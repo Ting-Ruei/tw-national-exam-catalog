@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T12:29:17.094205",
+  "generated_at": "2026-06-17T13:11:06.185335",
   "project": "tw-national-exam-catalog",
   "source": "https://wwwq.moex.gov.tw/exam/wFrmExamQandASearch.aspx",
   "scope": {
@@ -10,7 +10,8 @@
       "catalog metadata",
       "manual overrides",
       "schemas",
-      "documentation"
+      "documentation",
+      "indexing scripts"
     ],
     "excluded_artifact_types": [
       "PDF files",
@@ -37,8 +38,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 3903,
-      "sha256": "770e1e95aec4313baec0bf9ae4907dcdc4ce603cdc8eb21f21efa4745dcb19fd"
+      "bytes": 4366,
+      "sha256": "9aefba9afdb741c49d4e715ee96d599531a86baf1814397244e6ffaf1386bfab"
     },
     {
       "path": "catalogs/locked_27_canonical_category_names.csv",
@@ -71,6 +72,11 @@
       "sha256": "55688d2944107a2d562341836a851ab59a82e6971a7c5a90339cacd6f5d7a314"
     },
     {
+      "path": "docs/database-architecture.md",
+      "bytes": 3881,
+      "sha256": "7c6aa813b0f29adeabe235710998612c1d35e4381480cecf88ee92881224a0f7"
+    },
+    {
       "path": "docs/known-issues.md",
       "bytes": 7860,
       "sha256": "528310f0c3185536f2167fca3514d3222837f925b513481c9e6170bb2acf76eb"
@@ -96,6 +102,16 @@
       "sha256": "6896bf22faee9a77b994d8217f57b25b13a34ec75f1540eadba6cce17185d4de"
     },
     {
+      "path": "schemas/database/README.md",
+      "bytes": 342,
+      "sha256": "0f8fc37e532568b55199aee143b66c210772a60e6f214079a52c7434a7855a21"
+    },
+    {
+      "path": "schemas/database/postgresql_schema.sql",
+      "bytes": 6562,
+      "sha256": "054fd61aa76554e2490bd337ba071f762d878abb56713cf33bb5ae9ae760a530"
+    },
+    {
       "path": "schemas/moex_catalog.schema.json",
       "bytes": 1269,
       "sha256": "863aaff3226670a21407e7a7f4866217f79e89a34d1995ad158b72782253367b"
@@ -104,6 +120,11 @@
       "path": "schemas/question_candidate.schema.json",
       "bytes": 1403,
       "sha256": "bdcb7adee963a25432373ca18ad309c816888fe9b98902ff72a228e0f347330c"
+    },
+    {
+      "path": "scripts/build_pdf_asset_index.py",
+      "bytes": 9873,
+      "sha256": "35df42e04df75e291b1cbafc69ed3bc8d96b5e2ffc4a59ff337899529c55e42d"
     },
     {
       "path": "scripts/download_moex_pdfs_from_catalog.py",
