@@ -112,16 +112,17 @@ def normalize_filename_part(value: str) -> str:
     return value
 
 
-def filename_for(row: CatalogRow, role_suffix: str) -> str:
+def filename_for(row: CatalogRow, role_suffix: str, collision_suffix: str = "") -> str:
     ordinal = exam_ordinal(row)
     category = normalize_filename_part(row.category_name)
     subject = normalize_filename_part(row.subject_name)
-    return f"{row.year}{ordinal}_{category}_{subject}{role_suffix}.pdf"
+    return f"{row.year}{ordinal}_{category}_{subject}{collision_suffix}{role_suffix}.pdf"
 
 
-def destination_for(output_root: Path, row: CatalogRow, role_suffix: str) -> Path:
+def destination_for(output_root: Path, row: CatalogRow, role_suffix: str, collision_suffix: str = "") -> Path:
     ordinal = exam_ordinal(row)
-    return output_root / row.category_name / str(row.year) / f"第{ordinal}次" / filename_for(row, role_suffix)
+    category_dir = normalize_filename_part(row.category_name)
+    return output_root / category_dir / str(row.year) / f"第{ordinal}次" / filename_for(row, role_suffix, collision_suffix)
 
 
 def sha256_file(path: Path) -> str:
@@ -229,12 +230,17 @@ def run(args: argparse.Namespace) -> int:
             ],
         )
         writer.writeheader()
+        planned_destinations: dict[Path, str] = {}
         for row in rows:
             for role, url_field, suffix in DOCUMENTS:
                 url = getattr(row, url_field)
                 if not url:
                     continue
+                registry_key = f"{row.registry_key}:{role}"
                 dest = destination_for(args.output_root, row, suffix)
+                if dest in planned_destinations and planned_destinations[dest] != registry_key:
+                    dest = destination_for(args.output_root, row, suffix, f"_E{row.exam_code}")
+                planned_destinations[dest] = registry_key
                 if args.limit and count >= args.limit:
                     status, size, digest = "planned_limit_reached", 0, ""
                 elif args.dry_run:
@@ -259,7 +265,7 @@ def run(args: argparse.Namespace) -> int:
                         "destination": dest,
                         "bytes": size,
                         "sha256": digest,
-                        "registry_key": f"{row.registry_key}:{role}",
+                        "registry_key": registry_key,
                     }
                 )
                 count += 1

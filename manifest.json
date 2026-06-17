@@ -107,8 +107,8 @@
     },
     {
       "path": "scripts/download_moex_pdfs_from_catalog.py",
-      "bytes": 11259,
-      "sha256": "6bf4d95bf75fa9b3a866735cffad172bbf09ab941418b4d3e4a612841267e904"
+      "bytes": 11753,
+      "sha256": "283aa0ba0f471f072c6c9c4221f276eb2a2280f140e1df6a98686debc79d3df3"
     },
     {
       "path": "scripts/export_moex_subject_catalog.py",
