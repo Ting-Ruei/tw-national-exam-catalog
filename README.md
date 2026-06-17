@@ -42,6 +42,7 @@ docs/
   contribution-guide.md
   known-issues.md
   locked-27-category-name-stability.md
+  historical-transition-notes.md
   publication-roadmap.md
   database-architecture.md
 schemas/
@@ -98,6 +99,8 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 - 有些申論或特殊考試沒有答案 PDF，這不一定代表下載失敗。
 - 有些官方頁面會出現沒有父層類科標籤的孤立科目列，這類狀況會透過明確的 override 檔處理。
 - 有些科目名稱曾在不同年度改名，例如醫事檢驗師的 `臨床鏡檢學（包括寄生蟲學）` 後來出現為 `醫學分子檢驗學與臨床鏡檢學（包括寄生蟲學）`。這類差異應保留官方當年度名稱，入庫時再用 canonical mapping 歸併。
+
+制度演進、補辦考試、括號混用、分階段過渡期等特例集中記錄在 `docs/historical-transition-notes.md`。
 
 ## 後續資料層
 

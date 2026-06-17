@@ -98,6 +98,8 @@ question_assets
 
 ## PDF 命名與分類規則
 
+更多制度演進與命名特例見 `docs/historical-transition-notes.md`。
+
 - PDF 檔名與類科資料夾一律使用半形括號。
 - 官方 raw 類科名稱與科目名稱仍保存在 manifest / index 欄位。
 - 藥師四年制到六年制交叉期，`藥師`、`藥師（一）`、`藥師（二）`、`藥師(一)`、`藥師(二)` 全部保留，整理群組歸為 `藥師`。
