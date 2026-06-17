@@ -1,0 +1,306 @@
+# 遠端 MinerU 算力節點部署與批次回傳流程
+
+本文記錄如何用另一台 MacBook 作為 MinerU 算力節點。目標是讓主控端負責任務切分、去重與入庫前索引；遠端算力機只負責接收 PDF 批次、執行 MinerU、回傳輸出結果。
+
+## 角色與網路位置
+
+| 角色 | Tailscale IP | 職責 |
+|---|---:|---|
+| 主控端 | `100.96.146.93` | 保存完整 repo、官方 PDF、paired index、MinerU 全域狀態、去重與合併 |
+| 遠端算力機 | `100.96.207.80` | 接收批次 PDF、在本機 SSD 跑 MinerU、回傳 output 與 result CSV |
+
+原則：遠端算力機不要直接寫入主控端的 MinerU output 目錄。MinerU 會產生大量中間檔，跨網路直接寫入較慢，也比較容易留下半成品。正確流程是遠端本機跑完，再用 `rsync` 整批回傳。
+
+## 遠端算力機目錄規劃
+
+遠端算力機統一使用：
+
+```text
+/Users/tim/AI_workspace
+```
+
+建議建立以下結構：
+
+```text
+/Users/tim/AI_workspace/
+  OCR_model/
+    MinerU/
+      venv_mineru/
+        bin/
+          mineru
+  national_exam_mineru_worker/
+    incoming_batches/
+    running_batches/
+    finished_batches/
+    logs/
+```
+
+其中：
+
+- `OCR_model/MinerU`：MinerU 安裝位置。
+- `incoming_batches`：主控端傳來、尚未開始跑的批次。
+- `running_batches`：正在執行的批次。
+- `finished_batches`：已完成、等待或已經回傳的批次。
+- `logs`：遠端執行紀錄。
+
+## 遠端算力機基本部署
+
+遠端算力機可以直接從 GitHub 抓這個專案，並建立標準工作目錄：
+
+```bash
+bash scripts/setup_remote_mineru_worker.sh
+```
+
+這個腳本會：
+
+- 建立 `/Users/tim/AI_workspace/national_exam_mineru_worker`。
+- 建立 `incoming_batches`、`running_batches`、`finished_batches`、`logs`。
+- 從 GitHub clone 或 pull `tw-national-exam-catalog`。
+- 檢查 MinerU binary 是否存在。
+
+若尚未 clone repo，也可以先手動建立資料夾：
+
+```bash
+mkdir -p /Users/tim/AI_workspace/OCR_model
+mkdir -p /Users/tim/AI_workspace/national_exam_mineru_worker/incoming_batches
+mkdir -p /Users/tim/AI_workspace/national_exam_mineru_worker/running_batches
+mkdir -p /Users/tim/AI_workspace/national_exam_mineru_worker/finished_batches
+mkdir -p /Users/tim/AI_workspace/national_exam_mineru_worker/logs
+```
+
+MinerU 建議部署到：
+
+```text
+/Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru
+```
+
+部署完成後確認：
+
+```bash
+/Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru --version
+```
+
+主控端目前的預設 MinerU 路徑是 `~/AI workspace/OCR_model/MinerU/...`，遠端算力機則使用 `~/AI_workspace/OCR_model/MinerU/...`。因此遠端執行時一律明確指定：
+
+```bash
+--mineru-bin /Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru
+```
+
+## 批次資料夾格式
+
+每一批由主控端產生，格式如下：
+
+```text
+mineru_remote_batch_YYYYMMDD-HHMMSS_partNNN/
+  batch_manifest.csv
+  pdf_asset_index_batch.csv
+  question_answer_pairs_batch.csv      # 若此批來自 paired-primary，可包含
+  國考題資料夾/
+    10_official_pdf/
+      by_official_catalog/
+        ...                            # 保留原始相對路徑的 PDF
+  output/
+  logs/
+```
+
+必要欄位：
+
+- `batch_manifest.csv`：批次任務清單，至少包含 `pdf_path`、`pdf_relative`、`sha256`、`document_role`、`group_name`。
+- `pdf_asset_index_batch.csv`：只含本批 PDF 的 asset index；其中 `asset_path` 必須指向遠端批次內的 PDF，可用相對路徑，例如 `國考題資料夾/10_official_pdf/by_official_catalog/...pdf`，不要保留主控端的絕對路徑。
+- `question_answer_pairs_batch.csv`：若需要保持題目答案 pairing，保留本批涉及的 paired rows；其中 PDF path 欄位同樣要能在遠端批次目錄中解析。
+
+主控端產生批次時必須先排除已完成項目；遠端只處理批次內 PDF，不負責判斷全域是否重複。
+
+## 主控端拆解待做清單
+
+主控端用 `scripts/create_mineru_remote_batch.py` 產生遠端批次。第一輪建議先 dry-run：
+
+```bash
+python3 scripts/create_mineru_remote_batch.py \
+  --scope paired-primary \
+  --batch-size 50 \
+  --batch-count 1 \
+  --dry-run
+```
+
+確認清單合理後，正式建立批次：
+
+```bash
+python3 scripts/create_mineru_remote_batch.py \
+  --scope paired-primary \
+  --batch-size 50 \
+  --batch-count 1
+```
+
+預設排序是 `--order reverse`，也就是從待做清單尾端開始切。這是為了降低跟主控端目前背景 MinerU 任務撞到同一批 PDF 的機率。若要按照正向順序切，可加：
+
+```bash
+--order forward
+```
+
+產生位置：
+
+```text
+國考題資料夾/Registry/mineru_remote_batches/outgoing/
+```
+
+## 主控端傳送批次到遠端
+
+在主控端執行。假設批次目錄位於：
+
+```text
+/Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/outgoing/mineru_remote_batch_001
+```
+
+傳送到遠端：
+
+```bash
+rsync -avh --progress \
+  /Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/outgoing/mineru_remote_batch_001/ \
+  tim@100.96.207.80:/Users/tim/AI_workspace/national_exam_mineru_worker/incoming_batches/mineru_remote_batch_001/
+```
+
+建議先測試 SSH / rsync：
+
+```bash
+ssh tim@100.96.207.80 'hostname && pwd'
+rsync -avh --dry-run \
+  /Users/tim/tw-national-exam-catalog/README.md \
+  tim@100.96.207.80:/Users/tim/AI_workspace/national_exam_mineru_worker/
+```
+
+## 遠端算力機執行批次
+
+遠端算力機若已經從 GitHub clone/pull 這個 repo，可以直接用標準 runner：
+
+```bash
+bash /Users/tim/AI_workspace/national_exam_mineru_worker/repo/scripts/run_remote_mineru_batch.sh \
+  mineru_remote_batch_001
+```
+
+預設使用 `workers=2`。若遠端機器壓力較大，可以改成：
+
+```bash
+WORKERS=1 bash /Users/tim/AI_workspace/national_exam_mineru_worker/repo/scripts/run_remote_mineru_batch.sh \
+  mineru_remote_batch_001
+```
+
+runner 會自動：
+
+1. 從 `incoming_batches` 移到 `running_batches`。
+2. 進入批次工作目錄。
+3. 使用批次內的 `scripts/run_mineru_pdf_batch.py` 執行 MinerU。
+4. 完成後移到 `finished_batches`。
+5. 將 log 寫入 `/Users/tim/AI_workspace/national_exam_mineru_worker/logs`。
+
+若需要手動排查，也可以進入批次工作目錄後執行：
+
+```bash
+cd /Users/tim/AI_workspace/national_exam_mineru_worker/running_batches/mineru_remote_batch_001
+
+python3 scripts/run_mineru_pdf_batch.py \
+  --scope all-official \
+  --workers 2 \
+  --mineru-bin /Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru \
+  --pdf-index pdf_asset_index_batch.csv \
+  --output-root 國考題資料夾/20_mineru_output/by_official_catalog
+```
+
+這個命令假設 `pdf_asset_index_batch.csv` 的 `asset_path` 是批次目錄內可解析的路徑。若該欄位仍是主控端的 `/Users/tim/tw-national-exam-catalog/...` 絕對路徑，遠端會找不到檔案或把 output 相對路徑算錯。
+
+## 遠端回傳結果到主控端
+
+遠端算力機執行：
+
+```bash
+rsync -avh --progress \
+  /Users/tim/AI_workspace/national_exam_mineru_worker/finished_batches/mineru_remote_batch_001/ \
+  tim@100.96.146.93:/Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/returned/mineru_remote_batch_001/
+```
+
+也可以由主控端拉回：
+
+```bash
+rsync -avh --progress \
+  tim@100.96.207.80:/Users/tim/AI_workspace/national_exam_mineru_worker/finished_batches/mineru_remote_batch_001/ \
+  /Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/returned/mineru_remote_batch_001/
+```
+
+## 主控端合併與不重複機制
+
+主控端是唯一負責全域去重的地方。合併遠端結果時依序檢查：
+
+1. `sha256` 是否已存在於主控端完成結果。
+2. `pdf_path` 或 `pdf_relative` 是否已存在於主控端完成結果。
+3. `expected_md` 對應的 markdown 是否已存在。
+4. 若同一 PDF 同時有多份結果，保留先完成且 `status=ok` 的結果，其他標記為 duplicate provenance，不覆寫原始結果。
+
+主控端目前的本機批次已支援「看到 expected markdown 已存在就跳過」，因此遠端回傳後再啟動本機補跑，不應重跑已合併的 PDF。
+
+答案邏輯仍以 paired index 為準：
+
+- 若有 `_MOD`，`answer_pdf_primary` 使用 `_MOD`。
+- 若沒有 `_MOD`，才使用 `_ANS`。
+- 遠端 MinerU 只產生解析結果，不決定答案優先權。
+
+## 建議批次大小
+
+第一輪遠端測試建議：
+
+```text
+20-50 份 PDF
+```
+
+確認 MinerU、rsync、回傳合併都正常後，再增加到：
+
+```text
+100-200 份 PDF / batch
+```
+
+若遠端 MacBook 記憶體與 GPU 壓力較高，維持：
+
+```text
+workers=1
+```
+
+若狀況穩定，再提升到：
+
+```text
+workers=2
+```
+
+不建議遠端預設使用 3 workers；3 workers 只作為短時間備用策略。
+
+## 失敗與續跑
+
+若遠端中斷：
+
+1. 不刪除 batch。
+2. 重新執行相同命令。
+3. 不加 `--force`。
+4. 已經產生 expected markdown 的 PDF 會被跳過。
+
+若回傳中斷：
+
+```bash
+rsync -avh --progress --partial
+```
+
+可保留部分傳輸成果並續傳。
+
+## 安全邊界
+
+- 遠端算力機不需要 PostgreSQL。
+- 遠端算力機不需要 GitHub 權限。
+- 遠端算力機不寫入主控端 repo。
+- 遠端算力機只保存暫存 PDF 與 MinerU output。
+- 公開 repo 不應 commit 批次 PDF、MinerU output、圖片或資料庫 dump。
+
+## 後續自動化方向
+
+目前建議先用批次資料夾與 `rsync`，原因是穩定、易除錯、遇到斷線可恢復。等遠端工作流確認穩定後，再加入：
+
+- `scripts/create_mineru_remote_batch.py`：主控端切出未完成 PDF 批次。
+- `scripts/run_remote_mineru_batch.sh`：遠端標準啟動器。
+- `scripts/merge_remote_mineru_results.py`：主控端合併遠端 result CSV 並去重。
+- PostgreSQL job queue：多台 worker 自動 claim job。
