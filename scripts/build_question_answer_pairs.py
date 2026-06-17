@@ -31,6 +31,9 @@ DEFAULT_OUTPUT_DIR = DEFAULT_ASSET_ROOT / "Registry" / "paired_indexes"
 
 
 GROUP_OVERRIDES = {
+    "牙醫師": "牙醫師",
+    "牙醫師（一）": "牙醫師",
+    "牙醫師（二）": "牙醫師",
     "醫師(一)": "醫師",
     "醫師(二)": "醫師",
     "牙醫師(一)": "牙醫師",

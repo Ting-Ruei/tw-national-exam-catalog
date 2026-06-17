@@ -45,6 +45,9 @@ docs/
   historical-transition-notes.md
   publication-roadmap.md
   database-architecture.md
+  ai-workflow-architecture.md
+  local-rag-resource-assessment.md
+  remote-mineru-worker.md
 schemas/
   moex_catalog.schema.json
   question_candidate.schema.json
@@ -55,6 +58,9 @@ scripts/
   download_moex_pdfs_from_catalog.py
   build_pdf_asset_index.py
   build_question_answer_pairs.py
+  create_mineru_remote_batch.py
+  setup_remote_mineru_worker.sh
+  run_remote_mineru_batch.sh
 examples/
   sample-question-candidate.json
 國考題資料夾/              # 本機工作資料夾，已加入 .gitignore
@@ -117,11 +123,22 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 
 ## 資料庫與索引
 
-資料庫架構草案見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。
+資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
 
 目前可先用 `scripts/build_pdf_asset_index.py` 將已下載、已分類的 PDF manifest 整理成 CSV 索引。這個步驟只產生可審閱的索引檔，不會把資料寫入 PostgreSQL 或其他資料庫。
 
 題目 PDF 與答案 PDF 的 paired 清單可用 `scripts/build_question_answer_pairs.py` 產生；若同時有一般答案與更正答案，會以更正答案 `_MOD` 作為 primary answer，並保留 `_ANS` 欄位供追溯。
+
+若要先測試 PostgreSQL schema，可使用專案內的 Docker Compose 開發環境。預設映像是 PostgreSQL 18，並已安裝 pgvector：
+
+```bash
+cp .env.example .env
+bash scripts/postgres_up.sh
+bash scripts/postgres_apply_schema.sh
+bash scripts/postgres_smoke_test.sh
+```
+
+預設使用 `localhost:54329`，避免和本機既有 PostgreSQL 撞 port。這個流程只部署與測試 schema，尚不會把 PDF 或 MinerU 解析內容入庫；pgvector 先啟用 extension，向量表與索引等到題文 chunk 設計確認後再加入。
 
 ## 授權與來源
 

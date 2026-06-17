@@ -86,24 +86,41 @@ def read_catalog(path: Path) -> list[CatalogRow]:
     return rows
 
 
-def exam_ordinal(row: CatalogRow) -> int:
+def explicit_exam_ordinal(row: CatalogRow) -> int | None:
     if row.exam_code == "106111":
         return 3
 
     label = row.exam_label
+    if "第三次" in label or "第3次" in label or "第三梯次" in label or "第3梯次" in label:
+        return 3
     if "第二次" in label or "第2次" in label or "第二梯次" in label or "第2梯次" in label:
         return 2
     if "第一次" in label or "第1次" in label or "第一梯次" in label or "第1梯次" in label:
         return 1
 
-    # Most MOEX professional exam codes in this dataset use 020/030 for first
-    # and 090/100/110/140 for second. Keep this as a fallback only.
-    suffix = row.exam_code[-3:]
-    if suffix in {"020", "030"}:
-        return 1
-    if suffix in {"090", "100", "110", "140"}:
-        return 2
-    raise ValueError(f"Cannot determine exam ordinal for {row.exam_code}: {row.exam_label}")
+    return None
+
+
+def compute_exam_ordinals(rows: list[CatalogRow]) -> dict[str, int]:
+    by_year_and_code: dict[int, dict[str, CatalogRow]] = defaultdict(dict)
+    for row in rows:
+        by_year_and_code[row.year][row.exam_code] = row
+
+    ordinals: dict[str, int] = {}
+    for year, exam_rows in by_year_and_code.items():
+        next_ordinal = 1
+        for exam_code in sorted(exam_rows, key=int):
+            row = exam_rows[exam_code]
+            explicit = explicit_exam_ordinal(row)
+            if explicit is None:
+                ordinal = next_ordinal
+            elif explicit >= next_ordinal:
+                ordinal = explicit
+            else:
+                ordinal = next_ordinal
+            ordinals[exam_code] = ordinal
+            next_ordinal = ordinal + 1
+    return ordinals
 
 
 def normalize_filename_part(value: str) -> str:
@@ -115,17 +132,27 @@ def normalize_filename_part(value: str) -> str:
     return value
 
 
-def filename_for(row: CatalogRow, role_suffix: str, collision_suffix: str = "") -> str:
-    ordinal = exam_ordinal(row)
+def filename_for(row: CatalogRow, exam_ordinal_value: int, role_suffix: str, collision_suffix: str = "") -> str:
     category = normalize_filename_part(row.category_name)
     subject = normalize_filename_part(row.subject_name)
-    return f"{row.year}{ordinal}_{category}_{subject}{collision_suffix}{role_suffix}.pdf"
+    return f"{row.year}{exam_ordinal_value}_{category}_{subject}{collision_suffix}{role_suffix}.pdf"
 
 
-def destination_for(output_root: Path, row: CatalogRow, role_suffix: str, collision_suffix: str = "") -> Path:
-    ordinal = exam_ordinal(row)
+def destination_for(
+    output_root: Path,
+    row: CatalogRow,
+    exam_ordinal_value: int,
+    role_suffix: str,
+    collision_suffix: str = "",
+) -> Path:
     category_dir = normalize_filename_part(row.category_name)
-    return output_root / category_dir / str(row.year) / f"第{ordinal}次" / filename_for(row, role_suffix, collision_suffix)
+    return (
+        output_root
+        / category_dir
+        / str(row.year)
+        / f"第{exam_ordinal_value}次"
+        / filename_for(row, exam_ordinal_value, role_suffix, collision_suffix)
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -151,14 +178,11 @@ def download(url: str, dest: Path, overwrite: bool) -> tuple[str, int, str]:
 
 
 def filtered_rows(rows: list[CatalogRow], category: str, year_start: int, year_end: int) -> list[CatalogRow]:
-    return sorted(
-        [
-            r
-            for r in rows
-            if r.category_name == category and year_end <= r.year <= year_start
-        ],
-        key=lambda r: (-r.year, exam_ordinal(r), r.subject_code, r.subject_name),
-    )
+    return [
+        r
+        for r in rows
+        if r.category_name == category and year_end <= r.year <= year_start
+    ]
 
 
 def write_subject_variant_report(rows: list[CatalogRow], log_dir: Path, category: str, year_start: int, year_end: int) -> Path:
@@ -182,7 +206,8 @@ def write_subject_variant_report(rows: list[CatalogRow], log_dir: Path, category
     for name in sorted(by_name):
         seen = by_name[name]
         years = sorted({r.year for r in seen})
-        sessions = sorted({f"{r.year}{exam_ordinal(r)}" for r in seen})
+        exam_ordinals = compute_exam_ordinals(seen)
+        sessions = sorted({f"{r.year}{exam_ordinals[r.exam_code]}" for r in seen})
         codes = sorted({r.subject_code for r in seen})
         lines.append(f"- `{name}`")
         lines.append(f"  - years: {years[0]}-{years[-1]}" if len(years) > 1 else f"  - year: {years[0]}")
@@ -195,7 +220,9 @@ def write_subject_variant_report(rows: list[CatalogRow], log_dir: Path, category
             continue
         lines.append(f"- subject_code `{code}`")
         for name in names:
-            sessions = sorted({f"{r.year}{exam_ordinal(r)}" for r in rows if r.subject_code == code and r.subject_name == name})
+            matched_rows = [r for r in rows if r.subject_code == code and r.subject_name == name]
+            exam_ordinals = compute_exam_ordinals(matched_rows)
+            sessions = sorted({f"{r.year}{exam_ordinals[r.exam_code]}" for r in matched_rows})
             lines.append(f"  - `{name}`: {', '.join(sessions)}")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
@@ -205,6 +232,11 @@ def run(args: argparse.Namespace) -> int:
     rows = filtered_rows(read_catalog(args.catalog), args.category, args.year_start, args.year_end)
     if not rows:
         raise SystemExit(f"No catalog rows found for category={args.category!r} years={args.year_end}-{args.year_start}")
+    exam_ordinals = compute_exam_ordinals(rows)
+    rows = sorted(
+        rows,
+        key=lambda r: (-r.year, exam_ordinals[r.exam_code], r.subject_code, r.subject_name),
+    )
 
     variant_report = write_subject_variant_report(rows, args.log_dir, args.category, args.year_start, args.year_end)
     args.manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -240,9 +272,10 @@ def run(args: argparse.Namespace) -> int:
                 if not url:
                     continue
                 registry_key = f"{row.registry_key}:{role}"
-                dest = destination_for(args.output_root, row, suffix)
+                ordinal = exam_ordinals[row.exam_code]
+                dest = destination_for(args.output_root, row, ordinal, suffix)
                 if dest in planned_destinations and planned_destinations[dest] != registry_key:
-                    dest = destination_for(args.output_root, row, suffix, f"_E{row.exam_code}")
+                    dest = destination_for(args.output_root, row, ordinal, suffix, f"_E{row.exam_code}")
                 planned_destinations[dest] = registry_key
                 if args.limit and count >= args.limit:
                     status, size, digest = "planned_limit_reached", 0, ""
@@ -257,7 +290,7 @@ def run(args: argparse.Namespace) -> int:
                     {
                         "status": status,
                         "year": row.year,
-                        "exam_ordinal": exam_ordinal(row),
+                        "exam_ordinal": ordinal,
                         "exam_code": row.exam_code,
                         "category_code": row.category_code,
                         "category_name": row.category_name,

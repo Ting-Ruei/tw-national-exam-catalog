@@ -69,6 +69,72 @@ MongoDB 可以作為 MinerU 原始解析結果的文件型暫存庫，尤其是 
 
 SQLite 適合做單檔共享與 cmed 輕量接入；DuckDB / Parquet 適合分析與公開資料集發布。它們都應該從主索引或 PostgreSQL 匯出，而不是成為唯一工作來源。
 
+## 雲端儲存與雲資料庫規劃
+
+雲端部署要分成兩件事：公開資料集下載，以及線上查詢 / demo。前者需要大容量、可版本化、可被程式下載；後者需要資料庫查詢能力，但免費額度通常很小，不適合作為完整資料源。
+
+建議分工：
+
+- GitHub repo：放程式碼、schema、文件、manifest、小樣本與 export script，不放完整圖片、OCR output、大型 database dump。
+- GitHub Releases：放每版壓縮包，適合跟 repo tag 綁定；單一 release asset 需切在 2 GiB 以下。
+- Hugging Face Datasets：作為主要公開資料集位置，放 Parquet / JSONL / WebDataset / image assets，適合讓使用者用 Python 直接下載。
+- Zenodo：作為正式版本封存與 DOI 來源，適合重要 release 長期保存；多檔案時應包成 ZIP / tar.zst。
+- Cloudflare R2：需要網站或 API 即時讀圖時再使用，適合放 `assets/images/` 這類 object storage。
+- Neon Postgres：適合小型 demo DB、metadata 查詢、少量 pgvector 相似題 demo。
+- Supabase：適合 demo API、管理後台、小樣本資料庫與小量 storage。
+- MongoDB Atlas M0：只適合 JSON 原型或小樣本，不作為本專案主資料庫。
+
+不建議把完整題庫塞進免費雲資料庫。免費 Postgres / MongoDB 額度多在數百 MB 級距，而完整題庫加上 OCR、圖片、向量索引會超過這個範圍。完整共享應以檔案型 dataset 為主，雲資料庫只放 demo 子集或查詢索引。
+
+建議公開資料集結構：
+
+```text
+tw-national-exam-dataset/
+  manifest.json
+  README.md
+  checksums.sha256
+  parquet/
+    exam_sessions.parquet
+    categories.parquet
+    subjects.parquet
+    official_documents.parquet
+    questions.parquet
+    question_options.parquet
+    answers.parquet
+    question_assets.parquet
+    question_relations.parquet
+  assets/
+    images/
+      official_exam/
+        moex_100030_104_0303_1/
+          page_001_block_0001.jpg
+  sqlite/
+    tw-national-exam-catalog.sqlite
+```
+
+圖片不放進資料庫欄位本身。資料庫或 Parquet 只保存：
+
+- `asset_id`
+- `asset_role`
+- `relative_asset_path`
+- `sha256`
+- `mime_type`
+- `bytes`
+- `page_number`
+- `bbox_json`
+- `mineru_block_id`
+- `source_document_id`
+
+使用者下載完整包後，透過 `question_assets.relative_asset_path` 找到本機圖片。若部署到 R2 或其他 object storage，則由 manifest 另外提供 `asset_base_url`，讓同一份 metadata 可以在本機檔案與雲端 URL 之間切換。
+
+建議發布版本：
+
+- `metadata-only`：catalog、PDF index、paired index、hash，不含 OCR 與圖片。
+- `text-lite`：結構化題目、選項、答案、品質旗標，不含圖片。
+- `full-official`：題目文字、答案、官方題目圖片、表格、MinerU 解析 assets。
+- `demo-db`：抽樣或壓縮後的小型 Postgres / SQLite，供 Neon / Supabase demo 使用。
+- `private-knowledge`：本機私人教材知識庫，不發布。
+
 ## 題組題與圖題
 
 題組題使用 `question_groups` 表示共同題幹，再由 `questions.group_id` 連回。圖題、表格題、頁面截圖與選項圖片都用 `question_assets` 連到 `assets`。
@@ -106,5 +172,5 @@ question_assets
 - 官方 raw 類科名稱與科目名稱仍保存在 manifest / index 欄位。
 - 藥師四年制到六年制交叉期，`藥師`、`藥師（一）`、`藥師（二）`、`藥師(一)`、`藥師(二)` 全部保留，整理群組歸為 `藥師`。
 - 中醫師早期未分階段與後續分階段全部保留，整理群組歸為 `中醫師`。
-- 民國 106 年中醫師 `exam_code=106111` 是花東考區補辦考試試題，檔名次序記為 `1063`，並在索引 notes 註記。
+- 民國 106 年 `exam_code=106111` 是花東考區補辦考試試題，影響中醫師、營養師、心理師、護理師、社會工作師、法醫師、驗光師等同場次類科；檔名次序記為 `1063`，並在索引 notes 註記。
 - 若未來仍出現同年同次序同類科同科目但官方 `exam_code` 不同、且無明確補辦次序可歸類，檔名才會加 `_E{exam_code}` 避免撞名。

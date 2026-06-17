@@ -79,6 +79,18 @@ CREATE TABLE IF NOT EXISTS exam.document_assets (
     PRIMARY KEY (official_document_id, asset_id, role)
 );
 
+CREATE TABLE IF NOT EXISTS exam.question_answer_document_pairs (
+    id BIGSERIAL PRIMARY KEY,
+    pair_key TEXT NOT NULL UNIQUE,
+    pair_status TEXT NOT NULL,
+    question_document_id BIGINT NOT NULL REFERENCES exam.official_documents(id),
+    primary_answer_document_id BIGINT REFERENCES exam.official_documents(id),
+    ans_document_id BIGINT REFERENCES exam.official_documents(id),
+    mod_document_id BIGINT REFERENCES exam.official_documents(id),
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS exam.mineru_runs (
     id BIGSERIAL PRIMARY KEY,
     official_document_id BIGINT NOT NULL REFERENCES exam.official_documents(id),
@@ -171,3 +183,4 @@ CREATE INDEX IF NOT EXISTS idx_subjects_canonical ON exam.subjects (canonical_su
 CREATE INDEX IF NOT EXISTS idx_official_documents_role ON exam.official_documents (document_role);
 CREATE INDEX IF NOT EXISTS idx_assets_sha256 ON exam.assets (sha256);
 CREATE INDEX IF NOT EXISTS idx_questions_review_status ON exam.questions (review_status);
+CREATE INDEX IF NOT EXISTS idx_question_answer_pairs_status ON exam.question_answer_document_pairs (pair_status);

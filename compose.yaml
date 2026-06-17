@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18}"
+    container_name: tw-national-exam-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-54329}:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-tw_national_exam_dev}"
+      POSTGRES_USER: "${POSTGRES_USER:-national_exam}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-national_exam_dev_password}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./schemas/database/postgresql_extensions.sql:/docker-entrypoint-initdb.d/000_postgresql_extensions.sql:ro
+      - ./schemas/database/postgresql_schema.sql:/docker-entrypoint-initdb.d/001_postgresql_schema.sql:ro
+
+volumes:
+  postgres_data:

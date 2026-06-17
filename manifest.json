@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T13:29:18.507487",
+  "generated_at": "2026-06-17T15:03:42+08:00",
   "project": "tw-national-exam-catalog",
   "source": "https://wwwq.moex.gov.tw/exam/wFrmExamQandASearch.aspx",
   "scope": {
@@ -73,13 +73,13 @@
     },
     {
       "path": "docs/database-architecture.md",
-      "bytes": 4383,
-      "sha256": "e5e9d1bdf5c689e432f12157ef22e5ea9056b13209bcec6dcca418319e07cb95"
+      "bytes": 4488,
+      "sha256": "142671e6765396900c24580cc44b3ac30e9ebe1a298bd0d2d692b6c4586ba7f9"
     },
     {
       "path": "docs/historical-transition-notes.md",
-      "bytes": 4391,
-      "sha256": "6be54740eb1937caf07eec4ca5be3060ed48251d2295f30eb601cb80a9e191c3"
+      "bytes": 13320,
+      "sha256": "702385a366c799a4ef710bf7a211e93de10a58f85476f7be63b7dbda965b0e02"
     },
     {
       "path": "docs/known-issues.md",
@@ -127,24 +127,44 @@
       "sha256": "bdcb7adee963a25432373ca18ad309c816888fe9b98902ff72a228e0f347330c"
     },
     {
+      "path": "scripts/benchmark_mineru_workers.py",
+      "bytes": 17323,
+      "sha256": "a35cfab16be454d0dac77953e89f3de302affa7904d280dbcd777e3e553b0ab6"
+    },
+    {
+      "path": "scripts/build_download_progress_report.py",
+      "bytes": 13502,
+      "sha256": "075d2653d6091a26014ca84cd467ad039097d2f7952e5f32c84c8f9685e24d7c"
+    },
+    {
       "path": "scripts/build_pdf_asset_index.py",
-      "bytes": 10076,
-      "sha256": "d4b157bfc678b258994b25b02624e0c6b0f30b259197cb896cdb69c37e3f6c1f"
+      "bytes": 10469,
+      "sha256": "7264dea66a8b46e372539692249ce0b601aff7bdde514e63b2454c3b6a34c76a"
     },
     {
       "path": "scripts/build_question_answer_pairs.py",
-      "bytes": 11742,
-      "sha256": "816d86ee48e48d7954ae46e35cfb5e002113fe39de3ec712cfea778a15819951"
+      "bytes": 11850,
+      "sha256": "9f5204d1d2d2b950740959349e60a68d07f92e16d20ecfc2ce6d1f7f035133a3"
     },
     {
       "path": "scripts/download_moex_pdfs_from_catalog.py",
-      "bytes": 11805,
-      "sha256": "47a3736b2512eff4ac2e9ef45a5ebedf9d8aca5de7dc307436c94b63d75fa2b1"
+      "bytes": 12770,
+      "sha256": "f867315fab47993f52be01e9c9a0eea5025cf95d052d76922ceee99bcfeb7b16"
     },
     {
       "path": "scripts/export_moex_subject_catalog.py",
       "bytes": 17121,
       "sha256": "466e7b050c079689b17c0e0e3fc064897005dc2312a81dae907fd316b3118f31"
+    },
+    {
+      "path": "scripts/launch_mineru_pdf_batch.sh",
+      "bytes": 1215,
+      "sha256": "a48f59dcab70a89a831271645e49e20eab902cfbe44cdaf6cb692dc7dde00c7c"
+    },
+    {
+      "path": "scripts/run_mineru_pdf_batch.py",
+      "bytes": 12640,
+      "sha256": "757ce5d20ba1c476c4d77621e7a9a3ca449894db2b50bb6278262f38166d1035"
     }
   ]
 }
