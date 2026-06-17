@@ -68,33 +68,78 @@ print(candidates[-1][1])
 PY
 }
 
+batch_scope() {
+  local batch_dir="$1"
+  python3 - "$batch_dir/batch_metadata.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+default_scope = "paired-primary"
+if not path.exists():
+    print(default_scope)
+    raise SystemExit(0)
+
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print(default_scope)
+    raise SystemExit(0)
+
+print(data.get("scope") or default_scope)
+PY
+}
+
+pick_batch_dir() {
+  local -a candidate_dirs=()
+
+  while IFS= read -r line; do
+    candidate_dirs+=("$line")
+  done < <(find "$LOCAL_RUNNING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort -r)
+
+  if [[ ${#candidate_dirs[@]} -gt 0 ]]; then
+    printf '%s\n' "${candidate_dirs[0]}"
+    return 0
+  fi
+
+  candidate_dirs=()
+  while IFS= read -r line; do
+    candidate_dirs+=("$line")
+  done < <(find "$OUTGOING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort -r)
+
+  if [[ ${#candidate_dirs[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${candidate_dirs[0]}"
+}
+
 echo "Starting local split batch queue" | tee "$QUEUE_LOG"
 echo "  outgoing: $OUTGOING_ROOT" | tee -a "$QUEUE_LOG"
 echo "  workers:  $WORKERS" | tee -a "$QUEUE_LOG"
 
 while true; do
-  BATCH_DIRS=()
-  while IFS= read -r line; do
-    BATCH_DIRS+=("$line")
-  done < <(find "$OUTGOING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort -r)
-
-  if [[ ${#BATCH_DIRS[@]} -eq 0 ]]; then
+  if ! batch_dir="$(pick_batch_dir)"; then
     echo "Queue empty, stopping." | tee -a "$QUEUE_LOG"
     break
   fi
 
-  batch_dir="${BATCH_DIRS[0]}"
   batch_name="$(basename "$batch_dir")"
+  batch_scope_name="$(batch_scope "$batch_dir")"
   running_dir="$LOCAL_RUNNING_ROOT/$batch_name"
   runtime_pdf_index="$running_dir/pdf_asset_index_runtime.csv"
 
-  if [[ -e "$running_dir" ]]; then
+  if [[ -e "$running_dir" && "$batch_dir" != "$running_dir" ]]; then
     echo "Running directory already exists: $running_dir" | tee -a "$QUEUE_LOG"
     exit 1
   fi
 
-  mv "$batch_dir" "$running_dir"
+  if [[ "$batch_dir" != "$running_dir" ]]; then
+    mv "$batch_dir" "$running_dir"
+  fi
   echo "Running batch: $batch_name" | tee -a "$QUEUE_LOG"
+  echo "  scope:  $batch_scope_name" | tee -a "$QUEUE_LOG"
 
   python3 - "$running_dir/pdf_asset_index_batch.csv" "$runtime_pdf_index" "$ASSET_ROOT" <<'PY'
 import csv
@@ -121,7 +166,7 @@ PY
   run_started_epoch="$(date +%s)"
 
   if python3 -u "$PROJECT_ROOT/scripts/run_mineru_pdf_batch.py" \
-    --scope all-official \
+    --scope "$batch_scope_name" \
     --workers "$WORKERS" \
     --mineru-bin "$MINERU_BIN" \
     --pdf-index "$runtime_pdf_index" \

@@ -18,7 +18,7 @@ MINERU_BIN="${MINERU_BIN:-$WORKSPACE_ROOT/OCR_model/MinerU/venv_mineru/bin/miner
 REMOTE_ASSET_ROOT="${REMOTE_ASSET_ROOT:-$WORKER_ROOT/repo/國考題資料夾}"
 WORKERS="${WORKERS:-2}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
-SCOPE="${SCOPE:-all-official}"
+SCOPE="${SCOPE:-}"
 
 BATCH_ARG="$1"
 if [[ "$BATCH_ARG" = /* ]]; then
@@ -33,6 +33,29 @@ RUNNING_PATH="$WORKER_ROOT/running_batches/$BATCH_NAME"
 FINISHED_PATH="$WORKER_ROOT/finished_batches/$BATCH_NAME"
 LOG_FILE="$WORKER_ROOT/logs/${BATCH_NAME}__$(date '+%Y%m%d-%H%M%S').log"
 RUNTIME_PDF_INDEX="$RUNNING_PATH/pdf_asset_index_runtime.csv"
+
+batch_scope() {
+  local batch_dir="$1"
+  python3 - "$batch_dir/batch_metadata.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+default_scope = "paired-primary"
+if not path.exists():
+    print(default_scope)
+    raise SystemExit(0)
+
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print(default_scope)
+    raise SystemExit(0)
+
+print(data.get("scope") or default_scope)
+PY
+}
 
 batch_has_failures() {
   local csv_path="$1"
@@ -100,6 +123,10 @@ if [[ "$BATCH_PATH" != "$RUNNING_PATH" ]]; then
 fi
 
 cd "$RUNNING_PATH"
+
+if [[ -z "$SCOPE" ]]; then
+  SCOPE="$(batch_scope "$RUNNING_PATH")"
+fi
 
 if [[ ! -f "scripts/run_mineru_pdf_batch.py" ]]; then
   echo "Missing scripts/run_mineru_pdf_batch.py in batch: $RUNNING_PATH"
