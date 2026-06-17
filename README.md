@@ -54,6 +54,7 @@ scripts/
   export_moex_subject_catalog.py
   download_moex_pdfs_from_catalog.py
   build_pdf_asset_index.py
+  build_question_answer_pairs.py
 examples/
   sample-question-candidate.json
 國考題資料夾/              # 本機工作資料夾，已加入 .gitignore
@@ -119,6 +120,8 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 資料庫架構草案見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。
 
 目前可先用 `scripts/build_pdf_asset_index.py` 將已下載、已分類的 PDF manifest 整理成 CSV 索引。這個步驟只產生可審閱的索引檔，不會把資料寫入 PostgreSQL 或其他資料庫。
+
+題目 PDF 與答案 PDF 的 paired 清單可用 `scripts/build_question_answer_pairs.py` 產生；若同時有一般答案與更正答案，會以更正答案 `_MOD` 作為 primary answer，並保留 `_ANS` 欄位供追溯。
 
 ## 授權與來源
 

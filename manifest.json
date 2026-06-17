@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T13:24:59.516328",
+  "generated_at": "2026-06-17T13:29:18.507487",
   "project": "tw-national-exam-catalog",
   "source": "https://wwwq.moex.gov.tw/exam/wFrmExamQandASearch.aspx",
   "scope": {
@@ -38,8 +38,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 4529,
-      "sha256": "d07bd5f87db7e227ac911044c74fcf9608035488f89b24718ef950f9eb28fa13"
+      "bytes": 4790,
+      "sha256": "73fa9145f53c9f32610e17167c6508ca6de8f0bf41411b72b4afecdf9da8b435"
     },
     {
       "path": "catalogs/locked_27_canonical_category_names.csv",
@@ -73,8 +73,8 @@
     },
     {
       "path": "docs/database-architecture.md",
-      "bytes": 4152,
-      "sha256": "ac6d1f4a466e48516defd88a037d95e2ed5c7182278ee9abe6fa6aa35638880d"
+      "bytes": 4383,
+      "sha256": "e5e9d1bdf5c689e432f12157ef22e5ea9056b13209bcec6dcca418319e07cb95"
     },
     {
       "path": "docs/historical-transition-notes.md",
@@ -130,6 +130,11 @@
       "path": "scripts/build_pdf_asset_index.py",
       "bytes": 10076,
       "sha256": "d4b157bfc678b258994b25b02624e0c6b0f30b259197cb896cdb69c37e3f6c1f"
+    },
+    {
+      "path": "scripts/build_question_answer_pairs.py",
+      "bytes": 11742,
+      "sha256": "816d86ee48e48d7954ae46e35cfb5e002113fe39de3ec712cfea778a15819951"
     },
     {
       "path": "scripts/download_moex_pdfs_from_catalog.py",

@@ -48,6 +48,8 @@
 
 `Registry/pdf_indexes/` 用來放目前已分類 PDF 的索引 CSV。這些索引是入庫前的審核面，不等於資料庫。
 
+`Registry/paired_indexes/` 用來放題目 PDF 與答案 PDF 的配對清單。若同一科目同時有一般答案與更正答案，配對清單會以更正答案作為 primary answer，同時保留一般答案欄位供追溯。
+
 ## PostgreSQL 的角色
 
 PostgreSQL 適合當主資料庫，因為它同時支援：
