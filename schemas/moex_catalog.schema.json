@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/moex_catalog.schema.json",
+  "title": "MOEX Subject Catalog Record",
+  "type": "object",
+  "required": [
+    "year",
+    "exam_code",
+    "exam_label",
+    "category_code",
+    "subject_code",
+    "subject_name",
+    "question_set",
+    "registry_key"
+  ],
+  "properties": {
+    "year": { "type": "integer" },
+    "exam_code": { "type": "string", "pattern": "^[0-9]{5,6}$" },
+    "exam_label": { "type": "string" },
+    "exam_level": { "type": "string" },
+    "category_code": { "type": "string" },
+    "category_label": { "type": "string" },
+    "category_name": { "type": "string" },
+    "subject_code": { "type": "string" },
+    "subject_name": { "type": "string" },
+    "question_set": { "type": "string" },
+    "has_question": { "type": "boolean" },
+    "has_answer": { "type": "boolean" },
+    "has_correction": { "type": "boolean" },
+    "question_url": { "type": "string" },
+    "answer_url": { "type": "string" },
+    "correction_url": { "type": "string" },
+    "registry_key": { "type": "string" },
+    "source_url": { "type": "string" },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}
+

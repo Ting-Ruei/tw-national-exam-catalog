@@ -1,0 +1,15 @@
+# Large derived artifacts
+國考題資料夾/
+datasets/
+pdf/
+images/
+mineru/
+*.sqlite
+*.db
+*.parquet
+
+# Local runtime
+.DS_Store
+__pycache__/
+.venv/
+.env

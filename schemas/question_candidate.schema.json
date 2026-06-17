@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/question_candidate.schema.json",
+  "title": "Structured Question Candidate",
+  "type": "object",
+  "required": [
+    "source_registry_key",
+    "question_number",
+    "stem",
+    "options",
+    "answer",
+    "metadata"
+  ],
+  "properties": {
+    "source_registry_key": { "type": "string" },
+    "question_number": { "type": ["integer", "string"] },
+    "stem": { "type": "string" },
+    "stem_image": { "type": ["string", "null"] },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "text"],
+        "properties": {
+          "key": { "type": "string" },
+          "text": { "type": "string" },
+          "image": { "type": ["string", "null"] },
+          "explanation": { "type": ["string", "null"] },
+          "explanation_image": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "answer": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        { "type": "null" }
+      ]
+    },
+    "explanation": { "type": ["string", "null"] },
+    "question_type": { "type": "string" },
+    "group_ref": { "type": ["string", "null"] },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": true
+}
+

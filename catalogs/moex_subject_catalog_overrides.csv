@@ -1,0 +1,6 @@
+﻿year,exam_code,category_code,category_name_override,confidence,reason
+102,102170,603,員級晉高員_技術類(選試電機機械),high,MOEX 102170 has orphan shared subject rows; inferred from neighboring official category sequence and user page inspection.
+102,102170,604,員級晉高員_技術類(選試機械設計),high,MOEX 102170 has orphan shared subject rows; inferred from neighboring official category sequence and user page inspection.
+102,102170,614,佐級晉員級_技術類(選試電機機械概要),high,MOEX 102170 has orphan shared subject rows; inferred from neighboring official category sequence and user page inspection.
+102,102170,712,佐級晉員級_技術類(選試結構學概要)-公路總局,needs_user_confirm,MOEX 102170 orphan shared subject row; inferred from adjacent 711/714/715 section and PDF filename sharing with 714/715. Needs visual/user confirmation.
+102,102170,713,佐級晉員級_技術類(選試機械設計概要)-公路總局,needs_user_confirm,MOEX 102170 orphan shared subject row; inferred from adjacent 711/714/715 section and PDF filename sharing with 714/715. Needs visual/user confirmation.

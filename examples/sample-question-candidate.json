@@ -1,0 +1,31 @@
+{
+  "source_registry_key": "moex:115020:308:0501:1",
+  "question_number": 1,
+  "stem": "Sample stem text. This is a placeholder, not an official question.",
+  "stem_image": null,
+  "options": [
+    {
+      "key": "A",
+      "text": "Option A",
+      "image": null,
+      "explanation": null,
+      "explanation_image": null
+    },
+    {
+      "key": "B",
+      "text": "Option B",
+      "image": null,
+      "explanation": null,
+      "explanation_image": null
+    }
+  ],
+  "answer": "A",
+  "explanation": null,
+  "question_type": "single_choice",
+  "group_ref": null,
+  "metadata": {
+    "example_only": true,
+    "source": "Taiwan National Exam Catalog schema example"
+  }
+}
+

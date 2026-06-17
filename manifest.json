@@ -1,0 +1,119 @@
+{
+  "generated_at": "2026-06-17T12:29:17.094205",
+  "project": "tw-national-exam-catalog",
+  "source": "https://wwwq.moex.gov.tw/exam/wFrmExamQandASearch.aspx",
+  "scope": {
+    "catalog_year_start": 100,
+    "catalog_year_end": 115,
+    "current_ingestion_scope": "locked 27 health-care professional/technical license categories; public-service categories excluded",
+    "included_artifact_types": [
+      "catalog metadata",
+      "manual overrides",
+      "schemas",
+      "documentation"
+    ],
+    "excluded_artifact_types": [
+      "PDF files",
+      "OCR markdown",
+      "parsed official question text",
+      "database dumps"
+    ]
+  },
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 153,
+      "sha256": "685ca8f7f10f992f1e1cd1b97a71398521a61017c8fa1bc290dfa6e2288c969e"
+    },
+    {
+      "path": "DATA_LICENSE.md",
+      "bytes": 1891,
+      "sha256": "b08393e2a8f09d815734ba6b7fabebf0ebc74228af326aa97ec98edb4448312a"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1099,
+      "sha256": "38fef74b5243da1c7c4ec8a0ab431012c0a5f2f10165c541282a50c72429c91c"
+    },
+    {
+      "path": "README.md",
+      "bytes": 3529,
+      "sha256": "a4e4035bc16227e5d56b596afc975879babe43f2e9a2c68f6a4982b56aabc381"
+    },
+    {
+      "path": "catalogs/locked_27_canonical_category_names.csv",
+      "bytes": 9265,
+      "sha256": "dc403bb3988ecd611877b31231a41b315c2e6f314581843d8c2b4c208e808091"
+    },
+    {
+      "path": "catalogs/moex_subject_catalog__y100-115.csv",
+      "bytes": 32881364,
+      "sha256": "0d4722a6184c2f64c3e41131f88db7b2ddda1898cbf8d63a65226de49fa49260"
+    },
+    {
+      "path": "catalogs/moex_subject_catalog__y100-115.md",
+      "bytes": 46119,
+      "sha256": "b3ed2c90d3a1bd2488c849599f94c09ad74774e37fba5566327a565f07e933af"
+    },
+    {
+      "path": "catalogs/moex_subject_catalog_overrides.csv",
+      "bytes": 1153,
+      "sha256": "01d57da6d80a047da08336c52a9dff86624a3658a2052fb544eea299478b3350"
+    },
+    {
+      "path": "catalogs/other_professional_high_categories_excluding_locked27__y100-115.csv",
+      "bytes": 24195,
+      "sha256": "89277431bfddb6f9505237f59b80b7f1a28e411eece8886dbceee8cb6242b224"
+    },
+    {
+      "path": "docs/contribution-guide.md",
+      "bytes": 982,
+      "sha256": "55688d2944107a2d562341836a851ab59a82e6971a7c5a90339cacd6f5d7a314"
+    },
+    {
+      "path": "docs/known-issues.md",
+      "bytes": 7860,
+      "sha256": "528310f0c3185536f2167fca3514d3222837f925b513481c9e6170bb2acf76eb"
+    },
+    {
+      "path": "docs/locked-27-category-name-stability.md",
+      "bytes": 10118,
+      "sha256": "8ffd691f02ad11dadfb0eb49062c6df4a6308d401fb9ba790e92498281ecbfc0"
+    },
+    {
+      "path": "docs/publication-roadmap.md",
+      "bytes": 1434,
+      "sha256": "a94d439add52b37ca24c4f8aee07b414183798904f29708f37cff8387a5e5bf7"
+    },
+    {
+      "path": "docs/source-policy.md",
+      "bytes": 964,
+      "sha256": "fa9e760e8b1b40881fe106c93ce6f221d63f171df7f51495a4476665f9a9429f"
+    },
+    {
+      "path": "examples/sample-question-candidate.json",
+      "bytes": 678,
+      "sha256": "6896bf22faee9a77b994d8217f57b25b13a34ec75f1540eadba6cce17185d4de"
+    },
+    {
+      "path": "schemas/moex_catalog.schema.json",
+      "bytes": 1269,
+      "sha256": "863aaff3226670a21407e7a7f4866217f79e89a34d1995ad158b72782253367b"
+    },
+    {
+      "path": "schemas/question_candidate.schema.json",
+      "bytes": 1403,
+      "sha256": "bdcb7adee963a25432373ca18ad309c816888fe9b98902ff72a228e0f347330c"
+    },
+    {
+      "path": "scripts/download_moex_pdfs_from_catalog.py",
+      "bytes": 11259,
+      "sha256": "6bf4d95bf75fa9b3a866735cffad172bbf09ab941418b4d3e4a612841267e904"
+    },
+    {
+      "path": "scripts/export_moex_subject_catalog.py",
+      "bytes": 17121,
+      "sha256": "466e7b050c079689b17c0e0e3fc064897005dc2312a81dae907fd316b3118f31"
+    }
+  ]
+}
