@@ -26,6 +26,7 @@ REGISTRY_ROOT = ASSET_ROOT / "Registry"
 PDF_INDEX_DIR = REGISTRY_ROOT / "pdf_indexes"
 PAIR_INDEX_DIR = REGISTRY_ROOT / "paired_indexes"
 RUN_LOG_DIR = REGISTRY_ROOT / "mineru_runs"
+REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
 
 
@@ -72,6 +73,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--force", action="store_true", help="Run even when expected markdown already exists.")
     parser.add_argument(
+        "--exclude-remote-reserved",
+        action="store_true",
+        help="Skip PDFs already reserved by remote batch manifests under Registry/mineru_remote_batches.",
+    )
+    parser.add_argument(
         "--chain-all-official",
         action="store_true",
         help="After paired-primary finishes, automatically run all-official on remaining PDFs only.",
@@ -90,6 +96,22 @@ def latest_csv(directory: Path, prefix: str) -> Path:
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
+
+
+def reserved_pdf_paths() -> set[str]:
+    reserved: set[str] = set()
+    if not REMOTE_BATCH_ROOT.exists():
+        return reserved
+    for manifest_path in REMOTE_BATCH_ROOT.glob("**/batch_manifest.csv"):
+        try:
+            rows = read_csv(manifest_path)
+        except UnicodeDecodeError:
+            continue
+        for row in rows:
+            pdf_path = row.get("pdf_path", "")
+            if pdf_path:
+                reserved.add(str(Path(pdf_path).resolve()))
+    return reserved
 
 
 def within_filters(row: dict[str, str], groups: set[str] | None, year_start: int | None, year_end: int | None) -> bool:
@@ -147,6 +169,8 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
     groups = set(args.group) if args.group else None
     tasks_by_pdf: dict[str, MinerUTask] = {}
     exclude_pdf_paths = exclude_pdf_paths or set()
+    if args.exclude_remote_reserved:
+        exclude_pdf_paths = set(exclude_pdf_paths) | reserved_pdf_paths()
 
     if args.scope in {"paired-primary", "questions-only"}:
         pair_index = args.pair_index or latest_csv(PAIR_INDEX_DIR, "question_answer_pairs_detail__")

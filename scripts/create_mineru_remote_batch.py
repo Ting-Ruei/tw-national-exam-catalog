@@ -2,9 +2,10 @@
 """
 Create rsyncable MinerU remote batches from unfinished official PDFs.
 
-The produced batch is a small, self-contained workspace: it contains the PDFs,
-a batch-scoped PDF index, a manifest, and the MinerU runner scripts needed by
-the remote worker. The controller remains responsible for global deduplication.
+The produced batch is a small, self-contained workspace: it contains a
+batch-scoped PDF index, a manifest, and the MinerU runner scripts needed by the
+remote worker. PDF copying is optional; the default flow is manifest-only so the
+worker can use its own local synced official PDF tree.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ REGISTRY_ROOT = ASSET_ROOT / "Registry"
 PDF_INDEX_DIR = REGISTRY_ROOT / "pdf_indexes"
 PAIR_INDEX_DIR = REGISTRY_ROOT / "paired_indexes"
 RUN_LOG_DIR = REGISTRY_ROOT / "mineru_runs"
-REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches" / "outgoing"
+REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
+DEFAULT_OUTGOING_ROOT = REMOTE_BATCH_ROOT / "outgoing"
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--year-end", type=int)
     parser.add_argument("--pdf-index", type=Path, default=latest_csv(PDF_INDEX_DIR, "pdf_asset_index_detail__*.csv"))
     parser.add_argument("--pair-index", type=Path, default=latest_csv(PAIR_INDEX_DIR, "question_answer_pairs_detail__*.csv"))
-    parser.add_argument("--out-dir", type=Path, default=REMOTE_BATCH_ROOT)
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTGOING_ROOT)
+    parser.add_argument("--batch-mode", choices=["manifest-only", "copy-pdfs"], default="manifest-only")
     parser.add_argument("--stamp", default=time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -128,6 +131,22 @@ def result_completed_relatives() -> set[str]:
                 continue
             completed.add(relative)
     return completed
+
+
+def reserved_relatives() -> set[str]:
+    reserved: set[str] = set()
+    if not REMOTE_BATCH_ROOT.exists():
+        return reserved
+    for manifest_path in REMOTE_BATCH_ROOT.glob("**/batch_manifest.csv"):
+        try:
+            rows = read_csv(manifest_path)
+        except UnicodeDecodeError:
+            continue
+        for row in rows:
+            relative = row.get("pdf_relative", "")
+            if relative:
+                reserved.add(relative)
+    return reserved
 
 
 def is_done(relative_pdf: str, completed_relatives: set[str]) -> bool:
@@ -208,10 +227,13 @@ def build_candidates(args: argparse.Namespace) -> list[Candidate]:
             )
 
     completed_relatives = result_completed_relatives()
+    reserved = reserved_relatives()
     unfinished = [
         candidate
         for candidate in candidates.values()
-        if candidate.pdf_path.exists() and not is_done(candidate.pdf_relative, completed_relatives)
+        if candidate.pdf_path.exists()
+        and not is_done(candidate.pdf_relative, completed_relatives)
+        and candidate.pdf_relative not in reserved
     ]
     return sorted(unfinished, key=lambda item: item.pdf_relative, reverse=args.order == "reverse")
 
@@ -265,19 +287,21 @@ def create_batch(batch_dir: Path, candidates: list[Candidate], args: argparse.Na
     pair_rows = read_csv(args.pair_index)
     batch_dir.mkdir(parents=True, exist_ok=False)
     (batch_dir / "logs").mkdir()
-    (batch_dir / "國考題資料夾" / "10_official_pdf" / "by_official_catalog").mkdir(parents=True)
     (batch_dir / "國考題資料夾" / "20_mineru_output" / "by_official_catalog").mkdir(parents=True)
     (batch_dir / "國考題資料夾" / "Registry" / "mineru_runs").mkdir(parents=True)
+    if args.batch_mode == "copy-pdfs":
+        (batch_dir / "國考題資料夾" / "10_official_pdf" / "by_official_catalog").mkdir(parents=True)
 
     manifest_rows: list[dict[str, object]] = []
     for candidate in candidates:
-        destination = batch_dir / "國考題資料夾" / candidate.pdf_relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(candidate.pdf_path, destination)
         row = asdict(candidate)
         row["pdf_path"] = str(candidate.pdf_path)
         row["batch_pdf_path"] = str(Path("國考題資料夾") / candidate.pdf_relative)
         manifest_rows.append(row)
+        if args.batch_mode == "copy-pdfs":
+            destination = batch_dir / "國考題資料夾" / candidate.pdf_relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate.pdf_path, destination)
 
     write_csv(batch_dir / "batch_manifest.csv", manifest_rows)
     pdf_rows = batch_pdf_index_rows(batch_dir, candidates, pdf_index_rows)
@@ -291,6 +315,7 @@ def create_batch(batch_dir: Path, candidates: list[Candidate], args: argparse.Na
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "scope": args.scope,
         "batch_size": len(candidates),
+        "batch_mode": args.batch_mode,
         "order": args.order,
         "pdf_index": str(args.pdf_index),
         "pair_index": str(args.pair_index),
@@ -312,6 +337,7 @@ def main() -> None:
         "selected": len(selected),
         "batch_count": len(batches),
         "batch_size": args.batch_size,
+        "batch_mode": args.batch_mode,
         "order": args.order,
         "out_dir": str(args.out_dir),
         "dry_run": args.dry_run,

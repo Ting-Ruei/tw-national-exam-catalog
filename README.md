@@ -59,8 +59,12 @@ scripts/
   build_pdf_asset_index.py
   build_question_answer_pairs.py
   create_mineru_remote_batch.py
+  push_remote_mineru_batches.sh
+  pull_remote_mineru_batches.sh
+  merge_remote_mineru_batches.py
   setup_remote_mineru_worker.sh
   run_remote_mineru_batch.sh
+  run_remote_mineru_queue.sh
 examples/
   sample-question-candidate.json
 國考題資料夾/              # 本機工作資料夾，已加入 .gitignore

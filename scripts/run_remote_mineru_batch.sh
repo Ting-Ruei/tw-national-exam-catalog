@@ -15,6 +15,7 @@ fi
 WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-/Users/tim/AI_workspace}"
 WORKER_ROOT="${WORKER_ROOT:-$WORKSPACE_ROOT/national_exam_mineru_worker}"
 MINERU_BIN="${MINERU_BIN:-$WORKSPACE_ROOT/OCR_model/MinerU/venv_mineru/bin/mineru}"
+REMOTE_ASSET_ROOT="${REMOTE_ASSET_ROOT:-$WORKER_ROOT/repo/國考題資料夾}"
 WORKERS="${WORKERS:-2}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
 SCOPE="${SCOPE:-all-official}"
@@ -31,6 +32,7 @@ fi
 RUNNING_PATH="$WORKER_ROOT/running_batches/$BATCH_NAME"
 FINISHED_PATH="$WORKER_ROOT/finished_batches/$BATCH_NAME"
 LOG_FILE="$WORKER_ROOT/logs/${BATCH_NAME}__$(date '+%Y%m%d-%H%M%S').log"
+RUNTIME_PDF_INDEX="$RUNNING_PATH/pdf_asset_index_runtime.csv"
 
 if [[ ! -x "$MINERU_BIN" ]]; then
   echo "MinerU executable not found: $MINERU_BIN"
@@ -66,12 +68,35 @@ echo "  batch:  $BATCH_NAME" | tee -a "$LOG_FILE"
 echo "  scope:  $SCOPE" | tee -a "$LOG_FILE"
 echo "  workers:$WORKERS" | tee -a "$LOG_FILE"
 echo "  mineru: $MINERU_BIN" | tee -a "$LOG_FILE"
+echo "  assets: $REMOTE_ASSET_ROOT" | tee -a "$LOG_FILE"
+
+python3 - "$RUNNING_PATH/pdf_asset_index_batch.csv" "$RUNTIME_PDF_INDEX" "$REMOTE_ASSET_ROOT" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+asset_root = Path(sys.argv[3])
+
+with src.open(encoding="utf-8-sig", newline="") as f:
+    rows = list(csv.DictReader(f))
+
+fieldnames = rows[0].keys() if rows else []
+with dst.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        relative = row.get("relative_asset_path", "")
+        row["asset_path"] = str((asset_root / relative).resolve())
+        writer.writerow(row)
+PY
 
 python3 -u scripts/run_mineru_pdf_batch.py \
   --scope "$SCOPE" \
   --workers "$WORKERS" \
   --mineru-bin "$MINERU_BIN" \
-  --pdf-index pdf_asset_index_batch.csv \
+  --pdf-index "$RUNTIME_PDF_INDEX" \
   --output-root "國考題資料夾/20_mineru_output/by_official_catalog" \
   --timeout-seconds "$TIMEOUT_SECONDS" \
   2>&1 | tee -a "$LOG_FILE"

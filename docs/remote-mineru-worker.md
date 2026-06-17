@@ -1,6 +1,6 @@
 # 遠端 MinerU 算力節點部署與批次回傳流程
 
-本文記錄如何用另一台 MacBook 作為 MinerU 算力節點。目標是讓主控端負責任務切分、去重與入庫前索引；遠端算力機只負責接收 PDF 批次、執行 MinerU、回傳輸出結果。
+本文記錄如何用另一台 MacBook 作為 MinerU 算力節點。目標是讓主控端負責任務切分、去重與入庫前索引；遠端算力機只負責接收任務批次、使用自己本機已同步好的官方 PDF、執行 MinerU、回傳輸出結果。
 
 ## 角色與網路位置
 
@@ -10,6 +10,8 @@
 | 遠端算力機 | `100.96.207.80` | 接收批次 PDF、在本機 SSD 跑 MinerU、回傳 output 與 result CSV |
 
 原則：遠端算力機不要直接寫入主控端的 MinerU output 目錄。MinerU 會產生大量中間檔，跨網路直接寫入較慢，也比較容易留下半成品。正確流程是遠端本機跑完，再用 `rsync` 整批回傳。
+
+此版本工作流預設是「只同步任務，不同步 PDF」。遠端算力機應事先自行準備完整官方 PDF 樹，主控端只負責分配哪些 PDF 要跑。
 
 ## 遠端算力機目錄規劃
 
@@ -96,9 +98,6 @@ mineru_remote_batch_YYYYMMDD-HHMMSS_partNNN/
   pdf_asset_index_batch.csv
   question_answer_pairs_batch.csv      # 若此批來自 paired-primary，可包含
   國考題資料夾/
-    10_official_pdf/
-      by_official_catalog/
-        ...                            # 保留原始相對路徑的 PDF
   output/
   logs/
 ```
@@ -106,10 +105,28 @@ mineru_remote_batch_YYYYMMDD-HHMMSS_partNNN/
 必要欄位：
 
 - `batch_manifest.csv`：批次任務清單，至少包含 `pdf_path`、`pdf_relative`、`sha256`、`document_role`、`group_name`。
-- `pdf_asset_index_batch.csv`：只含本批 PDF 的 asset index；其中 `asset_path` 必須指向遠端批次內的 PDF，可用相對路徑，例如 `國考題資料夾/10_official_pdf/by_official_catalog/...pdf`，不要保留主控端的絕對路徑。
+- `pdf_asset_index_batch.csv`：只含本批 PDF 的 asset index；保留 `relative_asset_path`，遠端 runner 會在啟動前把它改寫成遠端本機的實際 PDF 絕對路徑。
 - `question_answer_pairs_batch.csv`：若需要保持題目答案 pairing，保留本批涉及的 paired rows；其中 PDF path 欄位同樣要能在遠端批次目錄中解析。
 
 主控端產生批次時必須先排除已完成項目；遠端只處理批次內 PDF，不負責判斷全域是否重複。
+
+## 主控端批次狀態流
+
+主控端會用下列資料夾表示批次狀態：
+
+```text
+國考題資料夾/Registry/mineru_remote_batches/
+  outgoing/                 # 尚未送出
+  assigned/<worker>/        # 已送到指定遠端 worker
+  returned/<worker>/        # 已由遠端回傳，等待主控端合併
+  merged/<worker>/          # 已合併回本機 output 與 results
+```
+
+這樣做的好處是很單純：
+
+- `create_mineru_remote_batch.py` 會排除已完成 PDF。
+- 它也會排除任何已經出現在 `outgoing/`、`assigned/`、`returned/`、`merged/` 的 `batch_manifest.csv` 裡的 PDF。
+- 因此同一份 `paired-primary` PDF 不會被重複切成第二個 batch。
 
 ## 主控端拆解待做清單
 
@@ -132,6 +149,18 @@ python3 scripts/create_mineru_remote_batch.py \
   --batch-count 1
 ```
 
+這個命令預設就是 `manifest-only`，不會把 PDF 複製進 batch。
+
+若真的需要把 PDF 一起塞進 batch，再顯式指定：
+
+```bash
+python3 scripts/create_mineru_remote_batch.py \
+  --scope paired-primary \
+  --batch-size 50 \
+  --batch-count 1 \
+  --batch-mode copy-pdfs
+```
+
 預設排序是 `--order reverse`，也就是從待做清單尾端開始切。這是為了降低跟主控端目前背景 MinerU 任務撞到同一批 PDF 的機率。若要按照正向順序切，可加：
 
 ```bash
@@ -144,9 +173,20 @@ python3 scripts/create_mineru_remote_batch.py \
 國考題資料夾/Registry/mineru_remote_batches/outgoing/
 ```
 
+若要一次切成多批、每批 50 份：
+
+```bash
+python3 scripts/create_mineru_remote_batch.py \
+  --scope paired-primary \
+  --batch-size 50 \
+  --batch-count 10
+```
+
+這會建立 `10` 個 batch，每個 batch `50` 份 PDF；若剩餘不足 50，最後一批只會放剩下的數量。
+
 ## 主控端傳送批次到遠端
 
-在主控端執行。假設批次目錄位於：
+若要手動傳送，假設批次目錄位於：
 
 ```text
 /Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/outgoing/mineru_remote_batch_001
@@ -169,6 +209,25 @@ rsync -avh --dry-run \
   tim@100.96.207.80:/Users/tim/AI_workspace/national_exam_mineru_worker/
 ```
 
+較建議直接用主控端同步腳本：
+
+```bash
+bash scripts/push_remote_mineru_batches.sh 100.96.207.80
+```
+
+這個腳本會：
+
+- 從 `outgoing/` 讀取 batch。
+- 用 `rsync` 傳到遠端 `incoming_batches/`。
+- 傳送的主要是 manifest、batch index 與 runner 腳本，而不是官方 PDF 本體。
+- 傳送成功後，把本機 batch 移到 `assigned/100-96-207-80/`。
+
+若只想先送 2 批：
+
+```bash
+BATCH_LIMIT=2 bash scripts/push_remote_mineru_batches.sh 100.96.207.80
+```
+
 ## 遠端算力機執行批次
 
 遠端算力機若已經從 GitHub clone/pull 這個 repo，可以直接用標準 runner：
@@ -189,28 +248,36 @@ runner 會自動：
 
 1. 從 `incoming_batches` 移到 `running_batches`。
 2. 進入批次工作目錄。
-3. 使用批次內的 `scripts/run_mineru_pdf_batch.py` 執行 MinerU。
-4. 完成後移到 `finished_batches`。
-5. 將 log 寫入 `/Users/tim/AI_workspace/national_exam_mineru_worker/logs`。
+3. 把 `pdf_asset_index_batch.csv` 轉成 `pdf_asset_index_runtime.csv`，其中 `asset_path` 會指向遠端本機自己的 PDF 目錄。
+4. 使用批次內的 `scripts/run_mineru_pdf_batch.py` 執行 MinerU。
+5. 完成後移到 `finished_batches`。
+6. 將 log 寫入 `/Users/tim/AI_workspace/national_exam_mineru_worker/logs`。
+
+遠端 runner 預設使用的官方 PDF 根目錄是：
+
+```text
+/Users/tim/AI_workspace/national_exam_mineru_worker/repo/國考題資料夾
+```
+
+若遠端把官方 PDF 放在別處，可在執行前覆寫：
+
+```bash
+REMOTE_ASSET_ROOT=/path/to/國考題資料夾 \
+bash /Users/tim/AI_workspace/national_exam_mineru_worker/repo/scripts/run_remote_mineru_batch.sh \
+  mineru_remote_batch_001
+```
 
 若需要手動排查，也可以進入批次工作目錄後執行：
 
 ```bash
-cd /Users/tim/AI_workspace/national_exam_mineru_worker/running_batches/mineru_remote_batch_001
-
-python3 scripts/run_mineru_pdf_batch.py \
-  --scope all-official \
-  --workers 2 \
-  --mineru-bin /Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru \
-  --pdf-index pdf_asset_index_batch.csv \
-  --output-root 國考題資料夾/20_mineru_output/by_official_catalog
+REMOTE_ASSET_ROOT=/Users/tim/AI_workspace/national_exam_mineru_worker/repo/國考題資料夾 \
+bash /Users/tim/AI_workspace/national_exam_mineru_worker/repo/scripts/run_remote_mineru_batch.sh \
+  mineru_remote_batch_001
 ```
-
-這個命令假設 `pdf_asset_index_batch.csv` 的 `asset_path` 是批次目錄內可解析的路徑。若該欄位仍是主控端的 `/Users/tim/tw-national-exam-catalog/...` 絕對路徑，遠端會找不到檔案或把 output 相對路徑算錯。
 
 ## 遠端回傳結果到主控端
 
-遠端算力機執行：
+若要手動從遠端推回，遠端算力機執行：
 
 ```bash
 rsync -avh --progress \
@@ -226,6 +293,18 @@ rsync -avh --progress \
   /Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches/returned/mineru_remote_batch_001/
 ```
 
+較建議由主控端主動拉回：
+
+```bash
+bash scripts/pull_remote_mineru_batches.sh 100.96.207.80
+```
+
+這個腳本會：
+
+- 掃描遠端 `finished_batches/`。
+- 把完成批次同步到本機 `returned/100-96-207-80/`。
+- 保留遠端檔案，方便再次檢查。
+
 ## 主控端合併與不重複機制
 
 主控端是唯一負責全域去重的地方。合併遠端結果時依序檢查：
@@ -236,6 +315,30 @@ rsync -avh --progress \
 4. 若同一 PDF 同時有多份結果，保留先完成且 `status=ok` 的結果，其他標記為 duplicate provenance，不覆寫原始結果。
 
 主控端目前的本機批次已支援「看到 expected markdown 已存在就跳過」，因此遠端回傳後再啟動本機補跑，不應重跑已合併的 PDF。
+
+合併動作用：
+
+```bash
+python3 scripts/merge_remote_mineru_batches.py
+```
+
+這個腳本會：
+
+- 掃描 `returned/<worker>/mineru_remote_batch_*`。
+- 將遠端 `國考題資料夾/20_mineru_output/by_official_catalog/` 內容複製回本機對應位置。
+- 產生一份已改寫成「本機絕對路徑」的 `mineru_results__remote-merge__*.csv`，放到：
+
+```text
+國考題資料夾/Registry/mineru_runs/remote_imports/
+```
+
+- 合併成功後，將 batch 從 `returned/` 移到 `merged/`。
+
+若只想先演練不真的複製：
+
+```bash
+python3 scripts/merge_remote_mineru_batches.py --dry-run
+```
 
 答案邏輯仍以 paired index 為準：
 
