@@ -87,6 +87,9 @@ def read_catalog(path: Path) -> list[CatalogRow]:
 
 
 def exam_ordinal(row: CatalogRow) -> int:
+    if row.exam_code == "106111":
+        return 3
+
     label = row.exam_label
     if "第二次" in label or "第2次" in label or "第二梯次" in label or "第2梯次" in label:
         return 2

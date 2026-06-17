@@ -47,6 +47,10 @@ TRANSITION_NOTES = {
     "中醫師": "早期未分階段官方類科；與分階段中醫師一起保留",
 }
 
+EXAM_CODE_NOTES = {
+    "106111": "花東考區補辦考試試題",
+}
+
 
 @dataclass(frozen=True)
 class ManifestChoice:
@@ -152,6 +156,8 @@ def build_indexes(args: argparse.Namespace) -> tuple[Path, Path]:
                     notes = []
                     if category in TRANSITION_NOTES:
                         notes.append(TRANSITION_NOTES[category])
+                    if row["exam_code"] in EXAM_CODE_NOTES:
+                        notes.append(EXAM_CODE_NOTES[row["exam_code"]])
                     if collision:
                         notes.append("同年同次序命名撞名，使用 _E{exam_code} 保留不同官方文件")
                     if "（" in category or "）" in category:

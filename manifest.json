@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T13:11:06.185335",
+  "generated_at": "2026-06-17T13:22:19.992374",
   "project": "tw-national-exam-catalog",
   "source": "https://wwwq.moex.gov.tw/exam/wFrmExamQandASearch.aspx",
   "scope": {
@@ -73,8 +73,8 @@
     },
     {
       "path": "docs/database-architecture.md",
-      "bytes": 3881,
-      "sha256": "7c6aa813b0f29adeabe235710998612c1d35e4381480cecf88ee92881224a0f7"
+      "bytes": 4073,
+      "sha256": "1a60571cccc03363a7b1c7bfcb974525d5b2708867eb553a894b4d55c65b4490"
     },
     {
       "path": "docs/known-issues.md",
@@ -123,13 +123,13 @@
     },
     {
       "path": "scripts/build_pdf_asset_index.py",
-      "bytes": 9873,
-      "sha256": "35df42e04df75e291b1cbafc69ed3bc8d96b5e2ffc4a59ff337899529c55e42d"
+      "bytes": 10076,
+      "sha256": "d4b157bfc678b258994b25b02624e0c6b0f30b259197cb896cdb69c37e3f6c1f"
     },
     {
       "path": "scripts/download_moex_pdfs_from_catalog.py",
-      "bytes": 11753,
-      "sha256": "283aa0ba0f471f072c6c9c4221f276eb2a2280f140e1df6a98686debc79d3df3"
+      "bytes": 11805,
+      "sha256": "47a3736b2512eff4ac2e9ef45a5ebedf9d8aca5de7dc307436c94b63d75fa2b1"
     },
     {
       "path": "scripts/export_moex_subject_catalog.py",
