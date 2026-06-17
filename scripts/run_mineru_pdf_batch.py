@@ -28,6 +28,8 @@ PAIR_INDEX_DIR = REGISTRY_ROOT / "paired_indexes"
 RUN_LOG_DIR = REGISTRY_ROOT / "mineru_runs"
 REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
+MINERU_METHOD = "ocr"
+MINERU_BACKEND = "vlm-engine"
 
 
 @dataclass(frozen=True)
@@ -319,9 +321,9 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
         "-o",
         str(output_parent),
         "-m",
-        "ocr",
+        MINERU_METHOD,
         "-b",
-        "vlm-auto-engine",
+        MINERU_BACKEND,
     ]
     started = time.monotonic()
     try:

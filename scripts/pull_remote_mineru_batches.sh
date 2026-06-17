@@ -23,7 +23,10 @@ RETURNED_ROOT="$BATCH_ROOT/returned/$REMOTE_LABEL"
 
 mkdir -p "$RETURNED_ROOT"
 
-mapfile -t REMOTE_BATCH_NAMES < <(
+REMOTE_BATCH_NAMES=()
+while IFS= read -r line; do
+  REMOTE_BATCH_NAMES+=("$line")
+done < <(
   ssh "$REMOTE_USER@$REMOTE_HOST" \
     "find '$REMOTE_WORKER_ROOT/finished_batches' -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' -exec basename {} \\; | sort"
 )

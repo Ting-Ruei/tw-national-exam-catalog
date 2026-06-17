@@ -34,6 +34,49 @@ FINISHED_PATH="$WORKER_ROOT/finished_batches/$BATCH_NAME"
 LOG_FILE="$WORKER_ROOT/logs/${BATCH_NAME}__$(date '+%Y%m%d-%H%M%S').log"
 RUNTIME_PDF_INDEX="$RUNNING_PATH/pdf_asset_index_runtime.csv"
 
+batch_has_failures() {
+  local csv_path="$1"
+  python3 - "$csv_path" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+bad = 0
+with open(path, encoding="utf-8-sig", newline="") as f:
+    for row in csv.DictReader(f):
+        if row.get("status") in {"error", "timeout"}:
+            bad += 1
+print(bad)
+raise SystemExit(1 if bad else 0)
+PY
+}
+
+latest_result_csv_since() {
+  local since_epoch="$1"
+  local run_root="$2"
+  python3 - "$since_epoch" "$run_root" <<'PY'
+import sys
+from pathlib import Path
+
+since_epoch = float(sys.argv[1])
+run_root = Path(sys.argv[2])
+candidates = []
+for path in run_root.glob("**/mineru_results__*.csv"):
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        continue
+    if mtime >= since_epoch:
+        candidates.append((mtime, str(path)))
+
+if not candidates:
+    raise SystemExit(1)
+
+candidates.sort()
+print(candidates[-1][1])
+PY
+}
+
 if [[ ! -x "$MINERU_BIN" ]]; then
   echo "MinerU executable not found: $MINERU_BIN"
   exit 1
@@ -92,6 +135,8 @@ with dst.open("w", encoding="utf-8", newline="") as f:
         writer.writerow(row)
 PY
 
+run_started_epoch="$(date +%s)"
+
 python3 -u scripts/run_mineru_pdf_batch.py \
   --scope "$SCOPE" \
   --workers "$WORKERS" \
@@ -100,6 +145,15 @@ python3 -u scripts/run_mineru_pdf_batch.py \
   --output-root "國考題資料夾/20_mineru_output/by_official_catalog" \
   --timeout-seconds "$TIMEOUT_SECONDS" \
   2>&1 | tee -a "$LOG_FILE"
+
+if ! after_latest="$(latest_result_csv_since "$run_started_epoch" "$RUNNING_PATH/國考題資料夾/Registry/mineru_runs")"; then
+  echo "Failed batch (no new result csv): $BATCH_NAME" | tee -a "$LOG_FILE"
+  exit 1
+fi
+if ! batch_has_failures "$after_latest"; then
+  echo "Failed batch (error statuses present): $BATCH_NAME" | tee -a "$LOG_FILE"
+  exit 1
+fi
 
 mkdir -p "$(dirname "$FINISHED_PATH")"
 if [[ -e "$FINISHED_PATH" ]]; then

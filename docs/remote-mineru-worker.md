@@ -2,6 +2,11 @@
 
 本文記錄如何用另一台 MacBook 作為 MinerU 算力節點。目標是讓主控端負責任務切分、去重與入庫前索引；遠端算力機只負責接收任務批次、使用自己本機已同步好的官方 PDF、執行 MinerU、回傳輸出結果。
 
+目前已驗證可同步的 MinerU 環境版本、freeze 清單與安裝順序，另見：
+
+- [docs/mineru-environment-sync.md](/Users/tim/tw-national-exam-catalog/docs/mineru-environment-sync.md)
+- [requirements/mineru-3.3.1-py314-freeze.txt](/Users/tim/tw-national-exam-catalog/requirements/mineru-3.3.1-py314-freeze.txt)
+
 ## 角色與網路位置
 
 | 角色 | Tailscale IP | 職責 |

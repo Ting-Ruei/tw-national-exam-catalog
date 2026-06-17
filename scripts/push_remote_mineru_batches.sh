@@ -26,7 +26,10 @@ ASSIGNED_ROOT="$BATCH_ROOT/assigned/$REMOTE_LABEL"
 
 mkdir -p "$OUTGOING_ROOT" "$ASSIGNED_ROOT"
 
-mapfile -t BATCH_DIRS < <(find "$OUTGOING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort)
+BATCH_DIRS=()
+while IFS= read -r line; do
+  BATCH_DIRS+=("$line")
+done < <(find "$OUTGOING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort)
 
 if [[ ${#BATCH_DIRS[@]} -eq 0 ]]; then
   echo "No outgoing batches found."

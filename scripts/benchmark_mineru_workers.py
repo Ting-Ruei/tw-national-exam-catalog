@@ -25,6 +25,8 @@ DEFAULT_ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 DEFAULT_PDF_ROOT = DEFAULT_ASSET_ROOT / "10_official_pdf" / "by_official_catalog"
 DEFAULT_OUTPUT_ROOT = DEFAULT_ASSET_ROOT / "20_mineru_output" / "_worker_benchmark"
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
+MINERU_METHOD = "ocr"
+MINERU_BACKEND = "vlm-engine"
 
 
 @dataclass
@@ -293,9 +295,9 @@ def run_one(
         "-o",
         str(output_dir),
         "-m",
-        "ocr",
+        MINERU_METHOD,
         "-b",
-        "vlm-auto-engine",
+        MINERU_BACKEND,
     ]
 
     proc: subprocess.Popen[str] | None = None

@@ -20,7 +20,10 @@ echo "Starting remote MinerU queue" | tee "$QUEUE_LOG"
 echo "  worker_root: $WORKER_ROOT" | tee -a "$QUEUE_LOG"
 
 while true; do
-  mapfile -t BATCH_NAMES < <(
+  BATCH_NAMES=()
+  while IFS= read -r line; do
+    BATCH_NAMES+=("$line")
+  done < <(
     find "$WORKER_ROOT/incoming_batches" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' -exec basename {} \; | sort
   )
 
