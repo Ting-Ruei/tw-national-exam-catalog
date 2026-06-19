@@ -16,29 +16,37 @@ BATCH_ROOT="$PROJECT_ROOT/國考題資料夾/Registry/mineru_remote_batches"
 OUTGOING_ROOT="$BATCH_ROOT/outgoing"
 LOCAL_RUNNING_ROOT="$BATCH_ROOT/local_running"
 LOCAL_DONE_ROOT="$BATCH_ROOT/local_done"
+LOCAL_PARTIAL_ROOT="$BATCH_ROOT/local_partial"
 LOCAL_FAILED_ROOT="$BATCH_ROOT/local_failed"
+ASSIGNED_ROOT="$BATCH_ROOT/assigned"
 QUEUE_LOG="${QUEUE_LOG:-$BATCH_ROOT/local_queue__$(date '+%Y%m%d-%H%M%S').log}"
 WORKERS="${WORKERS:-2}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
 MINERU_BIN="${MINERU_BIN:-$HOME/AI workspace/OCR_model/MinerU/venv_mineru/bin/mineru}"
 
-mkdir -p "$OUTGOING_ROOT" "$LOCAL_RUNNING_ROOT" "$LOCAL_DONE_ROOT" "$LOCAL_FAILED_ROOT"
+mkdir -p "$OUTGOING_ROOT" "$LOCAL_RUNNING_ROOT" "$LOCAL_DONE_ROOT" "$LOCAL_PARTIAL_ROOT" "$LOCAL_FAILED_ROOT" "$ASSIGNED_ROOT"
 mkdir -p "$(dirname "$QUEUE_LOG")"
 
-batch_has_failures() {
+batch_result_counts() {
   local csv_path="$1"
   python3 - "$csv_path" <<'PY'
 import csv
 import sys
 
 path = sys.argv[1]
-bad = 0
+ok = skipped = error = timeout = 0
 with open(path, encoding="utf-8-sig", newline="") as f:
     for row in csv.DictReader(f):
-        if row.get("status") in {"error", "timeout"}:
-            bad += 1
-print(bad)
-raise SystemExit(1 if bad else 0)
+        status = (row.get("status") or "").strip()
+        if status == "ok":
+            ok += 1
+        elif status == "skipped_existing":
+            skipped += 1
+        elif status == "error":
+            error += 1
+        elif status == "timeout":
+            timeout += 1
+print(f"{ok},{skipped},{error},{timeout}")
 PY
 }
 
@@ -105,6 +113,10 @@ pick_batch_dir() {
 
   candidate_dirs=()
   while IFS= read -r line; do
+    if find "$ASSIGNED_ROOT" -mindepth 2 -maxdepth 2 -type d -name "$(basename "$line")" | grep -q .; then
+      echo "Skipping assigned batch: $(basename "$line")" >> "$QUEUE_LOG"
+      continue
+    fi
     candidate_dirs+=("$line")
   done < <(find "$OUTGOING_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mineru_remote_batch_*' | sort -r)
 
@@ -176,19 +188,24 @@ PY
     if ! after_latest="$(latest_result_csv_since "$run_started_epoch" "$PROJECT_ROOT/國考題資料夾/Registry/mineru_runs")"; then
       mv "$running_dir" "$LOCAL_FAILED_ROOT/$batch_name"
       echo "Failed batch (no new result csv): $batch_name" | tee -a "$QUEUE_LOG"
-      exit 1
+      continue
     fi
-    if batch_has_failures "$after_latest"; then
+    IFS=',' read -r ok_count skipped_count error_count timeout_count <<<"$(batch_result_counts "$after_latest")"
+    total_ok=$((ok_count + skipped_count))
+    total_bad=$((error_count + timeout_count))
+    if [[ "$total_bad" -eq 0 ]]; then
       mv "$running_dir" "$LOCAL_DONE_ROOT/$batch_name"
       echo "Completed batch: $batch_name" | tee -a "$QUEUE_LOG"
-    else
+    elif [[ "$total_ok" -eq 0 ]]; then
       mv "$running_dir" "$LOCAL_FAILED_ROOT/$batch_name"
-      echo "Failed batch (error statuses present): $batch_name" | tee -a "$QUEUE_LOG"
-      exit 1
+      echo "Failed batch (all items failed): $batch_name" | tee -a "$QUEUE_LOG"
+    else
+      mv "$running_dir" "$LOCAL_PARTIAL_ROOT/$batch_name"
+      echo "Partial batch (mixed success/error): $batch_name" | tee -a "$QUEUE_LOG"
     fi
   else
     mv "$running_dir" "$LOCAL_FAILED_ROOT/$batch_name"
     echo "Failed batch: $batch_name" | tee -a "$QUEUE_LOG"
-    exit 1
+    continue
   fi
 done

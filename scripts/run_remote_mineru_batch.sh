@@ -31,6 +31,8 @@ fi
 
 RUNNING_PATH="$WORKER_ROOT/running_batches/$BATCH_NAME"
 FINISHED_PATH="$WORKER_ROOT/finished_batches/$BATCH_NAME"
+PARTIAL_PATH="$WORKER_ROOT/partial_batches/$BATCH_NAME"
+FAILED_PATH="$WORKER_ROOT/failed_batches/$BATCH_NAME"
 LOG_FILE="$WORKER_ROOT/logs/${BATCH_NAME}__$(date '+%Y%m%d-%H%M%S').log"
 RUNTIME_PDF_INDEX="$RUNNING_PATH/pdf_asset_index_runtime.csv"
 
@@ -57,20 +59,26 @@ print(data.get("scope") or default_scope)
 PY
 }
 
-batch_has_failures() {
+batch_result_counts() {
   local csv_path="$1"
   python3 - "$csv_path" <<'PY'
 import csv
 import sys
 
 path = sys.argv[1]
-bad = 0
+ok = skipped = error = timeout = 0
 with open(path, encoding="utf-8-sig", newline="") as f:
     for row in csv.DictReader(f):
-        if row.get("status") in {"error", "timeout"}:
-            bad += 1
-print(bad)
-raise SystemExit(1 if bad else 0)
+        status = (row.get("status") or "").strip()
+        if status == "ok":
+            ok += 1
+        elif status == "skipped_existing":
+            skipped += 1
+        elif status == "error":
+            error += 1
+        elif status == "timeout":
+            timeout += 1
+print(f"{ok},{skipped},{error},{timeout}")
 PY
 }
 
@@ -174,19 +182,44 @@ python3 -u scripts/run_mineru_pdf_batch.py \
   2>&1 | tee -a "$LOG_FILE"
 
 if ! after_latest="$(latest_result_csv_since "$run_started_epoch" "$RUNNING_PATH/國考題資料夾/Registry/mineru_runs")"; then
+  mkdir -p "$(dirname "$FAILED_PATH")"
+  if [[ -e "$FAILED_PATH" ]]; then
+    echo "Failed path already exists: $FAILED_PATH"
+    exit 1
+  fi
+  mv "$RUNNING_PATH" "$FAILED_PATH"
   echo "Failed batch (no new result csv): $BATCH_NAME" | tee -a "$LOG_FILE"
   exit 1
 fi
-if ! batch_has_failures "$after_latest"; then
-  echo "Failed batch (error statuses present): $BATCH_NAME" | tee -a "$LOG_FILE"
+IFS=',' read -r ok_count skipped_count error_count timeout_count <<<"$(batch_result_counts "$after_latest")"
+total_ok=$((ok_count + skipped_count))
+total_bad=$((error_count + timeout_count))
+if [[ "$total_bad" -eq 0 ]]; then
+  mkdir -p "$(dirname "$FINISHED_PATH")"
+  if [[ -e "$FINISHED_PATH" ]]; then
+    echo "Finished path already exists: $FINISHED_PATH"
+    exit 1
+  fi
+  mv "$RUNNING_PATH" "$FINISHED_PATH"
+  echo "Finished: $FINISHED_PATH" | tee -a "$LOG_FILE"
+  exit 0
+fi
+
+if [[ "$total_ok" -eq 0 ]]; then
+  mkdir -p "$(dirname "$FAILED_PATH")"
+  if [[ -e "$FAILED_PATH" ]]; then
+    echo "Failed path already exists: $FAILED_PATH"
+    exit 1
+  fi
+  mv "$RUNNING_PATH" "$FAILED_PATH"
+  echo "Failed batch (all items failed): $BATCH_NAME" | tee -a "$LOG_FILE"
   exit 1
 fi
 
-mkdir -p "$(dirname "$FINISHED_PATH")"
-if [[ -e "$FINISHED_PATH" ]]; then
-  echo "Finished path already exists: $FINISHED_PATH"
+mkdir -p "$(dirname "$PARTIAL_PATH")"
+if [[ -e "$PARTIAL_PATH" ]]; then
+  echo "Partial path already exists: $PARTIAL_PATH"
   exit 1
 fi
-mv "$RUNNING_PATH" "$FINISHED_PATH"
-
-echo "Finished: $FINISHED_PATH" | tee -a "$LOG_FILE"
+mv "$RUNNING_PATH" "$PARTIAL_PATH"
+echo "Partial batch (mixed success/error): $BATCH_NAME" | tee -a "$LOG_FILE"

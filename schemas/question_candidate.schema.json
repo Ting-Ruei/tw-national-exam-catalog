@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "source_registry_key",
+    "candidate_key",
     "question_number",
     "stem",
     "options",
@@ -12,9 +13,12 @@
     "metadata"
   ],
   "properties": {
+    "candidate_key": { "type": "string" },
     "source_registry_key": { "type": "string" },
+    "answer_source_registry_key": { "type": ["string", "null"] },
     "question_number": { "type": ["integer", "string"] },
     "stem": { "type": "string" },
+    "stem_markup": { "type": ["object", "null"] },
     "stem_image": { "type": ["string", "null"] },
     "options": {
       "type": "array",
@@ -25,6 +29,7 @@
           "key": { "type": "string" },
           "text": { "type": "string" },
           "image": { "type": ["string", "null"] },
+          "markup": { "type": ["object", "null"] },
           "explanation": { "type": ["string", "null"] },
           "explanation_image": { "type": ["string", "null"] }
         },
@@ -41,11 +46,27 @@
         { "type": "null" }
       ]
     },
+    "answer_payload": { "type": ["object", "null"] },
     "explanation": { "type": ["string", "null"] },
     "question_type": { "type": "string" },
     "group_ref": { "type": ["string", "null"] },
+    "image_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "raw_ref": { "type": "string" },
+          "path": { "type": "string" },
+          "relative_path": { "type": "string" },
+          "exists": { "type": "boolean" },
+          "bytes": { "type": ["integer", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "quality_status": { "type": "string", "enum": ["pass", "needs_review", "blocked"] },
+    "issue_count": { "type": "integer" },
     "metadata": { "type": "object" }
   },
   "additionalProperties": true
 }
-

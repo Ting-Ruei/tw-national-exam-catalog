@@ -157,12 +157,84 @@ question_assets
   role = figure | table | page_image | option_image
 ```
 
+## 入庫前審核與 Human-in-the-loop
+
+MinerU 解析結果不得直接寫入正式題目表。正式入庫前先產生可重跑、可丟棄的候選層：
+
+```text
+MinerU markdown / images
+        ↓
+question_candidates JSONL
+        ↓
+parse_issues QA flags
+        ↓
+本地 Review UI 人工核查
+        ↓
+review_events
+        ↓
+正式 questions / question_groups / question_assets / answers
+```
+
+審核重點先鎖定三類高風險：
+
+- 題目文字疑似 OCR 錯字、亂碼、上下標或科學符號遺失。
+- 題組題的共同題幹與題號範圍是否正確。
+- 圖片題、表格題、選項圖片是否擷取完整並正確綁定題目。
+
+候選資料的狀態建議分為：
+
+- `pass`：機械檢查通過，可進正式入庫佇列。
+- `needs_review`：需要人工確認，不進正式表。
+- `blocked`：缺必要資料或配對錯誤，禁止入正式表。
+
+人工審核不直接覆蓋官方 PDF、MinerU raw markdown 或 parser 輸出。所有人工判斷以 `review_events` 記錄，必要時再由正式入庫腳本合併 `human_corrected_text`、題組修正與圖片綁定。
+
+## 特殊符號、上下標與公式文字
+
+國考題可能包含科學符號、希臘字母、羅馬數字、上下標與少量公式。資料庫在本階段要保留語意與原始表現，但不綁死未來前端的渲染技術。
+
+每個重要文字欄位建議保留：
+
+- `raw_text`：MinerU 原始輸出，不修改。
+- `normalized_text`：清理換行、空白與全半形後的搜尋用文字。
+- `display_markup`：可選的 Markdown / HTML / LaTeX 表示。
+- `human_corrected_text`：人工校對後文字。
+
+正式題目表保留純文字欄位供搜尋，並用 JSONB 保存 markup span、原始 block 與 parser metadata。未來寫題網站可再決定使用 KaTeX、MathJax、HTML `<sup>/<sub>` 或純 Unicode 顯示。Review UI 則應先提供基本預覽，讓人工審核時能發現上下標或公式遺失。
+
+範例：
+
+```json
+{
+  "plain": "HbA1c、Ca2+、α-glucosidase、H2O",
+  "markup": "HbA<sub>1c</sub>、Ca<sup>2+</sup>、\\alpha-glucosidase、H<sub>2</sub>O",
+  "format": "html+latex"
+}
+```
+
 ## 目前先做的事情
 
 1. 設計 PostgreSQL schema 草案。
 2. 把已下載且分類好的 PDF 產生索引 CSV。
 3. 保留每個官方類科的 subject variant markdown。
-4. 暫不匯入 PostgreSQL，等分類與欄位審核後再入庫。
+4. 建立 `question_candidates`、`parse_issues`、`review_events` 作為入庫前審核層。
+5. 產生候選題目 JSONL 與 QA flags，先不污染正式題目表。
+6. 建立最小本地 Review UI，可並排查看 PDF、候選題、圖片與疑點，人工標記 accept / block。
+
+目前最小可用指令：
+
+```bash
+# 先小批測試
+python3 scripts/build_question_candidates_from_mineru.py --limit 10
+
+# 全量已配對且有 MinerU markdown 的題目候選產生
+python3 scripts/build_question_candidates_from_mineru.py
+
+# 開啟本地人工審核介面
+python3 scripts/serve_question_review_ui.py --port 8765
+```
+
+Review UI 預設讀取最新的 `30_normalized_items/question_candidates/*/question_candidates__*.jsonl` 與對應 `question_parse_issues__*.csv`。人工審核動作會追加到同一資料夾的 `question_review_events.jsonl`，後續再由正式入庫腳本讀取 review events 合併進 PostgreSQL。
 
 ## PDF 命名與分類規則
 

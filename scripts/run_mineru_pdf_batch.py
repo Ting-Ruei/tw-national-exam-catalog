@@ -30,6 +30,7 @@ REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
 MINERU_METHOD = "ocr"
 MINERU_BACKEND = "vlm-engine"
+MINERU_IMAGE_ANALYSIS = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,9 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
     groups = set(args.group) if args.group else None
     tasks_by_pdf: dict[str, MinerUTask] = {}
     exclude_pdf_paths = exclude_pdf_paths or set()
+    allowed_pdf_paths: set[str] | None = None
+    if args.pdf_index:
+        allowed_pdf_paths = {str(Path(row["asset_path"]).resolve()) for row in read_csv(args.pdf_index) if row.get("asset_path")}
     if args.exclude_remote_reserved:
         exclude_pdf_paths = set(exclude_pdf_paths) | reserved_pdf_paths()
 
@@ -181,7 +185,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
                 continue
 
             question_pdf = Path(row["question_pdf"]).resolve()
-            if str(question_pdf) not in exclude_pdf_paths:
+            if (allowed_pdf_paths is None or str(question_pdf) in allowed_pdf_paths) and str(question_pdf) not in exclude_pdf_paths:
                 task = task_from_pdf(
                     scope=args.scope,
                     pdf_path=question_pdf,
@@ -195,7 +199,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
 
             if args.scope == "paired-primary" and row["answer_pdf_primary"]:
                 answer_pdf = Path(row["answer_pdf_primary"]).resolve()
-                if str(answer_pdf) not in exclude_pdf_paths:
+                if (allowed_pdf_paths is None or str(answer_pdf) in allowed_pdf_paths) and str(answer_pdf) not in exclude_pdf_paths:
                     task = task_from_pdf(
                         scope=args.scope,
                         pdf_path=answer_pdf,
@@ -213,6 +217,8 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
             if not within_filters(row, groups, args.year_start, args.year_end):
                 continue
             pdf_path = Path(row["asset_path"]).resolve()
+            if allowed_pdf_paths is not None and str(pdf_path) not in allowed_pdf_paths:
+                continue
             if str(pdf_path) in exclude_pdf_paths:
                 continue
             task = task_from_pdf(
@@ -324,6 +330,8 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
         MINERU_METHOD,
         "-b",
         MINERU_BACKEND,
+        "--image-analysis",
+        str(MINERU_IMAGE_ANALYSIS).lower(),
     ]
     started = time.monotonic()
     try:

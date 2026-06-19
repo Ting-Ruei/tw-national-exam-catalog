@@ -16,12 +16,15 @@
 
 - method: `ocr`
 - backend: `vlm-engine`
+- image-analysis: `false`
 
 原因：
 
 - `3.3.x` 預設容易走到 `hybrid-engine`，輸出目錄會變成 `hybrid_auto/`
 - 我們目前既有批次、索引、paired 與後續入庫流程都以 `vlm/` 為主
 - 因此主流程先鎖定 `vlm-engine`，維持輸出結構穩定
+- `3.3.1` 的 CLI 預設 `image-analysis=True` 會顯著增加記憶體占用；在實測中，單一 worker 可逼近 `12 GB`
+- 現階段大規模正式批次先關閉 image analysis，避免 worker 數一上去就把系統壓垮
 
 相關腳本：
 
@@ -111,4 +114,5 @@ python3.14 -m venv venv_mineru
 - `pip freeze` 內含大量相依套件，另一台機器若是同架構的 Apple Silicon Mac，通常可直接對齊。
 - 若另一台機器是不同 Python patch version 或不同系統環境，少數 wheel 可能需要重解依賴。
 - 目前本 repo 的大規模批次已驗證 `3.3.1 + vlm-engine` 可運作。
+- 目前本 repo 的大規模批次實際採用的是 `3.3.1 + ocr + vlm-engine + image-analysis=false`。
 - 後續若要加入 `hybrid_auto` 作為 fallback，再另外補文件，不要直接改動主流程。

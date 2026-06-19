@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS exam.question_groups (
     group_key TEXT NOT NULL UNIQUE,
     shared_stem_text TEXT,
     shared_stem_json JSONB,
+    source_page_start INTEGER,
+    source_page_end INTEGER,
+    source_bbox JSONB,
+    group_question_range TEXT,
     review_status TEXT NOT NULL DEFAULT 'unreviewed'
 );
 
@@ -121,6 +125,12 @@ CREATE TABLE IF NOT EXISTS exam.questions (
     question_key TEXT NOT NULL UNIQUE,
     question_number TEXT NOT NULL,
     question_text TEXT,
+    question_markup_json JSONB,
+    question_raw_json JSONB,
+    source_page_start INTEGER,
+    source_page_end INTEGER,
+    source_bbox JSONB,
+    parse_confidence NUMERIC(5,4),
     question_json JSONB,
     parser_version TEXT,
     review_status TEXT NOT NULL DEFAULT 'unreviewed',
@@ -132,6 +142,8 @@ CREATE TABLE IF NOT EXISTS exam.question_options (
     question_id BIGINT NOT NULL REFERENCES exam.questions(id),
     option_label TEXT NOT NULL,
     option_text TEXT,
+    option_markup_json JSONB,
+    option_raw_json JSONB,
     option_json JSONB,
     UNIQUE (question_id, option_label)
 );
@@ -149,10 +161,58 @@ CREATE TABLE IF NOT EXISTS exam.answers (
 CREATE TABLE IF NOT EXISTS exam.question_assets (
     question_id BIGINT NOT NULL REFERENCES exam.questions(id),
     asset_id BIGINT NOT NULL REFERENCES exam.assets(id),
-    role TEXT NOT NULL CHECK (role IN ('page_image', 'figure', 'table', 'option_image', 'source_pdf_region', 'other')),
+    role TEXT NOT NULL CHECK (role IN ('page_image', 'figure', 'stem_figure', 'table', 'option_image', 'source_pdf_region', 'answer_explanation_image', 'other')),
     page_number INTEGER,
     bbox JSONB,
+    source_mineru_block_id TEXT,
+    asset_quality_status TEXT NOT NULL DEFAULT 'unreviewed',
     PRIMARY KEY (question_id, asset_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS exam.question_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_key TEXT NOT NULL UNIQUE,
+    source_registry_key TEXT NOT NULL,
+    source_document_id BIGINT REFERENCES exam.official_documents(id),
+    answer_source_registry_key TEXT,
+    answer_source_document_id BIGINT REFERENCES exam.official_documents(id),
+    question_number TEXT NOT NULL,
+    question_type TEXT,
+    group_ref TEXT,
+    stem_text TEXT,
+    stem_markup_json JSONB,
+    raw_candidate_json JSONB NOT NULL,
+    normalized_candidate_json JSONB,
+    parser_version TEXT NOT NULL,
+    quality_status TEXT NOT NULL DEFAULT 'needs_review' CHECK (quality_status IN ('pass', 'needs_review', 'blocked')),
+    review_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK (review_status IN ('unreviewed', 'accepted', 'corrected', 'needs_review', 'blocked')),
+    issue_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS exam.question_parse_issues (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE CASCADE,
+    candidate_key TEXT,
+    source_registry_key TEXT NOT NULL,
+    issue_code TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'error', 'blocked')),
+    message TEXT NOT NULL,
+    issue_json JSONB,
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS exam.question_review_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    reviewer TEXT,
+    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment')),
+    corrected_candidate_json JSONB,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS exam.canonical_subject_mappings (
@@ -184,3 +244,8 @@ CREATE INDEX IF NOT EXISTS idx_official_documents_role ON exam.official_document
 CREATE INDEX IF NOT EXISTS idx_assets_sha256 ON exam.assets (sha256);
 CREATE INDEX IF NOT EXISTS idx_questions_review_status ON exam.questions (review_status);
 CREATE INDEX IF NOT EXISTS idx_question_answer_pairs_status ON exam.question_answer_document_pairs (pair_status);
+CREATE INDEX IF NOT EXISTS idx_question_candidates_source ON exam.question_candidates (source_registry_key);
+CREATE INDEX IF NOT EXISTS idx_question_candidates_quality ON exam.question_candidates (quality_status, review_status);
+CREATE INDEX IF NOT EXISTS idx_question_parse_issues_candidate ON exam.question_parse_issues (candidate_key);
+CREATE INDEX IF NOT EXISTS idx_question_parse_issues_severity ON exam.question_parse_issues (severity, issue_code);
+CREATE INDEX IF NOT EXISTS idx_question_review_events_candidate ON exam.question_review_events (candidate_key);

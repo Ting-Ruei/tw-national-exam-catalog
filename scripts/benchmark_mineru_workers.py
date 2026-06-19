@@ -27,6 +27,7 @@ DEFAULT_OUTPUT_ROOT = DEFAULT_ASSET_ROOT / "20_mineru_output" / "_worker_benchma
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
 MINERU_METHOD = "ocr"
 MINERU_BACKEND = "vlm-engine"
+MINERU_IMAGE_ANALYSIS = False
 
 
 @dataclass
@@ -298,6 +299,8 @@ def run_one(
         MINERU_METHOD,
         "-b",
         MINERU_BACKEND,
+        "--image-analysis",
+        str(MINERU_IMAGE_ANALYSIS).lower(),
     ]
 
     proc: subprocess.Popen[str] | None = None

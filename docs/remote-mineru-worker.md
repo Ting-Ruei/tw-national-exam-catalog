@@ -93,6 +93,34 @@ MinerU 建議部署到：
 --mineru-bin /Users/tim/AI_workspace/OCR_model/MinerU/venv_mineru/bin/mineru
 ```
 
+## 最新注意參數
+
+這一版已確認過的實際運行參數如下：
+
+- 本機主跑建議維持 `WORKERS=2`，上限 `3`，不要再往上加。
+- MinerU 建議固定用 `MINERU_METHOD=ocr`。
+- VLM 推論後端固定用 `MINERU_BACKEND=vlm-engine`。
+- 圖像描述固定用 `MINERU_IMAGE_ANALYSIS=false`。
+- 本機 queue 預設用 `PART_SORT_ORDER=asc`，讓 `part001` 往上跑。
+- `scripts/run_mineru_pdf_batch.py` 現在會優先使用 batch 自己帶進來的 `--pdf-index`，不會回頭吃全域索引。
+- 遠端機壓力高時，先不要再開新的 worker。
+- 遠端若要接續跑，只讀那邊權威 batch 來源，不要在本機重新切同一份 part。
+- 遠端權威 batch 來源目前以 `/Users/tim/tw-national-exam-catalog/國考題資料夾/Registry/mineru_remote_batches` 為準。
+
+補充說明：
+
+- MinerU `3.3.1` 雖然我們仍固定用 `vlm-engine`，但 CLI 預設值比舊版更重，特別是 `image-analysis=True` 時，單一 worker 可能把記憶體推到約 `12 GB`。
+- 這次觀察到的高記憶體佔用，不是因為 backend 自動切成 `hybrid-engine`，而是新版預設功能變多。
+- 因此目前主流程明確鎖定 `ocr + vlm-engine + image-analysis=false`，先把批次穩定度放在第一位；若之後要補做圖像描述，再另外開專用流程。
+
+若之後要手動重啟本機 queue，建議使用：
+
+```bash
+PART_SORT_ORDER=asc WORKERS=2 MINERU_METHOD=ocr MINERU_BACKEND=vlm-engine \
+MINERU_IMAGE_ANALYSIS=false \
+  python3 scripts/start_local_split_batch_queue.py
+```
+
 ## 批次資料夾格式
 
 每一批由主控端產生，格式如下：
