@@ -180,6 +180,19 @@ docker compose up -d review-ui
 http://127.0.0.1:8765/
 ```
 
+Review UI 預設會綁定到本機所有網卡：
+
+```text
+0.0.0.0:8765
+```
+
+因此同一區網或 Tailscale 內的其他電腦可用這台主機的 IP 連線，例如：
+
+```text
+http://192.168.10.70:8765/
+http://100.96.146.93:8765/
+```
+
 查看 log：
 
 ```bash
@@ -191,6 +204,16 @@ docker compose logs -f review-ui
 ```bash
 docker compose stop review-ui
 ```
+
+若使用 NPM / Nginx Proxy Manager 管理區網網址，可將 proxy host 指到 Review UI：
+
+```text
+Forward Hostname / IP: 這台主機的 LAN IP 或 Tailscale IP
+Forward Port: 8765
+Scheme: http
+```
+
+如果 NPM 本身是跑在同一台 Mac 的 Docker container，`Forward Hostname / IP` 也可嘗試使用 `host.docker.internal`。實際審核紀錄仍寫回本專案工作資料夾內的 `question_review_events.jsonl`。
 
 Review UI 右側 PDF 檢視提供三種來源：
 
