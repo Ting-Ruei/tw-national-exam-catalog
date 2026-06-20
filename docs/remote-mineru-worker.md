@@ -310,6 +310,8 @@ bash /Users/tim/AI_workspace/national_exam_mineru_worker/repo/scripts/run_remote
 
 ## 遠端回傳結果到主控端
 
+主控端建議使用 Homebrew 版 `rsync 3.4.4`。腳本會優先使用 `/opt/homebrew/bin/rsync`，若需要指定其他路徑，可用 `RSYNC_BIN=/path/to/rsync` 覆蓋。
+
 若要手動從遠端推回，遠端算力機執行：
 
 ```bash
@@ -336,7 +338,28 @@ bash scripts/pull_remote_mineru_batches.sh 100.96.207.80
 
 - 掃描遠端 `finished_batches/`。
 - 把完成批次同步到本機 `returned/100-96-207-80/`。
+- 預設略過本機已經在 `merged/100-96-207-80/` 的批次，避免遠端保留舊資料時重複拉回。
 - 保留遠端檔案，方便再次檢查。
+
+正式拉回前可以先 dry-run：
+
+```bash
+DRY_RUN=1 bash scripts/pull_remote_mineru_batches.sh 100.96.207.80
+```
+
+若要先小批量確認：
+
+```bash
+BATCH_LIMIT=3 bash scripts/pull_remote_mineru_batches.sh 100.96.207.80
+```
+
+若要拉回後立刻合併進主控端 MinerU output：
+
+```bash
+MERGE_AFTER_PULL=1 bash scripts/pull_remote_mineru_batches.sh 100.96.207.80
+```
+
+若遠端批次內容需要嚴格鏡像到本機 `returned/`，可以加上 `RSYNC_DELETE=1`；一般不建議預設使用，避免排查期間誤刪本機保留檔。
 
 ## 主控端合併與不重複機制
 

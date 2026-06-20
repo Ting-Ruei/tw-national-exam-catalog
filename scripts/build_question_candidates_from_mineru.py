@@ -373,13 +373,19 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
     answers = parse_answers(a_text)
     candidates: list[dict[str, Any]] = []
     issues: list[Issue] = []
+    number_occurrences: dict[str, int] = {}
     for parsed in parsed_questions:
         number = str(int(parsed["question_number"]))
+        number_occurrences[number] = number_occurrences.get(number, 0) + 1
         candidate_key = f"{source_registry_key}:q{int(number):03d}"
+        if number_occurrences[number] > 1:
+            candidate_key = f"{candidate_key}:dup{number_occurrences[number]:02d}"
         answer_payload = answers.get(number)
         candidate = {
             "candidate_key": candidate_key,
             "source_registry_key": source_registry_key,
+            "canonical_question_key": f"{source_registry_key}:q{int(number):03d}",
+            "question_number_occurrence": number_occurrences[number],
             "answer_source_registry_key": row.get("answer_registry_key_primary") or None,
             "question_number": number,
             "stem": parsed["stem"],

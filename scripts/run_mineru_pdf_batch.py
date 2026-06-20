@@ -31,6 +31,10 @@ DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "ve
 MINERU_METHOD = "ocr"
 MINERU_BACKEND = "vlm-engine"
 MINERU_IMAGE_ANALYSIS = False
+CATEGORY_DIR_ALIASES = {
+    "藥師（一）": "藥師(一)",
+    "藥師（二）": "藥師(二)",
+}
 
 
 @dataclass(frozen=True)
@@ -133,8 +137,32 @@ def within_filters(row: dict[str, str], groups: set[str] | None, year_start: int
     return True
 
 
+def normalize_category_dir(name: str) -> str:
+    return CATEGORY_DIR_ALIASES.get(name, name)
+
+
+def normalize_official_catalog_relative(path: Path) -> Path:
+    parts = list(path.parts)
+    if parts:
+        parts[0] = normalize_category_dir(parts[0])
+    return Path(*parts)
+
+
+def resolve_pdf_path(path: Path) -> Path:
+    resolved = path.resolve()
+    if resolved.exists():
+        return resolved
+    try:
+        rel = resolved.relative_to(PDF_ROOT.resolve())
+    except ValueError:
+        return resolved
+    normalized = PDF_ROOT.resolve() / normalize_official_catalog_relative(rel)
+    return normalized if normalized.exists() else resolved
+
+
 def expected_paths(pdf_path: Path, output_root: Path) -> tuple[Path, Path]:
     rel = pdf_path.resolve().relative_to(PDF_ROOT.resolve())
+    rel = normalize_official_catalog_relative(rel)
     output_parent = output_root / rel.parent
     expected_md = output_parent / pdf_path.stem / "vlm" / f"{pdf_path.stem}.md"
     return output_parent, expected_md
@@ -174,7 +202,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
     exclude_pdf_paths = exclude_pdf_paths or set()
     allowed_pdf_paths: set[str] | None = None
     if args.pdf_index:
-        allowed_pdf_paths = {str(Path(row["asset_path"]).resolve()) for row in read_csv(args.pdf_index) if row.get("asset_path")}
+        allowed_pdf_paths = {str(resolve_pdf_path(Path(row["asset_path"]))) for row in read_csv(args.pdf_index) if row.get("asset_path")}
     if args.exclude_remote_reserved:
         exclude_pdf_paths = set(exclude_pdf_paths) | reserved_pdf_paths()
 
@@ -184,7 +212,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
             if not within_filters(row, groups, args.year_start, args.year_end):
                 continue
 
-            question_pdf = Path(row["question_pdf"]).resolve()
+            question_pdf = resolve_pdf_path(Path(row["question_pdf"]))
             if (allowed_pdf_paths is None or str(question_pdf) in allowed_pdf_paths) and str(question_pdf) not in exclude_pdf_paths:
                 task = task_from_pdf(
                     scope=args.scope,
@@ -198,7 +226,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
                 tasks_by_pdf[task.pdf_path] = task
 
             if args.scope == "paired-primary" and row["answer_pdf_primary"]:
-                answer_pdf = Path(row["answer_pdf_primary"]).resolve()
+                answer_pdf = resolve_pdf_path(Path(row["answer_pdf_primary"]))
                 if (allowed_pdf_paths is None or str(answer_pdf) in allowed_pdf_paths) and str(answer_pdf) not in exclude_pdf_paths:
                     task = task_from_pdf(
                         scope=args.scope,
@@ -216,7 +244,7 @@ def build_tasks(args: argparse.Namespace, exclude_pdf_paths: set[str] | None = N
         for row in read_csv(pdf_index):
             if not within_filters(row, groups, args.year_start, args.year_end):
                 continue
-            pdf_path = Path(row["asset_path"]).resolve()
+            pdf_path = resolve_pdf_path(Path(row["asset_path"]))
             if allowed_pdf_paths is not None and str(pdf_path) not in allowed_pdf_paths:
                 continue
             if str(pdf_path) in exclude_pdf_paths:

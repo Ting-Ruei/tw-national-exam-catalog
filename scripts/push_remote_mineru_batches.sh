@@ -18,6 +18,7 @@ REMOTE_USER="${REMOTE_USER:-tim}"
 REMOTE_LABEL="${REMOTE_LABEL:-${REMOTE_HOST//./-}}"
 REMOTE_WORKER_ROOT="${REMOTE_WORKER_ROOT:-/Users/tim/AI_workspace/national_exam_mineru_worker}"
 BATCH_LIMIT="${BATCH_LIMIT:-0}"
+RSYNC_BIN="${RSYNC_BIN:-}"
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BATCH_ROOT="$PROJECT_ROOT/國考題資料夾/Registry/mineru_remote_batches"
@@ -25,6 +26,14 @@ OUTGOING_ROOT="$BATCH_ROOT/outgoing"
 ASSIGNED_ROOT="$BATCH_ROOT/assigned/$REMOTE_LABEL"
 
 mkdir -p "$OUTGOING_ROOT" "$ASSIGNED_ROOT"
+
+if [[ -z "$RSYNC_BIN" ]]; then
+  if [[ -x /opt/homebrew/bin/rsync ]]; then
+    RSYNC_BIN="/opt/homebrew/bin/rsync"
+  else
+    RSYNC_BIN="rsync"
+  fi
+fi
 
 BATCH_DIRS=()
 while IFS= read -r line; do
@@ -46,7 +55,7 @@ for batch_dir in "${BATCH_DIRS[@]}"; do
   remote_dest="$REMOTE_USER@$REMOTE_HOST:$REMOTE_WORKER_ROOT/incoming_batches/$batch_name/"
 
   echo "Pushing $batch_name -> $REMOTE_HOST"
-  rsync -avh --partial --progress "$batch_dir/" "$remote_dest"
+  "$RSYNC_BIN" -avh --partial --progress "$batch_dir/" "$remote_dest"
 
   mv "$batch_dir" "$ASSIGNED_ROOT/$batch_name"
   echo "Assigned locally: $ASSIGNED_ROOT/$batch_name"

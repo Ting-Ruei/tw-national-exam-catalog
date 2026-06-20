@@ -209,7 +209,7 @@ CREATE TABLE IF NOT EXISTS exam.question_review_events (
     candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
     candidate_key TEXT NOT NULL,
     reviewer TEXT,
-    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment')),
+    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed')),
     corrected_candidate_json JSONB,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()

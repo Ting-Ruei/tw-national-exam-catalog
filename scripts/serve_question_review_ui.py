@@ -69,15 +69,23 @@ def load_issues(path: Path | None) -> dict[str, list[dict[str, Any]]]:
     return issues
 
 
+def project_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        parts = path.parts
+        if "tw-national-exam-catalog" in parts:
+            index = parts.index("tw-national-exam-catalog")
+            return PROJECT_ROOT.joinpath(*parts[index + 1 :])
+        return path
+    if value.startswith("國考題資料夾/"):
+        return PROJECT_ROOT / value
+    return ASSET_ROOT / value
+
+
 def safe_file_path(value: str) -> Path | None:
     if not value:
         return None
-    path = Path(value)
-    if not path.is_absolute():
-        if value.startswith("國考題資料夾/"):
-            path = PROJECT_ROOT / value
-        else:
-            path = ASSET_ROOT / value
+    path = project_path(value)
     try:
         resolved = path.resolve()
     except FileNotFoundError:
@@ -86,6 +94,46 @@ def safe_file_path(value: str) -> Path | None:
     if any(resolved == root or root in resolved.parents for root in allowed_roots):
         return resolved
     return None
+
+
+def display_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def sibling_pdf(markdown_value: str, suffix: str) -> str | None:
+    if not markdown_value:
+        return None
+    markdown_path = project_path(markdown_value)
+    candidate = markdown_path.with_name(f"{markdown_path.stem}{suffix}.pdf")
+    if candidate.exists():
+        return display_path(candidate)
+    return None
+
+
+def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    latest: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    if not path.exists():
+        return latest, counts
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = event.get("candidate_key")
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            latest[key] = event
+    return latest, counts
 
 
 def html_page() -> bytes:
@@ -100,13 +148,29 @@ class ReviewState:
         self.candidates = load_jsonl(candidate_path)
         self.issues = load_issues(issue_path)
         self.review_log.parent.mkdir(parents=True, exist_ok=True)
+        self.latest_reviews, self.review_counts = load_review_events(review_log)
 
     def candidate_payloads(self) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []
         for item in self.candidates:
             key = item["candidate_key"]
             copy = dict(item)
+            metadata = copy.get("metadata") or {}
             copy["issues"] = self.issues.get(key, [])
+            latest_review = self.latest_reviews.get(key)
+            copy["review"] = {
+                "status": "reviewed" if latest_review else "unreviewed",
+                "action": latest_review.get("action") if latest_review else None,
+                "notes": latest_review.get("notes") if latest_review else None,
+                "updated_at": latest_review.get("created_at") if latest_review else None,
+                "event_count": self.review_counts.get(key, 0),
+            }
+            copy["source_files"] = {
+                "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
+                "mineru_layout_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_layout"),
+                "mineru_origin_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_origin"),
+                "question_markdown": metadata.get("question_markdown_relative") or metadata.get("question_markdown"),
+            }
             payloads.append(copy)
         return payloads
 
@@ -115,6 +179,10 @@ class ReviewState:
         event.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
         with self.review_log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        key = event.get("candidate_key")
+        if key:
+            self.latest_reviews[key] = event
+            self.review_counts[key] = self.review_counts.get(key, 0) + 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -130,6 +198,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_HEAD(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/":
+            data = html_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path == "/file":
+            query = urllib.parse.parse_qs(parsed.query)
+            path = safe_file_path(query.get("path", [""])[0])
+            if path is None or not path.exists() or not path.is_file():
+                self.send_error(404, "File not found or not allowed")
+                return
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.end_headers()
+            return
+        else:
+            self.send_error(404, "Not found")
+            return
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -180,14 +273,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
             return
         action = payload.get("action")
-        if action not in {"accept", "correct", "needs_review", "block", "unblock", "comment"}:
+        if action not in {"accept", "correct", "needs_review", "block", "unblock", "comment", "reviewed"}:
             self.send_json({"ok": False, "error": "Invalid action"}, status=400)
             return
         if not payload.get("candidate_key"):
             self.send_json({"ok": False, "error": "candidate_key is required"}, status=400)
             return
         self.state.append_review(payload)
-        self.send_json({"ok": True, "review_log": str(self.state.review_log)})
+        self.send_json({"ok": True, "review_log": str(self.state.review_log), "event": payload})
 
 
 PAGE_HTML = r"""<!doctype html>
@@ -197,7 +290,7 @@ PAGE_HTML = r"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>國考題候選審核</title>
   <style>
-    :root { color-scheme: light; --line:#d9dee8; --muted:#687385; --bg:#f7f8fb; --ink:#172033; --ok:#0b7a4b; --warn:#9a5b00; --bad:#b42318; }
+    :root { color-scheme: light; --line:#d9dee8; --muted:#687385; --bg:#f7f8fb; --ink:#172033; --ok:#0b7a4b; --warn:#9a5b00; --bad:#b42318; --blue:#175cd3; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { height:52px; display:flex; align-items:center; gap:12px; padding:0 16px; border-bottom:1px solid var(--line); background:white; }
@@ -212,6 +305,8 @@ PAGE_HTML = r"""<!doctype html>
     .badge.pass { background:#dff7ea; color:var(--ok); }
     .badge.needs_review { background:#fff1cf; color:var(--warn); }
     .badge.blocked { background:#fee4e2; color:var(--bad); }
+    .badge.reviewed { background:#dbeafe; color:var(--blue); }
+    .badge.unreviewed { background:#edf0f5; color:#475467; }
     section { overflow:auto; padding:14px; }
     .panel { background:white; border:1px solid var(--line); border-radius:8px; margin-bottom:12px; overflow:hidden; }
     .panel h2 { margin:0; padding:10px 12px; font-size:14px; border-bottom:1px solid var(--line); background:#fbfcff; }
@@ -226,8 +321,12 @@ PAGE_HTML = r"""<!doctype html>
     button.action { border:1px solid var(--line); border-radius:6px; padding:8px 10px; background:white; cursor:pointer; }
     button.action.accept { border-color:#8bd9b1; color:var(--ok); }
     button.action.block { border-color:#f2a19b; color:var(--bad); }
+    button.action.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     textarea { width:100%; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:8px; }
-    iframe { width:100%; height:calc(100vh - 92px); border:1px solid var(--line); border-radius:8px; background:white; }
+    iframe { width:100%; height:calc(100vh - 138px); border:1px solid var(--line); border-radius:8px; background:white; }
+    .viewer-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+    .viewer-toolbar button { border:1px solid var(--line); border-radius:6px; padding:7px 9px; background:white; cursor:pointer; }
+    .viewer-toolbar button.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     .asset-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap:8px; }
     .asset-grid img { width:100%; max-height:160px; object-fit:contain; border:1px solid var(--line); border-radius:6px; background:white; }
     code { word-break:break-all; }
@@ -243,17 +342,37 @@ PAGE_HTML = r"""<!doctype html>
       <option value="needs_review">needs_review</option>
       <option value="pass">pass</option>
     </select>
+    <select id="reviewStatus">
+      <option value="">全部審核</option>
+      <option value="unreviewed" selected>未看過</option>
+      <option value="reviewed">已看過</option>
+      <option value="accept">已通過</option>
+      <option value="block">阻擋入庫</option>
+      <option value="needs_review">保留疑問</option>
+      <option value="comment">有註記</option>
+    </select>
     <span id="count" class="meta"></span>
+    <span id="progress" class="meta"></span>
   </header>
   <main>
     <aside id="list"></aside>
     <section id="detail"></section>
-    <section><iframe id="pdf"></iframe></section>
+    <section>
+      <div class="viewer-toolbar">
+        <button id="pdfOfficial" onclick="setPdfKind('official_pdf')">官方 PDF</button>
+        <button id="pdfLayout" onclick="setPdfKind('mineru_layout_pdf')">MinerU layout</button>
+        <button id="pdfOrigin" onclick="setPdfKind('mineru_origin_pdf')">MinerU origin</button>
+        <a id="pdfOpen" class="meta" target="_blank">另開</a>
+      </div>
+      <iframe id="pdf"></iframe>
+      <p id="pdfPath" class="meta"></p>
+    </section>
   </main>
 <script>
 let candidates = [];
 let filtered = [];
 let current = null;
+let currentPdfKind = 'mineru_layout_pdf';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
@@ -265,29 +384,53 @@ async function load() {
   applyFilter();
 }
 
-function applyFilter() {
+function applyFilter(preferredKey = null, preferredIndex = null) {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const status = document.getElementById('status').value;
+  const reviewStatus = document.getElementById('reviewStatus').value;
   filtered = candidates.filter(item => {
     const meta = item.metadata || {};
+    const review = item.review || {};
     const text = [
       item.candidate_key, item.question_number, item.stem,
       meta.group_name, meta.normalized_category_name, meta.normalized_subject_name,
+      review.action, review.notes,
       ...(item.issues || []).map(i => `${i.issue_code} ${i.message}`)
     ].join(' ').toLowerCase();
-    return (!status || item.quality_status === status) && (!q || text.includes(q));
+    const reviewMatch = !reviewStatus
+      || review.status === reviewStatus
+      || review.action === reviewStatus;
+    return (!status || item.quality_status === status) && reviewMatch && (!q || text.includes(q));
   });
+  const reviewedCount = candidates.filter(item => (item.review || {}).status === 'reviewed').length;
   document.getElementById('count').textContent = `${filtered.length} / ${candidates.length}`;
+  document.getElementById('progress').textContent = `已看 ${reviewedCount}，未看 ${candidates.length - reviewedCount}`;
+
+  let next = null;
+  if (preferredKey) {
+    next = filtered.find(item => item.candidate_key === preferredKey) || null;
+  }
+  if (!next && Number.isInteger(preferredIndex) && preferredIndex !== null && filtered.length) {
+    next = filtered[Math.min(preferredIndex, filtered.length - 1)] || null;
+  }
+  if (!next && current) {
+    next = filtered.find(item => item.candidate_key === current.candidate_key) || null;
+  }
+  if (!next && filtered.length) {
+    next = filtered[0];
+  }
+  current = next;
   renderList();
-  if (!current && filtered.length) selectCandidate(filtered[0].candidate_key);
+  renderDetail();
 }
 
 function renderList() {
   const list = document.getElementById('list');
   list.innerHTML = filtered.map(item => {
     const meta = item.metadata || {};
+    const review = item.review || {};
     return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-      <div><span class="badge ${esc(item.quality_status)}">${esc(item.quality_status)}</span> 第 ${esc(item.question_number)} 題</div>
+      <div><span class="badge ${esc(item.quality_status)}">${esc(item.quality_status)}</span> <span class="badge ${esc(review.status || 'unreviewed')}">${esc(review.action || review.status || 'unreviewed')}</span> 第 ${esc(item.question_number)} 題</div>
       <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
       <div class="meta">${esc(item.issue_count || 0)} issues</div>
     </button>`;
@@ -300,11 +443,42 @@ function selectCandidate(key) {
   renderDetail();
 }
 
-function renderDetail() {
+function pdfPathFor(kind) {
+  const files = current && current.source_files ? current.source_files : {};
+  return files[kind] || files.mineru_layout_pdf || files.official_pdf || files.mineru_origin_pdf || '';
+}
+
+function setPdfKind(kind) {
+  currentPdfKind = kind;
+  updatePdfViewer();
+}
+
+function updatePdfViewer() {
   if (!current) return;
+  const path = pdfPathFor(currentPdfKind);
+  const url = fileUrl(path);
+  document.getElementById('pdf').src = url;
+  document.getElementById('pdfOpen').href = url;
+  document.getElementById('pdfPath').innerHTML = path ? `<code>${esc(path)}</code>` : '找不到可顯示的 PDF';
+  for (const [kind, id] of [['official_pdf', 'pdfOfficial'], ['mineru_layout_pdf', 'pdfLayout'], ['mineru_origin_pdf', 'pdfOrigin']]) {
+    const btn = document.getElementById(id);
+    const exists = Boolean(pdfPathFor(kind));
+    btn.disabled = !exists;
+    btn.className = currentPdfKind === kind ? 'active' : '';
+  }
+}
+
+function renderDetail() {
+  if (!current) {
+    document.getElementById('detail').innerHTML = `<div class="panel"><h2>目前沒有符合條件的題目</h2><div class="body"><p class="meta">可以切換審核篩選，或開始產生下一批 candidate。</p></div></div>`;
+    document.getElementById('pdf').src = '';
+    document.getElementById('pdfOpen').removeAttribute('href');
+    document.getElementById('pdfPath').textContent = '';
+    return;
+  }
   const meta = current.metadata || {};
-  const pdf = meta.question_pdf || meta.question_pdf_relative || '';
-  document.getElementById('pdf').src = fileUrl(pdf);
+  const reviewState = current.review || {};
+  updatePdfViewer();
   const images = (current.image_refs || []).filter(ref => ref.exists).map(ref =>
     `<a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref)}"></a>`
   ).join('');
@@ -318,6 +492,7 @@ function renderDetail() {
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
       <p class="meta">${esc(meta.normalized_category_name)} / ${esc(meta.normalized_subject_name)} / ${esc(meta.year)} 年第 ${esc(meta.exam_ordinal)} 次</p>
+      <p><span class="badge ${esc(reviewState.status || 'unreviewed')}">${esc(reviewState.action || reviewState.status || 'unreviewed')}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
       <div class="stem">${esc(current.stem)}</div>
       <hr>${options}
       <p><b>答案：</b>${esc(current.answer ?? '未配對')}</p>
@@ -326,9 +501,10 @@ function renderDetail() {
     <div class="panel"><h2>疑點</h2><div class="body">${issues}</div></div>
     <div class="panel"><h2>圖片</h2><div class="body"><div class="asset-grid">${images || '<span class="meta">未偵測到圖片引用。</span>'}</div></div></div>
     <div class="panel"><h2>人工審核</h2><div class="body">
-      <textarea id="notes" placeholder="審核註記或修正摘要"></textarea>
+      <textarea id="notes" placeholder="審核註記或修正摘要">${esc(reviewState.notes || '')}</textarea>
       <div class="toolbar">
         <button class="action accept" onclick="review('accept')">通過</button>
+        <button class="action" onclick="review('reviewed')">標記已看過</button>
         <button class="action" onclick="review('needs_review')">保留疑問</button>
         <button class="action block" onclick="review('block')">阻擋入庫</button>
         <button class="action" onclick="review('comment')">只加註記</button>
@@ -336,13 +512,17 @@ function renderDetail() {
       <p id="saved" class="meta"></p>
     </div></div>
     <div class="panel"><h2>來源</h2><div class="body">
-      <p class="meta">PDF: <code>${esc(pdf)}</code></p>
-      <p class="meta">Markdown: <code>${esc(meta.question_markdown || '')}</code></p>
+      <p class="meta">官方 PDF: <code>${esc((current.source_files || {}).official_pdf || '')}</code></p>
+      <p class="meta">MinerU layout: <code>${esc((current.source_files || {}).mineru_layout_pdf || '')}</code></p>
+      <p class="meta">MinerU origin: <code>${esc((current.source_files || {}).mineru_origin_pdf || '')}</code></p>
+      <p class="meta">Markdown: <code>${esc((current.source_files || {}).question_markdown || '')}</code></p>
     </div></div>`;
 }
 
 async function review(action) {
   if (!current) return;
+  const reviewedKey = current.candidate_key;
+  const currentIndex = filtered.findIndex(item => item.candidate_key === reviewedKey);
   const notes = document.getElementById('notes').value;
   const res = await fetch('/api/review', {
     method: 'POST',
@@ -350,11 +530,23 @@ async function review(action) {
     body: JSON.stringify({candidate_key: current.candidate_key, action, notes, reviewer: 'local'})
   });
   const data = await res.json();
-  document.getElementById('saved').textContent = data.ok ? `已寫入 ${data.review_log}` : `寫入失敗：${data.error}`;
+  if (data.ok) {
+    current.review = {
+      status: 'reviewed',
+      action,
+      notes,
+      updated_at: data.event.created_at,
+      event_count: (current.review?.event_count || 0) + 1
+    };
+    applyFilter(null, currentIndex >= 0 ? currentIndex : null);
+  } else {
+    document.getElementById('saved').textContent = `寫入失敗：${data.error}`;
+  }
 }
 
 document.getElementById('search').addEventListener('input', applyFilter);
 document.getElementById('status').addEventListener('change', applyFilter);
+document.getElementById('reviewStatus').addEventListener('change', applyFilter);
 load();
 </script>
 </body>

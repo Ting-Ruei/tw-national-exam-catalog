@@ -45,6 +45,7 @@ docs/
   historical-transition-notes.md
   publication-roadmap.md
   database-architecture.md
+  database-ingestion-preflight.md
   ai-workflow-architecture.md
   local-rag-resource-assessment.md
   remote-mineru-worker.md
@@ -62,6 +63,9 @@ scripts/
   push_remote_mineru_batches.sh
   pull_remote_mineru_batches.sh
   merge_remote_mineru_batches.py
+  build_question_candidates_from_mineru.py
+  ingest_question_candidates_to_postgres.py
+  serve_question_review_ui.py
   setup_remote_mineru_worker.sh
   run_remote_mineru_batch.sh
   run_remote_mineru_queue.sh
@@ -127,7 +131,7 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 
 ## 資料庫與索引
 
-資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
+資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。入庫前分科排查、Review UI 與人工審核規則見 `docs/database-ingestion-preflight.md`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
 
 目前可先用 `scripts/build_pdf_asset_index.py` 將已下載、已分類的 PDF manifest 整理成 CSV 索引。這個步驟只產生可審閱的索引檔，不會把資料寫入 PostgreSQL 或其他資料庫。
 
@@ -143,6 +147,90 @@ bash scripts/postgres_smoke_test.sh
 ```
 
 預設使用 `localhost:54329`，避免和本機既有 PostgreSQL 撞 port。這個流程只部署與測試 schema，尚不會把 PDF 或 MinerU 解析內容入庫；pgvector 先啟用 extension，向量表與索引等到題文 chunk 設計確認後再加入。
+
+## 入庫前 Review UI
+
+題目內容正式入庫前，先走可丟棄、可重跑的 candidate 層：
+
+```text
+PDF
+  ↓
+MinerU markdown / images / layout PDF
+  ↓
+question_candidates JSONL
+  ↓
+question_parse_issues CSV
+  ↓
+Review UI 人工審核
+  ↓
+question_review_events JSONL
+  ↓
+未來才升級到正式 questions / answers 表
+```
+
+啟動 Review UI：
+
+```bash
+docker compose up -d review-ui
+```
+
+打開：
+
+```text
+http://127.0.0.1:8765/
+```
+
+查看 log：
+
+```bash
+docker compose logs -f review-ui
+```
+
+停止：
+
+```bash
+docker compose stop review-ui
+```
+
+Review UI 右側 PDF 檢視提供三種來源：
+
+- `官方 PDF`：考選部原始 PDF。
+- `MinerU layout`：MinerU 產出的 layout PDF，通常會以色塊或框線標示版面分區，適合判斷 MinerU 是否已經切壞。
+- `MinerU origin`：MinerU 輸出資料夾中的原始 PDF 複本，適合和官方 PDF 對照。
+
+人工審核預設只顯示 `未看過` 的題目。按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。
+
+審核按鈕語意：
+
+- `通過`：此題 candidate 可進入後續正式入庫佇列。
+- `標記已看過`：已人工看過，但暫不表示可以入庫。
+- `保留疑問`：需要後續再查。
+- `阻擋入庫`：目前不可入正式題庫。
+- `只加註記`：保存觀察或修正方向，供後續 parser 或人工校正使用。
+
+如果 Review UI 裡發現「MinerU layout 正常，但 candidate 題號、題幹或選項切錯」，通常代表 parser 規則需要修正；如果 MinerU layout 本身已經分區錯誤，則優先回頭檢查 MinerU 解析模式或輸出品質。
+
+## DBeaver 連線
+
+若要用 DBeaver 直接讀 PostgreSQL，可使用：
+
+```text
+Database type: PostgreSQL
+Host: 127.0.0.1
+Port: 54329
+Database: tw_national_exam_dev
+Username: national_exam
+Password: national_exam_dev_password
+Schema: exam
+```
+
+建議先看：
+
+- `exam.official_documents`：官方 PDF 索引。
+- `exam.question_answer_document_pairs`：題目與 primary answer 配對，`MOD` 優先於 `ANS`。
+- `exam.question_candidates`：parser 產生的候選題目，還不是正式題庫。
+- `exam.question_parse_issues`：候選題目的機械檢查疑點。
+- `exam.question_review_events`：人工審核紀錄。
 
 ## 授權與來源
 
