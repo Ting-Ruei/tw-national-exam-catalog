@@ -215,6 +215,19 @@ CREATE TABLE IF NOT EXISTS exam.question_review_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS exam.answer_review_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    answer_source_registry_key TEXT,
+    reviewer TEXT,
+    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed')),
+    reviewed_answer_json JSONB,
+    corrected_answer_json JSONB,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS exam.canonical_subject_mappings (
     id BIGSERIAL PRIMARY KEY,
     category_group_name TEXT NOT NULL,
@@ -249,3 +262,4 @@ CREATE INDEX IF NOT EXISTS idx_question_candidates_quality ON exam.question_cand
 CREATE INDEX IF NOT EXISTS idx_question_parse_issues_candidate ON exam.question_parse_issues (candidate_key);
 CREATE INDEX IF NOT EXISTS idx_question_parse_issues_severity ON exam.question_parse_issues (severity, issue_code);
 CREATE INDEX IF NOT EXISTS idx_question_review_events_candidate ON exam.question_review_events (candidate_key);
+CREATE INDEX IF NOT EXISTS idx_answer_review_events_candidate ON exam.answer_review_events (candidate_key);

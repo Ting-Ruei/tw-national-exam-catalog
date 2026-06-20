@@ -223,6 +223,10 @@ Review UI 右側 PDF 檢視提供三種來源：
 
 人工審核預設只顯示 `未看過` 的題目。按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。
 
+題目審核畫面先專注在題幹、選項、圖片、題組與 parser 切題品質，不直接顯示答案。答案會在後續獨立的 `answer_review_events` 關卡集中核對，避免同時看題目與答案而分散注意力。
+
+頁面上的 `資料庫層級` 按鈕可查看目前資料在各層的位置與數量，包括來源 PDF/MinerU raw、題目 candidate、QA flags、題目人工審核、答案核對與正式題庫表。
+
 審核按鈕語意：
 
 - `通過`：此題 candidate 可進入後續正式入庫佇列。
@@ -254,6 +258,7 @@ Schema: exam
 - `exam.question_candidates`：parser 產生的候選題目，還不是正式題庫。
 - `exam.question_parse_issues`：候選題目的機械檢查疑點。
 - `exam.question_review_events`：人工審核紀錄。
+- `exam.answer_review_events`：答案核對紀錄，獨立於題目結構審核。
 
 ## 授權與來源
 

@@ -7,9 +7,10 @@
 1. 官方 PDF、MinerU 原始輸出、candidate JSONL 都視為可追溯原始層，不直接覆蓋。
 2. 題目內容不得直接由 MinerU markdown 寫入 `exam.questions`。
 3. 每個類科獨立產生 candidate 與 issue 報告，先排查 parser 問題。
-4. `MOD` 答案優先於 `ANS`，只有沒有 `MOD` 時才使用 `ANS`。
-5. 有圖、題組、公式、上下標、希臘字母、羅馬數字、答案缺漏、題號不連續者，先進 `needs_review` 或 `blocked`。
-6. 人工審核只寫 `review_events`，不改官方檔、不改 MinerU raw markdown。
+4. 題目結構審核與答案核對分開進行，避免人工審核時同時看題目與答案而分心。
+5. `MOD` 答案優先於 `ANS`，只有沒有 `MOD` 時才使用 `ANS`，但此規則在答案核對關卡集中檢查。
+6. 有圖、題組、公式、上下標、希臘字母、羅馬數字、答案缺漏、題號不連續者，先進 `needs_review` 或 `blocked`。
+7. 人工審核只寫 `review_events` / `answer_review_events`，不改官方檔、不改 MinerU raw markdown。
 
 ## 建議入庫層級
 
@@ -24,8 +25,9 @@
 exam.question_candidates
 exam.question_parse_issues
 exam.question_review_events
+exam.answer_review_events
   ↓
-人工接受後才進入
+題目結構與答案核對都接受後才進入
 exam.question_groups
 exam.questions
 exam.question_options
@@ -77,18 +79,24 @@ python3 scripts/serve_question_review_ui.py \
 
 ## 每科排查清單
 
-每個類科至少檢查：
+題目結構審核時，每個類科至少檢查：
 
 - candidate 總數是否接近預期題數。
 - 每份考卷題號是否連續。
 - 每題是否有 4 或 5 個選項。
-- 答案表是否能對上每個題號。
-- `MOD` 是否正確覆蓋 `ANS`。
 - 題組題是否被標出 `group_ref`，共同題幹是否沒有被重複切壞。
 - 題幹提到圖、表、影像、心電圖、X 光、切片時，是否有 image asset。
 - Markdown 引用圖片是否存在且大小不為 0。
 - 科學符號、上下標、希臘字母、羅馬數字是否在 UI 中可辨識。
 - 早期科目名稱或類科名稱變體是否保留官方名稱，並另外歸到 canonical/group 名稱。
+
+答案核對在題目結構審核後獨立進行，至少檢查：
+
+- 答案表是否能對上每個題號。
+- `MOD` 是否正確覆蓋 `ANS`。
+- 更正答案是否保留原始答案與修正後答案。
+- 申論題、無答案 PDF、答案缺題是否有明確狀態。
+- 答案解析若由 LLM 或人工補充，必須和官方答案分欄保存。
 
 ## DB 使用界線
 
@@ -105,6 +113,7 @@ python3 scripts/serve_question_review_ui.py \
 - `exam.question_candidates`
 - `exam.question_parse_issues`
 - `exam.question_review_events`
+- `exam.answer_review_events`
 
 目前暫停自動大量寫入：
 
@@ -114,7 +123,7 @@ python3 scripts/serve_question_review_ui.py \
 - `exam.answers`
 - `exam.question_assets`
 
-正式題目表必須等 candidate parser、QA flags、Review UI 與人工校正流程穩定後，再用 accepted/corrected candidate 升級。
+正式題目表必須等 candidate parser、QA flags、Review UI 題目結構審核、答案核對與人工校正流程穩定後，再用 accepted/corrected candidate 升級。
 
 ## Review UI
 
@@ -138,6 +147,8 @@ docker compose logs -f review-ui
 
 目前 UI 預設讀取最新的 candidate JSONL 與 issue CSV。人工審核結果會寫回 candidate 資料夾裡的 `question_review_events.jsonl`。
 
+題目審核畫面不直接顯示答案；答案會在下一個 `answer_review_events` 關卡統一核對。
+
 右側 PDF 檢視提供三種來源：
 
 - `官方 PDF`：考選部原始 PDF。
@@ -151,6 +162,8 @@ docker compose logs -f review-ui
 - `保留疑問`：需要後續再查。
 - `阻擋入庫`：目前不可入正式題庫。
 - `只加註記`：保存觀察或修正方向，供後續 parser 或人工校正使用。
+
+Review UI 的 `資料庫層級` 按鈕會顯示目前資料所在關卡，包括來源 PDF/MinerU raw、題目 candidate、QA flags、題目人工審核、答案核對與正式題庫表。此視圖用於理解目前 pipeline 狀態，不代表所有資料都已正式入庫。
 
 如果要停掉：
 

@@ -184,6 +184,74 @@ class ReviewState:
             self.latest_reviews[key] = event
             self.review_counts[key] = self.review_counts.get(key, 0) + 1
 
+    def pipeline_payload(self) -> dict[str, Any]:
+        candidates = self.candidate_payloads()
+        reviewed = [item for item in candidates if item.get("review", {}).get("status") == "reviewed"]
+        accepted = [item for item in candidates if item.get("review", {}).get("action") == "accept"]
+        blocked = [item for item in candidates if item.get("review", {}).get("action") == "block"]
+        needs_review = [item for item in candidates if item.get("review", {}).get("action") == "needs_review"]
+        issue_count = sum(len(item.get("issues", [])) for item in candidates)
+        answer_ready = [item for item in candidates if item.get("answer") not in (None, "")]
+        question_accepted_answer_pending = [item for item in accepted if item.get("answer") not in (None, "")]
+        return {
+            "candidate_jsonl": str(self.candidate_path),
+            "issue_csv": str(self.issue_path) if self.issue_path else None,
+            "review_log": str(self.review_log),
+            "layers": [
+                {
+                    "name": "官方 PDF / MinerU raw",
+                    "tables": ["exam.official_documents", "exam.assets", "exam.document_assets", "exam.mineru_runs"],
+                    "status": "source",
+                    "count": len({item.get("source_registry_key") for item in candidates}),
+                    "description": "官方 PDF、MinerU markdown、圖片與 layout PDF。這一層只追溯來源，不代表題目已可入庫。",
+                },
+                {
+                    "name": "題目 candidate",
+                    "tables": ["exam.question_candidates"],
+                    "status": "pre_ingestion",
+                    "count": len(candidates),
+                    "description": "parser 從 MinerU markdown 切出的候選題目，目前仍需人工審核。",
+                },
+                {
+                    "name": "QA flags",
+                    "tables": ["exam.question_parse_issues"],
+                    "status": "pre_ingestion",
+                    "count": issue_count,
+                    "description": "機械檢查疑點，例如題號重複、選項不足、圖片提示但未偵測圖片。",
+                },
+                {
+                    "name": "題目人工審核",
+                    "tables": ["exam.question_review_events"],
+                    "status": "human_review",
+                    "count": len(reviewed),
+                    "description": "你在 Review UI 按下通過、保留疑問、阻擋入庫、註記後產生的事件。",
+                    "breakdown": {
+                        "accepted": len(accepted),
+                        "needs_review": len(needs_review),
+                        "blocked": len(blocked),
+                    },
+                },
+                {
+                    "name": "答案核對",
+                    "tables": ["exam.answer_review_events"],
+                    "status": "planned",
+                    "count": len(question_accepted_answer_pending),
+                    "description": "獨立於題目結構審核。題目通過後，再集中核對答案、MOD/ANS 優先序與答案表解析。",
+                    "breakdown": {
+                        "candidates_with_answer": len(answer_ready),
+                        "question_accepted_answer_pending": len(question_accepted_answer_pending),
+                    },
+                },
+                {
+                    "name": "正式題庫",
+                    "tables": ["exam.question_groups", "exam.questions", "exam.question_options", "exam.answers", "exam.question_assets"],
+                    "status": "not_bulk_ingested",
+                    "count": 0,
+                    "description": "目前不做大量自動寫入。只有題目審核與答案核對都通過後，才升級到正式表。",
+                },
+            ],
+        }
+
 
 class Handler(BaseHTTPRequestHandler):
     state: ReviewState
@@ -243,6 +311,9 @@ class Handler(BaseHTTPRequestHandler):
                     "candidates": self.state.candidate_payloads(),
                 }
             )
+            return
+        if parsed.path == "/api/pipeline":
+            self.send_json(self.state.pipeline_payload())
             return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
@@ -322,6 +393,7 @@ PAGE_HTML = r"""<!doctype html>
     button.action.accept { border-color:#8bd9b1; color:var(--ok); }
     button.action.block { border-color:#f2a19b; color:var(--bad); }
     button.action.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
+    button.nav { border:1px solid var(--line); border-radius:6px; height:32px; padding:0 10px; background:white; cursor:pointer; }
     textarea { width:100%; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:8px; }
     iframe { width:100%; height:calc(100vh - 138px); border:1px solid var(--line); border-radius:8px; background:white; }
     .viewer-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
@@ -329,6 +401,11 @@ PAGE_HTML = r"""<!doctype html>
     .viewer-toolbar button.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     .asset-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap:8px; }
     .asset-grid img { width:100%; max-height:160px; object-fit:contain; border:1px solid var(--line); border-radius:6px; background:white; }
+    .layer { border-left:4px solid #b8c1d1; background:#f8fafc; margin:8px 0; padding:9px 10px; }
+    .layer.human_review { border-color:#175cd3; }
+    .layer.planned { border-color:#9a5b00; }
+    .layer.not_bulk_ingested { border-color:#b42318; }
+    .kv { display:grid; grid-template-columns:120px 1fr; gap:6px 10px; }
     code { word-break:break-all; }
   </style>
 </head>
@@ -353,6 +430,7 @@ PAGE_HTML = r"""<!doctype html>
     </select>
     <span id="count" class="meta"></span>
     <span id="progress" class="meta"></span>
+    <button class="nav" onclick="showPipeline()">資料庫層級</button>
   </header>
   <main>
     <aside id="list"></aside>
@@ -386,6 +464,34 @@ async function load() {
   const data = await res.json();
   candidates = data.candidates;
   applyFilter();
+}
+
+async function showPipeline() {
+  const res = await fetch('/api/pipeline');
+  const data = await res.json();
+  current = null;
+  renderList();
+  document.getElementById('pdf').src = '';
+  document.getElementById('pdfOpen').removeAttribute('href');
+  document.getElementById('pdfPath').textContent = '';
+  const layers = data.layers.map(layer => `
+    <div class="layer ${esc(layer.status)}">
+      <h3>${esc(layer.name)} <span class="badge">${esc(layer.count)}</span></h3>
+      <p>${esc(layer.description)}</p>
+      <div class="kv">
+        <span class="meta">狀態</span><code>${esc(layer.status)}</code>
+        <span class="meta">表格</span><code>${esc((layer.tables || []).join(', '))}</code>
+        ${layer.breakdown ? `<span class="meta">細項</span><code>${esc(JSON.stringify(layer.breakdown))}</code>` : ''}
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('detail').innerHTML = `
+    <div class="panel"><h2>資料庫入庫層級</h2><div class="body">
+      <p class="meta">Candidate: <code>${esc(data.candidate_jsonl)}</code></p>
+      <p class="meta">Issues: <code>${esc(data.issue_csv)}</code></p>
+      <p class="meta">Review log: <code>${esc(data.review_log)}</code></p>
+      ${layers}
+    </div></div>`;
 }
 
 function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null) {
@@ -507,7 +613,7 @@ function renderDetail() {
       <p><span class="badge ${esc(reviewState.status || 'unreviewed')}">${esc(reviewState.action || reviewState.status || 'unreviewed')}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
       <div class="stem">${esc(current.stem)}</div>
       <hr>${options}
-      <p><b>答案：</b>${esc(current.answer ?? '未配對')}</p>
+      <p><b>答案：</b><span class="meta">本畫面先專注審題；答案會在下一個「答案核對」關卡統一檢查。</span></p>
       <p><b>題組：</b>${esc(current.group_ref ?? '無')}</p>
     </div></div>
     <div class="panel"><h2>疑點</h2><div class="body">${issues}</div></div>
