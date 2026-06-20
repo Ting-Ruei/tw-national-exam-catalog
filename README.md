@@ -225,7 +225,11 @@ Review UI 右側 PDF 檢視提供三種來源：
 
 `quality_status=pass` 只表示目前 parser 的機械規則沒有抓到 error/warning，不等於正式入庫通過。正式入庫仍需人工按下 `通過`，且後續答案核對關卡也要完成。自 `moex_mineru_candidate_v0.3` 起，題幹含公式、上下標或 markup 的 `markup_needs_review` 會進 `needs_review`，避免科學符號題被過早視為低風險。
 
+答案表 parser 需同時接受考選部 PDF / MinerU OCR 可能出現的 `題號`、`題序`、`题序` 表頭。若同一科有 `_MOD`，仍以 `_MOD` 為 primary answer；但 `_MOD` 可能是完整更正後答案表，也可能只是局部更正說明，因此後續答案核對關卡要繼續保留 `raw_answer`、`accepted_values` 與 `is_special_correction`。
+
 按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。右側 PDF 不會因為按鈕刷新而跳回頂端；只有切換題目或切換 PDF 來源時才會載入新的 PDF。
+
+題目卡片上方提供大型 `通過` / `阻擋入庫` 按鈕，適合快速瀏覽時連續審核。若看到 OCR 小錯、選項順序或題組標籤需要人工修正，可在 `人工校正` 區直接編輯題幹、選項、答案與題組；校正會以 `correction` 寫入 `question_review_events.jsonl`，標成有人工校正，不會覆蓋 parser 原始輸出。後續若再按 `通過`，該題仍會保留人工校正版，正式入庫時應優先使用人工校正版。
 
 題目審核畫面主要檢查題幹、選項、圖片、題組與 parser 切題品質。畫面仍會顯示目前 parser 抓到的答案，方便完整核對資料；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在後續獨立的 `answer_review_events` 關卡集中判定。
 

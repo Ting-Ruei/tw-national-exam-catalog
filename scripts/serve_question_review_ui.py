@@ -137,9 +137,38 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
             key = event.get("candidate_key")
             if not key:
                 continue
+            if "correction" not in event and key in latest and latest[key].get("correction"):
+                event["correction"] = latest[key]["correction"]
             counts[key] = counts.get(key, 0) + 1
             latest[key] = event
     return latest, counts
+
+
+def normalized_correction(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    correction: dict[str, Any] = {}
+    for key in ("stem", "answer", "group_ref"):
+        if key in value:
+            correction[key] = "" if value[key] is None else str(value[key])
+    if isinstance(value.get("options"), list):
+        options = []
+        for option in value["options"]:
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("key") or "").strip().upper()
+            if not label:
+                continue
+            options.append(
+                {
+                    "key": label[:1],
+                    "text": "" if option.get("text") is None else str(option.get("text")),
+                    "image": option.get("image"),
+                    "markup": option.get("markup"),
+                }
+            )
+        correction["options"] = options
+    return correction
 
 
 def html_page() -> bytes:
@@ -164,12 +193,27 @@ class ReviewState:
         metadata = copy.get("metadata") or {}
         copy["issues"] = self.issues.get(key, [])
         latest_review = self.latest_reviews.get(key)
+        correction = normalized_correction(latest_review.get("correction") if latest_review else None)
+        if correction:
+            copy["parser_original"] = {
+                "stem": item.get("stem"),
+                "options": item.get("options"),
+                "answer": item.get("answer"),
+                "group_ref": item.get("group_ref"),
+            }
+            for field in ("stem", "answer", "group_ref"):
+                if field in correction:
+                    copy[field] = correction[field]
+            if "options" in correction:
+                copy["options"] = correction["options"]
         copy["review"] = {
             "status": "reviewed" if latest_review else "unreviewed",
             "action": latest_review.get("action") if latest_review else None,
             "notes": latest_review.get("notes") if latest_review else None,
             "updated_at": latest_review.get("created_at") if latest_review else None,
             "event_count": self.review_counts.get(key, 0),
+            "has_correction": bool(correction),
+            "correction": correction or None,
         }
         copy["source_files"] = {
             "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
@@ -256,6 +300,8 @@ class ReviewState:
             subject = metadata.get("normalized_subject_name") or ""
             if review_status == "not_accept":
                 review_match = review["status"] == "reviewed" and review["action"] not in {"accept", "correct", "unblock"}
+            elif review_status == "correct":
+                review_match = bool(latest_review and normalized_correction(latest_review.get("correction")))
             else:
                 review_match = not review_status or review["status"] == review_status or review["action"] == review_status
             if status and item.get("quality_status") != status:
@@ -568,6 +614,12 @@ class Handler(BaseHTTPRequestHandler):
         if not payload.get("candidate_key"):
             self.send_json({"ok": False, "error": "candidate_key is required"}, status=400)
             return
+        if "correction" in payload:
+            correction = normalized_correction(payload.get("correction"))
+            if not correction:
+                payload.pop("correction", None)
+            else:
+                payload["correction"] = correction
         self.state.append_review(payload)
         self.send_json({"ok": True, "review_log": str(self.state.review_log), "event": payload})
 
@@ -615,9 +667,18 @@ PAGE_HTML = r"""<!doctype html>
     button.action { border:1px solid var(--line); border-radius:6px; padding:8px 10px; background:white; cursor:pointer; }
     button.action.accept { border-color:#8bd9b1; color:var(--ok); }
     button.action.block { border-color:#f2a19b; color:var(--bad); }
+    button.action.primary-accept, button.action.primary-block { min-height:46px; min-width:132px; font-size:16px; font-weight:700; color:white; border:0; }
+    button.action.primary-accept { background:var(--ok); }
+    button.action.primary-block { background:var(--bad); }
     button.action.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     button.nav { border:1px solid var(--line); border-radius:6px; height:32px; padding:0 10px; background:white; cursor:pointer; }
     textarea { width:100%; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:8px; }
+    input.edit-field, textarea.edit-field { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px; background:white; }
+    textarea.edit-field { min-height:58px; }
+    .edit-grid { display:grid; gap:8px; }
+    .edit-option { display:grid; grid-template-columns:34px 1fr; gap:8px; align-items:start; }
+    .manual-correction { border-left:4px solid var(--blue); background:#f5f8ff; padding:8px 10px; margin:8px 0; }
+    .quick-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fbfcff; margin:10px 0; }
     iframe { width:100%; height:calc(100vh - 162px); border:1px solid var(--line); border-radius:8px; background:white; }
     .viewer-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
     .viewer-toolbar button { border:1px solid var(--line); border-radius:6px; padding:7px 9px; background:white; cursor:pointer; }
@@ -655,6 +716,7 @@ PAGE_HTML = r"""<!doctype html>
       <option value="not_accept">未通過</option>
       <option value="reviewed">已看過</option>
       <option value="accept">已通過</option>
+      <option value="correct">有人工校正</option>
       <option value="block">阻擋入庫</option>
       <option value="needs_review">保留疑問</option>
       <option value="comment">有註記</option>
@@ -729,6 +791,10 @@ function renderText(value) {
       .replace(/&lt;sub&gt;(.+?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
       .replace(/&lt;sup&gt;(.+?)&lt;\/sup&gt;/g, '<sup>$1</sup>');
   }).join('');
+}
+
+function editableText(value) {
+  return esc(String(value ?? ''));
 }
 
 async function load() {
@@ -970,6 +1036,7 @@ function renderDetail() {
   const meta = current.metadata || {};
   const reviewState = current.review || {};
   const reviewBadge = reviewState.action || reviewState.status || 'unreviewed';
+  const hasCorrection = Boolean(reviewState.has_correction);
   updatePdfViewer();
   const images = (current.image_refs || []).filter(ref => ref.exists).map(ref =>
     `<a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref)}"></a>`
@@ -984,16 +1051,31 @@ function renderDetail() {
   const options = (current.options || []).map(opt =>
     `<div class="option"><b>(${esc(opt.key)})</b><div>${renderText(opt.text)}</div></div>`
   ).join('');
+  const editOptions = (current.options || []).map(opt =>
+    `<div class="edit-option"><b>(${esc(opt.key)})</b><textarea class="edit-field edit-option-text" data-key="${esc(opt.key)}">${editableText(opt.text)}</textarea></div>`
+  ).join('');
   const answerText = current.answer !== undefined && current.answer !== null && String(current.answer).trim() !== ''
     ? renderText(current.answer)
     : '<span class="meta">目前 candidate 未抓到答案，後續答案核對關卡會集中排查。</span>';
+  const original = current.parser_original || null;
+  const originalNote = original ? `
+    <div class="manual-correction">
+      <b>已使用人工校正版顯示</b>
+      <p class="meta">parser 原始內容仍保留於 candidate，正式入庫時可比對人工校正版與 parser 原始版。</p>
+    </div>` : '';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
       <p class="meta">Canonical: <code>${esc(current.canonical_question_key || current.candidate_key)}</code> / occurrence ${esc(current.question_number_occurrence || 1)}</p>
       <p class="meta">${esc(meta.normalized_category_name)} / ${esc(meta.normalized_subject_name)} / ${esc(meta.year)} 年第 ${esc(meta.exam_ordinal)} 次</p>
       <div class="question-number"><span>資料庫題號</span><b>第 ${esc(current.question_number)} 題</b><span class="meta">occurrence ${esc(current.question_number_occurrence || 1)}</span></div>
-      <p><span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
+      <p><span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span> ${hasCorrection ? '<span class="badge reviewed">人工校正</span>' : ''} <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
+      <div class="quick-actions">
+        <button class="action primary-accept" onclick="review('accept')">通過</button>
+        <button class="action primary-block" onclick="review('block')">阻擋入庫</button>
+        <span class="meta">快速瀏覽可直接按；需要修正時用下方人工校正。</span>
+      </div>
+      ${originalNote}
       <div class="stem">${renderText(current.stem)}</div>
       ${inlineImages ? `<div class="inline-images">${inlineImages}</div>` : ''}
       <hr>${options}
@@ -1013,6 +1095,22 @@ function renderDetail() {
       </div>
       <p id="saved" class="meta"></p>
     </div></div>
+    <div class="panel"><h2>人工校正</h2><div class="body">
+      <div class="edit-grid">
+        <label class="meta">題幹<textarea id="editStem" class="edit-field">${editableText(current.stem)}</textarea></label>
+        <div>
+          <div class="meta">選項</div>
+          ${editOptions}
+        </div>
+        <label class="meta">答案<input id="editAnswer" class="edit-field" value="${editableText(current.answer ?? '')}"></label>
+        <label class="meta">題組<input id="editGroupRef" class="edit-field" value="${editableText(current.group_ref ?? '')}"></label>
+      </div>
+      <div class="toolbar">
+        <button class="action" onclick="saveCorrection(false)">儲存人工校正</button>
+        <button class="action accept" onclick="saveCorrection(true)">儲存並通過</button>
+      </div>
+      <p class="meta">人工校正會寫入 review event，不會覆蓋 parser 原始輸出。</p>
+    </div></div>
     <div class="panel"><h2>來源</h2><div class="body">
       <p class="meta">官方 PDF: <code>${esc((current.source_files || {}).official_pdf || '')}</code></p>
       <p class="meta">MinerU layout: <code>${esc((current.source_files || {}).mineru_layout_pdf || '')}</code></p>
@@ -1021,15 +1119,39 @@ function renderDetail() {
     </div></div>`;
 }
 
-async function review(action) {
+function collectCorrection() {
+  const options = Array.from(document.querySelectorAll('.edit-option-text')).map(textarea => ({
+    key: textarea.dataset.key,
+    text: textarea.value
+  }));
+  return {
+    stem: document.getElementById('editStem')?.value ?? current?.stem ?? '',
+    options,
+    answer: document.getElementById('editAnswer')?.value ?? current?.answer ?? '',
+    group_ref: document.getElementById('editGroupRef')?.value ?? current?.group_ref ?? ''
+  };
+}
+
+async function saveCorrection(acceptAfterSave) {
+  if (!current) return;
+  await review(acceptAfterSave ? 'accept' : 'correct', collectCorrection());
+}
+
+async function review(action, correction = null) {
   if (!current) return;
   const reviewedKey = current.candidate_key;
   const currentIndex = filtered.findIndex(item => item.candidate_key === reviewedKey);
   const notes = document.getElementById('notes').value;
+  const body = {candidate_key: current.candidate_key, action, notes, reviewer: 'local'};
+  if (correction) {
+    body.correction = correction;
+  } else if (current.review?.correction) {
+    body.correction = current.review.correction;
+  }
   const res = await fetch('/api/review', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({candidate_key: current.candidate_key, action, notes, reviewer: 'local'})
+    body: JSON.stringify(body)
   });
   const data = await res.json();
   if (data.ok) {
@@ -1038,6 +1160,8 @@ async function review(action) {
       action,
       notes,
       updated_at: data.event.created_at,
+      has_correction: Boolean(data.event.correction),
+      correction: data.event.correction || null,
       event_count: (current.review?.event_count || 0) + 1
     };
     await fetchCandidates(null, currentIndex >= 0 ? currentIndex : null, reviewedKey);

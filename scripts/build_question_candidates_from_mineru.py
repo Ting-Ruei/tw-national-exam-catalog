@@ -24,7 +24,7 @@ ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 PAIR_INDEX_DIR = ASSET_ROOT / "Registry" / "paired_indexes"
 OUTPUT_ROOT = ASSET_ROOT / "30_normalized_items"
 MINERU_ROOT = ASSET_ROOT / "20_mineru_output"
-PARSER_VERSION = "moex_mineru_candidate_v0.3"
+PARSER_VERSION = "moex_mineru_candidate_v0.4"
 
 OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．])\s*")
 QUESTION_START_RE_MODERN = re.compile(r"(?m)^(\d{1,3})[\.、．]\s*(\S.*)$")
@@ -39,11 +39,19 @@ SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
 MARKUP_HINT_RE = re.compile(r"(<sub>|<sup>|\\[a-zA-Z]+|[α-ωΑ-ΩⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]|[A-Za-z][0-9][A-Za-z0-9]*|\^[0-9+-]+)")
 OCR_CHAR_MAP = str.maketrans(
     {
+        "锌": "鋅",
         "羟": "羥",
         "钙": "鈣",
         "减": "減",
+        "麦": "麩",
+        "状": "狀",
+        "肠": "腸",
+        "题": "題",
     }
 )
+OCR_PHRASE_MAP = {
+    "鎌": "鎂",
+}
 
 
 @dataclass
@@ -118,7 +126,10 @@ def mineru_md_for_pdf(pdf_value: str) -> Path | None:
 def normalize_text(value: str) -> str:
     value = DETAILS_BLOCK_RE.sub("", value)
     value = STANDALONE_IMAGE_RE.sub("", value)
+    for source, target in OCR_PHRASE_MAP.items():
+        value = value.replace(source, target)
     value = value.translate(OCR_CHAR_MAP)
+    value = re.sub(r"\\,\s*", " ", value)
     lines = [line.strip() for line in value.replace("\u3000", " ").splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines).strip()
@@ -152,11 +163,13 @@ def parse_question_block(number: str, body: str, md_path: Path) -> dict[str, Any
         options.append(
             {
                 "key": label,
+                "raw_order": index + 1,
                 "text": option_text,
                 "image": None,
                 "markup": markup_payload(option_text),
             }
         )
+    options.sort(key=lambda item: "ABCDE".find(item["key"]) if item["key"] in "ABCDE" else 99)
     image_refs = collect_image_refs(body, md_path)
     group_ref = infer_group_ref(stem, number)
     return {
@@ -231,7 +244,7 @@ def parse_answers(markdown: str) -> dict[str, dict[str, Any]]:
         for row in parsed_rows:
             if not row:
                 continue
-            if row[0] == "題號":
+            if row[0] in {"題號", "題序"}:
                 question_numbers = [cell for cell in row[1:] if cell]
             elif row[0] == "答案":
                 answer_values = [cell for cell in row[1:] if cell]
@@ -320,10 +333,23 @@ def candidate_issues(candidate: dict[str, Any]) -> list[Issue]:
     if SUSPICIOUS_RE.search(stem):
         add_issue(issues, key, source, number, "suspicious_ocr_chars", "warning", "題幹含疑似 OCR 亂碼或佔位符。")
     labels = [item["key"] for item in options]
+    raw_labels = [item["key"] for item in sorted(options, key=lambda item: item.get("raw_order", 0))]
     if len(options) < 4:
         add_issue(issues, key, source, number, "too_few_options", "error", "選項少於 4 個。", {"option_labels": labels})
     if len(labels) != len(set(labels)):
         add_issue(issues, key, source, number, "duplicate_option_label", "error", "選項標籤重複。", {"option_labels": labels})
+    expected_labels = list("ABCDE"[: len(labels)])
+    if len(labels) >= 4 and raw_labels != expected_labels:
+        add_issue(
+            issues,
+            key,
+            source,
+            number,
+            "option_order_unusual",
+            "warning",
+            "原始 Markdown 選項順序不是 A/B/C/D，可能是雙欄 PDF 或 OCR 閱讀順序造成；parser 已依選項標籤排序，仍建議人工確認。",
+            {"raw_option_labels": raw_labels, "normalized_option_labels": labels},
+        )
     for option in options:
         if not option["text"]:
             add_issue(issues, key, source, number, "empty_option", "error", f"選項 {option['key']} 為空。")

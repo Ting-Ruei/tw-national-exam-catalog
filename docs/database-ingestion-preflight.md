@@ -151,7 +151,11 @@ docker compose logs -f review-ui
 
 `quality_status=pass` 只代表目前 QA flags 沒有 error/warning，不代表題目已經可以正式入庫。正式入庫至少還要人工審核事件為 `accept` 或明確校正通過，並完成後續答案核對。自 `moex_mineru_candidate_v0.3` 起，`markup_needs_review` 從 info 提升為 warning，因此含公式、上下標、希臘字母、羅馬數字或 MinerU markup 的題目會先進 `needs_review`，讓人工優先確認顯示品質。
 
+答案表 parser 需同時接受 `題號`、`題序`、`题序` 這類表頭。1151 醫事檢驗師微生物曾出現 `_MOD` 內含完整 1-80 答案表，但 MinerU 將表頭辨識為 `题序`，造成舊 parser 整批找不到答案；此類應視為答案表 OCR / parser 規則問題，而不是題目 PDF 缺答案。若 `_MOD` 內的某題答案為 `#`，需用備註解析成 `accepted_values`，例如 `B|C|BC`。
+
 題目審核畫面仍顯示目前 parser 抓到的答案，避免遮蔽資訊；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在下一個 `answer_review_events` 關卡統一核對。
+
+Review UI 的題目卡片上方有大型 `通過` / `阻擋入庫` 按鈕，可用於快速瀏覽。若需要人工修正，使用 `人工校正` 區編輯題幹、選項、答案與題組；校正內容會寫入 review event 的 `correction` 欄位，並保留 parser 原始輸出。正式入庫時，若最新有效 review event 帶有 `correction`，應優先使用人工校正版；後續 `accept` 事件也會繼承既有校正，避免通過後遺失人工修正。
 
 題目含圖片時，Review UI 會將圖片直接放入題目預覽卡片，也會保留下方圖片來源總覽。右側 PDF 檢視不會因為審核按鈕刷新而跳回頂端，只有切換題目或 PDF 來源時才重新載入。
 
