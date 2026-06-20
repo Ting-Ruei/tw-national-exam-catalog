@@ -376,6 +376,10 @@ let currentPdfKind = 'mineru_layout_pdf';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
+const compactJson = (value) => {
+  if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) return '';
+  try { return JSON.stringify(value); } catch { return String(value); }
+};
 
 async function load() {
   const res = await fetch('/api/candidates');
@@ -384,7 +388,7 @@ async function load() {
   applyFilter();
 }
 
-function applyFilter(preferredKey = null, preferredIndex = null) {
+function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null) {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const status = document.getElementById('status').value;
   const reviewStatus = document.getElementById('reviewStatus').value;
@@ -411,13 +415,19 @@ function applyFilter(preferredKey = null, preferredIndex = null) {
     next = filtered.find(item => item.candidate_key === preferredKey) || null;
   }
   if (!next && Number.isInteger(preferredIndex) && preferredIndex !== null && filtered.length) {
-    next = filtered[Math.min(preferredIndex, filtered.length - 1)] || null;
+    const forward = filtered[Math.min(preferredIndex, filtered.length - 1)] || null;
+    if (forward && forward.candidate_key !== skipKey) {
+      next = forward;
+    } else {
+      next = filtered.find((item, index) => index > preferredIndex && item.candidate_key !== skipKey) || null;
+      next = next || [...filtered].reverse().find((item, index) => filtered.length - 1 - index < preferredIndex && item.candidate_key !== skipKey) || null;
+    }
   }
-  if (!next && current) {
+  if (!next && current && current.candidate_key !== skipKey) {
     next = filtered.find(item => item.candidate_key === current.candidate_key) || null;
   }
   if (!next && filtered.length) {
-    next = filtered[0];
+    next = filtered.find(item => item.candidate_key !== skipKey) || null;
   }
   current = next;
   renderList();
@@ -482,15 +492,17 @@ function renderDetail() {
   const images = (current.image_refs || []).filter(ref => ref.exists).map(ref =>
     `<a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref)}"></a>`
   ).join('');
-  const issues = (current.issues || []).map(issue =>
-    `<div class="issue ${esc(issue.severity)}"><b>${esc(issue.severity)} / ${esc(issue.issue_code)}</b><br>${esc(issue.message)}</div>`
-  ).join('') || '<div class="meta">目前沒有 QA flag。</div>';
+  const issues = (current.issues || []).map(issue => {
+    const detail = compactJson(issue.issue_json);
+    return `<div class="issue ${esc(issue.severity)}"><b>${esc(issue.severity)} / ${esc(issue.issue_code)}</b><br>${esc(issue.message)}${detail ? `<br><code>${esc(detail)}</code>` : ''}</div>`;
+  }).join('') || '<div class="meta">目前沒有 QA flag。</div>';
   const options = (current.options || []).map(opt =>
     `<div class="option"><b>(${esc(opt.key)})</b><div>${esc(opt.text)}</div></div>`
   ).join('');
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
+      <p class="meta">Canonical: <code>${esc(current.canonical_question_key || current.candidate_key)}</code> / occurrence ${esc(current.question_number_occurrence || 1)}</p>
       <p class="meta">${esc(meta.normalized_category_name)} / ${esc(meta.normalized_subject_name)} / ${esc(meta.year)} 年第 ${esc(meta.exam_ordinal)} 次</p>
       <p><span class="badge ${esc(reviewState.status || 'unreviewed')}">${esc(reviewState.action || reviewState.status || 'unreviewed')}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
       <div class="stem">${esc(current.stem)}</div>
@@ -538,7 +550,7 @@ async function review(action) {
       updated_at: data.event.created_at,
       event_count: (current.review?.event_count || 0) + 1
     };
-    applyFilter(null, currentIndex >= 0 ? currentIndex : null);
+    applyFilter(null, currentIndex >= 0 ? currentIndex : null, reviewedKey);
   } else {
     document.getElementById('saved').textContent = `寫入失敗：${data.error}`;
   }

@@ -30,6 +30,8 @@ OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．])\s*"
 QUESTION_START_RE = re.compile(r"(?m)^(\d{1,3})[\.、．]?\s+(.+)$")
 IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HTML_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.I)
+DETAILS_BLOCK_RE = re.compile(r"<details\b.*?</details>", re.S | re.I)
+STANDALONE_IMAGE_RE = re.compile(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$")
 GROUP_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:至|到|~|～|-|－)\s*(\d{1,3})\s*題")
 IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|圖示|圖中|附圖|圖片|照片|影像|心電圖|X光|x光|切片|表格|下表|如下表)")
 SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
@@ -106,6 +108,8 @@ def mineru_md_for_pdf(pdf_value: str) -> Path | None:
 
 
 def normalize_text(value: str) -> str:
+    value = DETAILS_BLOCK_RE.sub("", value)
+    value = STANDALONE_IMAGE_RE.sub("", value)
     lines = [line.strip() for line in value.replace("\u3000", " ").splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines).strip()
