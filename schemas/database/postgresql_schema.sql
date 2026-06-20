@@ -228,6 +228,12 @@ CREATE TABLE IF NOT EXISTS exam.answer_review_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS exam.review_ui_preferences (
+    reviewer TEXT PRIMARY KEY,
+    preferences_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS exam.canonical_subject_mappings (
     id BIGSERIAL PRIMARY KEY,
     category_group_name TEXT NOT NULL,

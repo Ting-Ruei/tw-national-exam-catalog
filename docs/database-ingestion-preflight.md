@@ -147,7 +147,11 @@ docker compose logs -f review-ui
 
 目前 UI 預設讀取最新的 candidate JSONL 與 issue CSV。人工審核結果會寫回 candidate 資料夾裡的 `question_review_events.jsonl`。
 
-題目審核畫面不直接顯示答案；答案會在下一個 `answer_review_events` 關卡統一核對。
+上方篩選器可依考別、科目、年份、考次、parser 狀態與審核狀態縮小範圍。篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在 candidate 資料夾保留 `review_ui_preferences.json` 備援。
+
+題目審核畫面仍顯示目前 parser 抓到的答案，避免遮蔽資訊；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在下一個 `answer_review_events` 關卡統一核對。
+
+題目含圖片時，Review UI 會將圖片直接放入題目預覽卡片，也會保留下方圖片來源總覽。右側 PDF 檢視不會因為審核按鈕刷新而跳回頂端，只有切換題目或 PDF 來源時才重新載入。
 
 右側 PDF 檢視提供三種來源：
 
@@ -192,6 +196,8 @@ Schema: exam
 - `exam.question_candidates`：parser 產生的候選題目，還不是正式題庫。
 - `exam.question_parse_issues`：候選題目的機械檢查疑點。
 - `exam.question_review_events`：人工審核紀錄。
+- `exam.answer_review_events`：答案核對紀錄，獨立於題目結構審核。
+- `exam.review_ui_preferences`：Review UI 篩選條件、目前題目與 PDF 模式。
 - `exam.questions` / `exam.question_options` / `exam.answers`：正式題庫表，目前不要全量寫入。
 
 推薦先在 DBeaver 跑：

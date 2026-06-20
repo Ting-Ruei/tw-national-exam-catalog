@@ -14,12 +14,18 @@ import csv
 import html
 import json
 import mimetypes
+import os
 import sys
 import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - optional runtime dependency in Docker
+    psycopg = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +154,8 @@ class ReviewState:
         self.candidates = load_jsonl(candidate_path)
         self.issues = load_issues(issue_path)
         self.review_log.parent.mkdir(parents=True, exist_ok=True)
+        self.preference_path = self.review_log.parent / "review_ui_preferences.json"
+        self.database_url = os.environ.get("DATABASE_URL")
         self.latest_reviews, self.review_counts = load_review_events(review_log)
 
     def candidate_payloads(self) -> list[dict[str, Any]]:
@@ -173,6 +181,71 @@ class ReviewState:
             }
             payloads.append(copy)
         return payloads
+
+    def load_preferences(self, reviewer: str) -> dict[str, Any]:
+        preferences = self._load_file_preferences().get(reviewer, {})
+        db_preferences = self._load_db_preferences(reviewer)
+        if db_preferences:
+            preferences.update(db_preferences)
+        return preferences
+
+    def save_preferences(self, reviewer: str, preferences: dict[str, Any]) -> None:
+        preferences = dict(preferences)
+        file_preferences = self._load_file_preferences()
+        file_preferences[reviewer] = preferences
+        with self.preference_path.open("w", encoding="utf-8") as f:
+            json.dump(file_preferences, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        self._save_db_preferences(reviewer, preferences)
+
+    def _load_file_preferences(self) -> dict[str, dict[str, Any]]:
+        if not self.preference_path.exists():
+            return {}
+        try:
+            with self.preference_path.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if isinstance(data, dict):
+            return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+        return {}
+
+    def _load_db_preferences(self, reviewer: str) -> dict[str, Any]:
+        if psycopg is None or not self.database_url:
+            return {}
+        try:
+            with psycopg.connect(self.database_url, connect_timeout=2) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT preferences_json FROM exam.review_ui_preferences WHERE reviewer = %s",
+                        (reviewer,),
+                    )
+                    row = cur.fetchone()
+                    if row and isinstance(row[0], dict):
+                        return row[0]
+        except Exception:
+            return {}
+        return {}
+
+    def _save_db_preferences(self, reviewer: str, preferences: dict[str, Any]) -> None:
+        if psycopg is None or not self.database_url:
+            return
+        try:
+            with psycopg.connect(self.database_url, connect_timeout=2) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO exam.review_ui_preferences (reviewer, preferences_json, updated_at)
+                        VALUES (%s, %s::jsonb, now())
+                        ON CONFLICT (reviewer) DO UPDATE
+                        SET preferences_json = EXCLUDED.preferences_json,
+                            updated_at = now()
+                        """,
+                        (reviewer, json.dumps(preferences, ensure_ascii=False)),
+                    )
+                conn.commit()
+        except Exception:
+            return
 
     def append_review(self, event: dict[str, Any]) -> None:
         event = dict(event)
@@ -315,6 +388,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/pipeline":
             self.send_json(self.state.pipeline_payload())
             return
+        if parsed.path == "/api/preferences":
+            query = urllib.parse.parse_qs(parsed.query)
+            reviewer = query.get("reviewer", ["local"])[0] or "local"
+            self.send_json({"ok": True, "reviewer": reviewer, "preferences": self.state.load_preferences(reviewer)})
+            return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
             path = safe_file_path(query.get("path", [""])[0])
@@ -333,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/api/review":
+        if parsed.path not in {"/api/review", "/api/preferences"}:
             self.send_error(404, "Not found")
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -342,6 +420,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw)
         except json.JSONDecodeError:
             self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
+            return
+        if parsed.path == "/api/preferences":
+            reviewer = payload.get("reviewer") or "local"
+            preferences = payload.get("preferences")
+            if not isinstance(preferences, dict):
+                self.send_json({"ok": False, "error": "preferences must be an object"}, status=400)
+                return
+            self.state.save_preferences(reviewer, preferences)
+            self.send_json({"ok": True, "reviewer": reviewer, "preferences": preferences})
             return
         action = payload.get("action")
         if action not in {"accept", "correct", "needs_review", "block", "unblock", "comment", "reviewed"}:
@@ -364,10 +451,10 @@ PAGE_HTML = r"""<!doctype html>
     :root { color-scheme: light; --line:#d9dee8; --muted:#687385; --bg:#f7f8fb; --ink:#172033; --ok:#0b7a4b; --warn:#9a5b00; --bad:#b42318; --blue:#175cd3; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
-    header { height:52px; display:flex; align-items:center; gap:12px; padding:0 16px; border-bottom:1px solid var(--line); background:white; }
+    header { min-height:76px; display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); background:white; flex-wrap:wrap; }
     header strong { font-size:16px; }
-    header input, header select { height:32px; border:1px solid var(--line); border-radius:6px; padding:0 8px; background:white; }
-    main { display:grid; grid-template-columns: 320px minmax(360px, 1fr) minmax(420px, 1.2fr); height:calc(100vh - 52px); }
+    header input, header select { height:32px; border:1px solid var(--line); border-radius:6px; padding:0 8px; background:white; max-width:180px; }
+    main { display:grid; grid-template-columns: 320px minmax(360px, 1fr) minmax(420px, 1.2fr); height:calc(100vh - 76px); }
     aside { border-right:1px solid var(--line); overflow:auto; background:white; }
     .list-item { width:100%; text-align:left; border:0; border-bottom:1px solid var(--line); background:white; padding:10px 12px; cursor:pointer; }
     .list-item:hover, .list-item.active { background:#eef4ff; }
@@ -395,17 +482,24 @@ PAGE_HTML = r"""<!doctype html>
     button.action.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     button.nav { border:1px solid var(--line); border-radius:6px; height:32px; padding:0 10px; background:white; cursor:pointer; }
     textarea { width:100%; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:8px; }
-    iframe { width:100%; height:calc(100vh - 138px); border:1px solid var(--line); border-radius:8px; background:white; }
+    iframe { width:100%; height:calc(100vh - 162px); border:1px solid var(--line); border-radius:8px; background:white; }
     .viewer-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
     .viewer-toolbar button { border:1px solid var(--line); border-radius:6px; padding:7px 9px; background:white; cursor:pointer; }
     .viewer-toolbar button.active { background:#eef4ff; border-color:#9ab8ff; color:var(--blue); }
     .asset-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap:8px; }
     .asset-grid img { width:100%; max-height:160px; object-fit:contain; border:1px solid var(--line); border-radius:6px; background:white; }
+    .inline-images { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin:12px 0; }
+    .inline-images figure { margin:0; border:1px solid var(--line); border-radius:8px; background:#fbfcff; padding:8px; }
+    .inline-images img { width:100%; max-height:280px; object-fit:contain; display:block; background:white; }
+    .inline-images figcaption { margin-top:6px; color:var(--muted); font-size:12px; word-break:break-all; }
     .layer { border-left:4px solid #b8c1d1; background:#f8fafc; margin:8px 0; padding:9px 10px; }
     .layer.human_review { border-color:#175cd3; }
     .layer.planned { border-color:#9a5b00; }
     .layer.not_bulk_ingested { border-color:#b42318; }
     .kv { display:grid; grid-template-columns:120px 1fr; gap:6px 10px; }
+    .question-number { display:inline-flex; align-items:baseline; gap:6px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#f8fafc; margin:8px 0; }
+    .question-number b { font-size:16px; color:#0f2f5f; }
+    .filter-label { display:flex; align-items:center; gap:4px; }
     code { word-break:break-all; }
   </style>
 </head>
@@ -428,6 +522,10 @@ PAGE_HTML = r"""<!doctype html>
       <option value="needs_review">保留疑問</option>
       <option value="comment">有註記</option>
     </select>
+    <label class="filter-label meta">考別<select id="categoryFilter"><option value="">全部</option></select></label>
+    <label class="filter-label meta">科目<select id="subjectFilter"><option value="">全部</option></select></label>
+    <label class="filter-label meta">年份<select id="yearFilter"><option value="">全部</option></select></label>
+    <label class="filter-label meta">考次<select id="ordinalFilter"><option value="">全部</option></select></label>
     <span id="count" class="meta"></span>
     <span id="progress" class="meta"></span>
     <button class="nav" onclick="showPipeline()">資料庫層級</button>
@@ -451,6 +549,10 @@ let candidates = [];
 let filtered = [];
 let current = null;
 let currentPdfKind = 'mineru_layout_pdf';
+let lastPdfUrl = '';
+let preferences = {};
+let savePreferenceTimer = null;
+const reviewer = 'local';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
@@ -460,10 +562,79 @@ const compactJson = (value) => {
 };
 
 async function load() {
-  const res = await fetch('/api/candidates');
-  const data = await res.json();
+  const [candidateRes, preferenceRes] = await Promise.all([
+    fetch('/api/candidates'),
+    fetch(`/api/preferences?reviewer=${encodeURIComponent(reviewer)}`)
+  ]);
+  const data = await candidateRes.json();
+  const preferenceData = await preferenceRes.json();
   candidates = data.candidates;
-  applyFilter();
+  preferences = preferenceData.preferences || {};
+  populateFilters();
+  restorePreferences();
+  applyFilter(preferences.currentKey || null);
+}
+
+function uniqueSorted(values, numeric = false) {
+  const items = [...new Set(values.filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(String))];
+  return items.sort((a, b) => numeric ? Number(a) - Number(b) : a.localeCompare(b, 'zh-Hant'));
+}
+
+function populateSelect(id, values, numeric = false) {
+  const select = document.getElementById(id);
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">全部</option>' + uniqueSorted(values, numeric).map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  if ([...select.options].some(option => option.value === currentValue)) select.value = currentValue;
+}
+
+function populateFilters() {
+  const metas = candidates.map(item => item.metadata || {});
+  populateSelect('categoryFilter', metas.map(meta => meta.normalized_category_name || meta.group_name));
+  populateSelect('subjectFilter', metas.map(meta => meta.normalized_subject_name));
+  populateSelect('yearFilter', metas.map(meta => meta.year), true);
+  populateSelect('ordinalFilter', metas.map(meta => meta.exam_ordinal), true);
+}
+
+function restorePreferences() {
+  const filters = preferences.filters || {};
+  for (const [id, value] of Object.entries(filters)) {
+    const element = document.getElementById(id);
+    if (element && Array.from(element.options || []).some(option => option.value === value)) {
+      element.value = value;
+    } else if (element && element.tagName === 'INPUT') {
+      element.value = value || '';
+    }
+  }
+  currentPdfKind = preferences.pdfKind || currentPdfKind;
+}
+
+function collectPreferences() {
+  return {
+    filters: {
+      search: document.getElementById('search').value,
+      status: document.getElementById('status').value,
+      reviewStatus: document.getElementById('reviewStatus').value,
+      categoryFilter: document.getElementById('categoryFilter').value,
+      subjectFilter: document.getElementById('subjectFilter').value,
+      yearFilter: document.getElementById('yearFilter').value,
+      ordinalFilter: document.getElementById('ordinalFilter').value
+    },
+    currentKey: current ? current.candidate_key : preferences.currentKey || '',
+    pdfKind: currentPdfKind,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function savePreferencesSoon() {
+  preferences = collectPreferences();
+  clearTimeout(savePreferenceTimer);
+  savePreferenceTimer = setTimeout(() => {
+    fetch('/api/preferences', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reviewer, preferences})
+    }).catch(() => {});
+  }, 250);
 }
 
 async function showPipeline() {
@@ -472,6 +643,7 @@ async function showPipeline() {
   current = null;
   renderList();
   document.getElementById('pdf').src = '';
+  lastPdfUrl = '';
   document.getElementById('pdfOpen').removeAttribute('href');
   document.getElementById('pdfPath').textContent = '';
   const layers = data.layers.map(layer => `
@@ -498,6 +670,10 @@ function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null)
   const q = document.getElementById('search').value.trim().toLowerCase();
   const status = document.getElementById('status').value;
   const reviewStatus = document.getElementById('reviewStatus').value;
+  const categoryFilter = document.getElementById('categoryFilter').value;
+  const subjectFilter = document.getElementById('subjectFilter').value;
+  const yearFilter = document.getElementById('yearFilter').value;
+  const ordinalFilter = document.getElementById('ordinalFilter').value;
   filtered = candidates.filter(item => {
     const meta = item.metadata || {};
     const review = item.review || {};
@@ -510,7 +686,15 @@ function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null)
     const reviewMatch = !reviewStatus
       || review.status === reviewStatus
       || review.action === reviewStatus;
-    return (!status || item.quality_status === status) && reviewMatch && (!q || text.includes(q));
+    const category = meta.normalized_category_name || meta.group_name || '';
+    const subject = meta.normalized_subject_name || '';
+    return (!status || item.quality_status === status)
+      && reviewMatch
+      && (!categoryFilter || category === categoryFilter)
+      && (!subjectFilter || subject === subjectFilter)
+      && (!yearFilter || String(meta.year || '') === yearFilter)
+      && (!ordinalFilter || String(meta.exam_ordinal || '') === ordinalFilter)
+      && (!q || text.includes(q));
   });
   const reviewedCount = candidates.filter(item => (item.review || {}).status === 'reviewed').length;
   document.getElementById('count').textContent = `${filtered.length} / ${candidates.length}`;
@@ -538,6 +722,7 @@ function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null)
   current = next;
   renderList();
   renderDetail();
+  savePreferencesSoon();
 }
 
 function renderList() {
@@ -557,6 +742,7 @@ function selectCandidate(key) {
   current = candidates.find(item => item.candidate_key === key);
   renderList();
   renderDetail();
+  savePreferencesSoon();
 }
 
 function pdfPathFor(kind) {
@@ -567,13 +753,17 @@ function pdfPathFor(kind) {
 function setPdfKind(kind) {
   currentPdfKind = kind;
   updatePdfViewer();
+  savePreferencesSoon();
 }
 
 function updatePdfViewer() {
   if (!current) return;
   const path = pdfPathFor(currentPdfKind);
   const url = fileUrl(path);
-  document.getElementById('pdf').src = url;
+  if (url !== lastPdfUrl) {
+    document.getElementById('pdf').src = url;
+    lastPdfUrl = url;
+  }
   document.getElementById('pdfOpen').href = url;
   document.getElementById('pdfPath').innerHTML = path ? `<code>${esc(path)}</code>` : '找不到可顯示的 PDF';
   for (const [kind, id] of [['official_pdf', 'pdfOfficial'], ['mineru_layout_pdf', 'pdfLayout'], ['mineru_origin_pdf', 'pdfOrigin']]) {
@@ -588,6 +778,7 @@ function renderDetail() {
   if (!current) {
     document.getElementById('detail').innerHTML = `<div class="panel"><h2>目前沒有符合條件的題目</h2><div class="body"><p class="meta">可以切換審核篩選，或開始產生下一批 candidate。</p></div></div>`;
     document.getElementById('pdf').src = '';
+    lastPdfUrl = '';
     document.getElementById('pdfOpen').removeAttribute('href');
     document.getElementById('pdfPath').textContent = '';
     return;
@@ -598,6 +789,9 @@ function renderDetail() {
   const images = (current.image_refs || []).filter(ref => ref.exists).map(ref =>
     `<a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref)}"></a>`
   ).join('');
+  const inlineImages = (current.image_refs || []).filter(ref => ref.exists).map((ref, index) =>
+    `<figure><a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref || `image ${index + 1}`)}"></a><figcaption>圖 ${index + 1}: ${esc(ref.raw_ref || ref.path)}</figcaption></figure>`
+  ).join('');
   const issues = (current.issues || []).map(issue => {
     const detail = compactJson(issue.issue_json);
     return `<div class="issue ${esc(issue.severity)}"><b>${esc(issue.severity)} / ${esc(issue.issue_code)}</b><br>${esc(issue.message)}${detail ? `<br><code>${esc(detail)}</code>` : ''}</div>`;
@@ -605,15 +799,20 @@ function renderDetail() {
   const options = (current.options || []).map(opt =>
     `<div class="option"><b>(${esc(opt.key)})</b><div>${esc(opt.text)}</div></div>`
   ).join('');
+  const answerText = current.answer !== undefined && current.answer !== null && String(current.answer).trim() !== ''
+    ? esc(current.answer)
+    : '<span class="meta">目前 candidate 未抓到答案，後續答案核對關卡會集中排查。</span>';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
       <p class="meta">Canonical: <code>${esc(current.canonical_question_key || current.candidate_key)}</code> / occurrence ${esc(current.question_number_occurrence || 1)}</p>
       <p class="meta">${esc(meta.normalized_category_name)} / ${esc(meta.normalized_subject_name)} / ${esc(meta.year)} 年第 ${esc(meta.exam_ordinal)} 次</p>
+      <div class="question-number"><span>資料庫題號</span><b>第 ${esc(current.question_number)} 題</b><span class="meta">occurrence ${esc(current.question_number_occurrence || 1)}</span></div>
       <p><span class="badge ${esc(reviewState.status || 'unreviewed')}">${esc(reviewState.action || reviewState.status || 'unreviewed')}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
       <div class="stem">${esc(current.stem)}</div>
+      ${inlineImages ? `<div class="inline-images">${inlineImages}</div>` : ''}
       <hr>${options}
-      <p><b>答案：</b><span class="meta">本畫面先專注審題；答案會在下一個「答案核對」關卡統一檢查。</span></p>
+      <p><b>答案：</b>${answerText} <span class="meta">此處顯示目前解析結果；正式判定會在下一個「答案核對」關卡統一檢查。</span></p>
       <p><b>題組：</b>${esc(current.group_ref ?? '無')}</p>
     </div></div>
     <div class="panel"><h2>疑點</h2><div class="body">${issues}</div></div>
@@ -665,6 +864,10 @@ async function review(action) {
 document.getElementById('search').addEventListener('input', applyFilter);
 document.getElementById('status').addEventListener('change', applyFilter);
 document.getElementById('reviewStatus').addEventListener('change', applyFilter);
+document.getElementById('categoryFilter').addEventListener('change', applyFilter);
+document.getElementById('subjectFilter').addEventListener('change', applyFilter);
+document.getElementById('yearFilter').addEventListener('change', applyFilter);
+document.getElementById('ordinalFilter').addEventListener('change', applyFilter);
 load();
 </script>
 </body>

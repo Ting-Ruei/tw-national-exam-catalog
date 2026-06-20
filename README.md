@@ -221,9 +221,13 @@ Review UI 右側 PDF 檢視提供三種來源：
 - `MinerU layout`：MinerU 產出的 layout PDF，通常會以色塊或框線標示版面分區，適合判斷 MinerU 是否已經切壞。
 - `MinerU origin`：MinerU 輸出資料夾中的原始 PDF 複本，適合和官方 PDF 對照。
 
-人工審核預設只顯示 `未看過` 的題目。按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。
+人工審核預設只顯示 `未看過` 的題目。可用上方選單依考別、科目、年份、考次、parser 狀態與審核狀態篩選；篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在同資料夾保留 `review_ui_preferences.json` 備援。下一次開啟 Review UI 會回到上次進度。
 
-題目審核畫面先專注在題幹、選項、圖片、題組與 parser 切題品質，不直接顯示答案。答案會在後續獨立的 `answer_review_events` 關卡集中核對，避免同時看題目與答案而分散注意力。
+按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。右側 PDF 不會因為按鈕刷新而跳回頂端；只有切換題目或切換 PDF 來源時才會載入新的 PDF。
+
+題目審核畫面主要檢查題幹、選項、圖片、題組與 parser 切題品質。畫面仍會顯示目前 parser 抓到的答案，方便完整核對資料；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在後續獨立的 `answer_review_events` 關卡集中判定。
+
+若題目含圖片，圖片會直接融合在題目預覽卡片中，並保留下方圖片來源總覽，方便同時比對題文、圖片與右側 PDF。
 
 頁面上的 `資料庫層級` 按鈕可查看目前資料在各層的位置與數量，包括來源 PDF/MinerU raw、題目 candidate、QA flags、題目人工審核、答案核對與正式題庫表。
 
@@ -259,6 +263,7 @@ Schema: exam
 - `exam.question_parse_issues`：候選題目的機械檢查疑點。
 - `exam.question_review_events`：人工審核紀錄。
 - `exam.answer_review_events`：答案核對紀錄，獨立於題目結構審核。
+- `exam.review_ui_preferences`：Review UI 的篩選條件、目前題目與 PDF 模式。
 
 ## 授權與來源
 
