@@ -158,29 +158,144 @@ class ReviewState:
         self.database_url = os.environ.get("DATABASE_URL")
         self.latest_reviews, self.review_counts = load_review_events(review_log)
 
-    def candidate_payloads(self) -> list[dict[str, Any]]:
+    def candidate_payload(self, item: dict[str, Any]) -> dict[str, Any]:
+        key = item["candidate_key"]
+        copy = dict(item)
+        metadata = copy.get("metadata") or {}
+        copy["issues"] = self.issues.get(key, [])
+        latest_review = self.latest_reviews.get(key)
+        copy["review"] = {
+            "status": "reviewed" if latest_review else "unreviewed",
+            "action": latest_review.get("action") if latest_review else None,
+            "notes": latest_review.get("notes") if latest_review else None,
+            "updated_at": latest_review.get("created_at") if latest_review else None,
+            "event_count": self.review_counts.get(key, 0),
+        }
+        copy["source_files"] = {
+            "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
+            "mineru_layout_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_layout"),
+            "mineru_origin_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_origin"),
+            "question_markdown": metadata.get("question_markdown_relative") or metadata.get("question_markdown"),
+        }
+        return copy
+
+    def facets(self, params: dict[str, str] | None = None) -> dict[str, list[str]]:
+        params = params or {}
+        values: dict[str, set[str]] = {"categories": set(), "subjects": set(), "years": set(), "ordinals": set()}
+        for item in self.candidates:
+            metadata = item.get("metadata") or {}
+            category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
+            subject = metadata.get("normalized_subject_name") or ""
+            year = str(metadata.get("year") or "")
+            ordinal = str(metadata.get("exam_ordinal") or "")
+            if self._facet_match(category, subject, year, ordinal, params, ignore="category") and category:
+                values["categories"].add(category)
+            if self._facet_match(category, subject, year, ordinal, params, ignore="subject") and subject:
+                values["subjects"].add(subject)
+            if self._facet_match(category, subject, year, ordinal, params, ignore="year") and year:
+                values["years"].add(year)
+            if self._facet_match(category, subject, year, ordinal, params, ignore="ordinal") and ordinal:
+                values["ordinals"].add(ordinal)
+        return {
+            key: sorted(value, key=lambda item: (int(item) if item.isdigit() else 9999, item))
+            if key in {"years", "ordinals"}
+            else sorted(value)
+            for key, value in values.items()
+        }
+
+    def _facet_match(
+        self,
+        category: str,
+        subject: str,
+        year: str,
+        ordinal: str,
+        params: dict[str, str],
+        ignore: str,
+    ) -> bool:
+        checks = {
+            "category": (category, params.get("category") or ""),
+            "subject": (subject, params.get("subject") or ""),
+            "year": (year, params.get("year") or ""),
+            "ordinal": (ordinal, params.get("ordinal") or ""),
+        }
+        for key, (value, expected) in checks.items():
+            if key == ignore or not expected:
+                continue
+            if value != expected:
+                return False
+        return True
+
+    def filtered_candidate_payloads(self, params: dict[str, str]) -> dict[str, Any]:
+        q = (params.get("q") or "").strip().lower()
+        status = params.get("status") or ""
+        review_status = params.get("reviewStatus") or ""
+        category_filter = params.get("category") or ""
+        subject_filter = params.get("subject") or ""
+        year_filter = params.get("year") or ""
+        ordinal_filter = params.get("ordinal") or ""
+        try:
+            limit = max(1, min(int(params.get("limit") or "500"), 1000))
+        except ValueError:
+            limit = 500
+
         payloads: list[dict[str, Any]] = []
+        filtered_count = 0
+        reviewed_count = 0
         for item in self.candidates:
             key = item["candidate_key"]
-            copy = dict(item)
-            metadata = copy.get("metadata") or {}
-            copy["issues"] = self.issues.get(key, [])
             latest_review = self.latest_reviews.get(key)
-            copy["review"] = {
+            review = {
                 "status": "reviewed" if latest_review else "unreviewed",
                 "action": latest_review.get("action") if latest_review else None,
                 "notes": latest_review.get("notes") if latest_review else None,
-                "updated_at": latest_review.get("created_at") if latest_review else None,
-                "event_count": self.review_counts.get(key, 0),
             }
-            copy["source_files"] = {
-                "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
-                "mineru_layout_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_layout"),
-                "mineru_origin_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_origin"),
-                "question_markdown": metadata.get("question_markdown_relative") or metadata.get("question_markdown"),
-            }
-            payloads.append(copy)
-        return payloads
+            if review["status"] == "reviewed":
+                reviewed_count += 1
+            metadata = item.get("metadata") or {}
+            category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
+            subject = metadata.get("normalized_subject_name") or ""
+            if review_status == "not_accept":
+                review_match = review["status"] == "reviewed" and review["action"] not in {"accept", "correct", "unblock"}
+            else:
+                review_match = not review_status or review["status"] == review_status or review["action"] == review_status
+            if status and item.get("quality_status") != status:
+                continue
+            if not review_match:
+                continue
+            if category_filter and category != category_filter:
+                continue
+            if subject_filter and subject != subject_filter:
+                continue
+            if year_filter and str(metadata.get("year") or "") != year_filter:
+                continue
+            if ordinal_filter and str(metadata.get("exam_ordinal") or "") != ordinal_filter:
+                continue
+            if q:
+                haystack = " ".join(
+                    str(value or "")
+                    for value in [
+                        item.get("candidate_key"),
+                        item.get("question_number"),
+                        item.get("stem"),
+                        category,
+                        subject,
+                        review.get("action"),
+                        review.get("notes"),
+                    ]
+                ).lower()
+                if q not in haystack:
+                    continue
+            filtered_count += 1
+            if len(payloads) < limit:
+                payloads.append(self.candidate_payload(item))
+        return {
+            "candidates": payloads,
+            "total_count": len(self.candidates),
+            "filtered_count": filtered_count,
+            "returned_count": len(payloads),
+            "reviewed_count": reviewed_count,
+            "facets": self.facets(params),
+        }
 
     def load_preferences(self, reviewer: str) -> dict[str, Any]:
         preferences = self._load_file_preferences().get(reviewer, {})
@@ -258,14 +373,27 @@ class ReviewState:
             self.review_counts[key] = self.review_counts.get(key, 0) + 1
 
     def pipeline_payload(self) -> dict[str, Any]:
-        candidates = self.candidate_payloads()
-        reviewed = [item for item in candidates if item.get("review", {}).get("status") == "reviewed"]
-        accepted = [item for item in candidates if item.get("review", {}).get("action") == "accept"]
-        blocked = [item for item in candidates if item.get("review", {}).get("action") == "block"]
-        needs_review = [item for item in candidates if item.get("review", {}).get("action") == "needs_review"]
-        issue_count = sum(len(item.get("issues", [])) for item in candidates)
-        answer_ready = [item for item in candidates if item.get("answer") not in (None, "")]
-        question_accepted_answer_pending = [item for item in accepted if item.get("answer") not in (None, "")]
+        reviewed = []
+        accepted = []
+        blocked = []
+        needs_review = []
+        answer_ready_count = 0
+        question_accepted_answer_pending_count = 0
+        for item in self.candidates:
+            latest = self.latest_reviews.get(item["candidate_key"])
+            if latest:
+                reviewed.append(item)
+                if latest.get("action") == "accept":
+                    accepted.append(item)
+                    if item.get("answer") not in (None, ""):
+                        question_accepted_answer_pending_count += 1
+                elif latest.get("action") == "block":
+                    blocked.append(item)
+                elif latest.get("action") == "needs_review":
+                    needs_review.append(item)
+            if item.get("answer") not in (None, ""):
+                answer_ready_count += 1
+        issue_count = sum(len(value) for value in self.issues.values())
         return {
             "candidate_jsonl": str(self.candidate_path),
             "issue_csv": str(self.issue_path) if self.issue_path else None,
@@ -275,14 +403,14 @@ class ReviewState:
                     "name": "官方 PDF / MinerU raw",
                     "tables": ["exam.official_documents", "exam.assets", "exam.document_assets", "exam.mineru_runs"],
                     "status": "source",
-                    "count": len({item.get("source_registry_key") for item in candidates}),
+                    "count": len({item.get("source_registry_key") for item in self.candidates}),
                     "description": "官方 PDF、MinerU markdown、圖片與 layout PDF。這一層只追溯來源，不代表題目已可入庫。",
                 },
                 {
                     "name": "題目 candidate",
                     "tables": ["exam.question_candidates"],
                     "status": "pre_ingestion",
-                    "count": len(candidates),
+                    "count": len(self.candidates),
                     "description": "parser 從 MinerU markdown 切出的候選題目，目前仍需人工審核。",
                 },
                 {
@@ -308,11 +436,11 @@ class ReviewState:
                     "name": "答案核對",
                     "tables": ["exam.answer_review_events"],
                     "status": "planned",
-                    "count": len(question_accepted_answer_pending),
+                    "count": question_accepted_answer_pending_count,
                     "description": "獨立於題目結構審核。題目通過後，再集中核對答案、MOD/ANS 優先序與答案表解析。",
                     "breakdown": {
-                        "candidates_with_answer": len(answer_ready),
-                        "question_accepted_answer_pending": len(question_accepted_answer_pending),
+                        "candidates_with_answer": answer_ready_count,
+                        "question_accepted_answer_pending": question_accepted_answer_pending_count,
                     },
                 },
                 {
@@ -376,12 +504,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path == "/api/candidates":
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            payload = self.state.filtered_candidate_payloads(params)
             self.send_json(
                 {
                     "candidate_jsonl": str(self.state.candidate_path),
                     "issue_csv": str(self.state.issue_path) if self.state.issue_path else None,
                     "review_log": str(self.state.review_log),
-                    "candidates": self.state.candidate_payloads(),
+                    **payload,
                 }
             )
             return
@@ -461,8 +592,11 @@ PAGE_HTML = r"""<!doctype html>
     .meta { color:var(--muted); font-size:12px; line-height:1.35; }
     .badge { display:inline-block; min-width:44px; text-align:center; padding:2px 6px; border-radius:999px; font-size:12px; background:#edf0f5; color:#334155; }
     .badge.pass { background:#dff7ea; color:var(--ok); }
+    .badge.accept { background:#dff7ea; color:var(--ok); }
     .badge.needs_review { background:#fff1cf; color:var(--warn); }
     .badge.blocked { background:#fee4e2; color:var(--bad); }
+    .badge.block { background:#fee4e2; color:var(--bad); }
+    .badge.comment { background:#f3e8ff; color:#6941c6; }
     .badge.reviewed { background:#dbeafe; color:var(--blue); }
     .badge.unreviewed { background:#edf0f5; color:#475467; }
     section { overflow:auto; padding:14px; }
@@ -470,6 +604,8 @@ PAGE_HTML = r"""<!doctype html>
     .panel h2 { margin:0; padding:10px 12px; font-size:14px; border-bottom:1px solid var(--line); background:#fbfcff; }
     .panel .body { padding:12px; }
     .stem { white-space:pre-wrap; line-height:1.55; }
+    .math { white-space:nowrap; font-family: "Times New Roman", "Noto Serif", serif; }
+    sub, sup { line-height:0; }
     .option { display:grid; grid-template-columns:34px 1fr; gap:8px; margin:8px 0; line-height:1.5; }
     .option b { color:#243b64; }
     .issue { border-left:4px solid #b8c1d1; padding:7px 9px; margin:7px 0; background:#f8fafc; }
@@ -516,6 +652,7 @@ PAGE_HTML = r"""<!doctype html>
     <select id="reviewStatus">
       <option value="">全部審核</option>
       <option value="unreviewed" selected>未看過</option>
+      <option value="not_accept">未通過</option>
       <option value="reviewed">已看過</option>
       <option value="accept">已通過</option>
       <option value="block">阻擋入庫</option>
@@ -553,6 +690,10 @@ let lastPdfUrl = '';
 let preferences = {};
 let savePreferenceTimer = null;
 const reviewer = 'local';
+let totalCount = 0;
+let filteredCount = 0;
+let reviewedCount = 0;
+let pendingPreferenceFilters = null;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
@@ -560,19 +701,43 @@ const compactJson = (value) => {
   if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) return '';
   try { return JSON.stringify(value); } catch { return String(value); }
 };
+const greekMap = {
+  alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ε', zeta:'ζ', eta:'η', theta:'θ',
+  iota:'ι', kappa:'κ', lambda:'λ', mu:'μ', nu:'ν', xi:'ξ', omicron:'ο', pi:'π',
+  rho:'ρ', sigma:'σ', tau:'τ', upsilon:'υ', phi:'φ', chi:'χ', psi:'ψ', omega:'ω',
+  Alpha:'Α', Beta:'Β', Gamma:'Γ', Delta:'Δ', Theta:'Θ', Lambda:'Λ', Xi:'Ξ', Pi:'Π',
+  Sigma:'Σ', Phi:'Φ', Psi:'Ψ', Omega:'Ω'
+};
+function renderMath(value) {
+  return esc(value)
+    .replace(/\\rightarrow/g, '→')
+    .replace(/\\to/g, '→')
+    .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
+    .replace(/_\{([^{}]+)\}/g, '<sub>$1</sub>')
+    .replace(/\^\{([^{}]+)\}/g, '<sup>$1</sup>')
+    .replace(/_([A-Za-z0-9+-])/g, '<sub>$1</sub>')
+    .replace(/\^([A-Za-z0-9+-])/g, '<sup>$1</sup>');
+}
+function renderText(value) {
+  const raw = String(value ?? '');
+  const parts = raw.split(/(\$[^$]+\$)/g);
+  return parts.map(part => {
+    if (part.startsWith('$') && part.endsWith('$')) {
+      return `<span class="math">${renderMath(part.slice(1, -1).trim())}</span>`;
+    }
+    return esc(part)
+      .replace(/&lt;sub&gt;(.+?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
+      .replace(/&lt;sup&gt;(.+?)&lt;\/sup&gt;/g, '<sup>$1</sup>');
+  }).join('');
+}
 
 async function load() {
-  const [candidateRes, preferenceRes] = await Promise.all([
-    fetch('/api/candidates'),
-    fetch(`/api/preferences?reviewer=${encodeURIComponent(reviewer)}`)
-  ]);
-  const data = await candidateRes.json();
+  const preferenceRes = await fetch(`/api/preferences?reviewer=${encodeURIComponent(reviewer)}`);
   const preferenceData = await preferenceRes.json();
-  candidates = data.candidates;
   preferences = preferenceData.preferences || {};
-  populateFilters();
+  pendingPreferenceFilters = preferences.filters || {};
   restorePreferences();
-  applyFilter(preferences.currentKey || null);
+  await fetchCandidates(preferences.currentKey || null);
 }
 
 function uniqueSorted(values, numeric = false) {
@@ -588,11 +753,18 @@ function populateSelect(id, values, numeric = false) {
 }
 
 function populateFilters() {
-  const metas = candidates.map(item => item.metadata || {});
-  populateSelect('categoryFilter', metas.map(meta => meta.normalized_category_name || meta.group_name));
-  populateSelect('subjectFilter', metas.map(meta => meta.normalized_subject_name));
-  populateSelect('yearFilter', metas.map(meta => meta.year), true);
-  populateSelect('ordinalFilter', metas.map(meta => meta.exam_ordinal), true);
+  return;
+}
+
+function populateFiltersFromFacets(facets) {
+  populateSelect('categoryFilter', facets.categories || []);
+  populateSelect('subjectFilter', facets.subjects || []);
+  populateSelect('yearFilter', facets.years || [], true);
+  populateSelect('ordinalFilter', facets.ordinals || [], true);
+  if (pendingPreferenceFilters) {
+    restorePreferences();
+    pendingPreferenceFilters = null;
+  }
 }
 
 function restorePreferences() {
@@ -623,6 +795,13 @@ function collectPreferences() {
     pdfKind: currentPdfKind,
     updatedAt: new Date().toISOString()
   };
+}
+
+function filterValue(id) {
+  if (pendingPreferenceFilters && Object.prototype.hasOwnProperty.call(pendingPreferenceFilters, id)) {
+    return pendingPreferenceFilters[id] || '';
+  }
+  return document.getElementById(id).value;
 }
 
 function savePreferencesSoon() {
@@ -666,39 +845,43 @@ async function showPipeline() {
     </div></div>`;
 }
 
+function queryParams() {
+  const params = new URLSearchParams();
+  params.set('q', filterValue('search').trim());
+  params.set('status', filterValue('status'));
+  params.set('reviewStatus', filterValue('reviewStatus'));
+  params.set('category', filterValue('categoryFilter'));
+  params.set('subject', filterValue('subjectFilter'));
+  params.set('year', filterValue('yearFilter'));
+  params.set('ordinal', filterValue('ordinalFilter'));
+  params.set('limit', '500');
+  return params;
+}
+
+async function fetchCandidates(preferredKey = null, preferredIndex = null, skipKey = null) {
+  const res = await fetch(`/api/candidates?${queryParams().toString()}`);
+  const data = await res.json();
+  candidates = data.candidates || [];
+  filtered = candidates;
+  totalCount = data.total_count || candidates.length;
+  filteredCount = data.filtered_count || candidates.length;
+  reviewedCount = data.reviewed_count || 0;
+  if (data.facets) populateFiltersFromFacets(data.facets);
+  chooseCurrent(preferredKey, preferredIndex, skipKey);
+}
+
 function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null) {
+  pendingPreferenceFilters = null;
+  savePreferencesSoon();
+  fetchCandidates(preferredKey, preferredIndex, skipKey);
+}
+
+function chooseCurrent(preferredKey = null, preferredIndex = null, skipKey = null) {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const status = document.getElementById('status').value;
   const reviewStatus = document.getElementById('reviewStatus').value;
-  const categoryFilter = document.getElementById('categoryFilter').value;
-  const subjectFilter = document.getElementById('subjectFilter').value;
-  const yearFilter = document.getElementById('yearFilter').value;
-  const ordinalFilter = document.getElementById('ordinalFilter').value;
-  filtered = candidates.filter(item => {
-    const meta = item.metadata || {};
-    const review = item.review || {};
-    const text = [
-      item.candidate_key, item.question_number, item.stem,
-      meta.group_name, meta.normalized_category_name, meta.normalized_subject_name,
-      review.action, review.notes,
-      ...(item.issues || []).map(i => `${i.issue_code} ${i.message}`)
-    ].join(' ').toLowerCase();
-    const reviewMatch = !reviewStatus
-      || review.status === reviewStatus
-      || review.action === reviewStatus;
-    const category = meta.normalized_category_name || meta.group_name || '';
-    const subject = meta.normalized_subject_name || '';
-    return (!status || item.quality_status === status)
-      && reviewMatch
-      && (!categoryFilter || category === categoryFilter)
-      && (!subjectFilter || subject === subjectFilter)
-      && (!yearFilter || String(meta.year || '') === yearFilter)
-      && (!ordinalFilter || String(meta.exam_ordinal || '') === ordinalFilter)
-      && (!q || text.includes(q));
-  });
-  const reviewedCount = candidates.filter(item => (item.review || {}).status === 'reviewed').length;
-  document.getElementById('count').textContent = `${filtered.length} / ${candidates.length}`;
-  document.getElementById('progress').textContent = `已看 ${reviewedCount}，未看 ${candidates.length - reviewedCount}`;
+  document.getElementById('count').textContent = `顯示 ${filtered.length} / 符合 ${filteredCount} / 全部 ${totalCount}`;
+  document.getElementById('progress').textContent = `已看 ${reviewedCount}，未看 ${Math.max(totalCount - reviewedCount, 0)}`;
 
   let next = null;
   if (preferredKey) {
@@ -730,8 +913,9 @@ function renderList() {
   list.innerHTML = filtered.map(item => {
     const meta = item.metadata || {};
     const review = item.review || {};
+    const reviewBadge = review.action || review.status || 'unreviewed';
     return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-      <div><span class="badge ${esc(item.quality_status)}">${esc(item.quality_status)}</span> <span class="badge ${esc(review.status || 'unreviewed')}">${esc(review.action || review.status || 'unreviewed')}</span> 第 ${esc(item.question_number)} 題</div>
+      <div><span class="badge ${esc(item.quality_status)}">${esc(item.quality_status)}</span> <span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span> 第 ${esc(item.question_number)} 題</div>
       <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
       <div class="meta">${esc(item.issue_count || 0)} issues</div>
     </button>`;
@@ -785,6 +969,7 @@ function renderDetail() {
   }
   const meta = current.metadata || {};
   const reviewState = current.review || {};
+  const reviewBadge = reviewState.action || reviewState.status || 'unreviewed';
   updatePdfViewer();
   const images = (current.image_refs || []).filter(ref => ref.exists).map(ref =>
     `<a href="${fileUrl(ref.path)}" target="_blank"><img src="${fileUrl(ref.path)}" alt="${esc(ref.raw_ref)}"></a>`
@@ -797,10 +982,10 @@ function renderDetail() {
     return `<div class="issue ${esc(issue.severity)}"><b>${esc(issue.severity)} / ${esc(issue.issue_code)}</b><br>${esc(issue.message)}${detail ? `<br><code>${esc(detail)}</code>` : ''}</div>`;
   }).join('') || '<div class="meta">目前沒有 QA flag。</div>';
   const options = (current.options || []).map(opt =>
-    `<div class="option"><b>(${esc(opt.key)})</b><div>${esc(opt.text)}</div></div>`
+    `<div class="option"><b>(${esc(opt.key)})</b><div>${renderText(opt.text)}</div></div>`
   ).join('');
   const answerText = current.answer !== undefined && current.answer !== null && String(current.answer).trim() !== ''
-    ? esc(current.answer)
+    ? renderText(current.answer)
     : '<span class="meta">目前 candidate 未抓到答案，後續答案核對關卡會集中排查。</span>';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
@@ -808,8 +993,8 @@ function renderDetail() {
       <p class="meta">Canonical: <code>${esc(current.canonical_question_key || current.candidate_key)}</code> / occurrence ${esc(current.question_number_occurrence || 1)}</p>
       <p class="meta">${esc(meta.normalized_category_name)} / ${esc(meta.normalized_subject_name)} / ${esc(meta.year)} 年第 ${esc(meta.exam_ordinal)} 次</p>
       <div class="question-number"><span>資料庫題號</span><b>第 ${esc(current.question_number)} 題</b><span class="meta">occurrence ${esc(current.question_number_occurrence || 1)}</span></div>
-      <p><span class="badge ${esc(reviewState.status || 'unreviewed')}">${esc(reviewState.action || reviewState.status || 'unreviewed')}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
-      <div class="stem">${esc(current.stem)}</div>
+      <p><span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span> <span class="meta">${esc(reviewState.updated_at || '')}</span></p>
+      <div class="stem">${renderText(current.stem)}</div>
       ${inlineImages ? `<div class="inline-images">${inlineImages}</div>` : ''}
       <hr>${options}
       <p><b>答案：</b>${answerText} <span class="meta">此處顯示目前解析結果；正式判定會在下一個「答案核對」關卡統一檢查。</span></p>
@@ -855,7 +1040,7 @@ async function review(action) {
       updated_at: data.event.created_at,
       event_count: (current.review?.event_count || 0) + 1
     };
-    applyFilter(null, currentIndex >= 0 ? currentIndex : null, reviewedKey);
+    await fetchCandidates(null, currentIndex >= 0 ? currentIndex : null, reviewedKey);
   } else {
     document.getElementById('saved').textContent = `寫入失敗：${data.error}`;
   }
@@ -864,9 +1049,21 @@ async function review(action) {
 document.getElementById('search').addEventListener('input', applyFilter);
 document.getElementById('status').addEventListener('change', applyFilter);
 document.getElementById('reviewStatus').addEventListener('change', applyFilter);
-document.getElementById('categoryFilter').addEventListener('change', applyFilter);
-document.getElementById('subjectFilter').addEventListener('change', applyFilter);
-document.getElementById('yearFilter').addEventListener('change', applyFilter);
+document.getElementById('categoryFilter').addEventListener('change', () => {
+  document.getElementById('subjectFilter').value = '';
+  document.getElementById('yearFilter').value = '';
+  document.getElementById('ordinalFilter').value = '';
+  applyFilter();
+});
+document.getElementById('subjectFilter').addEventListener('change', () => {
+  document.getElementById('yearFilter').value = '';
+  document.getElementById('ordinalFilter').value = '';
+  applyFilter();
+});
+document.getElementById('yearFilter').addEventListener('change', () => {
+  document.getElementById('ordinalFilter').value = '';
+  applyFilter();
+});
 document.getElementById('ordinalFilter').addEventListener('change', applyFilter);
 load();
 </script>

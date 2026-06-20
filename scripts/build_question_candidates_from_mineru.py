@@ -24,18 +24,26 @@ ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 PAIR_INDEX_DIR = ASSET_ROOT / "Registry" / "paired_indexes"
 OUTPUT_ROOT = ASSET_ROOT / "30_normalized_items"
 MINERU_ROOT = ASSET_ROOT / "20_mineru_output"
-PARSER_VERSION = "moex_mineru_candidate_v0.1"
+PARSER_VERSION = "moex_mineru_candidate_v0.3"
 
 OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．])\s*")
-QUESTION_START_RE = re.compile(r"(?m)^(\d{1,3})[\.、．]?\s+(.+)$")
+QUESTION_START_RE_MODERN = re.compile(r"(?m)^(\d{1,3})[\.、．]\s*(\S.*)$")
+QUESTION_START_RE_LEGACY = re.compile(r"(?m)^(\d{1,3})(?:[\.、．]\s*|\s+)(\S.*)$")
 IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HTML_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.I)
 DETAILS_BLOCK_RE = re.compile(r"<details\b.*?</details>", re.S | re.I)
 STANDALONE_IMAGE_RE = re.compile(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$")
 GROUP_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:至|到|~|～|-|－)\s*(\d{1,3})\s*題")
-IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|圖示|圖中|附圖|圖片|照片|影像|心電圖|X光|x光|切片|表格|下表|如下表)")
+IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|如附圖|附圖|圖示|圖中|圖片|照片|影像如下|X光片|x光片|切片圖|表格如下|下表|如下表)")
 SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
 MARKUP_HINT_RE = re.compile(r"(<sub>|<sup>|\\[a-zA-Z]+|[α-ωΑ-ΩⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]|[A-Za-z][0-9][A-Za-z0-9]*|\^[0-9+-]+)")
+OCR_CHAR_MAP = str.maketrans(
+    {
+        "羟": "羥",
+        "钙": "鈣",
+        "减": "減",
+    }
+)
 
 
 @dataclass
@@ -110,6 +118,7 @@ def mineru_md_for_pdf(pdf_value: str) -> Path | None:
 def normalize_text(value: str) -> str:
     value = DETAILS_BLOCK_RE.sub("", value)
     value = STANDALONE_IMAGE_RE.sub("", value)
+    value = value.translate(OCR_CHAR_MAP)
     lines = [line.strip() for line in value.replace("\u3000", " ").splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines).strip()
@@ -162,8 +171,18 @@ def parse_question_block(number: str, body: str, md_path: Path) -> dict[str, Any
     }
 
 
-def parse_questions(markdown: str, md_path: Path) -> list[dict[str, Any]]:
-    starts = list(QUESTION_START_RE.finditer(markdown))
+def question_start_re_for_year(year: str | None) -> re.Pattern[str]:
+    try:
+        roc_year = int(year or "")
+    except ValueError:
+        roc_year = 999
+    if roc_year <= 105:
+        return QUESTION_START_RE_LEGACY
+    return QUESTION_START_RE_MODERN
+
+
+def parse_questions(markdown: str, md_path: Path, year: str | None = None) -> list[dict[str, Any]]:
+    starts = list(question_start_re_for_year(year).finditer(markdown))
     questions: list[dict[str, Any]] = []
     for index, start in enumerate(starts):
         number = start.group(1)
@@ -194,6 +213,13 @@ def parse_correction_notes(markdown: str) -> dict[str, list[str]]:
     return notes
 
 
+def normalize_question_number(value: str) -> str | None:
+    match = re.search(r"\d{1,3}", str(value))
+    if not match:
+        return None
+    return str(int(match.group(0)))
+
+
 def parse_answers(markdown: str) -> dict[str, dict[str, Any]]:
     corrections = parse_correction_notes(markdown)
     answers: dict[str, dict[str, Any]] = {}
@@ -212,7 +238,9 @@ def parse_answers(markdown: str) -> dict[str, dict[str, Any]]:
         if not question_numbers or not answer_values:
             continue
         for number, answer in zip(question_numbers, answer_values):
-            number_key = str(int(number))
+            number_key = normalize_question_number(number)
+            if number_key is None:
+                continue
             if answer == "#" and number_key in corrections:
                 accepted = corrections[number_key]
                 answers[number_key] = {
@@ -314,7 +342,7 @@ def candidate_issues(candidate: dict[str, Any]) -> list[Issue]:
             add_issue(issues, key, source, number, "empty_image_asset", "error", "圖片檔案大小為 0。", ref)
     stem_markup = candidate.get("stem_markup") or {}
     if stem_markup.get("needs_review"):
-        add_issue(issues, key, source, number, "markup_needs_review", "info", "題幹含公式、上下標或 markup，建議人工預覽。")
+        add_issue(issues, key, source, number, "markup_needs_review", "warning", "題幹含公式、上下標或 markup，建議人工預覽。")
     return issues
 
 
@@ -347,7 +375,7 @@ def quality_status(issues: list[Issue]) -> str:
     severities = {issue.severity for issue in issues}
     if "blocked" in severities or "error" in severities:
         return "blocked"
-    if "warning" in severities or "info" in severities:
+    if "warning" in severities:
         return "needs_review"
     return "pass"
 
@@ -373,7 +401,7 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
         return [], [issue], meta
     q_text = q_md.read_text(encoding="utf-8", errors="replace")
     a_text = a_md.read_text(encoding="utf-8", errors="replace")
-    parsed_questions = parse_questions(q_text, q_md)
+    parsed_questions = parse_questions(q_text, q_md, row.get("year"))
     answers = parse_answers(a_text)
     candidates: list[dict[str, Any]] = []
     issues: list[Issue] = []

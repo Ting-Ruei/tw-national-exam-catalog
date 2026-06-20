@@ -221,13 +221,23 @@ Review UI 右側 PDF 檢視提供三種來源：
 - `MinerU layout`：MinerU 產出的 layout PDF，通常會以色塊或框線標示版面分區，適合判斷 MinerU 是否已經切壞。
 - `MinerU origin`：MinerU 輸出資料夾中的原始 PDF 複本，適合和官方 PDF 對照。
 
-人工審核預設只顯示 `未看過` 的題目。可用上方選單依考別、科目、年份、考次、parser 狀態與審核狀態篩選；篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在同資料夾保留 `review_ui_preferences.json` 備援。下一次開啟 Review UI 會回到上次進度。
+人工審核可用上方選單依考別、科目、年份、考次、parser 狀態與審核狀態篩選。篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在同資料夾保留 `review_ui_preferences.json` 備援。下一次開啟 Review UI 會回到上次進度；開頁後若切換成 `全部審核`、`未看過`、`未通過`、`全部狀態` 或其他篩選，畫面當下的選擇就是新的偏好，會同步保存，不能再被舊設定覆蓋。
+
+`quality_status=pass` 只表示目前 parser 的機械規則沒有抓到 error/warning，不等於正式入庫通過。正式入庫仍需人工按下 `通過`，且後續答案核對關卡也要完成。自 `moex_mineru_candidate_v0.3` 起，題幹含公式、上下標或 markup 的 `markup_needs_review` 會進 `needs_review`，避免科學符號題被過早視為低風險。
 
 按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。右側 PDF 不會因為按鈕刷新而跳回頂端；只有切換題目或切換 PDF 來源時才會載入新的 PDF。
 
 題目審核畫面主要檢查題幹、選項、圖片、題組與 parser 切題品質。畫面仍會顯示目前 parser 抓到的答案，方便完整核對資料；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在後續獨立的 `answer_review_events` 關卡集中判定。
 
 若題目含圖片，圖片會直接融合在題目預覽卡片中，並保留下方圖片來源總覽，方便同時比對題文、圖片與右側 PDF。
+
+parser 的題號偵測會依年份切換規則：早期卷面可能使用 `1 題幹`，新版卷面多為 `1.` / `1、` / `1．`。目前 `105` 年以前使用 legacy 題號規則，`106` 年起使用較嚴格的 modern 題號規則，避免把內文數字誤切成新題。
+
+審核紀錄是 append-only。後續分析 parser 問題時，應以每題最新事件為準：若最後一次動作是 `通過`、`修正`、`標記已看過` 或 `解除阻擋`，舊的 `阻擋入庫` / `保留疑問` 註記只視為歷史，不再當成待修問題。可用以下指令查看目前仍有效的註記：
+
+```bash
+python3 scripts/summarize_active_review_notes.py
+```
 
 頁面上的 `資料庫層級` 按鈕可查看目前資料在各層的位置與數量，包括來源 PDF/MinerU raw、題目 candidate、QA flags、題目人工審核、答案核對與正式題庫表。
 

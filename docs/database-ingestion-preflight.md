@@ -147,11 +147,21 @@ docker compose logs -f review-ui
 
 目前 UI 預設讀取最新的 candidate JSONL 與 issue CSV。人工審核結果會寫回 candidate 資料夾裡的 `question_review_events.jsonl`。
 
-上方篩選器可依考別、科目、年份、考次、parser 狀態與審核狀態縮小範圍。篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在 candidate 資料夾保留 `review_ui_preferences.json` 備援。
+上方篩選器可依考別、科目、年份、考次、parser 狀態與審核狀態縮小範圍。篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在 candidate 資料夾保留 `review_ui_preferences.json` 備援。偏好只在頁面初次載入時還原；開頁後使用者切換成 `全部審核`、`未看過`、`未通過`、`全部狀態` 或其他篩選時，畫面當下選擇會立即成為新的偏好，避免舊資料庫設定把下拉選單拉回去。
+
+`quality_status=pass` 只代表目前 QA flags 沒有 error/warning，不代表題目已經可以正式入庫。正式入庫至少還要人工審核事件為 `accept` 或明確校正通過，並完成後續答案核對。自 `moex_mineru_candidate_v0.3` 起，`markup_needs_review` 從 info 提升為 warning，因此含公式、上下標、希臘字母、羅馬數字或 MinerU markup 的題目會先進 `needs_review`，讓人工優先確認顯示品質。
 
 題目審核畫面仍顯示目前 parser 抓到的答案，避免遮蔽資訊；但答案是否正確、`MOD` / `ANS` 優先序與答案表解析，會在下一個 `answer_review_events` 關卡統一核對。
 
 題目含圖片時，Review UI 會將圖片直接放入題目預覽卡片，也會保留下方圖片來源總覽。右側 PDF 檢視不會因為審核按鈕刷新而跳回頂端，只有切換題目或 PDF 來源時才重新載入。
+
+parser 題號偵測需依歷史卷面格式切換。早期卷面可能是 `1 題幹`，新版卷面則常見 `1.` / `1、` / `1．`，且有時標點後沒有空格。現行規則以民國 `105` 年以前為 legacy，民國 `106` 年起為 modern；若後續人工審核發現某類科分界不同，應記錄在歷史變革文件並調整規則。
+
+審核紀錄採 append-only。分析人工註記或交給 AI 修 parser 時，必須只看每題最新事件；如果某題後來被標成 `accept`、`correct`、`reviewed` 或 `unblock`，舊的 `block` / `needs_review` 註記只保留為歷史，不再視為待修問題。查看目前仍有效註記：
+
+```bash
+python3 scripts/summarize_active_review_notes.py
+```
 
 右側 PDF 檢視提供三種來源：
 
