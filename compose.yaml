@@ -27,6 +27,11 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       DATABASE_URL: "postgresql://${POSTGRES_USER:-national_exam}:${POSTGRES_PASSWORD:-national_exam_dev_password}@postgres:5432/${POSTGRES_DB:-tw_national_exam_dev}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4.1-mini}"
+      OPENAI_REVIEW_MODEL: "${OPENAI_REVIEW_MODEL:-gpt-4.1-mini}"
+      OPENAI_REVIEW_TIMEOUT: "${OPENAI_REVIEW_TIMEOUT:-45}"
+      REVIEW_UI_BACKEND: "${REVIEW_UI_BACKEND:-sql}"
     ports:
       - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_PORT:-8765}:8765"
     volumes:
@@ -34,7 +39,7 @@ services:
     command:
       - sh
       - -c
-      - python3 -m pip install -q -r requirements/review-ui.txt && python3 scripts/serve_question_review_ui.py --host 0.0.0.0 --port 8765
+      - python3 -m pip install -q -r requirements/review-ui.txt && python3 scripts/serve_question_review_ui.py --host 0.0.0.0 --port 8765 --review-backend "$${REVIEW_UI_BACKEND:-sql}"
     depends_on:
       postgres:
         condition: service_healthy

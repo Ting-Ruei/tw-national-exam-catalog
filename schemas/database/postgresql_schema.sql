@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS exam.question_groups (
     group_key TEXT NOT NULL UNIQUE,
     shared_stem_text TEXT,
     shared_stem_json JSONB,
+    display_markup_json JSONB,
+    asset_policy_json JSONB,
     source_page_start INTEGER,
     source_page_end INTEGER,
     source_bbox JSONB,
@@ -125,8 +127,11 @@ CREATE TABLE IF NOT EXISTS exam.questions (
     question_key TEXT NOT NULL UNIQUE,
     question_number TEXT NOT NULL,
     question_text TEXT,
+    normalized_text TEXT,
+    display_text TEXT,
     question_markup_json JSONB,
     question_raw_json JSONB,
+    human_corrected_json JSONB,
     source_page_start INTEGER,
     source_page_end INTEGER,
     source_bbox JSONB,
@@ -142,8 +147,11 @@ CREATE TABLE IF NOT EXISTS exam.question_options (
     question_id BIGINT NOT NULL REFERENCES exam.questions(id),
     option_label TEXT NOT NULL,
     option_text TEXT,
+    normalized_text TEXT,
+    display_text TEXT,
     option_markup_json JSONB,
     option_raw_json JSONB,
+    human_corrected_json JSONB,
     option_json JSONB,
     UNIQUE (question_id, option_label)
 );
@@ -161,10 +169,11 @@ CREATE TABLE IF NOT EXISTS exam.answers (
 CREATE TABLE IF NOT EXISTS exam.question_assets (
     question_id BIGINT NOT NULL REFERENCES exam.questions(id),
     asset_id BIGINT NOT NULL REFERENCES exam.assets(id),
-    role TEXT NOT NULL CHECK (role IN ('page_image', 'figure', 'stem_figure', 'table', 'option_image', 'source_pdf_region', 'answer_explanation_image', 'other')),
+    role TEXT NOT NULL CHECK (role IN ('page_image', 'figure', 'stem_figure', 'table', 'table_structured', 'table_manual_screenshot', 'option_image', 'source_pdf_region', 'answer_explanation_image', 'group_shared_asset', 'other')),
     page_number INTEGER,
     bbox JSONB,
     source_mineru_block_id TEXT,
+    display_order INTEGER,
     asset_quality_status TEXT NOT NULL DEFAULT 'unreviewed',
     PRIMARY KEY (question_id, asset_id, role)
 );
@@ -209,8 +218,9 @@ CREATE TABLE IF NOT EXISTS exam.question_review_events (
     candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
     candidate_key TEXT NOT NULL,
     reviewer TEXT,
-    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed')),
+    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'exclude', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review')),
     corrected_candidate_json JSONB,
+    event_json JSONB,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -221,9 +231,48 @@ CREATE TABLE IF NOT EXISTS exam.answer_review_events (
     candidate_key TEXT NOT NULL,
     answer_source_registry_key TEXT,
     reviewer TEXT,
-    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed')),
+    action TEXT NOT NULL CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review')),
     reviewed_answer_json JSONB,
     corrected_answer_json JSONB,
+    event_json JSONB,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS exam.model_runs (
+    id BIGSERIAL PRIMARY KEY,
+    task_type TEXT NOT NULL CHECK (task_type IN ('question_format_audit', 'answer_audit', 'explanation', 'relation', 'concept_map_spec', 'verification', 'embedding', 'rerank')),
+    provider TEXT NOT NULL DEFAULT 'local',
+    model_name TEXT,
+    prompt_version TEXT,
+    input_hash TEXT,
+    input_token_count INTEGER,
+    output_token_count INTEGER,
+    estimated_cost_usd NUMERIC(12,6),
+    status TEXT NOT NULL DEFAULT 'succeeded' CHECK (status IN ('planned', 'running', 'succeeded', 'failed', 'skipped')),
+    request_json JSONB,
+    response_json JSONB,
+    error_message TEXT,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS exam.question_ai_review_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    model_run_id BIGINT REFERENCES exam.model_runs(id) ON DELETE SET NULL,
+    action TEXT NOT NULL DEFAULT 'ai_audit',
+    reviewer TEXT,
+    provider TEXT NOT NULL DEFAULT 'local',
+    model_name TEXT,
+    prompt_version TEXT,
+    input_hash TEXT,
+    audit_status TEXT NOT NULL CHECK (audit_status IN ('pass', 'needs_review', 'block')),
+    recommended_action TEXT,
+    audit_json JSONB NOT NULL,
+    event_json JSONB,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -269,3 +318,47 @@ CREATE INDEX IF NOT EXISTS idx_question_parse_issues_candidate ON exam.question_
 CREATE INDEX IF NOT EXISTS idx_question_parse_issues_severity ON exam.question_parse_issues (severity, issue_code);
 CREATE INDEX IF NOT EXISTS idx_question_review_events_candidate ON exam.question_review_events (candidate_key);
 CREATE INDEX IF NOT EXISTS idx_answer_review_events_candidate ON exam.answer_review_events (candidate_key);
+CREATE INDEX IF NOT EXISTS idx_question_ai_review_events_candidate ON exam.question_ai_review_events (candidate_key);
+CREATE INDEX IF NOT EXISTS idx_question_review_events_latest ON exam.question_review_events (candidate_key, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_answer_review_events_latest ON exam.answer_review_events (candidate_key, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_ai_review_events_latest ON exam.question_ai_review_events (candidate_key, created_at DESC, id DESC);
+
+ALTER TABLE exam.question_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
+ALTER TABLE exam.answer_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
+ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'ai_audit';
+ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
+
+ALTER TABLE exam.question_review_events DROP CONSTRAINT IF EXISTS question_review_events_action_check;
+ALTER TABLE exam.question_review_events
+ADD CONSTRAINT question_review_events_action_check
+CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'exclude', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review'));
+
+ALTER TABLE exam.answer_review_events DROP CONSTRAINT IF EXISTS answer_review_events_action_check;
+ALTER TABLE exam.answer_review_events
+ADD CONSTRAINT answer_review_events_action_check
+CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review'));
+
+CREATE INDEX IF NOT EXISTS idx_question_candidates_category_subject_year
+ON exam.question_candidates (
+    (raw_candidate_json->'metadata'->>'normalized_category_name'),
+    (raw_candidate_json->'metadata'->>'normalized_subject_name'),
+    (raw_candidate_json->'metadata'->>'year'),
+    (raw_candidate_json->'metadata'->>'exam_ordinal')
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_candidates_review_ui_filter_sort
+ON exam.question_candidates (
+    (COALESCE(raw_candidate_json->'metadata'->>'normalized_category_name', '')),
+    (COALESCE(raw_candidate_json->'metadata'->>'normalized_subject_name', '')),
+    ((CASE WHEN COALESCE(raw_candidate_json->'metadata'->>'year', '') ~ '^[0-9]+$'
+        THEN (raw_candidate_json->'metadata'->>'year')::integer ELSE 0 END)) DESC,
+    ((CASE WHEN COALESCE(raw_candidate_json->'metadata'->>'exam_ordinal', '') ~ '^[0-9]+$'
+        THEN (raw_candidate_json->'metadata'->>'exam_ordinal')::integer ELSE 0 END)) DESC,
+    ((CASE WHEN question_number ~ '^[0-9]+$' THEN question_number::integer ELSE 0 END)),
+    candidate_key
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_candidates_question_number
+ON exam.question_candidates (
+    (CASE WHEN question_number ~ '^[0-9]+$' THEN question_number::integer ELSE NULL END)
+);

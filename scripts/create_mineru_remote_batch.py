@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 import time
 from dataclasses import asdict, dataclass
@@ -20,7 +21,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 PDF_ROOT = ASSET_ROOT / "10_official_pdf" / "by_official_catalog"
 OUTPUT_ROOT = ASSET_ROOT / "20_mineru_output" / "by_official_catalog"
 REGISTRY_ROOT = ASSET_ROOT / "Registry"
@@ -55,8 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--group", action="append", help="Filter group_name. Repeatable.")
     parser.add_argument("--year-start", type=int)
     parser.add_argument("--year-end", type=int)
-    parser.add_argument("--pdf-index", type=Path, default=latest_csv(PDF_INDEX_DIR, "pdf_asset_index_detail__*.csv"))
-    parser.add_argument("--pair-index", type=Path, default=latest_csv(PAIR_INDEX_DIR, "question_answer_pairs_detail__*.csv"))
+    parser.add_argument("--pdf-index", type=Path)
+    parser.add_argument("--pair-index", type=Path)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTGOING_ROOT)
     parser.add_argument("--batch-mode", choices=["manifest-only", "copy-pdfs"], default="manifest-only")
     parser.add_argument("--stamp", default=time.strftime("%Y%m%d-%H%M%S"))
@@ -164,6 +165,11 @@ def add_candidate(candidates: dict[str, Candidate], candidate: Candidate) -> Non
 def build_candidates(args: argparse.Namespace) -> list[Candidate]:
     groups = set(args.group) if args.group else None
     candidates: dict[str, Candidate] = {}
+
+    if args.pdf_index is None:
+        args.pdf_index = latest_csv(PDF_INDEX_DIR, "pdf_asset_index_detail__*.csv")
+    if args.scope in {"paired-primary", "questions-only"} and args.pair_index is None:
+        args.pair_index = latest_csv(PAIR_INDEX_DIR, "question_answer_pairs_detail__*.csv")
 
     if args.scope in {"paired-primary", "questions-only"}:
         for row in read_csv(args.pair_index):
@@ -284,7 +290,7 @@ def copy_support_scripts(batch_dir: Path) -> None:
 
 def create_batch(batch_dir: Path, candidates: list[Candidate], args: argparse.Namespace) -> dict[str, object]:
     pdf_index_rows = read_csv(args.pdf_index)
-    pair_rows = read_csv(args.pair_index)
+    pair_rows = read_csv(args.pair_index) if args.pair_index else []
     batch_dir.mkdir(parents=True, exist_ok=False)
     (batch_dir / "logs").mkdir()
     (batch_dir / "國考題資料夾" / "20_mineru_output" / "by_official_catalog").mkdir(parents=True)

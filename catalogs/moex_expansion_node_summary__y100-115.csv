@@ -1,0 +1,9 @@
+﻿node_id,node_label,priority,catalog_rows,pdf_url_documents,distinct_exam_codes,distinct_exam_category_pairs,distinct_categories,distinct_subject_names,year_min,year_max,rationale
+locked27_medical_current,醫事 locked27 現行主線,0,3197,7553,87,641,27,159,100,115,目前主要入庫與 parser 品質控管範圍。
+professional_high_other_seed,專技高普考其他類科種子集,10,5392,7335,109,886,97,386,100,115,已建立獨立資料根與 MinerU 背景 queue 的第一個非醫事拓展節點。
+professional_technical_remaining,其餘專門職業及技術人員考試,20,846,1656,55,205,20,70,100,115,專技考試但尚未納入 97 類種子集者。
+civil_service_core,公務人員高普初等與一般行政類,30,19499,28603,54,3038,212,1278,100,115,最大宗公職考試，可再按職系或共同科目拆分。
+civil_service_special,公務人員特種考試,40,32980,52993,127,5347,545,1322,100,115,警察、司法、調查、關務、外交、原民、身障、地方等特殊考試。
+promotion_rank_exam,升官等與升資考試,50,7647,11249,16,1535,346,546,100,114,公務、警察、交通等升等/升資考試。
+language_tourism,導遊領隊與外語類,60,990,2413,13,254,40,28,100,112,外語導遊、華語導遊、外語領隊、華語領隊等可獨立處理。
+other_unclassified,其他未分類節點,90,4,8,1,1,1,4,101,101,尚待人工檢查或新增規則的 catalog rows。

@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--issue-csv", type=Path, default=None)
     parser.add_argument("--postgres-db", default=os.environ.get("POSTGRES_DB", "tw_national_exam_dev"))
     parser.add_argument("--postgres-user", default=os.environ.get("POSTGRES_USER", "national_exam"))
+    parser.add_argument("--category", default="", help="Only ingest candidates whose normalized category/group name matches this value.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -142,10 +143,23 @@ def candidate_rows(candidates: list[dict[str, Any]]) -> list[dict[str, object]]:
     return rows
 
 
-def issue_rows(issues: list[dict[str, str]]) -> list[dict[str, object]]:
+def candidate_category(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") or {}
+    return str(metadata.get("normalized_category_name") or metadata.get("group_name") or "")
+
+
+def filter_candidates(candidates: list[dict[str, Any]], category: str) -> list[dict[str, Any]]:
+    if not category:
+        return candidates
+    return [item for item in candidates if candidate_category(item) == category]
+
+
+def issue_rows(issues: list[dict[str, str]], candidate_keys: set[str] | None = None) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in issues:
         candidate_key = item.get("candidate_key") or ""
+        if candidate_keys is not None and candidate_key not in candidate_keys:
+            continue
         source_registry_key = item.get("source_registry_key") or ""
         if not source_registry_key:
             continue
@@ -193,7 +207,11 @@ CREATE TABLE IF NOT EXISTS exam_staging.question_parse_issues (
     issue_json TEXT
 );
 
-TRUNCATE exam_staging.question_candidates, exam_staging.question_parse_issues;
+CREATE TABLE IF NOT EXISTS exam_staging.question_candidate_scope (
+    candidate_key TEXT PRIMARY KEY
+);
+
+TRUNCATE exam_staging.question_candidates, exam_staging.question_parse_issues, exam_staging.question_candidate_scope;
 """,
     )
 
@@ -260,13 +278,8 @@ SET source_registry_key = EXCLUDED.source_registry_key,
     updated_at = now();
 
 DELETE FROM exam.question_parse_issues existing
-USING exam_staging.question_parse_issues s
-WHERE existing.candidate_key = s.candidate_key
-   OR (
-        existing.candidate_key IS NULL
-        AND existing.source_registry_key = s.source_registry_key
-        AND existing.issue_code = s.issue_code
-      );
+USING exam_staging.question_candidate_scope s
+WHERE existing.candidate_key = s.candidate_key;
 
 INSERT INTO exam.question_parse_issues (
     candidate_id,
@@ -287,6 +300,25 @@ SELECT
     COALESCE(NULLIF(s.issue_json, '')::jsonb, '{}'::jsonb)
 FROM exam_staging.question_parse_issues s
 LEFT JOIN exam.question_candidates c ON c.candidate_key = NULLIF(s.candidate_key, '');
+
+DELETE FROM exam.question_candidates c
+WHERE COALESCE(
+        c.raw_candidate_json->'metadata'->>'normalized_category_name',
+        c.raw_candidate_json->'metadata'->>'group_name',
+        ''
+    ) IN (
+        SELECT DISTINCT COALESCE(
+            s.raw_candidate_json::jsonb->'metadata'->>'normalized_category_name',
+            s.raw_candidate_json::jsonb->'metadata'->>'group_name',
+            ''
+        )
+        FROM exam_staging.question_candidates s
+    )
+  AND NOT EXISTS (
+        SELECT 1
+        FROM exam_staging.question_candidate_scope scope
+        WHERE scope.candidate_key = c.candidate_key
+    );
 """,
     )
 
@@ -312,13 +344,17 @@ ORDER BY severity, issue_code;
 def main() -> None:
     args = parse_args()
     candidate_path, issue_path = resolve_defaults(args)
-    candidates = read_jsonl(candidate_path)
+    all_candidates = read_jsonl(candidate_path)
+    candidates = filter_candidates(all_candidates, args.category)
+    candidate_keys = {str(item.get("candidate_key")) for item in candidates if item.get("candidate_key")}
     issues = read_issues(issue_path)
     c_rows = candidate_rows(candidates)
-    i_rows = issue_rows(issues)
+    i_rows = issue_rows(issues, candidate_keys if args.category else None)
+    scope_rows = [{"candidate_key": key} for key in sorted(candidate_keys)]
     summary = {
         "candidate_jsonl": str(candidate_path),
         "issue_csv": str(issue_path),
+        "category": args.category or None,
         "candidate_rows": len(c_rows),
         "issue_rows": len(i_rows),
         "quality_status_counts": {
@@ -332,6 +368,7 @@ def main() -> None:
 
     create_staging(args)
     copy_table(args, "exam_staging.question_candidates", c_rows, list(c_rows[0].keys()) if c_rows else [])
+    copy_table(args, "exam_staging.question_candidate_scope", scope_rows, ["candidate_key"])
     copy_table(args, "exam_staging.question_parse_issues", i_rows, list(i_rows[0].keys()) if i_rows else [])
     apply_upserts(args)
     print_db_summary(args)
@@ -339,4 +376,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

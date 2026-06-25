@@ -12,7 +12,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ASSET_ROOT="${ASSET_ROOT:-$PROJECT_ROOT/國考題資料夾}"
-BATCH_ROOT="$PROJECT_ROOT/國考題資料夾/Registry/mineru_remote_batches"
+BATCH_ROOT="$ASSET_ROOT/Registry/mineru_remote_batches"
 OUTGOING_ROOT="$BATCH_ROOT/outgoing"
 LOCAL_RUNNING_ROOT="$BATCH_ROOT/local_running"
 LOCAL_DONE_ROOT="$BATCH_ROOT/local_done"
@@ -185,7 +185,7 @@ PY
     --output-root "$ASSET_ROOT/20_mineru_output/by_official_catalog" \
     --timeout-seconds "$TIMEOUT_SECONDS" \
     2>&1 | tee -a "$QUEUE_LOG"; then
-    if ! after_latest="$(latest_result_csv_since "$run_started_epoch" "$PROJECT_ROOT/國考題資料夾/Registry/mineru_runs")"; then
+    if ! after_latest="$(latest_result_csv_since "$run_started_epoch" "$ASSET_ROOT/Registry/mineru_runs")"; then
       mv "$running_dir" "$LOCAL_FAILED_ROOT/$batch_name"
       echo "Failed batch (no new result csv): $batch_name" | tee -a "$QUEUE_LOG"
       continue

@@ -42,7 +42,9 @@ class CatalogRow:
     year: int
     exam_code: str
     exam_label: str
+    exam_level: str
     category_code: str
+    category_label: str
     category_name: str
     subject_code: str
     subject_name: str
@@ -72,7 +74,9 @@ def read_catalog(path: Path) -> list[CatalogRow]:
                     year=int(row["year"]),
                     exam_code=row["exam_code"],
                     exam_label=row["exam_label"],
+                    exam_level=row["exam_level"],
                     category_code=row["category_code"],
+                    category_label=row["category_label"],
                     category_name=row["category_name"],
                     subject_code=row["subject_code"],
                     subject_name=row["subject_name"],
@@ -138,6 +142,17 @@ def filename_for(row: CatalogRow, exam_ordinal_value: int, role_suffix: str, col
     return f"{row.year}{exam_ordinal_value}_{category}_{subject}{collision_suffix}{role_suffix}.pdf"
 
 
+def official_track_filename_for(
+    row: CatalogRow,
+    exam_ordinal_value: int,
+    role_suffix: str,
+    collision_suffix: str = "",
+) -> str:
+    category = normalize_filename_part(row.category_name) or "no_category_name"
+    subject = normalize_filename_part(row.subject_name) or "no_subject_name"
+    return f"{row.year}{exam_ordinal_value}_C{row.category_code}_{category}_{subject}{collision_suffix}{role_suffix}.pdf"
+
+
 def destination_for(
     output_root: Path,
     row: CatalogRow,
@@ -152,6 +167,27 @@ def destination_for(
         / str(row.year)
         / f"第{exam_ordinal_value}次"
         / filename_for(row, exam_ordinal_value, role_suffix, collision_suffix)
+    )
+
+
+def official_track_destination_for(
+    output_root: Path,
+    row: CatalogRow,
+    exam_ordinal_value: int,
+    role_suffix: str,
+    collision_suffix: str = "",
+) -> Path:
+    exam_level_dir = normalize_filename_part(row.exam_level) or "no_exam_level"
+    category_label_dir = normalize_filename_part(row.category_label) or "no_category_label"
+    category_dir = f"C{row.category_code}_{normalize_filename_part(row.category_name) or 'no_category_name'}"
+    return (
+        output_root
+        / exam_level_dir
+        / category_label_dir
+        / category_dir
+        / str(row.year)
+        / f"第{exam_ordinal_value}次"
+        / official_track_filename_for(row, exam_ordinal_value, role_suffix, collision_suffix)
     )
 
 
@@ -177,11 +213,22 @@ def download(url: str, dest: Path, overwrite: bool) -> tuple[str, int, str]:
     return "downloaded", len(payload), hashlib.sha256(payload).hexdigest()
 
 
-def filtered_rows(rows: list[CatalogRow], category: str, year_start: int, year_end: int) -> list[CatalogRow]:
+def filtered_rows(
+    rows: list[CatalogRow],
+    category: str,
+    year_start: int,
+    year_end: int,
+    exam_level: str = "",
+    category_label: str = "",
+    category_code: str = "",
+) -> list[CatalogRow]:
     return [
         r
         for r in rows
         if r.category_name == category and year_end <= r.year <= year_start
+        and (not exam_level or r.exam_level == exam_level)
+        and (not category_label or r.category_label == category_label)
+        and (not category_code or r.category_code == category_code)
     ]
 
 
@@ -229,7 +276,15 @@ def write_subject_variant_report(rows: list[CatalogRow], log_dir: Path, category
 
 
 def run(args: argparse.Namespace) -> int:
-    rows = filtered_rows(read_catalog(args.catalog), args.category, args.year_start, args.year_end)
+    rows = filtered_rows(
+        read_catalog(args.catalog),
+        args.category,
+        args.year_start,
+        args.year_end,
+        args.exam_level,
+        args.category_label,
+        args.category_code,
+    )
     if not rows:
         raise SystemExit(f"No catalog rows found for category={args.category!r} years={args.year_end}-{args.year_start}")
     exam_ordinals = compute_exam_ordinals(rows)
@@ -238,10 +293,11 @@ def run(args: argparse.Namespace) -> int:
         key=lambda r: (-r.year, exam_ordinals[r.exam_code], r.subject_code, r.subject_name),
     )
 
-    variant_report = write_subject_variant_report(rows, args.log_dir, args.category, args.year_start, args.year_end)
+    artifact_label = getattr(args, "manifest_label", "") or args.category
+    variant_report = write_subject_variant_report(rows, args.log_dir, artifact_label, args.year_start, args.year_end)
     args.manifest_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    manifest_path = args.manifest_dir / f"moex_pdf_download__{args.category}__y{args.year_end}-{args.year_start}__{stamp}.csv"
+    manifest_path = args.manifest_dir / f"moex_pdf_download__{artifact_label}__y{args.year_end}-{args.year_start}__{stamp}.csv"
 
     count = 0
     with manifest_path.open("w", newline="", encoding="utf-8") as f:
@@ -273,9 +329,15 @@ def run(args: argparse.Namespace) -> int:
                     continue
                 registry_key = f"{row.registry_key}:{role}"
                 ordinal = exam_ordinals[row.exam_code]
-                dest = destination_for(args.output_root, row, ordinal, suffix)
+                if getattr(args, "path_mode", "") == "official-track":
+                    dest = official_track_destination_for(args.output_root, row, ordinal, suffix)
+                else:
+                    dest = destination_for(args.output_root, row, ordinal, suffix)
                 if dest in planned_destinations and planned_destinations[dest] != registry_key:
-                    dest = destination_for(args.output_root, row, ordinal, suffix, f"_E{row.exam_code}")
+                    if getattr(args, "path_mode", "") == "official-track":
+                        dest = official_track_destination_for(args.output_root, row, ordinal, suffix, f"_E{row.exam_code}")
+                    else:
+                        dest = destination_for(args.output_root, row, ordinal, suffix, f"_E{row.exam_code}")
                 planned_destinations[dest] = registry_key
                 if args.limit and count >= args.limit:
                     status, size, digest = "planned_limit_reached", 0, ""
@@ -319,6 +381,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download MOEX PDFs from catalog metadata.")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--category", default="醫事檢驗師")
+    parser.add_argument("--exam-level", default="")
+    parser.add_argument("--category-label", default="")
+    parser.add_argument("--category-code", default="")
+    parser.add_argument("--manifest-label", default="")
+    parser.add_argument("--path-mode", choices=["category", "official-track"], default="category")
     parser.add_argument("--year-start", type=int, default=115)
     parser.add_argument("--year-end", type=int, default=100)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)

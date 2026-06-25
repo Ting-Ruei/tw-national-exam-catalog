@@ -12,7 +12,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BATCH_ROOT = PROJECT_ROOT / "國考題資料夾" / "Registry" / "mineru_remote_batches"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
+BATCH_ROOT = ASSET_ROOT / "Registry" / "mineru_remote_batches"
 PID_PATH = BATCH_ROOT / "local_queue__active.pid"
 
 

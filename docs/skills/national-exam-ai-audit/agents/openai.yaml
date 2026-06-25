@@ -1,0 +1,7 @@
+interface:
+  display_name: "National Exam AI Audit"
+  short_description: "Audit exam candidates for parser issues"
+  default_prompt: "Use $national-exam-ai-audit to scan selected exam candidates and emit advisory review labels."
+
+policy:
+  allow_implicit_invocation: true

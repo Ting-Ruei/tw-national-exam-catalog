@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,7 +20,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 PDF_ROOT = ASSET_ROOT / "10_official_pdf" / "by_official_catalog"
 OUTPUT_ROOT = ASSET_ROOT / "20_mineru_output" / "by_official_catalog"
 REGISTRY_ROOT = ASSET_ROOT / "Registry"
@@ -28,9 +29,9 @@ PAIR_INDEX_DIR = REGISTRY_ROOT / "paired_indexes"
 RUN_LOG_DIR = REGISTRY_ROOT / "mineru_runs"
 REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
 DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
-MINERU_METHOD = "ocr"
-MINERU_BACKEND = "vlm-engine"
-MINERU_IMAGE_ANALYSIS = False
+MINERU_METHOD = os.environ.get("MINERU_METHOD", "ocr")
+MINERU_BACKEND = os.environ.get("MINERU_BACKEND", "vlm-engine")
+MINERU_IMAGE_ANALYSIS = os.environ.get("MINERU_IMAGE_ANALYSIS", "false").lower() in {"1", "true", "yes", "on"}
 CATEGORY_DIR_ALIASES = {
     "藥師（一）": "藥師(一)",
     "藥師（二）": "藥師(二)",

@@ -13,3 +13,4 @@ mineru/
 __pycache__/
 .venv/
 .env
+.env.devspace

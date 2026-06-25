@@ -225,6 +225,22 @@ knowledge_chunk_embeddings
 
 LLM 可以回答得比課本整理更流暢，但也可能幻覺。因此不應讓 LLM 直接寫入「正式詳解」，而是寫入候選詳解。
 
+## 前置：LLM 入庫格式稽核
+
+在正式詳解與 RAG 之前，題目 candidate 需要先通過結構審核。Review UI 可呼叫 LLM 做「格式稽核」，但它只是一個輔助檢查，不取代人工審核。
+
+稽核任務：
+
+- 檢查 OCR 字形、簡繁混用、希臘字母、上下標與科學符號。
+- 檢查選項數量、選項代號、題組標籤、表格與圖片線索。
+- 將疑點寫入 `question_ai_review_events`，並關聯 `model_runs`。
+- 不自動覆蓋 `question_review_events`，也不自動讓題目通過或退回。
+
+這個通道同時支援兩種模式：
+
+- 沒有 API key：使用本機規則做低成本初篩。
+- 有 API key：呼叫外部 LLM，輸出固定 JSON schema，方便後續統計與批次重跑。
+
 建議三段式：
 
 ```text
