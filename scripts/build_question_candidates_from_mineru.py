@@ -24,7 +24,7 @@ ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 PAIR_INDEX_DIR = ASSET_ROOT / "Registry" / "paired_indexes"
 OUTPUT_ROOT = ASSET_ROOT / "30_normalized_items"
 MINERU_ROOT = ASSET_ROOT / "20_mineru_output"
-PARSER_VERSION = "moex_mineru_candidate_v0.6"
+PARSER_VERSION = "moex_mineru_candidate_v0.8"
 
 OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．·]|([A-E])-(?=[a-z]))\s*")
 INLINE_OPTION_RE = re.compile(
@@ -45,7 +45,9 @@ HTML_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.I)
 DETAILS_BLOCK_RE = re.compile(r"<details\b.*?</details>", re.S | re.I)
 STANDALONE_IMAGE_RE = re.compile(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$")
 GROUP_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:至|到|~|～|-|－)\s*(\d{1,3})\s*題")
-IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|如附圖|附圖|圖示|圖中|圖片|照片|影像如下|X光片|x光片|切片圖|表格如下|下表|如下表)")
+GROUP_PREFIX_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})\s*(?=\S)")
+GROUP_COUNT_RE = re.compile(r"回答下列\s*(\d{1,2})\s*題")
+IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|如附圖|附圖|圖示|圖中|圖片|照片|影像如下|X光片|x光片|切片圖|表中|下表|附表|如下表)")
 EXAM_HEADER_HINT_RE = re.compile(r"(代號|類科名稱|科目名稱|考試時間|座號|本試題|禁止使用電子計算器|單一選擇題)")
 SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
 MARKUP_HINT_RE = re.compile(r"(<sub>|<sup>|\\[a-zA-Z]+|[α-ωΑ-ΩⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]|[A-Za-z][0-9][A-Za-z0-9]*|\^[0-9+-]+)")
@@ -141,6 +143,8 @@ LATEX_SYMBOL_MAP = {
     "epsilon": "ε",
     "varepsilon": "ε",
     "gamma": "γ",
+    "kappa": "κ",
+    "lambda": "λ",
     "theta": "θ",
     "chi": "χ",
     "mu": "μ",
@@ -149,7 +153,7 @@ LATEX_SYMBOL_MAP = {
 
 SUBSCRIPT_DIGITS = str.maketrans("0123456789+-", "₀₁₂₃₄₅₆₇₈₉₊₋")
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789+-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻")
-SUPERSCRIPT_LETTERS = str.maketrans({"a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "k": "ᵏ", "m": "ᵐ", "n": "ⁿ", "u": "ᵘ", "w": "ʷ"})
+SUPERSCRIPT_LETTERS = str.maketrans({"a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "k": "ᵏ", "m": "ᵐ", "n": "ⁿ", "s": "ˢ", "u": "ᵘ", "w": "ʷ"})
 SUBSCRIPT_LETTERS = str.maketrans({"a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"})
 ORDINAL_SUPERSCRIPTS = {
     "st": "ˢᵗ",
@@ -278,6 +282,17 @@ def normalize_science_markup(value: str) -> str:
     value = value.replace(r"\sim", "～").replace("∼", "～")
     value = re.sub(r"\\mathrm\{([^{}]+)\}", r"\1", value)
     value = value.replace(r"\geq", "≥").replace(r"\leq", "≤")
+    # MinerU/Markdown may escape biomedical allele and variant names such as
+    # HLA-B\*5801, CYP2D6\*2, or delE746\_A750. These backslashes are display
+    # artifacts, not part of the official notation.
+    value = re.sub(r"(?<=[A-Za-z0-9])\\([*_])(?=[A-Za-z0-9])", r"\1", value)
+    value = re.sub(r"\{\}\s*(?=[⁰¹²³⁴⁵⁶⁷⁸⁹]|\d+\s*[A-Z][a-z]?)", "", value)
+    value = re.sub(r"\b(3|14|32|35|51|57|59|75|99|111|123|125|131)\s*(H|C|Cr|Co|Fe|Se|Tc|In|I|P|S)\b", lambda m: f"{m.group(1).translate(SUPERSCRIPT_DIGITS)}{m.group(2)}", value)
+    value = re.sub(r"([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s+(H|C|Cr|Co|Fe|Se|Tc|In|I|P|S)\b", r"\1\2", value)
+    value = re.sub(r"\b(LD|ID)\\*([₀₁₂₃₄₅₆₇₈₉0-9]+)\\*", lambda m: f"{m.group(1)}{m.group(2).translate(SUBSCRIPT_DIGITS)}", value)
+    value = re.sub(r"\b(LD|ID)\s*50\b", r"\1₅₀", value)
+    value = re.sub(r"\b(CD\d+)\s*([+-])(?=\s|$|[，。,；;、）)])", lambda m: f"{m.group(1)}{m.group(2).translate(SUPERSCRIPT_DIGITS)}", value)
+    value = re.sub(r"\bPrP(sc|c)\b", lambda m: "PrP" + "".join(ch.translate(SUPERSCRIPT_LETTERS) for ch in m.group(1)), value)
     value = value.replace("T_{1/2}", "T₁/₂")
     value = value.replace("t_{1/2}", "t₁/₂")
     value = value.replace(r"V_{\max}", "Vmax").replace(r"V_{max}", "Vmax")
@@ -468,9 +483,26 @@ def option_marker_start(marker: re.Match[str]) -> int:
     return marker.start(0)
 
 
+def strip_leading_question_number_marker(text: str, number: str) -> str:
+    try:
+        n = str(int(number))
+    except ValueError:
+        return text
+    superscript_n = n.translate(SUPERSCRIPT_DIGITS)
+    patterns = [
+        rf"^\s*{re.escape(n)}\s*(?:[\.．、·\-－]\s*)",
+        rf"^\s*{re.escape(superscript_n)}\s*(?:[\.．、·\-－]\s*)",
+    ]
+    cleaned = text
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1)
+    return cleaned.strip()
+
+
 def parse_question_block(number: str, body: str, md_path: Path) -> dict[str, Any]:
     markers = option_markers(body)
     stem = normalize_text(body[: option_marker_start(markers[0])] if markers else body)
+    stem = strip_leading_question_number_marker(stem, number)
     options: list[dict[str, Any]] = []
     for index, marker in enumerate(markers):
         label = option_marker_label(marker)
@@ -538,6 +570,38 @@ def split_merged_unnumbered_questions(number: str, body: str) -> list[tuple[str,
     return [(number, body[:split_at]), (next_number, body[split_at:])]
 
 
+def split_merged_inline_numbered_question(number: str, body: str) -> list[tuple[str, str]]:
+    """Split blocks where the next question number is glued to the previous option text."""
+    markers = list(INLINE_OPTION_RE.finditer(body)) or list(OPTION_RE.finditer(body))
+    labels = [option_marker_label(marker) for marker in markers]
+    if len(labels) < 4 or labels[:4] != ["A", "B", "C", "D"]:
+        return [(number, body)]
+    try:
+        current_number = int(number)
+    except ValueError:
+        return [(number, body)]
+    next_number = current_number + 1
+    if not (1 <= next_number <= 200):
+        return [(number, body)]
+
+    search_start = markers[3].end()
+    pattern = re.compile(rf"(?<!\d)({next_number})(?:[\.．、](?!\d)\s*|\s+)(\S.*)", re.S)
+    match = pattern.search(body, search_start)
+    if not match:
+        return [(number, body)]
+    next_stem = match.group(2).strip()
+    if not re.search(r"(下列|何者|何種|何項|哪一|為何|？|\?)", next_stem[:80]):
+        return [(number, body)]
+    return [(number, body[: match.start()]), (str(next_number), body[match.start(2) :])]
+
+
+def split_merged_questions(number: str, body: str) -> list[tuple[str, str]]:
+    parts: list[tuple[str, str]] = []
+    for split_number, split_body in split_merged_inline_numbered_question(number, body):
+        parts.extend(split_merged_unnumbered_questions(split_number, split_body))
+    return parts
+
+
 def question_start_re_for_year(year: str | None) -> re.Pattern[str]:
     try:
         roc_year = int(year or "")
@@ -597,7 +661,7 @@ def parse_questions(markdown: str, md_path: Path, year: str | None = None) -> li
             continue
         if is_exam_header_block(body):
             continue
-        for split_number, split_body in split_merged_unnumbered_questions(number, body):
+        for split_number, split_body in split_merged_questions(number, body):
             if is_exam_header_block(split_body):
                 continue
             questions.append(parse_question_block(split_number, split_body, md_path))
@@ -676,7 +740,49 @@ def infer_group_ref(stem: str, number: str) -> str | None:
             continue
         if a <= n <= b:
             return f"q{a:03d}-q{b:03d}"
+    prefix = GROUP_PREFIX_RANGE_RE.search(stem)
+    if prefix:
+        try:
+            n = int(number)
+            a = int(prefix.group(1))
+            b = int(prefix.group(2))
+        except ValueError:
+            return None
+        if a <= n <= b:
+            return f"q{a:03d}-q{b:03d}"
+    count = GROUP_COUNT_RE.search(stem)
+    if count:
+        try:
+            a = int(number)
+            b = a + int(count.group(1)) - 1
+        except ValueError:
+            return None
+        if b >= a:
+            return f"q{a:03d}-q{b:03d}"
     return None
+
+
+def propagate_group_refs(parsed_questions: list[dict[str, Any]]) -> None:
+    by_number: dict[int, dict[str, Any]] = {}
+    for parsed in parsed_questions:
+        try:
+            by_number[int(parsed["question_number"])] = parsed
+        except (KeyError, ValueError):
+            continue
+    for parsed in list(parsed_questions):
+        group_ref = parsed.get("group_ref")
+        if not group_ref:
+            continue
+        match = re.fullmatch(r"q(\d{3})-q(\d{3})", str(group_ref))
+        if not match:
+            continue
+        start = int(match.group(1))
+        end = int(match.group(2))
+        if not (start <= end <= start + 20):
+            continue
+        for number in range(start, end + 1):
+            if number in by_number:
+                by_number[number]["group_ref"] = group_ref
 
 
 def markup_payload(text: str) -> dict[str, Any] | None:
@@ -730,10 +836,32 @@ def candidate_issues(candidate: dict[str, Any]) -> list[Issue]:
         add_issue(issues, key, source, number, "suspicious_ocr_chars", "warning", "題幹含疑似 OCR 亂碼或佔位符。")
     labels = [item["key"] for item in options]
     raw_labels = [item["key"] for item in sorted(options, key=lambda item: item.get("raw_order", 0))]
+    doubled_ad = raw_labels[:8] == ["A", "B", "C", "D", "A", "B", "C", "D"] or labels == ["A", "A", "B", "B", "C", "C", "D", "D"]
     if len(options) < 4:
         add_issue(issues, key, source, number, "too_few_options", "error", "選項少於 4 個。", {"option_labels": labels})
     if len(labels) != len(set(labels)):
         add_issue(issues, key, source, number, "duplicate_option_label", "error", "選項標籤重複。", {"option_labels": labels})
+        if doubled_ad:
+            try:
+                next_number = int(number) + 1
+            except ValueError:
+                next_number = None
+            add_issue(
+                issues,
+                key,
+                source,
+                number,
+                "merged_next_question_suspect",
+                "blocked",
+                "選項呈現 A-D 後又出現 A-D，應優先判定為下一題黏在本題；修補時必須同時切出/新增下一題，不可只整理本題選項。",
+                {
+                    "option_labels": labels,
+                    "raw_option_labels": raw_labels,
+                    "expected_next_question_number": next_number,
+                    "repair_policy": "split_current_and_create_next_candidate",
+                    "source_of_truth": "official_pdf",
+                },
+            )
     expected_labels = list("ABCDE"[: len(labels)])
     if len(labels) >= 4 and raw_labels != expected_labels:
         add_issue(
@@ -781,6 +909,16 @@ def candidate_issues(candidate: dict[str, Any]) -> list[Issue]:
     return issues
 
 
+def expected_question_numbers_for_document(candidates: list[dict[str, Any]]) -> set[int]:
+    if not candidates:
+        return set()
+    metadata = candidates[0].get("metadata") or {}
+    category = str(metadata.get("normalized_category_name") or metadata.get("group_name") or "")
+    if category == "醫事檢驗師":
+        return set(range(1, 81))
+    return set()
+
+
 def document_issues(candidates: list[dict[str, Any]], source_registry_key: str) -> list[Issue]:
     issues: list[Issue] = []
     numbers: list[int] = []
@@ -803,6 +941,42 @@ def document_issues(candidates: list[dict[str, Any]], source_registry_key: str) 
     if missing:
         key = candidates[0]["candidate_key"]
         add_issue(issues, key, source_registry_key, "", "question_number_gap", "warning", "題號不連續，可能有缺題或 parser 未切到。", {"missing_numbers": missing[:50]})
+    fixed_expected = expected_question_numbers_for_document(candidates)
+    if fixed_expected:
+        key = candidates[0]["candidate_key"]
+        actual = {number for number in numbers if number in fixed_expected}
+        fixed_missing = sorted(fixed_expected - actual)
+        out_of_range = sorted({number for number in numbers if number not in fixed_expected})
+        if fixed_missing:
+            add_issue(
+                issues,
+                key,
+                source_registry_key,
+                "",
+                "fixed_exam_question_count_missing",
+                "blocked",
+                "此類科每份試題應有固定 80 題，但 parser 未切出完整題號。",
+                {
+                    "expected_range": [1, 80],
+                    "expected_count": 80,
+                    "actual_distinct_in_range": len(actual),
+                    "missing_numbers": fixed_missing[:80],
+                },
+            )
+        if out_of_range:
+            add_issue(
+                issues,
+                key,
+                source_registry_key,
+                "",
+                "fixed_exam_question_count_out_of_range",
+                "error",
+                "此類科每份試題應只含 1-80 題，parser 切出範圍外題號，可能誤抓 PDF 表頭或頁碼。",
+                {
+                    "expected_range": [1, 80],
+                    "out_of_range_numbers": out_of_range[:80],
+                },
+            )
     return issues
 
 
@@ -837,6 +1011,7 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
     q_text = q_md.read_text(encoding="utf-8", errors="replace")
     a_text = a_md.read_text(encoding="utf-8", errors="replace")
     parsed_questions = parse_questions(q_text, q_md, row.get("year"))
+    propagate_group_refs(parsed_questions)
     answers = parse_answers(a_text)
     candidates: list[dict[str, Any]] = []
     issues: list[Issue] = []
