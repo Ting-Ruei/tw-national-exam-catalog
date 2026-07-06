@@ -149,7 +149,7 @@ python3 scripts/serve_question_review_ui.py \
 - `exam.question_review_events`
 - `exam.answer_review_events`
 
-目前暫停未審核的自動大量寫入；已分科完成題目審核與答案核對者，可用 `scripts/promote_ready_candidates_to_formal_postgres.py` 逐科升級：
+目前暫停未審核的自動大量寫入。Review UI 採 SQL-first 流程：同一題的「題目審核」與「答案核對」都通過後，會自動同步到正式題庫表：
 
 - `exam.question_groups`
 - `exam.questions`
@@ -157,7 +157,11 @@ python3 scripts/serve_question_review_ui.py \
 - `exam.answers`
 - `exam.question_assets`
 
-正式題目表必須使用 accepted/corrected candidate 升級，不得直接從 MinerU markdown 或尚未通過答案核對的 candidate 寫入。
+正式題目表必須使用已通過人工審題與答案核對的 candidate，不得直接從 MinerU markdown 或尚未通過答案核對的 candidate 寫入。
+
+`scripts/promote_ready_candidates_to_formal_postgres.py` 保留作為批次 dry-run、歷史補同步與異常修復工具；日常審核不需要手動執行 promotion。若某題後續被退回未審、阻擋入庫或標記非題目，Review UI 會同步取消其正式可用狀態，避免資料包匯出時誤收。
+
+未來供 AI Learning Platform 匯入的題庫包，應從 `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets` 這組正式表匯出，並遵守外部平台的資料包契約：只使用相對資產路徑、保留 `source_question_key` / `source_registry_key` / package version / schema version 等 lineage，不讓平台直接依賴本專案工作目錄。
 
 ## Review UI
 

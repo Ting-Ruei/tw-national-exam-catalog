@@ -274,6 +274,8 @@ Review UI 只會自動刷新 `question_review_events.jsonl`、`answer_review_eve
 
 Review UI 的 AI 區塊只顯示已批次產生的 advisory，不再提供單題即時 `AI 格式稽核` 或 `撤回 AI 稽核` 按鈕，避免人工審核時誤觸耗費模型流量。AI advisory 只做輔助判斷：檢查疑似 OCR 字形錯誤、簡繁混用、科學符號/上下標、選項數量、圖表線索與 parser 結構疑點。結果寫入 `question_ai_review_events.jsonl`，不會自動改變人工審核狀態。若 AI 原始結果是 `pass`，但同時帶有 findings、recommended action、advisory labels 或可套用的 OCR/簡繁校正建議，Review UI 會顯示成 `AI needs_review`，避免「有建議卻看起來通過」。AI 建議校正可以在畫面中套用，但套用後只會保留為 `needs_review` 或原本的 `block` / `exclude`，並停留在同一題讓人工立即核對；必須再由人工按 `通過` 才能進下一關。ChatGPT / Codex 協作通道與 LLM 稽核規劃見 [docs/chatgpt-codex-llm-review-channel.md](/Users/tim/tw-national-exam-catalog/docs/chatgpt-codex-llm-review-channel.md)。
 
+圖片審核刻意維持簡單：畫面只分 `待處理`、`有圖`、`錯圖待改`、`沒有圖`。AI 或 Python / SQL 寬篩只負責把可能有圖表問題的題目送進圖片頁，或在 `question_ai_review_events` 留下背景 advisory；它不會出現在主要篩選狀態，也不能直接寫入人工圖片審核結果。人工按鈕只會寫入三種 `visual_review`：`visual_asset_ok`、`visual_asset_problem`、`no_visual_required`。完整流程見 [docs/visual-ai-audit-workflow.md](/Users/tim/tw-national-exam-catalog/docs/visual-ai-audit-workflow.md)。
+
 若要指派 Codex 或其他模型掃描特定考別、科目、年份或考次，請使用 repo 內的 AI 稽核 skill：[docs/skills/national-exam-ai-audit/SKILL.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/SKILL.md)。規則採「通用核心 + 科目覆寫」：所有科目先套用 [core-rules.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/core-rules.md)，再依科目讀取 [subject-overrides.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/subject-overrides.md)。AI 輸出格式見 [output-schema.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/output-schema.md)。
 
 若要穩定用 `5.4` / `5.4-mini` 逐科審核，優先使用「按科目分包」流程，避免 Review UI 的本機 heuristic 或 OpenAI API fallback 污染模型品質判斷。完整流程見 [docs/ai-audit-subject-workflow.md](/Users/tim/tw-national-exam-catalog/docs/ai-audit-subject-workflow.md)。目前可用以下指令產生每個考別＋科目的 task JSONL：
@@ -372,9 +374,9 @@ Schema: exam
 - `exam.question_review_events`：人工審核紀錄。
 - `exam.answer_review_events`：答案核對紀錄，獨立於題目結構審核。
 - `exam.review_ui_preferences`：Review UI 的篩選條件、目前題目與 PDF 模式。
-- `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets`：正式題庫表；目前只使用 `scripts/promote_ready_candidates_to_formal_postgres.py` 將已分科通過題目審核與答案核對的資料升級進入。
+- `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets`：正式題庫表；Review UI 在題目審核與答案核對都通過後會自動同步進入。題組與圖片審核屬於額外結構標籤，不阻擋正式可用狀態。
 
-正式分科入庫先 dry-run：
+若要批次檢查或修復歷史資料，可先 dry-run：
 
 ```bash
 python3 scripts/promote_ready_candidates_to_formal_postgres.py \
@@ -383,7 +385,7 @@ python3 scripts/promote_ready_candidates_to_formal_postgres.py \
   --dry-run
 ```
 
-確認題目、選項、答案與 skipped 數量後再寫入：
+確認題目、選項、答案與 skipped 數量後，可用同一腳本補同步；平常人工審核流程不需要手動執行：
 
 ```bash
 python3 scripts/promote_ready_candidates_to_formal_postgres.py \

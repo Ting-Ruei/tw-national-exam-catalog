@@ -259,11 +259,14 @@ def evaluate_candidate(
     unresolved_blocking_issues = [
         item for item in issues.get(key, [])
         if (item.get("severity") or "").lower() in BLOCKING_ISSUE_SEVERITIES
-        and not (question_ready and issue_resolved_by_effective_candidate(item, effective))
+        and not issue_resolved_by_effective_candidate(item, effective)
     ]
     if unresolved_blocking_issues:
         issue_codes = sorted({item.get("issue_code") or "unknown_issue" for item in unresolved_blocking_issues})
-        reasons.append("blocking_parse_issues=" + ",".join(issue_codes))
+        if question_ready:
+            warnings.append("blocking_parse_issues_confirmed_by_human_review=" + ",".join(issue_codes))
+        else:
+            reasons.append("blocking_parse_issues=" + ",".join(issue_codes))
     resolved_blocking_issues = [
         item for item in issues.get(key, [])
         if (item.get("severity") or "").lower() in BLOCKING_ISSUE_SEVERITIES

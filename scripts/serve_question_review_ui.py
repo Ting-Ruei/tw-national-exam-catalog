@@ -36,6 +36,11 @@ except ImportError:  # pragma: no cover - optional runtime dependency in Docker
     psycopg = None
     Jsonb = None
 
+try:
+    import promote_ready_candidates_to_formal_postgres as formal_promote
+except ImportError:  # pragma: no cover - UI can still run without formal sync helpers
+    formal_promote = None
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
@@ -232,6 +237,20 @@ def answer_payload_values(answer_payload: Any, answer: Any) -> list[str]:
             unique_values.append(value)
             seen.add(value)
     return unique_values
+
+
+def ai_visual_status(ai_audit: Any) -> str:
+    if not isinstance(ai_audit, dict):
+        return ""
+    direct = str(ai_audit.get("visual_status") or "").strip()
+    if direct in {"visual_required_likely", "visual_not_required_likely", "visual_uncertain"}:
+        return direct
+    labels = ai_audit.get("labels") if isinstance(ai_audit.get("labels"), list) else []
+    for label in labels:
+        value = str(label or "").strip()
+        if value in {"visual_required_likely", "visual_not_required_likely", "visual_uncertain"}:
+            return value
+    return ""
 
 
 def answer_choice_letters(value: str) -> list[str]:
@@ -1029,6 +1048,7 @@ class ReviewState:
         self.legacy_jsonl_backup_enabled = os.environ.get("REVIEW_UI_WRITE_LEGACY_JSONL", "1").lower() not in {"0", "false", "no"}
         self._sql_local = threading.local()
         self._sql_facets_cache: dict[str, dict[str, list[str]]] = {}
+        self._formal_sync_schema_ready = False
         if self.sql_review_enabled:
             self.candidates = []
             self.candidate_by_key = {}
@@ -1509,16 +1529,45 @@ class ReviewState:
         elif ai_review_status:
             clauses.append("ai_effective_status = %s")
             values.append(ai_review_status)
+        if visual_status not in {"", "visual", "visual_asset_pending", "visual_suspect", "visual_ok", "no_visual", "visual_problem"}:
+            visual_status = "visual_asset_pending"
         if visual_status == "visual":
-            clauses.append("visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem') AND NOT has_manual_asset AND (has_visual_asset OR has_visual_dependency OR has_structured_table)")
-        elif visual_status == "visual_asset":
-            clauses.append("visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem') AND NOT has_manual_asset AND has_visual_asset")
-        elif visual_status == "visual_missing_asset":
-            clauses.append("visual_review_status = '' AND has_visual_dependency AND NOT has_visual_asset AND NOT has_structured_table")
-        elif visual_status == "table":
-            clauses.append("visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem') AND NOT has_manual_asset AND has_structured_table")
-        elif visual_status == "manual_asset":
-            clauses.append("has_manual_asset")
+            clauses.append(
+                """
+                visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
+                AND NOT has_manual_asset
+                AND (
+                    has_visual_asset
+                    OR has_structured_table
+                    OR visual_ai_status IN ('visual_required_likely', 'visual_uncertain')
+                    OR (has_visual_dependency AND visual_ai_status = '')
+                )
+                """
+            )
+        elif visual_status == "visual_asset_pending":
+            clauses.append(
+                """
+                visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
+                AND NOT has_manual_asset
+                AND (
+                    has_visual_asset
+                    OR has_structured_table
+                )
+                """
+            )
+        elif visual_status == "visual_suspect":
+            clauses.append(
+                """
+                visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
+                AND NOT has_manual_asset
+                AND NOT has_visual_asset
+                AND NOT has_structured_table
+                AND (
+                    visual_ai_status IN ('visual_required_likely', 'visual_uncertain')
+                    OR (has_visual_dependency AND visual_ai_status = '')
+                )
+                """
+            )
         elif visual_status == "visual_ok":
             clauses.append("(visual_review_status = 'visual_asset_ok' OR has_manual_asset)")
         elif visual_status == "no_visual":
@@ -1570,7 +1619,7 @@ latest_visual AS (
         created_at,
         id
     FROM exam.question_review_events
-    WHERE action = 'human_review_pdf_visual'
+    WHERE corrected_candidate_json ? 'visual_review'
     ORDER BY candidate_key, id DESC
 ),
 latest_answer AS (
@@ -1737,6 +1786,22 @@ base AS (
             WHEN COALESCE(lai.audit_json, '{{}}'::jsonb) ? 'suggested_correction' THEN 'needs_review'
             ELSE COALESCE(lai.audit_status, 'pass')
         END AS ai_effective_status,
+        COALESCE(
+            NULLIF(lai.audit_json->>'visual_status', ''),
+            (
+                SELECT label.value
+                FROM jsonb_array_elements_text(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(lai.audit_json->'labels', '[]'::jsonb)) = 'array'
+                            THEN COALESCE(lai.audit_json->'labels', '[]'::jsonb)
+                        ELSE '[]'::jsonb
+                    END
+                ) AS label(value)
+                WHERE label.value IN ('visual_required_likely', 'visual_not_required_likely', 'visual_uncertain')
+                LIMIT 1
+            ),
+            ''
+        ) AS visual_ai_status,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'year', '') ~ '^[0-9]+$'
             THEN (c.raw_candidate_json->'metadata'->>'year')::integer ELSE 0 END AS year_sort,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'exam_ordinal', '') ~ '^[0-9]+$'
@@ -2126,7 +2191,7 @@ filtered AS (
                     (keys,),
                 )
                 for key, action, correction, event_json, notes, reviewer, created_at in cur.fetchall():
-                    if action in GROUP_REVIEW_ACTIONS:
+                    if action in NON_QUESTION_REVIEW_ACTIONS:
                         counts[key] = counts.get(key, 0) + 1
                         continue
                     event = self._db_event_value(
@@ -2345,6 +2410,19 @@ filtered AS (
                 saved.append(self.append_review(event))
             except SqlWriteError as exc:
                 skipped.append({"candidate_key": key, "reason": f"sql_write_failed: {exc}"})
+        if self.sql_review_enabled and seen:
+            with self._sql_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE exam.questions
+                        SET question_group_id = NULL,
+                            group_sequence_no = NULL
+                        WHERE question_key = ANY(%s)
+                        """,
+                        (list(seen),),
+                    )
+                conn.commit()
         return {"saved": saved, "skipped": skipped}
 
     def reset_group_review(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "", group_sheet_key: str = "") -> dict[str, Any]:
@@ -2886,6 +2964,7 @@ filtered AS (
             "status": "reviewed" if latest_ai_review else "unreviewed",
             "audit_status": effective_ai_audit_status(ai_audit, ai_suggestion),
             "raw_audit_status": ai_audit.get("status") if isinstance(ai_audit, dict) else None,
+            "visual_status": ai_visual_status(ai_audit),
             "recommended_action": ai_audit.get("recommended_action") if isinstance(ai_audit, dict) else None,
             "summary": ai_audit.get("summary") if isinstance(ai_audit, dict) else None,
             "findings": ai_audit.get("findings") if isinstance(ai_audit, dict) else [],
@@ -3092,7 +3171,7 @@ filtered AS (
             return reasons
         group_ref = str(item.get("group_ref") or "").strip()
         if group_ref:
-            reasons.append("已有 group_ref")
+            reasons.append("已綁題組")
         inferred_group_ref = str(item.get("inferred_group_ref") or "").strip()
         inferred_group_kind = str(item.get("inferred_group_kind") or "").strip()
         if inferred_group_ref and inferred_group_kind != "explicit_count":
@@ -3226,6 +3305,7 @@ filtered AS (
             raise ValueError("group sheet requires at least one candidate")
         first = payload_items[0]
         metadata = first.get("metadata") or {}
+        first_group_review_action = (first.get("group_review") or {}).get("action") or ""
         group_ref = str(first.get("group_ref") or "").strip()
         inferred_group_ref = str(first.get("inferred_group_ref") or "").strip()
         inferred_group_kind = str(first.get("inferred_group_kind") or "").strip()
@@ -3273,6 +3353,9 @@ filtered AS (
             group_review_status = "confirmed_not_group"
         elif group_review_actions:
             group_review_status = "reviewed"
+        is_confirmed_not_group = group_review_status == "confirmed_not_group" or first_group_review_action == "confirm_not_group"
+        if is_confirmed_not_group:
+            reason_counts = {}
         return {
             "sheet_type": "group_sheet",
             "candidate_key": self.group_sheet_key(first),
@@ -3281,7 +3364,7 @@ filtered AS (
             "group_ref": group_ref,
             "inferred_group_ref": inferred_group_ref,
             "inferred_group_kind": inferred_group_kind,
-            "group_label": group_ref or (
+            "group_label": "已確認非題組" if is_confirmed_not_group else group_ref or (
                 f"明示範圍 {inferred_group_ref}"
                 if inferred_group_kind == "explicit_count"
                 else f"承上題 {inferred_group_ref}"
@@ -3296,7 +3379,7 @@ filtered AS (
             "blocked_count": blocked_count,
             "needs_review_count": needs_review_count,
             "reason_counts": reason_counts,
-            "gate_status": "linked" if group_ref else "inferred_continuation" if inferred_group_ref else "unbound_suspect",
+            "gate_status": "not_group" if is_confirmed_not_group else "linked" if group_ref else "inferred_continuation" if inferred_group_ref else "unbound_suspect",
         }
 
     def facets(self, params: dict[str, str] | None = None) -> dict[str, list[str]]:
@@ -3359,6 +3442,7 @@ filtered AS (
         subject_filter = params.get("subject") or ""
         year_filter = params.get("year") or ""
         ordinal_filter = params.get("ordinal") or ""
+        focus_key = params.get("focusKey") or ""
         try:
             limit = max(1, min(int(params.get("limit") or "500"), 1000))
         except ValueError:
@@ -3463,6 +3547,10 @@ filtered AS (
                 reviewed_count += 1
             if len(payloads) < limit:
                 payloads.append(self.candidate_payload(item))
+        if focus_key and all(payload.get("candidate_key") != focus_key for payload in payloads):
+            focus_item = self.candidate_by_key.get(focus_key)
+            if focus_item:
+                payloads.insert(0, self.candidate_payload(focus_item))
         return {
             "candidates": payloads,
             "total_count": len(self.candidates),
@@ -3480,6 +3568,11 @@ filtered AS (
             limit = 500
 
         rows, filtered_count, reviewed_count, total_count = self._sql_filtered_candidate_rows_and_counts(params, limit)
+        focus_key = params.get("focusKey") or ""
+        if focus_key and all(str(item.get("candidate_key") or "") != focus_key for item in rows):
+            focus_row = self._candidate_by_key_sql(focus_key)
+            if focus_row:
+                rows.insert(0, focus_row)
         keys = [str(item.get("candidate_key")) for item in rows if item.get("candidate_key")]
         issues_by_key = self._sql_issue_map(keys)
         formal_question_map = self._sql_formal_question_map(keys)
@@ -4387,6 +4480,436 @@ filtered_sheets AS (
         self._sql_facets_cache.clear()
         return {"ok": True, "sql_primary": True, "table": "exam.question_ai_review_events", "event_id": event_id}
 
+    def _ensure_formal_sync_schema(self, conn: Any) -> None:
+        if self._formal_sync_schema_ready:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE exam.questions
+                    ADD COLUMN IF NOT EXISTS normalized_text TEXT,
+                    ADD COLUMN IF NOT EXISTS display_text TEXT,
+                    ADD COLUMN IF NOT EXISTS question_markup_json JSONB,
+                    ADD COLUMN IF NOT EXISTS question_raw_json JSONB,
+                    ADD COLUMN IF NOT EXISTS human_corrected_json JSONB,
+                    ADD COLUMN IF NOT EXISTS source_page_start INTEGER,
+                    ADD COLUMN IF NOT EXISTS source_page_end INTEGER,
+                    ADD COLUMN IF NOT EXISTS source_bbox JSONB,
+                    ADD COLUMN IF NOT EXISTS parse_confidence NUMERIC(5,4);
+
+                ALTER TABLE exam.question_options
+                    ADD COLUMN IF NOT EXISTS normalized_text TEXT,
+                    ADD COLUMN IF NOT EXISTS display_text TEXT,
+                    ADD COLUMN IF NOT EXISTS option_markup_json JSONB,
+                    ADD COLUMN IF NOT EXISTS option_raw_json JSONB,
+                    ADD COLUMN IF NOT EXISTS human_corrected_json JSONB;
+
+                ALTER TABLE exam.question_groups
+                    ADD COLUMN IF NOT EXISTS display_markup_json JSONB,
+                    ADD COLUMN IF NOT EXISTS asset_policy_json JSONB,
+                    ADD COLUMN IF NOT EXISTS source_page_start INTEGER,
+                    ADD COLUMN IF NOT EXISTS source_page_end INTEGER,
+                    ADD COLUMN IF NOT EXISTS source_bbox JSONB,
+                    ADD COLUMN IF NOT EXISTS group_question_range TEXT;
+
+                ALTER TABLE exam.question_assets
+                    ADD COLUMN IF NOT EXISTS source_mineru_block_id TEXT,
+                    ADD COLUMN IF NOT EXISTS display_order INTEGER,
+                    ADD COLUMN IF NOT EXISTS asset_quality_status TEXT NOT NULL DEFAULT 'unreviewed';
+
+                ALTER TABLE exam.question_assets
+                    DROP CONSTRAINT IF EXISTS question_assets_role_check;
+
+                ALTER TABLE exam.question_assets
+                    ADD CONSTRAINT question_assets_role_check
+                    CHECK (role IN (
+                        'page_image',
+                        'figure',
+                        'stem_figure',
+                        'table',
+                        'table_structured',
+                        'table_manual_screenshot',
+                        'option_image',
+                        'source_pdf_region',
+                        'answer_explanation_image',
+                        'group_shared_asset',
+                        'other'
+                    ));
+                """
+            )
+        self._formal_sync_schema_ready = True
+
+    def _jsonb_or_none(self, value: Any) -> Any:
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return Jsonb(value) if Jsonb is not None else value
+
+    def _formal_unready_status(self, question_event: dict[str, Any] | None, answer_event: dict[str, Any] | None) -> str:
+        action = str((question_event or {}).get("action") or "")
+        answer_action = str((answer_event or {}).get("action") or "")
+        if action == "exclude":
+            return "excluded"
+        if action == "block" or answer_action == "block":
+            return "blocked"
+        if action in RESET_REVIEW_ACTIONS or answer_action in RESET_REVIEW_ACTIONS:
+            return "unreviewed"
+        if action == "needs_review" or answer_action == "needs_review":
+            return "needs_review"
+        return "review_drift"
+
+    def _withdraw_formal_candidate(
+        self,
+        cur: Any,
+        candidate_key: str,
+        question_event: dict[str, Any] | None,
+        answer_event: dict[str, Any] | None,
+    ) -> bool:
+        status = self._formal_unready_status(question_event, answer_event)
+        cur.execute(
+            """
+            UPDATE exam.questions
+            SET review_status = %s
+            WHERE question_key = %s
+            RETURNING id
+            """,
+            (status, candidate_key),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        question_id = int(row[0])
+        cur.execute("DELETE FROM exam.answers WHERE question_id = %s", (question_id,))
+        return True
+
+    def _upsert_formal_candidate_rows(
+        self,
+        cur: Any,
+        question_rows: list[dict[str, object]],
+        option_rows: list[dict[str, object]],
+        answer_rows: list[dict[str, object]],
+        asset_rows: list[dict[str, object]],
+    ) -> list[str]:
+        promoted: list[str] = []
+        options_by_key: dict[str, list[dict[str, object]]] = {}
+        answers_by_key: dict[str, list[dict[str, object]]] = {}
+        assets_by_key: dict[str, list[dict[str, object]]] = {}
+        for row in option_rows:
+            options_by_key.setdefault(str(row.get("question_key") or ""), []).append(row)
+        for row in answer_rows:
+            answers_by_key.setdefault(str(row.get("question_key") or ""), []).append(row)
+        for row in asset_rows:
+            assets_by_key.setdefault(str(row.get("question_key") or ""), []).append(row)
+
+        for row in question_rows:
+            question_key = str(row.get("question_key") or "")
+            source_registry_key = str(row.get("source_registry_key") or "")
+            group_key = str(row.get("group_key") or "")
+            group_id: int | None = None
+            if group_key:
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_groups (
+                        official_document_id,
+                        group_key,
+                        shared_stem_json,
+                        review_status
+                    )
+                    SELECT id, %s, %s, 'accepted'
+                    FROM exam.official_documents
+                    WHERE registry_key = %s
+                    ON CONFLICT (group_key) DO UPDATE
+                    SET shared_stem_json = EXCLUDED.shared_stem_json,
+                        review_status = EXCLUDED.review_status
+                    RETURNING id
+                    """,
+                    (group_key, Jsonb({"group_ref": group_key}), source_registry_key),
+                )
+                group_row = cur.fetchone()
+                group_id = int(group_row[0]) if group_row else None
+            cur.execute(
+                """
+                INSERT INTO exam.questions (
+                    official_document_id,
+                    question_group_id,
+                    question_key,
+                    question_number,
+                    question_text,
+                    normalized_text,
+                    display_text,
+                    question_markup_json,
+                    question_raw_json,
+                    human_corrected_json,
+                    question_json,
+                    parser_version,
+                    review_status
+                )
+                SELECT
+                    od.id,
+                    %s,
+                    %s,
+                    %s,
+                    NULLIF(%s, ''),
+                    NULLIF(%s, ''),
+                    NULLIF(%s, ''),
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    'accepted'
+                FROM exam.official_documents od
+                WHERE od.registry_key = %s
+                ON CONFLICT (question_key) DO UPDATE
+                SET official_document_id = EXCLUDED.official_document_id,
+                    question_group_id = EXCLUDED.question_group_id,
+                    question_number = EXCLUDED.question_number,
+                    question_text = EXCLUDED.question_text,
+                    normalized_text = EXCLUDED.normalized_text,
+                    display_text = EXCLUDED.display_text,
+                    question_markup_json = EXCLUDED.question_markup_json,
+                    question_raw_json = EXCLUDED.question_raw_json,
+                    human_corrected_json = EXCLUDED.human_corrected_json,
+                    question_json = EXCLUDED.question_json,
+                    parser_version = EXCLUDED.parser_version,
+                    review_status = EXCLUDED.review_status
+                RETURNING id
+                """,
+                (
+                    group_id,
+                    question_key,
+                    str(row.get("question_number") or ""),
+                    str(row.get("question_text") or ""),
+                    str(row.get("normalized_text") or ""),
+                    str(row.get("display_text") or ""),
+                    self._jsonb_or_none(row.get("question_markup_json")),
+                    self._jsonb_or_none(row.get("question_raw_json")),
+                    self._jsonb_or_none(row.get("human_corrected_json")),
+                    self._jsonb_or_none(row.get("question_json")),
+                    str(row.get("parser_version") or "unknown"),
+                    source_registry_key,
+                ),
+            )
+            question_row = cur.fetchone()
+            if not question_row:
+                continue
+            question_id = int(question_row[0])
+
+            option_labels: list[str] = []
+            for option in options_by_key.get(question_key, []):
+                label = str(option.get("option_label") or "").strip().upper()
+                if not label:
+                    continue
+                option_labels.append(label)
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_options (
+                        question_id,
+                        option_label,
+                        option_text,
+                        normalized_text,
+                        display_text,
+                        option_markup_json,
+                        option_raw_json,
+                        human_corrected_json,
+                        option_json
+                    )
+                    VALUES (%s, %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), %s, %s, %s, %s)
+                    ON CONFLICT (question_id, option_label) DO UPDATE
+                    SET option_text = EXCLUDED.option_text,
+                        normalized_text = EXCLUDED.normalized_text,
+                        display_text = EXCLUDED.display_text,
+                        option_markup_json = EXCLUDED.option_markup_json,
+                        option_raw_json = EXCLUDED.option_raw_json,
+                        human_corrected_json = EXCLUDED.human_corrected_json,
+                        option_json = EXCLUDED.option_json
+                    """,
+                    (
+                        question_id,
+                        label,
+                        str(option.get("option_text") or ""),
+                        str(option.get("normalized_text") or ""),
+                        str(option.get("display_text") or ""),
+                        self._jsonb_or_none(option.get("option_markup_json")),
+                        self._jsonb_or_none(option.get("option_raw_json")),
+                        self._jsonb_or_none(option.get("human_corrected_json")),
+                        self._jsonb_or_none(option.get("option_json")),
+                    ),
+                )
+            if option_labels:
+                cur.execute(
+                    "DELETE FROM exam.question_options WHERE question_id = %s AND option_label <> ALL(%s)",
+                    (question_id, option_labels),
+                )
+            else:
+                cur.execute("DELETE FROM exam.question_options WHERE question_id = %s", (question_id,))
+
+            cur.execute("DELETE FROM exam.answers WHERE question_id = %s", (question_id,))
+            for answer in answers_by_key.get(question_key, []):
+                cur.execute(
+                    """
+                    INSERT INTO exam.answers (
+                        question_id,
+                        answer_source_document_id,
+                        answer_value,
+                        answer_json,
+                        is_correction
+                    )
+                    SELECT
+                        %s,
+                        answer_doc.id,
+                        NULLIF(%s, ''),
+                        %s,
+                        %s
+                    FROM (SELECT 1) seed
+                    LEFT JOIN exam.official_documents answer_doc
+                      ON answer_doc.registry_key = NULLIF(%s, '')
+                    """,
+                    (
+                        question_id,
+                        str(answer.get("answer_value") or ""),
+                        self._jsonb_or_none(answer.get("answer_json")) or Jsonb({}),
+                        str(answer.get("is_correction") or "").lower() == "true",
+                        str(answer.get("answer_source_registry_key") or ""),
+                    ),
+                )
+
+            asset_keys: list[str] = []
+            for index, asset in enumerate(assets_by_key.get(question_key, []), start=1):
+                asset_key = str(asset.get("asset_key") or "").strip()
+                if not asset_key:
+                    continue
+                asset_keys.append(asset_key)
+                cur.execute(
+                    """
+                    INSERT INTO exam.assets (
+                        asset_key,
+                        asset_type,
+                        asset_path,
+                        relative_asset_path,
+                        mime_type
+                    )
+                    VALUES (%s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''))
+                    ON CONFLICT (asset_key) DO UPDATE
+                    SET asset_type = EXCLUDED.asset_type,
+                        asset_path = EXCLUDED.asset_path,
+                        relative_asset_path = EXCLUDED.relative_asset_path,
+                        mime_type = EXCLUDED.mime_type
+                    RETURNING id
+                    """,
+                    (
+                        asset_key,
+                        str(asset.get("asset_type") or "other"),
+                        str(asset.get("asset_path") or ""),
+                        str(asset.get("relative_asset_path") or ""),
+                        str(asset.get("mime_type") or ""),
+                    ),
+                )
+                asset_id = int(cur.fetchone()[0])
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_assets (
+                        question_id,
+                        asset_id,
+                        role,
+                        display_order,
+                        asset_quality_status
+                    )
+                    VALUES (%s, %s, %s, %s, 'accepted')
+                    ON CONFLICT (question_id, asset_id, role) DO UPDATE
+                    SET display_order = EXCLUDED.display_order,
+                        asset_quality_status = EXCLUDED.asset_quality_status
+                    """,
+                    (
+                        question_id,
+                        asset_id,
+                        str(asset.get("role") or "figure"),
+                        int(asset.get("display_order") or index),
+                    ),
+                )
+            if asset_keys:
+                cur.execute(
+                    """
+                    DELETE FROM exam.question_assets qa
+                    USING exam.assets a
+                    WHERE qa.asset_id = a.id
+                      AND qa.question_id = %s
+                      AND a.asset_key <> ALL(%s)
+                    """,
+                    (question_id, asset_keys),
+                )
+            else:
+                cur.execute("DELETE FROM exam.question_assets WHERE question_id = %s", (question_id,))
+            promoted.append(question_key)
+        return promoted
+
+    def sync_formal_candidates(self, candidate_keys: list[str]) -> dict[str, Any]:
+        keys = list(dict.fromkeys(str(key or "") for key in candidate_keys if str(key or "").strip()))
+        if not keys or not self.sql_review_enabled:
+            return {"ok": True, "enabled": False, "promoted": [], "withdrawn": [], "skipped": [], "errors": []}
+        if formal_promote is None or Jsonb is None:
+            return {
+                "ok": False,
+                "enabled": True,
+                "promoted": [],
+                "withdrawn": [],
+                "skipped": [],
+                "errors": ["formal promotion helpers are unavailable"],
+            }
+        try:
+            candidates = self._candidates_by_key_sql(keys)
+            issues = self._sql_issue_map(keys)
+            question_reviews, _question_counts, question_resets = self._sql_question_review_maps(keys)
+            answer_reviews, _answer_counts, answer_resets = self._sql_latest_event_maps(
+                "exam.answer_review_events",
+                keys,
+                reset_actions=RESET_REVIEW_ACTIONS,
+            )
+            ordered_candidates = [candidates[key] for key in keys if key in candidates]
+            question_rows, option_rows, answer_rows, asset_rows, skipped = formal_promote.build_rows(
+                ordered_candidates,
+                issues,
+                question_reviews,
+                question_resets,
+                answer_reviews,
+                answer_resets,
+            )
+            promoted: list[str] = []
+            withdrawn: list[str] = []
+            with self._sql_connect() as conn:
+                self._ensure_formal_sync_schema(conn)
+                with conn.cursor() as cur:
+                    promoted = self._upsert_formal_candidate_rows(cur, question_rows, option_rows, answer_rows, asset_rows)
+                    promoted_set = set(promoted)
+                    for key in keys:
+                        if key in promoted_set:
+                            continue
+                        if self._withdraw_formal_candidate(cur, key, question_reviews.get(key), answer_reviews.get(key)):
+                            withdrawn.append(key)
+                conn.commit()
+            self._sql_facets_cache.clear()
+            return {
+                "ok": True,
+                "enabled": True,
+                "promoted": promoted,
+                "withdrawn": withdrawn,
+                "skipped": skipped,
+                "errors": [],
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "enabled": True,
+                "promoted": [],
+                "withdrawn": [],
+                "skipped": [],
+                "errors": [str(exc)],
+            }
+
     def append_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
@@ -4410,6 +4933,9 @@ filtered_sheets AS (
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
+        formal_sync = self.sync_formal_candidates([str(key)]) if key and event.get("action") not in NON_QUESTION_REVIEW_ACTIONS else None
+        if formal_sync is not None:
+            storage["formal_sync"] = formal_sync
         return {**event, "storage": storage}
 
     def append_answer_review(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -4433,6 +4959,9 @@ filtered_sheets AS (
             else:
                 self.latest_answer_reviews[key] = event
                 self.latest_answer_reset_reviews.pop(key, None)
+        formal_sync = self.sync_formal_candidates([str(key)]) if key else None
+        if formal_sync is not None:
+            storage["formal_sync"] = formal_sync
         return {**event, "storage": storage}
 
     def append_answer_reviews_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4491,6 +5020,9 @@ filtered_sheets AS (
                     self.latest_answer_reviews[key] = event
                     self.latest_answer_reset_reviews.pop(key, None)
             saved.append({**event, "storage": storage})
+        formal_sync = self.sync_formal_candidates([str(event.get("candidate_key") or "") for event in normalized_events])
+        for saved_event in saved:
+            saved_event.setdefault("storage", {})["formal_sync"] = formal_sync
         return saved
 
     def append_ai_review(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -5520,7 +6052,6 @@ PAGE_HTML = r"""<!doctype html>
     body.group-mode .question-only, body.group-mode .answer-only, body.group-mode .visual-only { display:none; }
     body.visual-mode .visual-only { display:initial; }
     body.visual-mode .question-only, body.visual-mode .answer-only, body.visual-mode .group-only { display:none; }
-    body.visual-mode .question-correction-panel { display:none; }
     .answer-sheet-summary { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap:8px; margin:10px 0; }
     .answer-sheet-summary div { border:1px solid var(--line); border-radius:8px; background:#fbfcff; padding:8px; }
     .answer-sheet-summary b { display:block; font-size:18px; }
@@ -5603,16 +6134,13 @@ PAGE_HTML = r"""<!doctype html>
       <option value="pass">AI 通過</option>
       <option value="block">AI 阻擋</option>
     </select>
-    <select id="visualStatus" class="visual-only">
-      <option value="">全部圖表狀態</option>
-      <option value="visual">圖表待審核</option>
-      <option value="visual_asset">待核：已有 MinerU 圖片</option>
-      <option value="table">待核：表格/表中資料</option>
-      <option value="visual_missing_asset">待核：明確提到圖但目前無圖</option>
-      <option value="visual_problem">圖片有問題/待補圖</option>
-      <option value="visual_ok">圖片題/已確認</option>
-      <option value="no_visual">已確認不需要圖片</option>
-      <option value="manual_asset">已有人工補圖(已處理)</option>
+    <select id="visualStatus" class="visual-only" onchange="applyFilter()">
+      <option value="">全部圖片</option>
+      <option value="visual_asset_pending" selected>待處理-有圖待審</option>
+      <option value="visual_suspect">待處理-疑似有圖</option>
+      <option value="visual_ok">有圖</option>
+      <option value="visual_problem">錯圖待改</option>
+      <option value="no_visual">沒有圖</option>
     </select>
     <select id="answerReviewStatus" class="answer-only">
       <option value="">全部答案審核</option>
@@ -5681,6 +6209,8 @@ let modeRefreshTimer = null;
 const modeDataCache = new Map();
 const modeSnapshots = new Map();
 const MODE_CACHE_MAX_AGE_MS = 120000;
+const VISUAL_DEFAULT_FILTER = 'visual_asset_pending';
+const VISUAL_FILTER_VALUES = new Set(['', 'visual', 'visual_asset_pending', 'visual_suspect', 'visual_ok', 'visual_problem', 'no_visual']);
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const jsArg = (s) => JSON.stringify(String(s ?? '')).replace(/</g, '\\u003c');
@@ -5701,10 +6231,15 @@ const STATUS_LABELS = {
   reset_review: '退回未審',
   formal: '已入正式庫',
   formal_drift: '正式庫待同步',
-  visual: '圖片題',
-  visual_asset_ok: '圖片題',
-  visual_asset_problem: '圖片有問題',
-  no_visual_required: '不需要圖片',
+  visual: '待處理',
+  visual_asset_pending: '待處理-有圖待審',
+  visual_suspect: '待處理-疑似有圖',
+  visual_asset_ok: '有圖',
+  visual_asset_problem: '錯圖待改',
+  no_visual_required: '沒有圖',
+  not_group: '非題組',
+  inferred_continuation: '疑似題組',
+  unbound_suspect: '疑似未綁',
   ai_pass: 'AI 通過',
   ai_needs_review: 'AI 有疑點',
   ai_block: 'AI 阻擋',
@@ -5726,6 +6261,29 @@ function aiStatusLabel(status) {
   if (!normalized) return 'AI 未稽核';
   return STATUS_LABELS[`ai_${normalized}`] || `AI ${normalized}`;
 }
+
+function visualAiStatus(item) {
+  const review = item?.ai_review || {};
+  const direct = String(review.visual_status || '').trim();
+  if (['visual_required_likely', 'visual_not_required_likely', 'visual_uncertain'].includes(direct)) return direct;
+  const labels = Array.isArray(review.labels) ? review.labels : [];
+  return labels.find(label => ['visual_required_likely', 'visual_not_required_likely', 'visual_uncertain'].includes(String(label || '').trim())) || '';
+}
+
+function visualSourceBadges(item) {
+  const profile = item?.visual_profile || {};
+  const badges = [];
+  if (profile.has_visual_asset) badges.push('<span class="badge visual">已有圖</span>');
+  if (profile.has_manual_asset) badges.push('<span class="badge visual">人工補圖</span>');
+  if (item?.table_markup_suppressed || profile.has_structured_table) badges.push('<span class="badge visual">表格</span>');
+  if (profile.has_visual_dependency) badges.push('<span class="badge reviewed">Python候選</span>');
+  const aiVisual = visualAiStatus(item);
+  if (aiVisual === 'visual_required_likely') badges.push('<span class="badge reviewed">AI檢查: 可能需圖</span>');
+  else if (aiVisual === 'visual_not_required_likely') badges.push('<span class="badge reviewed">AI檢查: 可能無圖</span>');
+  else if (aiVisual === 'visual_uncertain') badges.push('<span class="badge needs_review">AI檢查: 不確定</span>');
+  return badges.join(' ');
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -5869,24 +6427,31 @@ async function saveManualAsset(options = {}) {
 }
 
 function itemMatchesVisualFilter(item) {
-  const visualStatus = filterValue('visualStatus') || 'visual';
+  const visualStatus = filterValue('visualStatus') || VISUAL_DEFAULT_FILTER;
   if (!visualStatus) return true;
   const profile = item.visual_profile || {};
   const reviewStatus = profile.visual_review_status || item.visual_review || '';
   const hasAsset = Boolean(profile.has_visual_asset);
   const hasDependency = Boolean(profile.has_visual_dependency);
   const hasTable = Boolean(item.table_markup_suppressed || profile.has_structured_table);
+  const aiVisual = visualAiStatus(item);
   const hasManual = Boolean(profile.has_manual_asset) || Boolean(profile.visual_asset_roles || item.image_refs || item.stem_image || item.options)
     && JSON.stringify({
       image_refs: item.image_refs || [],
       stem_image: item.stem_image || null,
       options: item.options || []
     }).includes('manual');
-  if (visualStatus === 'visual') return !['no_visual_required', 'visual_asset_ok', 'visual_asset_problem'].includes(reviewStatus) && !hasManual && (hasAsset || hasDependency || hasTable);
-  if (visualStatus === 'visual_asset') return !['no_visual_required', 'visual_asset_ok', 'visual_asset_problem'].includes(reviewStatus) && !hasManual && hasAsset;
-  if (visualStatus === 'visual_missing_asset') return !reviewStatus && hasDependency && !hasAsset && !hasTable;
-  if (visualStatus === 'table') return !['no_visual_required', 'visual_asset_ok', 'visual_asset_problem'].includes(reviewStatus) && !hasManual && hasTable;
-  if (visualStatus === 'manual_asset') return hasManual;
+  const isUnreviewedVisual = !['no_visual_required', 'visual_asset_ok', 'visual_asset_problem'].includes(reviewStatus) && !hasManual;
+  const hasExistingVisualMaterial = hasAsset || hasTable;
+  const isVisualSuspectWithoutAsset = !hasExistingVisualMaterial && (
+    ['visual_required_likely', 'visual_uncertain'].includes(aiVisual)
+    || (hasDependency && !aiVisual)
+  );
+  if (visualStatus === 'visual') {
+    return isUnreviewedVisual && (hasExistingVisualMaterial || isVisualSuspectWithoutAsset);
+  }
+  if (visualStatus === 'visual_asset_pending') return isUnreviewedVisual && hasExistingVisualMaterial;
+  if (visualStatus === 'visual_suspect') return isUnreviewedVisual && isVisualSuspectWithoutAsset;
   if (visualStatus === 'visual_ok') return reviewStatus === 'visual_asset_ok' || hasManual;
   if (visualStatus === 'no_visual') return reviewStatus === 'no_visual_required';
   if (visualStatus === 'visual_problem') return reviewStatus === 'visual_asset_problem';
@@ -5916,12 +6481,12 @@ async function saveVisualReviewStatus(status, note) {
   if (noteBox && !noteBox.value.includes(note)) {
     noteBox.value = [noteBox.value.trim(), note].filter(Boolean).join('\n');
   }
-  const result = await review('human_review_pdf_visual', correction, {stayOnCurrent: true, notes: note});
+  const result = await review('correct', correction, {stayOnCurrent: true, notes: note});
   if (result?.ok) advanceAfterVisualReview(reviewedKey, reviewedIndex);
 }
 
 async function markNoVisualRequired() {
-  await saveVisualReviewStatus('no_visual_required', '圖片審核：人工確認此題不需要圖片或表格資產，取消疑似需圖標籤。');
+  await saveVisualReviewStatus('no_visual_required', '圖片審核：人工確認此題沒有圖或不需要圖片/表格資產。');
 }
 
 async function markVisualAssetOk() {
@@ -5931,6 +6496,10 @@ async function markVisualAssetOk() {
 async function markVisualAssetProblem() {
   await saveVisualReviewStatus('visual_asset_problem', '圖片審核：人工確認圖片或表格資產有問題，需要補圖、換圖或重新綁定。');
 }
+
+window.markNoVisualRequired = markNoVisualRequired;
+window.markVisualAssetOk = markVisualAssetOk;
+window.markVisualAssetProblem = markVisualAssetProblem;
 
 function imageRefPath(ref) {
   if (!ref || typeof ref !== 'object') return '';
@@ -6307,9 +6876,15 @@ function collectPreferences() {
 
 function filterValue(id) {
   if (pendingPreferenceFilters && Object.prototype.hasOwnProperty.call(pendingPreferenceFilters, id)) {
-    return pendingPreferenceFilters[id] || '';
+    const pendingValue = pendingPreferenceFilters[id] || '';
+    if (id === 'visualStatus' && pendingValue === 'visual') return VISUAL_DEFAULT_FILTER;
+    if (id === 'visualStatus' && !VISUAL_FILTER_VALUES.has(pendingValue)) return VISUAL_DEFAULT_FILTER;
+    return pendingValue;
   }
-  return document.getElementById(id).value;
+  const value = document.getElementById(id).value;
+  if (id === 'visualStatus' && value === 'visual') return VISUAL_DEFAULT_FILTER;
+  if (id === 'visualStatus' && !VISUAL_FILTER_VALUES.has(value)) return VISUAL_DEFAULT_FILTER;
+  return value;
 }
 
 function savePreferencesSoon() {
@@ -6335,21 +6910,22 @@ function updateModeControls() {
 function setMode(nextMode) {
   const normalizedMode = ['answer', 'group', 'visual'].includes(nextMode) ? nextMode : 'question';
   if (mode === normalizedMode) return;
+  const preferredKey = current?.candidate_key || null;
   mode = normalizedMode;
   if (mode === 'answer') currentPdfKind = 'official_pdf';
   if (mode === 'visual') {
     const visualSelect = document.getElementById('visualStatus');
-    if (visualSelect && !visualSelect.value) visualSelect.value = 'visual';
+    if (visualSelect && !visualSelect.value) visualSelect.value = VISUAL_DEFAULT_FILTER;
   }
   updateModeControls();
-  const showedSnapshot = renderModeSnapshotIfAvailable();
-  if (showedSnapshot) scheduleModeBackgroundRefresh();
-  else applyFilter(null, null, null, {useCache: true, showLoading: true});
+  const showedSnapshot = renderModeSnapshotIfAvailable(preferredKey);
+  if (showedSnapshot) scheduleModeBackgroundRefresh(preferredKey);
+  else applyFilter(preferredKey, null, null, {useCache: true, showLoading: true, focusKey: preferredKey});
 }
 
 function startVisualReview() {
   mode = 'visual';
-  document.getElementById('visualStatus').value = 'visual';
+  document.getElementById('visualStatus').value = VISUAL_DEFAULT_FILTER;
   updateModeControls();
   const showedSnapshot = renderModeSnapshotIfAvailable();
   if (showedSnapshot) scheduleModeBackgroundRefresh();
@@ -6387,13 +6963,13 @@ async function showPipeline() {
     </div></div>`;
 }
 
-function queryParams() {
+function queryParams(options = {}) {
   const params = new URLSearchParams();
   params.set('q', filterValue('search').trim());
   params.set('status', mode === 'question' ? filterValue('status') : '');
   params.set('reviewStatus', mode === 'question' ? filterValue('reviewStatus') : '');
   params.set('aiReviewStatus', mode === 'question' ? filterValue('aiReviewStatus') : '');
-  params.set('visualStatus', mode === 'visual' ? (filterValue('visualStatus') || 'visual') : '');
+  params.set('visualStatus', mode === 'visual' ? (filterValue('visualStatus') || VISUAL_DEFAULT_FILTER) : '');
   params.set('answerReviewStatus', mode === 'answer' ? filterValue('answerReviewStatus') : '');
   params.set('groupReviewStatus', mode === 'group' ? filterValue('groupReviewStatus') : '');
   params.set('category', filterValue('categoryFilter'));
@@ -6401,6 +6977,8 @@ function queryParams() {
   params.set('year', filterValue('yearFilter'));
   params.set('ordinal', filterValue('ordinalFilter'));
   params.set('limit', mode === 'group' ? '200' : '500');
+  const focusKey = options.focusKey || '';
+  if (focusKey) params.set('focusKey', focusKey);
   return params;
 }
 
@@ -6426,23 +7004,24 @@ function cacheCandidateData(key, data) {
   }
 }
 
-function renderModeSnapshotIfAvailable() {
+function renderModeSnapshotIfAvailable(preferredKey = null) {
   const snapshot = modeSnapshots.get(mode);
   if (!snapshot) return false;
-  applyCandidateData(snapshot.data, current?.candidate_key || null, null, null);
+  applyCandidateData(snapshot.data, preferredKey || current?.candidate_key || null, null, null);
   const status = document.getElementById('dataStatus');
   if (status) status.textContent = '背景更新中';
   return true;
 }
 
-function scheduleModeBackgroundRefresh() {
+function scheduleModeBackgroundRefresh(preferredKey = null) {
   if (modeRefreshTimer) clearTimeout(modeRefreshTimer);
   const refreshMode = mode;
   savePreferencesSoon();
   modeRefreshTimer = setTimeout(() => {
     modeRefreshTimer = null;
     if (mode !== refreshMode) return;
-    fetchCandidates(current?.candidate_key || null, null, null, {useCache: false, showLoading: false, allowStaleModeCache: false});
+    const focusKey = preferredKey || current?.candidate_key || null;
+    fetchCandidates(focusKey, null, null, {useCache: false, showLoading: false, allowStaleModeCache: false, focusKey});
   }, 1200);
 }
 
@@ -6482,7 +7061,7 @@ async function fetchCandidates(preferredKey = null, preferredIndex = null, skipK
   updateModeControls();
   const useCache = options.useCache !== false;
   const showLoading = options.showLoading !== false;
-  const params = queryParams();
+  const params = queryParams({focusKey: options.focusKey || preferredKey || ''});
   const endpoint = endpointForCurrentMode();
   const requestKey = requestKeyForCurrentMode(endpoint, params);
   const cached = useCache ? modeDataCache.get(requestKey) : null;
@@ -6559,7 +7138,14 @@ function applyFilter(preferredKey = null, preferredIndex = null, skipKey = null,
     clearTimeout(modeRefreshTimer);
     modeRefreshTimer = null;
   }
-  if (preferredKey && typeof preferredKey === 'object' && Object.prototype.hasOwnProperty.call(preferredKey, 'target')) {
+  const looksLikeDomEvent = preferredKey
+    && typeof preferredKey === 'object'
+    && (
+      'target' in preferredKey
+      || 'currentTarget' in preferredKey
+      || 'type' in preferredKey
+    );
+  if (looksLikeDomEvent) {
     preferredKey = null;
     preferredIndex = null;
     skipKey = null;
@@ -6696,8 +7282,16 @@ function renderList() {
           : groupReviewStatus === 'reviewed'
             ? '<span class="badge reviewed">已審</span>'
             : '<span class="badge unreviewed">未審</span>';
-      const groupKind = item.group_ref ? '已綁題組' : item.inferred_group_kind === 'explicit_count' ? '明示範圍題組' : item.inferred_group_ref ? '承上題關聯' : '疑似未綁';
-      const reasons = Object.entries(item.reason_counts || {}).map(([key, value]) => `${key} ${value}`).join('、');
+      const groupKind = groupReviewStatus === 'confirmed_not_group'
+        ? '非題組'
+        : item.group_ref
+          ? '已綁題組'
+          : item.inferred_group_kind === 'explicit_count'
+            ? '明示範圍題組'
+            : item.inferred_group_ref
+              ? '承上題關聯'
+              : '疑似未綁';
+      const reasons = Object.entries(item.reason_counts || {}).map(([key, value]) => `${key} ${value} 題`).join('、');
       return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
         <div>${groupReviewBadge} <span class="badge ${esc(status)}">${esc(groupKind)}</span> ${esc(item.group_label || '題組候選')}</div>
         <div class="meta">${esc(meta.normalized_category_name || meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
@@ -6719,7 +7313,7 @@ function renderList() {
     const reviewBadge = review.is_reset_unreviewed ? 'reset_review' : (review.action || review.status || 'unreviewed');
     const reviewLabel = review.is_reset_unreviewed ? '退回未審' : statusLabel(reviewBadge);
     const aiReview = item.ai_review || {};
-    const aiBadge = aiReview.audit_status && aiReview.audit_status !== 'pass'
+    const aiBadge = mode !== 'visual' && aiReview.audit_status && aiReview.audit_status !== 'pass'
       ? `<span class="badge ai-warning">${esc(aiStatusLabel(aiReview.audit_status))}</span>`
       : '';
     const formal = item.formal || {};
@@ -6731,11 +7325,14 @@ function renderList() {
           ? '<span class="badge formal_drift">正式表舊資料</span>'
         : '';
     const firstAiFinding = (aiReview.findings || [])[0];
-    const aiSummary = firstAiFinding
+    const aiSummary = mode === 'visual'
+      ? ''
+      : firstAiFinding
       ? `<div class="meta ai-list-note">AI 建議：${esc(firstAiFinding.message || firstAiFinding.suggestion || firstAiFinding.code || '')}</div>`
       : aiReview.summary && aiReview.audit_status && aiReview.audit_status !== 'pass'
         ? `<div class="meta ai-list-note">AI 摘要：${esc(aiReview.summary)}</div>`
         : '';
+    const visualSources = mode === 'visual' ? visualSourceBadges(item) : '';
     const statusText = mode === 'answer' ? (item.answer_gate_status || 'pass') : (item.question_quality_status || item.quality_status);
     const statusBadge = statusText && statusText !== 'pass'
       ? `<span class="badge ${esc(statusText)}">${esc(statusLabel(statusText))}</span>`
@@ -6749,12 +7346,13 @@ function renderList() {
         : visualStatus === 'no_visual_required'
           ? '<span class="badge reviewed">不需圖</span>'
           : item.is_visual_question
-            ? `<span class="badge visual">${item.visual_profile?.has_visual_asset ? '圖片待核' : '疑似需圖'}</span>`
+            ? '<span class="badge visual">待處理</span>'
             : '';
     return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
       <div>${statusBadge} ${formalBadge} ${visualBadge} ${aiBadge} <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> 第 ${esc(item.question_number)} 題</div>
       <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
       <div class="meta">${mode === 'answer' ? esc(item.answer_issue_count || 0) + ' 個答案疑點' : esc(item.question_issue_count ?? item.issue_count ?? 0) + ' 個題目疑點'}</div>
+      ${visualSources ? `<div class="meta">來源：${visualSources}</div>` : ''}
       ${aiSummary}
     </button>`;
   }).join('');
@@ -7093,7 +7691,7 @@ function renderDetail() {
       <p class="meta">parser 原始內容仍保留於 candidate，正式入庫時可比對人工校正版與 parser 原始版。</p>
     </div>` : '';
   const aiReview = current.ai_review || {};
-  const aiBadge = aiReview.audit_status && aiReview.audit_status !== 'pass'
+  const aiBadge = !isVisualMode && aiReview.audit_status && aiReview.audit_status !== 'pass'
     ? `<span class="badge ai-warning">${esc(aiStatusLabel(aiReview.audit_status))}</span>`
     : '';
   const aiRawNote = aiReview.raw_audit_status && aiReview.raw_audit_status !== aiReview.audit_status
@@ -7147,6 +7745,7 @@ function renderDetail() {
     </div>` : '';
   const visualProfile = current.visual_profile || {};
   const visualReviewStatus = visualProfile.visual_review_status || current.visual_review || '';
+  const visualSources = visualSourceBadges(current);
   const isManualVisual = Boolean(visualProfile.has_manual_asset);
   const visualBadge = visualReviewStatus === 'visual_asset_ok' || isManualVisual
     ? `<span class="badge visual">${esc(statusLabel('visual_asset_ok'))}</span>`
@@ -7155,22 +7754,26 @@ function renderDetail() {
       : visualReviewStatus === 'no_visual_required'
         ? `<span class="badge reviewed">${esc(statusLabel('no_visual_required'))}</span>`
         : current.is_visual_question
-          ? `<span class="badge visual">${visualProfile.has_visual_asset ? `圖片待核 ${esc(visualProfile.visual_asset_count || 0)}` : '疑似需圖'}</span>`
+          ? '<span class="badge visual">待處理</span>'
           : '';
   const visualReviewPanel = isVisualMode ? `
     <div class="issue info">
       <b>圖片/表格審核</b><br>
-      <span class="meta">AI 與 parser 標籤只提示疑點；這裡只判斷圖片或表格資產是否正確、是否需要補圖。</span>
+      <span class="meta">只做三種人工判斷：有圖正確、圖片錯要改、沒有圖。AI 或 parser 只負責把可疑題目送進來，不代表審核結論。</span>
+      ${visualSources ? `<div class="meta visual-source-line">候選來源：${visualSources}</div>` : ''}
       <div class="toolbar">
-        <button class="action primary-accept" onclick="markVisualAssetOk()">圖片正確</button>
-        <button class="action block" onclick="markVisualAssetProblem()">圖片有問題/待補圖</button>
-        <button class="action" onclick="markNoVisualRequired()">確認不需要圖片</button>
+        <button class="action primary-accept" onclick="markVisualAssetOk()">有圖正確</button>
+        <button class="action block" onclick="markVisualAssetProblem()">圖片錯要改</button>
+        <button class="action" onclick="markNoVisualRequired()">沒有圖</button>
       </div>
     </div>` : '';
-  const imageReviewAssetPanel = isVisualMode ? `
+  const imageReviewAssetPanel = `
     <div class="panel"><h2>圖片</h2><div class="body">
       <div class="asset-grid">${images || '<span class="meta">未偵測到圖片引用。</span>'}</div>
       <div class="manual-asset-controls">
+        <p class="meta">${isVisualMode
+          ? '圖片審核頁只判斷圖片或表格資產是否正確；若需要補圖，也可以在這裡貼上並綁定位置。'
+          : '審題時若發現題幹、選項或題組共用圖片缺漏/裁切錯誤，可在這裡貼上正確截圖並綁定到對應位置。圖片對錯仍可到「圖片」頁集中審核。'}</p>
         <div id="manualAssetPasteZone" class="paste-zone" tabindex="0" onpaste="handleManualAssetPaste(event)">
           <b>貼上人工修正圖片</b>
           <span class="meta">先在 PDF 或截圖工具框選正確範圍，點這裡後按 ⌘V；或選擇圖片檔。若要取代 MinerU 錯圖，勾選「取代既有圖片」。</span>
@@ -7198,7 +7801,7 @@ function renderDetail() {
           <span id="manualAssetStatus" class="meta"></span>
         </div>
       </div>
-    </div></div>` : '';
+    </div></div>`;
   const symbolToolsPanel = `
     <div class="panel question-correction-panel"><h2>符號模板</h2><div class="body">
       <div class="symbol-toolbar" aria-label="常用符號模板">
@@ -7243,6 +7846,13 @@ function renderDetail() {
       </div>
       <p id="saved" class="meta"></p>
     </div></div>`;
+  const correctionTitle = isVisualMode ? '人工校正（題文/圖片備註）' : '人工校正';
+  const correctionNotesField = isVisualMode
+    ? `<label class="meta">校正註記<textarea id="notes" placeholder="例如：圖片註解 OCR 遺漏，已補回題幹。">${esc(notePrefill)}</textarea></label>`
+    : '';
+  const correctionActions = isVisualMode
+    ? `<button class="action" onclick="saveCorrection(false)">儲存人工校正</button><span id="saved" class="meta"></span>`
+    : `<button class="action" onclick="saveCorrection(false)">儲存人工校正</button><button class="action accept" onclick="saveCorrection(true)">儲存並通過</button>`;
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
@@ -7266,10 +7876,10 @@ function renderDetail() {
       <p><b>題組：</b>${esc(current.group_ref ?? '無')}${current.group_sequence_no ? ` <span class="meta">序號 ${esc(current.group_sequence_no)}</span>` : ''}</p>
     </div></div>
     <div class="panel"><h2>疑點</h2><div class="body">${issues}</div></div>
-    ${aiPanel}
+    ${isVisualMode ? '' : aiPanel}
     ${imageReviewAssetPanel}
     ${manualReviewPanel}
-    <div class="panel question-correction-panel"><h2>人工校正</h2><div class="body">
+    <div class="panel question-correction-panel"><h2>${correctionTitle}</h2><div class="body">
       <div class="correction-tools">
         <div class="correction-preview">
           <div class="meta">即時顯示預覽（與審題畫面使用同一個 renderer）</div>
@@ -7285,10 +7895,10 @@ function renderDetail() {
         </div>
         <label class="meta">答案<input id="editAnswer" class="edit-field" value="${editableText(current.answer ?? '')}"><span class="meta">可補文字答案，例如 A、AC 或 A|C；圖片請用上方補圖按鈕放到題幹、選項或題組共用。</span></label>
         <label class="meta">題組<input id="editGroupRef" class="edit-field" value="${editableText(current.group_ref ?? '')}"></label>
+        ${correctionNotesField}
       </div>
       <div class="toolbar">
-        <button class="action" onclick="saveCorrection(false)">儲存人工校正</button>
-        <button class="action accept" onclick="saveCorrection(true)">儲存並通過</button>
+        ${correctionActions}
       </div>
       <p class="meta">人工校正會寫入 review event，不會覆蓋 parser 原始輸出；單純儲存校正會保留原本通過、阻擋或疑問狀態。</p>
     </div></div>
@@ -7412,7 +8022,7 @@ function renderGroupDetail() {
   const rows = uniqueRowsByKey(current.rows || []);
   current.rows = rows;
   const reasonCounts = Object.entries(current.reason_counts || {}).map(([key, value]) =>
-    `<span class="badge needs_review">${esc(key)} ${esc(value)}</span>`
+    `<span class="badge needs_review">${esc(key)} ${esc(value)} 題</span>`
   ).join(' ');
   const rowsHtml = rows.map(row => {
     const review = row.review || {};
@@ -7423,10 +8033,16 @@ function renderGroupDetail() {
         ? ' <span class="badge not_group">確認非題組</span>'
         : '';
     const aiStatus = row.ai_review?.audit_status || '';
-    const visualBadge = row.is_visual_question ? ` <span class="badge visual">${row.visual_profile?.has_visual_asset ? '圖片題' : '疑似需圖'}</span>` : '';
+    const visualBadge = row.is_visual_question ? ' <span class="badge visual">圖片待處理</span>' : '';
     const reasons = (row.reasons || []).map(reason => `<span class="badge needs_review">${esc(reason)}</span>`).join(' ');
     const rowGroupRef = row.group_ref || row.inferred_group_ref || '無';
-    const rowGroupKind = row.group_ref ? 'group_ref' : row.inferred_group_kind === 'explicit_count' ? 'explicit inferred' : row.inferred_group_ref ? 'inferred' : 'group_ref';
+    const rowGroupKind = row.group_ref
+      ? '已綁題組'
+      : row.inferred_group_kind === 'explicit_count'
+        ? '明示範圍推論'
+        : row.inferred_group_ref
+          ? '承上題推論'
+          : '未綁題組';
     return `<tr>
       <td><b>第 ${esc(row.question_number)} 題</b>${row.question_number_occurrence && row.question_number_occurrence !== 1 ? ` <span class="meta">occ ${esc(row.question_number_occurrence)}</span>` : ''}</td>
       <td><code>${esc(row.candidate_key)}</code><div class="meta">${esc(rowGroupKind)}: ${esc(rowGroupRef)}</div></td>
@@ -8047,9 +8663,14 @@ async function review(action, correction = null, options = {}) {
       renderList();
       renderDetail();
       const saved = document.getElementById('saved') || document.getElementById('manualAssetStatus');
-      if (saved) saved.textContent = `已儲存人工校正；${storageLabel(data.event?.storage)}。畫面已更新，尚未自動通過。`;
+      if (saved) {
+        const visualReviewSaved = Boolean(savedCorrection && Object.prototype.hasOwnProperty.call(savedCorrection, 'visual_review'));
+        saved.textContent = mode === 'visual' && visualReviewSaved
+          ? `已儲存圖片判斷；${storageLabel(data.event?.storage)}。`
+          : `已儲存人工校正；${storageLabel(data.event?.storage)}。畫面已更新，尚未自動通過。`;
+      }
       savePreferencesSoon();
-      return;
+      return data;
     }
     const stillVisible = itemMatchesCurrentReviewFilter(current);
     updateProgressCountsAfterLocalReview(wasReviewed, stillVisible);
