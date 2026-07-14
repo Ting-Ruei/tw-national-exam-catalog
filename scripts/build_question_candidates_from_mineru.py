@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import re
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,8 @@ ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 PAIR_INDEX_DIR = ASSET_ROOT / "Registry" / "paired_indexes"
 OUTPUT_ROOT = ASSET_ROOT / "30_normalized_items"
 MINERU_ROOT = ASSET_ROOT / "20_mineru_output"
-PARSER_VERSION = "moex_mineru_candidate_v0.8"
+TEXT_NORMALIZATION_REGISTRY = PROJECT_ROOT / "configs" / "text_normalization_rules.json"
+PARSER_VERSION = "moex_mineru_candidate_v0.11"
 
 OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．·]|([A-E])-(?=[a-z]))\s*")
 INLINE_OPTION_RE = re.compile(
@@ -46,7 +48,7 @@ DETAILS_BLOCK_RE = re.compile(r"<details\b.*?</details>", re.S | re.I)
 STANDALONE_IMAGE_RE = re.compile(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$")
 GROUP_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:至|到|~|～|-|－)\s*(\d{1,3})\s*題")
 GROUP_PREFIX_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})\s*(?=\S)")
-GROUP_COUNT_RE = re.compile(r"回答下列\s*(\d{1,2})\s*題")
+GROUP_COUNT_RE = re.compile(r"回答(?:下列|以下)\s*(\d{1,2})\s*題")
 IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|如附圖|附圖|圖示|圖中|圖片|照片|影像如下|X光片|x光片|切片圖|表中|下表|附表|如下表)")
 EXAM_HEADER_HINT_RE = re.compile(r"(代號|類科名稱|科目名稱|考試時間|座號|本試題|禁止使用電子計算器|單一選擇題)")
 SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
@@ -54,10 +56,13 @@ MARKUP_HINT_RE = re.compile(r"(<sub>|<sup>|\\[a-zA-Z]+|[α-ωΑ-ΩⅠⅡⅢⅣ�
 OCR_CHAR_MAP = str.maketrans(
     {
         "锌": "鋅",
+        "须": "須",
         "羟": "羥",
         "钙": "鈣",
         "锰": "錳",
+        "镁": "鎂",
         "减": "減",
+        "剂": "劑",
         "内": "內",
         "麦": "麩",
         "麸": "麩",
@@ -66,6 +71,7 @@ OCR_CHAR_MAP = str.maketrans(
         "肠": "腸",
         "岛": "島",
         "题": "題",
+        "数": "數",
         "脱": "脫",
         "氢": "氫",
         "铵": "銨",
@@ -76,6 +82,7 @@ OCR_CHAR_MAP = str.maketrans(
         "疡": "瘍",
         "鳞": "鱗",
         "静": "靜",
+        "匀": "勻",
         "婴": "嬰",
         "脏": "臟",
         "肾": "腎",
@@ -112,6 +119,44 @@ OCR_PHRASE_MAP = {
     "氩離": "氫離",
     "上腔静脈": "上腔靜脈",
 }
+
+
+@lru_cache(maxsize=1)
+def load_text_normalization_rules() -> tuple[dict[str, Any], ...]:
+    """Load user-maintained phrase rules without making the parser depend on them."""
+    if not TEXT_NORMALIZATION_REGISTRY.exists():
+        return ()
+    try:
+        payload = json.loads(TEXT_NORMALIZATION_REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    rules = payload.get("rules") if isinstance(payload, dict) else None
+    if not isinstance(rules, list):
+        return ()
+    return tuple(rule for rule in rules if isinstance(rule, dict) and rule.get("kind") == "phrase")
+
+
+def _rule_matches_context(rule: dict[str, Any], category: str | None, subject: str | None) -> bool:
+    scope = rule.get("scope") or {}
+    if not scope:
+        return True
+    categories = {str(value) for value in scope.get("categories") or []}
+    subjects = {str(value) for value in scope.get("subjects") or []}
+    if categories and (category or "") not in categories:
+        return False
+    if subjects and (subject or "") not in subjects:
+        return False
+    return True
+
+
+def custom_phrase_map(category: str | None = None, subject: str | None = None) -> dict[str, str]:
+    """Return confirmed additions from the editable generic/subject rule file."""
+    return {
+        str(rule["source"]): str(rule["target"])
+        for rule in load_text_normalization_rules()
+        if rule.get("source") and rule.get("target")
+        and _rule_matches_context(rule, category, subject)
+    }
 
 AMINO_ACID_ANCHORS = [
     (re.compile(r"\bglycine\b", re.I), ["甘胺酸"]),
@@ -239,10 +284,12 @@ def mineru_md_for_pdf(pdf_value: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def normalize_text(value: str) -> str:
+def normalize_text(value: str, *, category: str | None = None, subject: str | None = None) -> str:
     value = DETAILS_BLOCK_RE.sub("", value)
     value = STANDALONE_IMAGE_RE.sub("", value)
     for source, target in OCR_PHRASE_MAP.items():
+        value = value.replace(source, target)
+    for source, target in custom_phrase_map(category, subject).items():
         value = value.replace(source, target)
     value = value.translate(OCR_CHAR_MAP)
     value = re.sub(r"\\,\s*", " ", value)
@@ -252,12 +299,42 @@ def normalize_text(value: str) -> str:
     return "\n".join(lines).strip()
 
 
+def normalize_confirmed_ocr_text(value: str, *, category: str | None = None, subject: str | None = None) -> str:
+    """Apply only PDF-confirmed OCR phrase/character corrections.
+
+    This intentionally excludes scientific markup, whitespace cleanup, and
+    semantic formatting. It is used when a known Traditional-Chinese OCR
+    rule must be propagated without changing unrelated presentation.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    for source, target in OCR_PHRASE_MAP.items():
+        value = value.replace(source, target)
+    for source, target in custom_phrase_map(category, subject).items():
+        value = value.replace(source, target)
+    return value.translate(OCR_CHAR_MAP)
+
+
 def ordinal_suffix(value: str) -> str:
     return ORDINAL_SUPERSCRIPTS.get(value, value)
 
 
+def normalize_trademark_superscript_spacing(value: str) -> str:
+    """Attach registered/trade-mark superscripts to the preceding product name."""
+    return re.sub(
+        r"(?<=[A-Za-z0-9\u4e00-\u9fff])\s+<sup>([®™])</sup>",
+        r"<sup>\1</sup>",
+        value,
+    )
+
+
 def normalize_science_markup(value: str) -> str:
     """Render common MinerU/LaTeX biomedical notation as review-friendly text."""
+    # MinerU frequently mixes a full-width opening parenthesis with an ASCII
+    # closing parenthesis around English biomedical terms. Repair only simple,
+    # non-nested pairs so formulas and nested prose remain untouched.
+    value = re.sub(r"（([^（）()\n]{1,240})\)", r"（\1）", value)
+    value = re.sub(r"\(([^（）()\n]{1,240})）", r"(\1)", value)
     value = re.sub(r"\$?\\mu\$?\s*([a-zA-Z])", r"μ\1", value)
     value = re.sub(r"\\mu\s+([a-zA-Z])", r"μ\1", value)
     symbol_pattern = "|".join(sorted(LATEX_SYMBOL_MAP, key=len, reverse=True))
@@ -266,13 +343,38 @@ def normalize_science_markup(value: str) -> str:
     value = re.sub(rf"\$?\\({symbol_pattern})\$?", lambda m: LATEX_SYMBOL_MAP[m.group(1)], value)
     value = re.sub(r"\\(?:mathbf|mathrm|mathit|text)\{([^{}]+)\}", r"\1", value)
     value = value.replace(r"\triangle", "△")
-    value = value.replace(r"\%", "%")
-    value = re.sub(r"(\d+(?:\.\d+)?)\s*\$?\s*\^\{(?:\\mathrm\{)?(st|nd|rd|th)(?:\})?\}", lambda m: f"{m.group(1)}{ordinal_suffix(m.group(2))}", value)
-    value = re.sub(r"\$?\s*(-?\d+(?:\.\d+)?)\s*\$?\s*\^\s*\{?\\circ\}?\s*\$?\s*(?:\\mathrm\{C\}|C)", r"\1℃", value)
+    # MinerU/LaTeX may emit one or more backslashes, sometimes with a space,
+    # before a percent sign.  They are all the same display escape and must
+    # not survive into the candidate layer as literal `\\%` text.
+    value = re.sub(r"\\+\s*%", "%", value)
+    # Celsius also arrives in several equivalent LaTeX forms. Only convert
+    # `\\circ` when it is explicitly followed by C; a standalone angle marker
+    # must remain an angle marker.
+    value = re.sub(r"\^\s*\{\s*\\+\s*circ\s*\}\s*(?:\\mathrm\{C\}|C)", "℃", value, flags=re.I)
+    value = re.sub(r"\\+\s*circ\s*(?:\\mathrm\{C\}|C)", "℃", value, flags=re.I)
+    value = re.sub(r"(?<=\d)\s*\\+\s*circ\b", "°", value, flags=re.I)
+    value = re.sub(
+        r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*(?:\$\s*)?\^\{(?:\\mathrm\{)?(st|nd|rd|th)(?:\})?\}",
+        lambda m: f"{m.group(1)}{ordinal_suffix(m.group(2))}",
+        value,
+    )
+    # Ordinal suffixes are typography rather than semantics, but retaining the
+    # printed superscript keeps clinical staging and prose faithful to the PDF.
+    value = re.sub(
+        r"(?<![A-Za-z0-9])(\d+)(st|nd|rd|th)\b",
+        lambda m: f"{m.group(1)}{ordinal_suffix(m.group(2))}",
+        value,
+        flags=re.I,
+    )
+    # Registered/trade-mark symbols frequently arrive as standalone LaTex
+    # superscripts, for example `Berotec ^{®}`. Store semantic HTML rather
+    # than leaving literal source markup in the candidate text.
+    value = re.sub(r"\^\{\s*([®™])\s*\}", r"<sup>\1</sup>", value)
+    value = re.sub(r"\$?\s*(-?\d+(?:\.\d+)?)\s*\$?\s*\^\s*\{?\\+\s*circ\}?\s*\$?\s*(?:\\mathrm\{C\}|C)", r"\1℃", value)
     value = re.sub(r"\$?\s*(-?\d+(?:\.\d+)?)\s*(?:°|˚)\s*C\b", r"\1℃", value)
-    value = re.sub(r"\^\s*\{?\\circ\}?\s*(?:\\mathrm\{C\}|C)", "℃", value)
+    value = re.sub(r"\^\s*\{?\\+\s*circ\}?\s*(?:\\mathrm\{C\}|C)", "℃", value)
     value = re.sub(r"(?:°|˚)\s*C\b", "℃", value)
-    value = re.sub(r"\^\s*\{?\\circ\}?", "°", value)
+    value = re.sub(r"\^\s*\{?\\+\s*circ\}?", "°", value)
     value = re.sub(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)℃", r"\1-\2℃", value)
     value = value.replace(r"\rightarrow", "→").replace(r"\to", "→")
     value = value.replace(r"\uparrow", "↑").replace(r"\downarrow", "↓")
@@ -322,15 +424,191 @@ def normalize_science_markup(value: str) -> str:
     value = re.sub(r"\s+([μmunp]?mol|[μmunp]?g|mL|dL|L|cm|m)\b", r" \1", value)
     value = re.sub(r"\b([μmunp]?g)\s*/\s*(dL|mL|L)\b", r"\1/\2", value)
     value = re.sub(r"\b(MΩ)\s*/\s*(cm)\b", r"\1/\2", value)
-    value = re.sub(r"\b([pP]CO)2\b", r"\1₂", value)
-    value = re.sub(r"\b([pP])\s*O₂\b", r"\1O₂", value)
-    value = re.sub(r"\b([pP])\s*CO₂\b", r"\1CO₂", value)
-    value = re.sub(r"\bDL\s+CO\b", "DLCO", value, flags=re.I)
-    value = re.sub(r"\bSO\s*₂\b", "SO₂", value)
+    # Only normalize standalone blood-gas tokens.  A word boundary is not
+    # sufficient here because it can be ambiguous around OCR/Unicode text;
+    # more importantly, never read the `PO` inside `hypothyroidism` as P-O2.
+    token_prefix = r"(?<![A-Za-z0-9])"
+    token_suffix = r"(?![A-Za-z0-9])"
+    value = re.sub(rf"{token_prefix}([pP]CO)2{token_suffix}", r"\1₂", value)
+    value = re.sub(rf"{token_prefix}([pP])\s*O2{token_suffix}", r"\1O₂", value)
+    value = re.sub(rf"{token_prefix}([pP])\s*O₂{token_suffix}", r"\1O₂", value)
+    value = re.sub(rf"{token_prefix}([pP])\s*CO₂{token_suffix}", r"\1CO₂", value)
+    value = re.sub(rf"{token_prefix}DL\s+CO{token_suffix}", "DLCO", value, flags=re.I)
+    value = re.sub(rf"{token_prefix}SO\s*₂{token_suffix}", "SO₂", value)
     value = re.sub(r"\bFEV\s*₁(?:\.₀)?\s*%\b", "FEV₁%", value)
     value = re.sub(r"\bFEV\s*₁(?:\.₀)?\s*/\s*FVC\b", "FEV₁/FVC", value)
+    # Pharmacology/clinical-lab abbreviations frequently lose the printed
+    # subscript in MinerU text. Keep these replacements narrow to established
+    # biomedical tokens rather than treating every adjacent capital as a subscript.
+    token_tail = r"(?=\s|[0-9]|[，。,；;、：:）)\]]|$)"
+    token_prefix = r"(?<![A-Za-z0-9])"
+    value = re.sub(rf"{token_prefix}C\s*(?:<sub>)?trough(?:</sub>)?{token_tail}", "C<sub>trough</sub>", value, flags=re.I)
+    value = re.sub(
+        rf"{token_prefix}C\s*(?:<sub>)?SS(?:</sub>)?{token_tail}",
+        "C<sub>SS</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(rf"{token_prefix}E[Rr]\s*(?:<sub>)?H(?:</sub>)?{token_tail}", "ER<sub>H</sub>", value)
+    value = re.sub(rf"{token_prefix}F[Ee]\s*(?:<sub>)?N[aA](?:</sub>)?{token_tail}", "FE<sub>Na</sub>", value)
+    value = re.sub(rf"{token_prefix}[Ss]\s*(?:<sub>)?[Cc][Rr](?:</sub>)?{token_tail}", "S<sub>Cr</sub>", value)
+    value = re.sub(rf"{token_prefix}C[Ll]\s*(?:<sub>)?C[rR](?:</sub>)?{token_tail}", "CL<sub>Cr</sub>", value)
+    value = re.sub(rf"{token_prefix}V\s*(?:<sub>)?d(?:</sub>)?{token_tail}", "V<sub>d</sub>", value)
+    # Pharmacokinetic abbreviations are often printed with a letter or word
+    # subscript but arrive from MinerU as plain ASCII. Match only complete
+    # biomedical tokens so ordinary words such as `keto` or `Vmaximal` stay
+    # untouched. Keep the source case for the blood-volume `D` form.
+    pharmacokinetic_tail = r"(?![A-Za-z0-9])"
+
+    def pharmacokinetic_token(base: str, subscript: str) -> str:
+        # Keep paired braces intact for formula text such as `Vmax}{KM`;
+        # consume braces only in an explicit `V_{max}` form.
+        return (
+            rf"{token_prefix}{base}\s*"
+            rf"(?:_\s*\{{\s*{subscript}\s*\}}|_\s*{subscript}|"
+            rf"<sub>\s*{subscript}\s*</sub>|{subscript})"
+            rf"{pharmacokinetic_tail}"
+        )
+
+    value = re.sub(pharmacokinetic_token("K", "M"), "K<sub>M</sub>", value)
+    value = re.sub(pharmacokinetic_token("V", "max"), "V<sub>max</sub>", value, flags=re.I)
+    value = re.sub(pharmacokinetic_token("k", "a"), "k<sub>a</sub>", value)
+    value = re.sub(pharmacokinetic_token("k", "e"), "k<sub>e</sub>", value)
+    value = re.sub(pharmacokinetic_token("V", "p"), "V<sub>p</sub>", value)
+    value = re.sub(pharmacokinetic_token("V", "ss"), "V<sub>ss</sub>", value, flags=re.I)
+    value = re.sub(pharmacokinetic_token("V", "exp"), "V<sub>exp</sub>", value, flags=re.I)
+    value = re.sub(
+        rf"{token_prefix}V\s*(?:_\s*\{{\s*D\s*\}}|_\s*D|D|d)\s*([)）])\s*ss{pharmacokinetic_tail}",
+        r"V<sub>D</sub>\1<sub>ss</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}V\s*(?:_\s*\{{\s*D\s*\}}|_\s*D|D|d)\s*(?:[,，]\s*)?ss{pharmacokinetic_tail}",
+        "V<sub>D,ss</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(pharmacokinetic_token("V", "D"), "V<sub>D</sub>", value)
+    value = re.sub(
+        rf"(V<sub>D</sub>[)）]?)\s*ss{pharmacokinetic_tail}",
+        r"\1<sub>ss</sub>",
+        value,
+        flags=re.I,
+    )
+    # Additional notation confirmed from pharmacokinetics review notes. These
+    # are complete-token rules: they do not turn ordinary words into formulas.
+    value = re.sub(
+        rf"{token_prefix}C\s*(?:_\s*\{{\s*max\s*\}}|_\s*max|<sub>\s*max\s*</sub>|max){pharmacokinetic_tail}",
+        "C<sub>max</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}t\s*(?:_\s*\{{\s*max\s*\}}|_\s*max|<sub>\s*max\s*</sub>|max){pharmacokinetic_tail}",
+        "t<sub>max</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}C\s*(?:_\s*\{{\s*p\s*\}}|_\s*p|<sub>\s*p\s*</sub>|p){pharmacokinetic_tail}",
+        "C<sub>p</sub>",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}C[Ll]\s*(?:_\s*\{{\s*cr\s*\}}|_\s*cr|<sub>\s*cr\s*</sub>|cr){pharmacokinetic_tail}",
+        "CL<sub>Cr</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}C\s*(?:_\s*\{{\s*cr\s*\}}|_\s*cr|<sub>\s*cr\s*</sub>|cr){pharmacokinetic_tail}",
+        "C<sub>cr</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}f\s*(?:_\s*\{{\s*e\s*\}}|_\s*e|<sub>\s*e\s*</sub>|e){pharmacokinetic_tail}",
+        "f<sub>e</sub>",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}f\s*(?:_\s*\{{\s*u\s*\}}|_\s*u|<sub>\s*u\s*</sub>|u){pharmacokinetic_tail}",
+        "f<sub>u</sub>",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}D\s*(?:_\s*\{{\s*0\s*\}}|_\s*0|<sub>\s*0\s*</sub>|0|₀){pharmacokinetic_tail}",
+        "D₀",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}D\s*(?:_\s*\{{\s*L\s*\}}|_\s*L|<sub>\s*L\s*</sub>|L){pharmacokinetic_tail}",
+        "D<sub>L</sub>",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}R\s*(?:_\s*\{{\s*in\s*\}}|_\s*in|<sub>\s*in\s*</sub>|in){pharmacokinetic_tail}",
+        "R<sub>in</sub>",
+        value,
+    )
+    value = re.sub(
+        rf"{token_prefix}MW\s*(?:_\s*\{{\s*dextrose\s*\}}|_\s*dextrose|<sub>\s*dextrose\s*</sub>|dextrose){pharmacokinetic_tail}",
+        "MW<sub>dextrose</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}K\s*(?:_\s*\{{\s*sp\s*\}}|_\s*sp|<sub>\s*sp\s*</sub>|sp){pharmacokinetic_tail}",
+        "K<sub>sp</sub>",
+        value,
+        flags=re.I,
+    )
+    # D_u and D_u(0-t) are urinary excretion quantities. Parenthesized
+    # intervals are retained inside the subscript rather than flattened.
+    value = re.sub(
+        rf"{token_prefix}D\s*(?:_\s*\{{\s*u\s*\(\s*0\s*-\s*t\s*\)\s*\}}|_\s*u\(\s*0\s*-\s*t\s*\)|<sub>\s*u\(\s*0\s*-\s*t\s*\)\s*</sub>){pharmacokinetic_tail}",
+        "D<sub>u(0-t)</sub>",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf"{token_prefix}D\s*(?:_\s*\{{\s*u\s*\}}|_\s*u|<sub>\s*u\s*</sub>|u)(?=∞|[\s,，。；;、：:）)\]]|$)",
+        "D<sub>u</sub>",
+        value,
+        flags=re.I,
+    )
+    # In pharmacokinetic context, Co/C0 denotes the initial concentration.
+    # Do not globally rewrite Co: it is also the valid chemical symbol for
+    # cobalt. The surrounding Chinese/English phrase is the disambiguator.
+    value = re.sub(
+        r"(初濃度|initial\s+concentration)(.{0,40}?)(?<![A-Za-z0-9])C[o0](?![A-Za-z0-9])",
+        r"\1\2C₀",
+        value,
+        flags=re.I,
+    )
+    # Electrochemical reduction-potential notation uses a superscript zero.
+    if re.search(r"還原電位|reduction\s+potential", value, flags=re.I):
+        value = re.sub(
+            rf"{token_prefix}E(?:o|0|_\s*o|_\s*0|<sub>\s*0\s*</sub>){pharmacokinetic_tail}",
+            "E⁰",
+            value,
+            flags=re.I,
+        )
+    value = re.sub(rf"{token_prefix}HbA\s*(?:₁|1)\s*C{token_tail}", "HbA₁<sub>C</sub>", value)
+    # A stray OCR tilde before a laboratory unit is not an approximation sign;
+    # it is a MinerU escape/layout artifact. Remove it only after a numeric
+    # value and before a complete unit token. Keep genuine approximation signs
+    # in prose and formula expressions untouched.
+    value = re.sub(
+        r"(?<=\d)\s*[~～]\s*(?=(?:mL|L|hr|mEq|mmHg|mg|μg|g|mol|cm|kg|mmol|h⁻¹)(?![A-Za-z0-9]))",
+        " ",
+        value,
+    )
+    value = re.sub(r"(?<=[\u4e00-\u9fff])(?=\d+(?:℃|°C))", " ", value)
     value = re.sub(r"\s+([，。；：、])", r"\1", value)
     value = re.sub(r"[ \t]{2,}", " ", value)
+    value = normalize_trademark_superscript_spacing(value)
     value = normalize_blood_group_markup(value)
     value = value.replace("R₄S", "R₄s")
     value = value.replace(r"\~", "～")
@@ -499,16 +777,27 @@ def strip_leading_question_number_marker(text: str, number: str) -> str:
     return cleaned.strip()
 
 
-def parse_question_block(number: str, body: str, md_path: Path) -> dict[str, Any]:
+def parse_question_block(
+    number: str,
+    body: str,
+    md_path: Path,
+    *,
+    category: str | None = None,
+    subject: str | None = None,
+) -> dict[str, Any]:
     markers = option_markers(body)
-    stem = normalize_text(body[: option_marker_start(markers[0])] if markers else body)
+    stem = normalize_text(
+        body[: option_marker_start(markers[0])] if markers else body,
+        category=category,
+        subject=subject,
+    )
     stem = strip_leading_question_number_marker(stem, number)
     options: list[dict[str, Any]] = []
     for index, marker in enumerate(markers):
         label = option_marker_label(marker)
         start = marker.end()
         end = option_marker_start(markers[index + 1]) if index + 1 < len(markers) else len(body)
-        option_text = normalize_text(body[start:end])
+        option_text = normalize_text(body[start:end], category=category, subject=subject)
         options.append(
             {
                 "key": label,
@@ -537,13 +826,39 @@ def parse_question_block(number: str, body: str, md_path: Path) -> dict[str, Any
     }
 
 
-def is_exam_header_block(body: str) -> bool:
-    normalized = normalize_text(body)
+def is_exam_header_block(
+    body: str,
+    *,
+    number: str | None = None,
+    year: str | None = None,
+    category: str | None = None,
+    subject: str | None = None,
+) -> bool:
+    normalized = normalize_text(body, category=category, subject=subject)
     if not normalized:
         return False
     header_hits = len(EXAM_HEADER_HINT_RE.findall(normalized))
-    has_options = bool(OPTION_RE.search(body))
-    return header_hits >= 3 and not has_options
+    option_count = max(
+        len(list(OPTION_RE.finditer(body))),
+        len(list(INLINE_OPTION_RE.finditer(body))),
+    )
+    if header_hits >= 3 and option_count == 0:
+        return True
+
+    # MinerU may put the ROC year at the start of an exam header. The legacy
+    # parser then treated the rest of the paper as one giant question because
+    # the header block naturally contains many A-D markers. A real question
+    # whose number happens to equal the year still has a normal option count.
+    try:
+        number_matches_year = int(number or "") == int(year or "")
+    except ValueError:
+        number_matches_year = False
+    if number_matches_year and header_hits >= 3 and option_count > 8:
+        return True
+
+    # Keep a second, year-independent guard for malformed headers where the
+    # year was not propagated by an older catalog row.
+    return header_hits >= 5 and option_count > 20
 
 
 def split_merged_unnumbered_questions(number: str, body: str) -> list[tuple[str, str]]:
@@ -641,30 +956,87 @@ def is_spurious_legacy_markup_start(match: re.Match[str], year: str | None) -> b
     return tail in {"</details>", "<details>", "</summary>", "text_image"}
 
 
-def parse_questions(markdown: str, md_path: Path, year: str | None = None) -> list[dict[str, Any]]:
-    starts = [
-        match
-        for match in question_start_re_for_year(year).finditer(markdown)
-        if normalize_question_number(match.group(1)) != "0"
-        and not is_spurious_legacy_numeric_start(match, year)
-        and not is_spurious_legacy_markup_start(match, year)
-    ]
-    questions: list[dict[str, Any]] = []
-    for index, start in enumerate(starts):
-        number = start.group(1)
-        body_start = start.start(2)
-        body_end = starts[index + 1].start() if index + 1 < len(starts) else len(markdown)
-        body = markdown[body_start:body_end]
-        try:
-            int(number)
-        except ValueError:
-            continue
-        if is_exam_header_block(body):
-            continue
-        for split_number, split_body in split_merged_questions(number, body):
-            if is_exam_header_block(split_body):
+def parse_questions(
+    markdown: str,
+    md_path: Path,
+    year: str | None = None,
+    *,
+    category: str | None = None,
+    subject: str | None = None,
+) -> list[dict[str, Any]]:
+    def starts_for(pattern: re.Pattern[str], *, legacy_fallback: bool = False) -> list[re.Match[str]]:
+        return [
+            match
+            for match in pattern.finditer(markdown)
+            if normalize_question_number(match.group(1)) != "0"
+            and not is_spurious_legacy_numeric_start(match, year)
+            and not is_spurious_legacy_markup_start(match, year)
+            and (
+                not legacy_fallback
+                or int(normalize_question_number(match.group(1)) or "0") <= 200
+            )
+        ]
+
+    def parse_from_starts(
+        starts: list[re.Match[str]],
+        *,
+        require_options: bool = False,
+    ) -> tuple[list[dict[str, Any]], int]:
+        questions: list[dict[str, Any]] = []
+        header_count = 0
+        for index, start in enumerate(starts):
+            number = start.group(1)
+            body_start = start.start(2)
+            body_end = starts[index + 1].start() if index + 1 < len(starts) else len(markdown)
+            body = markdown[body_start:body_end]
+            try:
+                int(number)
+            except ValueError:
                 continue
-            questions.append(parse_question_block(split_number, split_body, md_path))
+            if is_exam_header_block(body, number=number, year=year, category=category, subject=subject):
+                header_count += 1
+                continue
+            for split_number, split_body in split_merged_questions(number, body):
+                if is_exam_header_block(split_body, number=split_number, year=year, category=category, subject=subject):
+                    header_count += 1
+                    continue
+                if require_options and len(option_markers(split_body)) < 2:
+                    continue
+                questions.append(
+                    parse_question_block(
+                        split_number,
+                        split_body,
+                        md_path,
+                        category=category,
+                        subject=subject,
+                    )
+                )
+        return questions, header_count
+
+    primary_starts = starts_for(question_start_re_for_year(year))
+    questions, header_count = parse_from_starts(primary_starts)
+
+    # Some post-106 MinerU outputs still use the historical bare-number shape
+    # (`1 題幹`) even though most papers use `1.`. Only fall back when the
+    # modern parse found an exam header swallowing the paper and recovered very
+    # few real questions. Requiring option markers keeps chart ticks out.
+    try:
+        roc_year = int(year or "")
+    except ValueError:
+        roc_year = 0
+    document_has_exam_header = len(
+        EXAM_HEADER_HINT_RE.findall(normalize_text(markdown[:3000], category=category, subject=subject))
+    ) >= 3
+    should_try_legacy = (
+        roc_year > 105
+        and len(questions) < 10
+        and (header_count > 0 or (not primary_starts and document_has_exam_header))
+    )
+    if should_try_legacy:
+        legacy_starts = starts_for(QUESTION_START_RE_LEGACY, legacy_fallback=True)
+        legacy_questions, _legacy_header_count = parse_from_starts(legacy_starts, require_options=True)
+        if len(legacy_questions) > len(questions):
+            return legacy_questions
     return questions
 
 
@@ -990,8 +1362,11 @@ def quality_status(issues: list[Issue]) -> str:
 
 
 def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]], list[Issue], dict[str, Any]]:
-    q_md = mineru_md_for_pdf(row.get("question_pdf") or row.get("question_pdf_relative", ""))
-    a_md = mineru_md_for_pdf(row.get("answer_pdf_primary") or row.get("answer_pdf_primary_relative", ""))
+    # Relative catalog paths are portable across the host, Docker, and remote
+    # workers. Absolute paths in historical pair indexes point to the machine
+    # that generated the CSV and must only be a fallback.
+    q_md = mineru_md_for_pdf(row.get("question_pdf_relative") or row.get("question_pdf", ""))
+    a_md = mineru_md_for_pdf(row.get("answer_pdf_primary_relative") or row.get("answer_pdf_primary", ""))
     source_registry_key = row["question_registry_key"]
     meta = {
         "pair_key": row["pair_key"],
@@ -1010,7 +1385,13 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
         return [], [issue], meta
     q_text = q_md.read_text(encoding="utf-8", errors="replace")
     a_text = a_md.read_text(encoding="utf-8", errors="replace")
-    parsed_questions = parse_questions(q_text, q_md, row.get("year"))
+    parsed_questions = parse_questions(
+        q_text,
+        q_md,
+        row.get("year"),
+        category=row.get("normalized_category_name") or row.get("official_category_name"),
+        subject=row.get("normalized_subject_name") or row.get("official_subject_name"),
+    )
     propagate_group_refs(parsed_questions)
     answers = parse_answers(a_text)
     candidates: list[dict[str, Any]] = []

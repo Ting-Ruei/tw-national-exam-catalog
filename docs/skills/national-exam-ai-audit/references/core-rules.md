@@ -1,184 +1,101 @@
-# Core AI Audit Rules
+# Core Question Audit Rules
 
 ## Scope
 
-Apply these rules to every Taiwan national exam question candidate regardless of category or subject.
+Question audit asks whether the parsed question is a faithful, usable representation of the source. It does not decide medical correctness, answer correctness, image crop quality, or the final group range.
 
-The audit answers: "Does the parsed candidate look structurally safe enough for human review and later ingestion?" It does not answer: "Is the exam answer correct?" or "Is the medical/scientific statement true?"
+## Required Fields
 
-Question audit and answer audit are separate gates. During question audit, do not lower a candidate's status only because the parsed `answer` or `answer_payload` is unusual, multi-valued, missing, or needs MOD/ANS confirmation. Record those as answer-audit notes only when useful, and keep the question status based on stem/options/images/group structure.
+Inspect:
 
-## Candidate Fields To Inspect
+- `candidate_key`, question number, occurrence;
+- stem and A-D options;
+- raw block excerpt and option count;
+- previous/current/next question context;
+- parser issues;
+- image/group routing signals;
+- latest human state and whether prior AI is superseded;
+- source paths when PDF comparison is needed.
 
-- `candidate_key`
-- `question_number`
-- `question_number_occurrence`
-- `stem`
-- `options`
-- `answer`
-- `answer_payload`
-- `group_ref`
-- `image_refs`
-- `stem_image`
-- `stem_markup`
-- `metadata.raw_block`
-- `metadata.year`
-- `metadata.exam_ordinal`
-- `metadata.normalized_category_name`
-- `metadata.normalized_subject_name`
-- `metadata.question_pdf_relative`
-- `metadata.answer_pdf_primary_relative`
-- `issue_count`
-- `quality_status`
+## Decision Order
 
-## Status Decision
+### 1. Non-question header
 
-Use:
+Use `non_question_header` when a candidate is an exam cover/header rather than a question. Strong evidence includes:
 
-- `pass` when the candidate appears structurally complete.
-- `needs_review` when a human should inspect but ingestion may still be possible after quick confirmation.
-- `block` only when the parsed candidate is likely unsafe for ingestion without correction.
+- question number equals the ROC exam year;
+- stem contains several of `考試時間`, `類科名稱`, `科目名稱`, `座號`, `本試題`, `代號`;
+- the candidate contains more than eight option markers because it swallowed the paper.
 
-Recommended mapping:
+This is a root-cause finding. Do not also emit `option_structure` for the same header candidate.
 
-- `pass_likely` -> `pass`
-- one or more suspect labels -> usually `needs_review`
-- missing stem, missing options for multiple choice, severe boundary mix, or image/table missing from a question that depends on it -> `block`
+### 2. Boundaries
 
-## Universal Labels
+Use `boundary_merge` when one candidate contains two or more independent questions or repeated A-D sets. Check the next question before deciding.
 
-### `ocr_char_suspect`
+Use `boundary_missing` when a gap or duplicate indicates that another question was swallowed. Never fix only the visible duplicate options; recover the missing neighboring question from PDF/Markdown.
 
-Flag visible OCR character problems, especially simplified/variant characters inside Traditional Chinese exam text. Known examples:
+Historical numbering:
 
-- `麸` likely should be `麩`
-- `黄` likely should be `黃`
-- `氢` likely should be `氫`
-- `脱` likely should be `脫`
-- `铵` likely should be `銨`
-- `巯` likely should be `巰`
-- `羟` likely should be `羥`
-- `钠` / `钾` / `钙` / `镁` likely should be `鈉` / `鉀` / `鈣` / `鎂`
+- ROC 105 and earlier may use `1 題幹` without a dot.
+- ROC 106 and later usually use `1.` / `1、` / `1．`.
 
-Do not flag `酶`; it is valid Traditional Chinese in Taiwan biomedical terminology.
+Do not require one punctuation style across all years.
 
-### `amino_acid_translation_suspect`
+### 3. Stem and options
 
-When a question includes an English amino-acid name in parentheses or nearby text, use it as an anchor to check the preceding Chinese translation. This is especially useful in biochemistry, where MinerU may turn one Chinese character into a visually similar but wrong character.
+Use `empty_stem` for an empty or unusable stem.
 
-Use `needs_review` when:
+Use `option_structure` for duplicated keys, missing A-D option text, merged stem/option text, or abnormal option count in an ordinary multiple-choice question. Four A-D options are expected for this corpus unless source evidence proves otherwise.
 
-- the English anchor is clear, such as `valine`, `glutamine`, `phenylalanine`, or `tyrosine`;
-- nearby Chinese text looks like an amino-acid translation; and
-- the expected Chinese term is missing or visibly damaged.
+### 4. OCR characters
 
-Common anchors:
+Use `ocr_character` only for visible OCR damage. Known examples:
 
-- `glycine` -> `甘胺酸`
-- `alanine` -> `丙胺酸`
-- `valine` -> `纈胺酸`
-- `leucine` -> `白胺酸` / `亮胺酸`
-- `isoleucine` -> `異白胺酸` / `異亮胺酸`
-- `serine` -> `絲胺酸`
-- `threonine` -> `蘇胺酸`
-- `cysteine` -> `半胱胺酸`
-- `methionine` -> `甲硫胺酸`
-- `aspartate` / `aspartic acid` -> `天門冬胺酸`
-- `glutamate` / `glutamic acid` -> `麩胺酸` / `穀胺酸` / `谷胺酸`
-- `asparagine` -> `天門冬醯胺`
-- `glutamine` -> `麩醯胺` / `麩胺醯胺`
-- `lysine` -> `離胺酸` / `賴胺酸`
-- `arginine` -> `精胺酸`
-- `histidine` -> `組胺酸`
-- `phenylalanine` -> `苯丙胺酸`
-- `tyrosine` -> `酪胺酸`
-- `tryptophan` -> `色胺酸`
-- `proline` -> `脯胺酸`
+- `麸` -> `麩`
+- simplified biomedical characters such as `氢`, `钠`, `钾`, `钙`, `镁` in Traditional Chinese text;
+- bilingual amino-acid anchor mismatch, such as a damaged Chinese term next to `valine`, `glutamine`, or `tyrosine`.
 
-If the correction is obvious, include a `suggested_correction` for the exact field and a short `suggested_changes` entry. Do not auto-accept the question after applying this suggestion; it must still pass human review.
+`酶` is valid Traditional Chinese and must not be flagged.
 
-### `science_notation_suspect`
+### 5. Scientific notation and markup
 
-Flag likely broken scientific notation or biomedical symbols:
+Use `notation_markup` for meaning-bearing format damage:
 
-- Greek letters split from numbers or words, such as `α 1` when the source likely has `α1`.
-- Chemical formulas with missing subscript/superscript meaning.
-- Units or ranges broken by OCR, such as `mg / dL`, `10 - 3`, or separated `%`.
-- Celsius temperature markup left in LaTeX-like form, such as `65^{\circ} C`, `65^\circ C`, or `65° C`; it should display as `65℃`.
-- HTML/LaTeX-like fragments that would display poorly.
+- Greek letter split from index/term (`α 1`, `γ 麩胺醯`);
+- missing or broken superscript/subscript;
+- blood-group antigen notation flattened into ordinary text;
+- raw LaTeX/HTML that the shared renderer cannot display;
+- Celsius lost or left as broken markup. Canonical display should preserve `°C`/`℃` meaning.
 
-Do not require perfect LaTeX at this stage. The goal is to catch display-risk candidates.
+Do not flag harmless spacing or ordinary Latin names.
 
-### `option_parse_suspect`
+Percentage escape safeguard:
 
-Flag option structure issues:
+- In candidate text, `\%`, `\\%`, and `\ %` are LaTeX/Markdown display escapes for `%`, not distinct content. Normalize all of them to `%`.
+- Rebuild derived `stem_markup`/option markup after this normalization; do not edit `raw_candidate_json`, which remains source evidence.
+- Celsius escapes such as `\\circC`, `\\circ C`, and `^{\\circ}C` normalize to `℃`; standalone angle markers such as `90^\\circ`, `90^{\\circ}`, and `165^{\\circ} F` normalize only to `90°`, `90°`, and `165° F` respectively.
 
-- multiple-choice candidate has fewer or more than 4 options unless clearly not A-D format.
-- duplicated option keys.
-- option text appears merged into stem.
-- stem appears split into option A.
-- option text is empty while raw block has visible option content.
+Token-boundary safeguard:
 
-### `parser_boundary_suspect`
+- Never infer a missing digit, subscript, or formula from a substring inside an English word. `hypo`, `hypothyroidism`, and a standalone `PO` remain unchanged.
+- Normalize `PO2` to `PO₂` only when the source already contains that independent token, or an explicit equivalent such as `PO₂` / `P_{O_2}`. Do not turn `hypo` into `PO₂`.
+- If the proposed correction changes an English word into a scientific token, label it `needs_review` with the original/source evidence instead of applying it.
 
-Flag likely wrong question boundaries:
+### 6. Route visual/group work
 
-- stem contains another question number.
-- raw block appears to include multiple independent questions.
-- candidate has very short stem but long unrelated option text.
-- historical format has `1 題幹` rather than `1.` and parser may have mis-split.
+Use `visual_dependency` only to route a question whose text clearly depends on a figure/table but whose visual state still needs image review. Image review owns missing/wrong crop/placement.
 
-Year guidance:
+Use `group_dependency` only to route likely shared context. Group review owns the final range, order, type, and shared stem.
 
-- For `105` and earlier, tolerate legacy question numbering like `1 題幹`.
-- For `106` and later, expect stricter `1.` / `1、` / `1．` style, but do not fail solely on punctuation.
+Phrases such as `下列資料`, `以下資料`, or `依據下列資料` alone are not enough to declare a group. Stronger evidence includes an explicit range/count, `承上題`/`呈上題`, shared stem, or neighbor dependence.
 
-### `table_or_image_suspect`
+## Answer Boundary
 
-Flag visual dependency issues:
-
-- stem says `下表`, `下圖`, `圖示`, `附圖`, `如圖`, `依下列資料`, `下列檢驗結果`, `following table`, or similar but `image_refs`, `stem_image`, and table/markup fields are empty.
-- options are images but candidate stores the same image set under both stem and options.
-- answer/explanation area contains images that were incorrectly attached to question stem.
-- MinerU table markup exists but is unreadable or incomplete; prefer manual asset review.
-
-If a table is essential for solving the question and only garbled text remains, use `block`.
-
-### `group_question_suspect`
-
-Flag likely題組 problems:
-
-- stem begins with shared scenario language but `group_ref` is empty.
-- consecutive candidates repeat a long shared paragraph.
-- question refers to "上題", "前述", "下列資料", "此病人", or "此案例" without a clear group binding.
-
-### `answer_pair_suspect`
-
-Use this only as an advisory note that should be deferred to answer audit. It should not by itself make a question `needs_review` or `block`.
-
-- candidate has no answer source path even though metadata suggests an answer PDF exists.
-- answer value is missing, multi-valued, malformed, or outside expected format, such as `A|C|AC`.
-- `MOD` / correction precedence appears inconsistent in metadata.
-
-For pure answer-format concerns, keep `status` as `pass` if the question text, options, images, and group binding are otherwise structurally safe. Use `recommended_action: "defer_to_answer_audit"` and include evidence, but do not provide `suggested_correction` for `answer`.
-
-Do not mark a whole question blocked or needs_review merely because an answer PDF is missing or an answer value is unusual. Full answer correctness and answer-format normalization belong to answer audit.
+Missing, multi-valued, ANS/MOD, or malformed answers do not lower question-stage status. Route them to answer review without adding a question issue.
 
 ## Pass Criteria
 
-Use `pass` when all are true:
+Return `pass` when this stage has a readable stem, expected option structure, no visible OCR/notation damage, no boundary defect, and no unresolved route dependency.
 
-- question number is present.
-- stem is readable and non-empty.
-- A-D options are present for multiple-choice questions.
-- no obvious image/table dependency is missing.
-- no obvious OCR or notation damage that may change meaning.
-- candidate does not appear to contain multiple questions.
-
-## Reason Style
-
-Write one concise reason in Traditional Chinese. Mention field evidence, for example:
-
-- `題幹提到「下表」，但 image_refs/stem_image 均為空。`
-- `選項只有 3 個，raw_block 看起來仍有 D 選項。`
-- `出現「麸」，疑似 OCR 將「麩」轉成簡體。`
+Keep reason and evidence short. Cite observable fields, not medical assumptions.

@@ -16,7 +16,7 @@ The long-term review pipeline is:
 可使用狀態
 ```
 
-`question_candidates` and `question_parse_issues` should move into PostgreSQL review staging for browsing, filtering, and cross-device review. Append-only JSONL logs remain the source of recovery while the workflow is still evolving, but the operating surface should become SQL-first.
+`question_candidates` and `question_parse_issues` reside in PostgreSQL review staging for browsing, filtering, and cross-device review. PostgreSQL event tables are the primary append-only review record. Existing JSONL logs remain historical/import snapshots, but the Review UI no longer writes them by default.
 
 The existing importer already supports full candidate import when `--category` is omitted:
 
@@ -79,9 +79,11 @@ Canonical AI audit wording lives in:
 
 When a new repeated pattern appears, update those files first, then re-audit only affected candidates.
 
-## SQL Optimization Plan
+## SQL Optimization
 
-The first SQL migration step can still use append-only review events. For speed, the next optimization should add a derived review state layer:
+The Review UI now scopes candidates by category/subject/year/ordinal before calculating expensive visual and AI fields, limits each response to an actionable page, debounces text search, and keeps short-lived per-mode snapshots. Review writes enqueue candidate keys in `exam.formal_sync_queue`; a background worker promotes or withdraws formal rows after the SQL event commits, so the UI does not wait for full formal-table reconstruction.
+
+The next optimization, if event history growth makes filtering slow again, is a derived current-state layer:
 
 - latest human question review per candidate
 - latest AI advisory per candidate

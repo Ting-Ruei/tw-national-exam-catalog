@@ -1,0 +1,69 @@
+{
+  "taxonomy_code": "medtech-biochemistry",
+  "taxonomy_version": "medtech-biochemistry-v1",
+  "category": "醫事檢驗師",
+  "definition": "醫事檢驗師生物化學與臨床生化學課程分類；第一版先細分基礎生化，臨床生化暫不細分。",
+  "subjects": [
+    {
+      "subject_code": "MTH_BIOCHEM",
+      "names": ["生物化學與臨床生化學"],
+      "boundary_rules": [
+        "題目考分子本身的結構、鍵結、反應、代謝路徑或酵素機制時歸基礎生化。",
+        "題目考人體疾病、病人檢體、分析儀器、定量方法、臨床指標、器官功能、治療藥物監測或品質管理時歸臨床生化。",
+        "不要只看名詞：質譜分析蛋白若考儀器元件屬臨床生化；蛋白質的次單位或胺基酸性質才屬基礎生化。",
+        "正常脂蛋白的組成、運輸與脂質代謝原理可歸基礎生化脂質；高脂血症、風險指標、檢測與臨床判讀歸臨床生化。",
+        "同時實質考查兩種以上基礎生化分子類別時，可多選章節並標記綜合；錯誤選項中偶然出現另一類分子不構成多選。"
+      ],
+      "domains": [
+        {
+          "code": "MTH_BIOCHEM.BASIC",
+          "label": "基礎生化",
+          "definition": "以生物分子的結構、功能、反應與代謝原理為核心，不依賴病人情境或臨床檢驗判讀。",
+          "positive_cues": ["結構", "鍵結", "代謝路徑", "酵素動力學", "生合成", "分解反應"],
+          "exclusions": ["儀器、方法、病人檢體、疾病指標與品管歸臨床生化"],
+          "chapters": [
+            {
+              "code": "MTH_BIOCHEM.BASIC.PROTEIN_ENZYME",
+              "label": "蛋白質（含酵素）",
+              "definition": "胺基酸、胜肽與蛋白質的結構、摺疊、修飾、功能，以及酵素催化、動力學與調控。",
+              "positive_cues": ["胺基酸側鏈", "蛋白質一至四級結構", "酵素動力學", "Km", "Vmax", "抑制作用", "蛋白質修飾"]
+            },
+            {
+              "code": "MTH_BIOCHEM.BASIC.CARBOHYDRATE",
+              "label": "醣類",
+              "definition": "單醣、寡醣與多醣的結構，以及糖解、糖質新生、肝醣、磷酸戊糖等醣類代謝原理。",
+              "positive_cues": ["單醣", "糖苷鍵", "糖解作用", "糖質新生", "肝醣", "磷酸戊糖途徑"]
+            },
+            {
+              "code": "MTH_BIOCHEM.BASIC.LIPID",
+              "label": "脂質",
+              "definition": "脂肪酸、三酸甘油酯、磷脂、膽固醇與脂蛋白的結構、運輸及正常代謝原理。",
+              "positive_cues": ["脂肪酸氧化", "脂質生合成", "酮體", "膽固醇", "磷脂", "脂蛋白運輸"]
+            },
+            {
+              "code": "MTH_BIOCHEM.BASIC.NUCLEIC_ACID",
+              "label": "核酸",
+              "definition": "核苷酸、DNA與RNA的結構，以及複製、轉錄、轉譯、修復與核苷酸代謝原理。",
+              "positive_cues": ["核苷酸", "DNA複製", "RNA轉錄", "蛋白質轉譯", "密碼子", "DNA修復"]
+            }
+          ]
+        },
+        {
+          "code": "MTH_BIOCHEM.CLINICAL",
+          "label": "臨床生化",
+          "definition": "以臨床檢體、分析技術、疾病指標、器官功能、治療監測或實驗室品質為核心；第一版暫不細分。",
+          "positive_cues": ["血清", "血漿", "尿液", "分析方法", "儀器", "參考區間", "臨床判讀", "品質管制", "腫瘤標誌", "治療藥物監測"],
+          "exclusions": ["純生物分子結構與反應機制歸基礎生化"],
+          "chapters": [
+            {
+              "code": "MTH_BIOCHEM.CLINICAL.GENERAL",
+              "label": "臨床生化（暫不細分）",
+              "definition": "臨床化學方法、儀器、檢體、器官功能、荷爾蒙、脂蛋白疾病、腫瘤標誌、毒物藥物與品管等臨床生化內容的第一版集合。",
+              "positive_cues": ["分光光度法", "質譜儀", "電極法", "血清酵素", "荷爾蒙", "腎功能", "肝功能", "心臟標誌", "藥物濃度", "accuracy", "precision"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

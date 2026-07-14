@@ -1,0 +1,225 @@
+{
+  "taxonomy_code": "medtech-curriculum",
+  "taxonomy_version": "medtech-curriculum-v1",
+  "category": "醫事檢驗師",
+  "subjects": [
+    {
+      "subject_code": "MTH_HEM",
+      "names": ["臨床血液學與血庫學"],
+      "boundary_rules": [
+        "輸血相容性、血型抗原抗體、血品與輸血反應優先歸血庫。",
+        "凝血因子、出血與血栓、血小板功能優先歸血小板與止血。",
+        "同時涉及多系血球時，以題目要判斷的主要疾病或檢驗結果所屬系別為主。"
+      ],
+      "domains": [
+        {
+          "code": "MTH_HEM.RBC",
+          "label": "紅血球",
+          "definition": "紅血球生成、形態、血紅素、貧血與紅血球相關檢驗。",
+          "positive_cues": ["RBC", "Hb", "Hct", "MCV", "網狀紅血球", "貧血", "溶血", "紅血球形態"],
+          "exclusions": ["ABO/Rh與輸血相容性歸血庫", "凝血與血小板功能歸血小板與止血"],
+          "chapters": [
+            {"code": "MTH_HEM.RBC.HEMATOPOIESIS", "label": "紅血球生成與代謝", "definition": "紅血球生成、EPO、鐵代謝、維生素B12、葉酸與紅血球能量代謝。", "positive_cues": ["EPO", "鐵蛋白", "轉鐵蛋白", "B12", "葉酸", "網狀紅血球"]},
+            {"code": "MTH_HEM.RBC.INDICES_MORPH", "label": "紅血球指數與形態", "definition": "CBC紅血球參數、大小與染色性、血抹片形態及判讀。", "positive_cues": ["MCV", "MCHC", "RDW", "球形紅血球", "裂片紅血球", "靶形紅血球"]},
+            {"code": "MTH_HEM.RBC.ANEMIA", "label": "貧血分類與缺乏性貧血", "definition": "依病因或紅血球指數分類貧血，包含缺鐵、巨幼紅血球與慢性病貧血。", "positive_cues": ["小球性", "大球性", "缺鐵性貧血", "巨幼紅血球", "慢性病貧血"]},
+            {"code": "MTH_HEM.RBC.HEMOLYSIS", "label": "溶血性疾病", "definition": "先天或後天溶血、膜缺陷、酵素缺陷及免疫性溶血。", "positive_cues": ["溶血", "G6PD", "遺傳性球形紅血球症", "DAT", "冷凝集素"]},
+            {"code": "MTH_HEM.RBC.HEMOGLOBIN", "label": "血紅素與血紅素病", "definition": "血紅素結構、合成、電泳、海洋性貧血及鐮刀型血紅素病。", "positive_cues": ["HbA2", "HbF", "血紅素電泳", "海洋性貧血", "鐮刀型"]},
+            {"code": "MTH_HEM.RBC.TESTING", "label": "紅血球檢驗方法與品管", "definition": "紅血球計數、血比容、沉降率、特殊染色與分析儀原理或干擾。", "positive_cues": ["ESR", "血球計數器", "滲透脆性", "supravital stain", "儀器干擾"]}
+          ]
+        },
+        {
+          "code": "MTH_HEM.WBC",
+          "label": "白血球",
+          "definition": "白血球生成與形態、反應性變化、白血病、淋巴瘤與骨髓疾病。",
+          "positive_cues": ["WBC", "白血球分類", "blast", "白血病", "淋巴瘤", "骨髓", "流式細胞儀"],
+          "exclusions": ["單純血小板或凝血異常歸血小板與止血", "紅血球生成異常以紅血球為主"],
+          "chapters": [
+            {"code": "MTH_HEM.WBC.DEVELOPMENT", "label": "白血球生成與正常形態", "definition": "粒系、單核球、淋巴球的成熟、功能與正常骨髓或周邊血形態。", "positive_cues": ["myeloblast", "metamyelocyte", "白血球成熟", "骨髓抹片"]},
+            {"code": "MTH_HEM.WBC.REACTIVE", "label": "反應性與良性白血球變化", "definition": "感染、發炎與其他非腫瘤性白血球數量或形態變化。", "positive_cues": ["類白血病反應", "毒性顆粒", "異型淋巴球", "嗜酸性球增多"]},
+            {"code": "MTH_HEM.WBC.ACUTE_LEUKEMIA", "label": "急性白血病", "definition": "AML、ALL及其形態、免疫表現、細胞化學和分子特徵。", "positive_cues": ["AML", "ALL", "Auer rod", "MPO", "TdT", "PML-RARA"]},
+            {"code": "MTH_HEM.WBC.CHRONIC_MYELOID", "label": "慢性骨髓性腫瘤", "definition": "CML、骨髓增生性腫瘤、骨髓發育不良症候群及相關分類。", "positive_cues": ["CML", "BCR-ABL1", "JAK2", "MDS", "MPN", "骨髓纖維化"]},
+            {"code": "MTH_HEM.WBC.LYMPHOID_PLASMA", "label": "淋巴與漿細胞腫瘤", "definition": "慢性淋巴性白血病、淋巴瘤、漿細胞腫瘤及免疫表現。", "positive_cues": ["CLL", "淋巴瘤", "CD標記", "多發性骨髓瘤", "M protein"]},
+            {"code": "MTH_HEM.WBC.TESTING", "label": "白血球與骨髓檢驗", "definition": "白血球分類、骨髓檢查、細胞化學、流式細胞術及血液腫瘤檢驗策略。", "positive_cues": ["flow cytometry", "細胞化學染色", "骨髓切片", "免疫表現型"]}
+          ]
+        },
+        {
+          "code": "MTH_HEM.HEMOSTASIS",
+          "label": "血小板與止血",
+          "definition": "血小板、凝血、纖溶、出血疾病、血栓與相關檢驗。",
+          "positive_cues": ["platelet", "PT", "aPTT", "凝血因子", "出血", "血栓", "D-dimer"],
+          "exclusions": ["輸血血品與血型抗體歸血庫"],
+          "chapters": [
+            {"code": "MTH_HEM.HEMOSTASIS.PLATELET_BIOLOGY", "label": "血小板生成與功能", "definition": "血小板生成、黏附、活化、聚集與顆粒釋放。", "positive_cues": ["megakaryocyte", "GPIIb/IIIa", "vWF", "aggregation", "release reaction"]},
+            {"code": "MTH_HEM.HEMOSTASIS.PLATELET_DISORDERS", "label": "血小板數量與功能異常", "definition": "血小板低下、增多與先天或後天功能缺陷。", "positive_cues": ["ITP", "TTP", "Bernard-Soulier", "Glanzmann", "血小板低下"]},
+            {"code": "MTH_HEM.HEMOSTASIS.COAGULATION", "label": "凝血與纖溶機制", "definition": "凝血因子、凝血路徑、調控蛋白及纖溶系統。", "positive_cues": ["thrombin", "fibrin", "protein C", "antithrombin", "plasmin"]},
+            {"code": "MTH_HEM.HEMOSTASIS.BLEEDING", "label": "出血性疾病", "definition": "血友病、von Willebrand disease、肝病或其他凝血因子相關出血。", "positive_cues": ["hemophilia", "vWD", "factor VIII", "mixing test", "出血時間"]},
+            {"code": "MTH_HEM.HEMOSTASIS.THROMBOSIS_DIC", "label": "血栓與DIC", "definition": "遺傳或後天血栓傾向、瀰漫性血管內凝血與相關指標。", "positive_cues": ["DIC", "D-dimer", "factor V Leiden", "血栓傾向", "FDP"]},
+            {"code": "MTH_HEM.HEMOSTASIS.TESTING", "label": "止血檢驗與抗凝監測", "definition": "PT、aPTT、凝血因子分析、血小板功能與抗凝藥物監測。", "positive_cues": ["PT", "INR", "aPTT", "thrombin time", "anti-Xa", "PFA"]}
+          ]
+        },
+        {
+          "code": "MTH_HEM.BLOOD_BANK",
+          "label": "血庫",
+          "definition": "免疫血液學、血型、抗體鑑定、血品、輸血安全與輸血反應。",
+          "positive_cues": ["ABO", "Rh", "抗體篩檢", "交叉試驗", "血品", "輸血反應", "新生兒溶血"],
+          "exclusions": ["不涉及輸血的自體免疫性溶血可歸紅血球溶血疾病"],
+          "chapters": [
+            {"code": "MTH_HEM.BLOOD_BANK.ABO_RH", "label": "ABO與Rh血型", "definition": "ABO、H、分泌型、Rh系統的遺傳、抗原抗體與正反定型。", "positive_cues": ["ABO", "Bombay", "forward typing", "reverse typing", "RhD", "weak D"]},
+            {"code": "MTH_HEM.BLOOD_BANK.OTHER_GROUPS", "label": "其他血型系統", "definition": "Kell、Kidd、Duffy、MNS及其他紅血球血型系統。", "positive_cues": ["Kell", "Kidd", "Duffy", "MNS", "Lewis"]},
+            {"code": "MTH_HEM.BLOOD_BANK.ANTIBODY_TESTING", "label": "抗體篩檢與鑑定", "definition": "抗球蛋白試驗、不規則抗體篩檢、鑑定、效價與干擾排除。", "positive_cues": ["IAT", "DAT", "antibody screen", "panel", "autocontrol", "elution"]},
+            {"code": "MTH_HEM.BLOOD_BANK.COMPATIBILITY", "label": "輸血前檢驗與相容性", "definition": "受血者與捐血者檢體、交叉試驗、緊急輸血及相容血選擇。", "positive_cues": ["crossmatch", "相容性試驗", "緊急輸血", "電子交叉"]},
+            {"code": "MTH_HEM.BLOOD_BANK.COMPONENTS", "label": "血品製備與使用", "definition": "全血與成分血的製備、保存、品質、適應症及特殊處理。", "positive_cues": ["濃縮紅血球", "血小板濃厚液", "FFP", "cryoprecipitate", "照射", "白血球減除"]},
+            {"code": "MTH_HEM.BLOOD_BANK.REACTIONS", "label": "輸血反應與輸血安全", "definition": "急慢性輸血反應、感染風險、調查流程及大量輸血。", "positive_cues": ["TRALI", "TACO", "FNHTR", "溶血性輸血反應", "輸血感染"]},
+            {"code": "MTH_HEM.BLOOD_BANK.HDFN", "label": "新生兒溶血與產前免疫血液學", "definition": "母胎血型不合、HDFN、產前抗體評估與Rh免疫球蛋白。", "positive_cues": ["HDFN", "RhIG", "羊水", "胎兒貧血", "母體抗體效價"]}
+          ]
+        }
+      ]
+    },
+    {
+      "subject_code": "MTH_IMM_VIR",
+      "names": ["臨床血清免疫學與臨床病毒學"],
+      "boundary_rules": [
+        "題目核心是具名病毒的構造、致病、流行病學、治療或診斷策略時歸臨床病毒。",
+        "題目核心是抗原抗體反應、免疫機制或一般免疫分析原理時歸血清免疫。",
+        "使用免疫分析偵測病毒不會自動歸血清免疫；先判斷題目在考病毒知識還是方法原理。"
+      ],
+      "domains": [
+        {
+          "code": "MTH_IMM_VIR.IMMUNOLOGY",
+          "label": "臨床血清免疫",
+          "definition": "免疫機制、免疫疾病、血清學與免疫分析方法。",
+          "positive_cues": ["抗原", "抗體", "補體", "自體免疫", "過敏", "免疫缺陷", "ELISA"],
+          "exclusions": ["以具名病毒生物學或感染診斷為核心者歸臨床病毒"],
+          "chapters": [
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.INNATE_COMPLEMENT", "label": "先天免疫與補體", "definition": "先天免疫細胞、辨識受體、細胞激素、發炎介質與補體。", "positive_cues": ["TLR", "NK cell", "complement", "C3", "C5", "cytokine"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.ADAPTIVE", "label": "適應性免疫", "definition": "T細胞、B細胞、抗體結構、MHC與免疫反應調控。", "positive_cues": ["MHC", "TCR", "BCR", "immunoglobulin", "class switching", "Treg"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.AG_AB", "label": "抗原抗體反應", "definition": "親和力、結合力、沉澱、凝集及抗原抗體反應基本原理。", "positive_cues": ["affinity", "avidity", "agglutination", "precipitation", "prozone"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.HYPERSENSITIVITY_AUTOIMMUNE", "label": "過敏與自體免疫", "definition": "第一至第四型過敏反應、自體抗體與自體免疫疾病。", "positive_cues": ["hypersensitivity", "ANA", "anti-dsDNA", "ANCA", "類風濕因子"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.IMMUNODEF_TRANSPLANT", "label": "免疫缺陷與移植免疫", "definition": "先天或後天免疫缺陷、移植排斥與組織相容性。", "positive_cues": ["SCID", "免疫缺陷", "HLA", "移植排斥", "GVHD"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.TUMOR_MONITORING", "label": "腫瘤免疫與免疫監測", "definition": "腫瘤抗原、腫瘤免疫、單株抗體治療與免疫狀態監測。", "positive_cues": ["tumor antigen", "checkpoint", "CD4/CD8", "免疫監測"]},
+            {"code": "MTH_IMM_VIR.IMMUNOLOGY.ASSAYS", "label": "血清與免疫分析方法", "definition": "免疫分析、螢光、化學發光、免疫轉漬、濁度與方法品管。", "positive_cues": ["ELISA", "CLIA", "immunofluorescence", "western blot", "nephelometry", "cutoff"]}
+          ]
+        },
+        {
+          "code": "MTH_IMM_VIR.VIROLOGY",
+          "label": "臨床病毒",
+          "definition": "病毒構造、複製、致病、流行病學、抗病毒治療及實驗室診斷。",
+          "positive_cues": ["virus", "病毒", "viral load", "抗病毒藥", "病毒培養", "核酸檢測"],
+          "exclusions": ["純一般免疫分析原理且無病毒特異知識者歸血清免疫"],
+          "chapters": [
+            {"code": "MTH_IMM_VIR.VIROLOGY.BASICS", "label": "病毒基本學", "definition": "病毒構造、分類、複製、遺傳變異、培養及宿主交互作用。", "positive_cues": ["capsid", "envelope", "replication", "reassortment", "cytopathic effect"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.DNA", "label": "DNA病毒", "definition": "疱疹、腺、乳突、痘、細小及其他DNA病毒。", "positive_cues": ["HSV", "CMV", "EBV", "HPV", "adenovirus", "parvovirus"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.RNA", "label": "RNA病毒", "definition": "流感、冠狀、腸、呼吸融合、麻疹、腮腺炎及其他RNA病毒。", "positive_cues": ["influenza", "coronavirus", "enterovirus", "RSV", "measles", "rabies"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.HEPATITIS", "label": "病毒性肝炎", "definition": "A至E型肝炎病毒、血清標誌、慢性感染與治療監測。", "positive_cues": ["HAV", "HBsAg", "anti-HBc", "HCV", "HDV", "HEV"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.RETRO", "label": "反轉錄病毒", "definition": "HIV、HTLV及反轉錄病毒複製、致病、分期與治療。", "positive_cues": ["HIV", "HTLV", "reverse transcriptase", "integrase", "AIDS"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.ARBO_ZOONOTIC", "label": "蟲媒與人畜共通病毒", "definition": "登革、日本腦炎、黃熱、漢他及其他蟲媒或人畜共通病毒。", "positive_cues": ["dengue", "Japanese encephalitis", "yellow fever", "hantavirus", "arbovirus"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.DIAGNOSIS", "label": "病毒實驗室診斷", "definition": "病毒檢體、培養、抗原抗體、核酸、病毒量與結果判讀。", "positive_cues": ["viral load", "PCR", "病毒培養", "抗原快篩", "血清轉陽"]},
+            {"code": "MTH_IMM_VIR.VIROLOGY.TREAT_PREVENT", "label": "抗病毒治療與預防", "definition": "抗病毒藥物、抗藥性、疫苗、暴露後處置與感染控制。", "positive_cues": ["antiviral", "疫苗", "抗藥性", "post-exposure prophylaxis"]}
+          ]
+        }
+      ]
+    },
+    {
+      "subject_code": "MTH_PHY_PATH",
+      "names": ["臨床生理學與病理學"],
+      "boundary_rules": [
+        "題目考器官功能、波形、功能檢查操作或生理數值判讀時歸臨床生理。",
+        "題目考細胞或組織形態、病變機轉、腫瘤與病理診斷時歸病理學。",
+        "疾病名稱本身不能決定領域；依題目要求判讀的是功能還是病變形態分類。"
+      ],
+      "domains": [
+        {
+          "code": "MTH_PHY_PATH.PHYSIOLOGY",
+          "label": "臨床生理",
+          "definition": "人體器官功能與臨床生理檢查的原理、操作及判讀。",
+          "positive_cues": ["ECG", "EEG", "肺功能", "神經傳導", "肌電圖", "生理功能"],
+          "exclusions": ["組織形態、腫瘤分類與病變機轉歸病理學"],
+          "chapters": [
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.CARDIO", "label": "心臟循環生理與檢查", "definition": "心電圖、心臟電生理、血壓、血流與心臟功能檢查。", "positive_cues": ["ECG", "心律", "心輸出量", "血壓", "心臟超音波"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.RESP", "label": "呼吸生理與肺功能", "definition": "通氣、擴散、血氣、肺容量及肺功能檢查。", "positive_cues": ["FEV1", "FVC", "DLCO", "肺容量", "血液氣體"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.NEURO", "label": "神經生理與腦波", "definition": "腦波、誘發電位、睡眠檢查及中樞神經生理。", "positive_cues": ["EEG", "腦波", "evoked potential", "sleep stage"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.NEUROMUSCULAR", "label": "周邊神經與肌肉生理", "definition": "神經傳導、肌電圖、神經肌肉接合與反射檢查。", "positive_cues": ["NCV", "EMG", "神經傳導", "H reflex", "重複刺激"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.RENAL", "label": "腎臟與體液生理", "definition": "腎血流、腎小球過濾、腎小管功能、酸鹼與體液調節。", "positive_cues": ["GFR", "clearance", "腎小管", "酸鹼平衡", "滲透壓"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.GI_LIVER", "label": "消化與肝膽生理", "definition": "胃腸運動與分泌、吸收、肝膽功能及相關生理檢查。", "positive_cues": ["胃酸", "腸道吸收", "肝血流", "膽汁"]},
+            {"code": "MTH_PHY_PATH.PHYSIOLOGY.ENDOCRINE", "label": "內分泌與代謝生理", "definition": "荷爾蒙調控、動態功能試驗與代謝生理。", "positive_cues": ["ACTH stimulation", "dexamethasone suppression", "甲狀腺功能", "荷爾蒙"]}
+          ]
+        },
+        {
+          "code": "MTH_PHY_PATH.PATHOLOGY",
+          "label": "病理學",
+          "definition": "細胞與組織病變、發炎、血流障礙、腫瘤及系統病理。",
+          "positive_cues": ["necrosis", "inflammation", "biopsy", "腫瘤", "組織切片", "病理變化"],
+          "exclusions": ["單純功能檢查波形與生理數值判讀歸臨床生理"],
+          "chapters": [
+            {"code": "MTH_PHY_PATH.PATHOLOGY.CELL_INJURY", "label": "細胞傷害與適應", "definition": "細胞適應、可逆或不可逆傷害、壞死、凋亡與細胞內堆積。", "positive_cues": ["atrophy", "metaplasia", "necrosis", "apoptosis", "脂肪變性"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.INFLAMMATION_REPAIR", "label": "發炎與修復", "definition": "急慢性發炎、肉芽腫、傷口癒合、再生與纖維化。", "positive_cues": ["acute inflammation", "granuloma", "wound healing", "fibrosis"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.HEMODYNAMIC", "label": "血流動力與循環障礙", "definition": "水腫、充血、血栓、栓塞、梗塞與休克的病理。", "positive_cues": ["edema", "thrombosis", "embolism", "infarction", "shock"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.IMMUNE", "label": "免疫病理", "definition": "免疫造成的組織傷害、自體免疫與移植病理。", "positive_cues": ["immune complex", "autoimmune", "vasculitis", "transplant rejection"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.NEOPLASIA", "label": "腫瘤病理", "definition": "腫瘤生物學、命名、分級分期、致癌機轉與腫瘤標誌。", "positive_cues": ["neoplasia", "carcinoma", "sarcoma", "metastasis", "grading", "staging"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.SYSTEMIC", "label": "系統病理", "definition": "心血管、呼吸、消化、肝膽、泌尿、生殖、內分泌與神經等器官病理。", "positive_cues": ["glomerulonephritis", "cirrhosis", "pneumonia", "atherosclerosis", "organ pathology"]},
+            {"code": "MTH_PHY_PATH.PATHOLOGY.METHODS", "label": "病理技術與診斷", "definition": "固定、包埋、切片、染色、免疫組織化學、細胞學及病理檢體處理。", "positive_cues": ["formalin", "paraffin", "H&E", "IHC", "frozen section", "cytology"]}
+          ]
+        }
+      ]
+    },
+    {
+      "subject_code": "MTH_MOL_MIC_PAR",
+      "names": ["醫學分子檢驗學與臨床鏡檢學(包括寄生蟲學)", "醫學分子檢驗學與臨床鏡檢學（包括寄生蟲學）"],
+      "boundary_rules": [
+        "題目核心是尿液、體液、精液、糞便等檢體的物理化學或顯微判讀時歸臨床鏡檢。",
+        "題目核心是寄生蟲形態、生活史、宿主、疾病或診斷策略時歸寄生蟲學。",
+        "題目核心是核酸技術原理、探針或引子設計、定量、定序與分子品管時歸醫學分子檢驗。",
+        "用PCR檢測寄生蟲時，若考寄生蟲辨識或疾病診斷歸寄生蟲；若考PCR設計或技術原理歸分子檢驗。"
+      ],
+      "domains": [
+        {
+          "code": "MTH_MOL_MIC_PAR.MICROSCOPY",
+          "label": "臨床鏡檢",
+          "definition": "尿液、體液、精液、糞便與其他檢體的物理、化學及顯微鏡檢查。",
+          "positive_cues": ["urinalysis", "尿沉渣", "CSF", "體液", "精液", "結晶", "管型"],
+          "exclusions": ["寄生蟲形態與生活史歸寄生蟲學", "核酸技術原理歸醫學分子檢驗"],
+          "chapters": [
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.URINE_PHYSICAL_CHEM", "label": "尿液物理與化學檢查", "definition": "尿液外觀、比重、試紙、化學反應與干擾。", "positive_cues": ["specific gravity", "dipstick", "proteinuria", "glucose", "nitrite"]},
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.URINE_SEDIMENT", "label": "尿沉渣與尿液形態", "definition": "尿中細胞、管型、結晶、微生物與自動化尿沉渣分析。", "positive_cues": ["cast", "crystal", "dysmorphic RBC", "尿沉渣", "renal tubular cell"]},
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.CSF", "label": "腦脊髓液檢查", "definition": "CSF細胞、化學、外觀與疾病型態判讀。", "positive_cues": ["CSF", "xanthochromia", "腦脊髓液"]},
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.BODY_FLUIDS", "label": "漿膜腔與關節液檢查", "definition": "胸腹水、心包液、關節液與其他體液的分類、細胞及結晶。", "positive_cues": ["pleural fluid", "ascites", "Light criteria", "synovial fluid", "urate crystal"]},
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.SEMEN", "label": "精液與生殖檢體", "definition": "精液採集、理學、精蟲計數、形態、活動力及相關生殖檢體。", "positive_cues": ["semen", "sperm count", "motility", "Kruger"]},
+            {"code": "MTH_MOL_MIC_PAR.MICROSCOPY.FECAL_OTHER", "label": "糞便與其他鏡檢", "definition": "非寄生蟲性的糞便檢查、潛血、消化狀態及其他臨床鏡檢。", "positive_cues": ["fecal occult blood", "stool fat", "肌肉纖維", "糞便"]}
+          ]
+        },
+        {
+          "code": "MTH_MOL_MIC_PAR.PARASITOLOGY",
+          "label": "寄生蟲學",
+          "definition": "原蟲、蠕蟲、節肢動物的形態、生活史、致病、流行病學與診斷。",
+          "positive_cues": ["protozoa", "helminth", "egg", "larva", "cyst", "trophozoite", "中間宿主"],
+          "exclusions": ["非寄生蟲性尿液或體液鏡檢歸臨床鏡檢", "純核酸方法原理歸醫學分子檢驗"],
+          "chapters": [
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.INTESTINAL_PROTOZOA", "label": "腸道與泌尿生殖原蟲", "definition": "阿米巴、梨形鞭毛蟲、滴蟲、隱孢子蟲及其他腸道或泌尿生殖原蟲。", "positive_cues": ["Entamoeba", "Giardia", "Trichomonas", "Cryptosporidium"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.BLOOD_TISSUE_PROTOZOA", "label": "血液與組織原蟲", "definition": "瘧原蟲、弓形蟲、利什曼原蟲、錐蟲與巴貝蟲。", "positive_cues": ["Plasmodium", "Toxoplasma", "Leishmania", "Trypanosoma", "Babesia"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.NEMATODES", "label": "線蟲", "definition": "蛔蟲、蟯蟲、鉤蟲、鞭蟲、糞小桿線蟲、絲蟲與其他線蟲。", "positive_cues": ["Ascaris", "Enterobius", "hookworm", "Strongyloides", "filaria"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.CESTODES", "label": "絛蟲", "definition": "有鉤與無鉤絛蟲、裂頭絛蟲、包生絛蟲及其他絛蟲。", "positive_cues": ["Taenia", "Diphyllobothrium", "Echinococcus", "proglottid"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.TREMATODES", "label": "吸蟲", "definition": "肝吸蟲、肺吸蟲、薑片蟲、血吸蟲及其他吸蟲。", "positive_cues": ["Clonorchis", "Paragonimus", "Fasciola", "Schistosoma", "operculum"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.ARTHROPODS", "label": "醫用節肢動物", "definition": "昆蟲、蜱蟎、病媒、生態與相關疾病傳播。", "positive_cues": ["mosquito", "tick", "mite", "vector", "節肢動物"]},
+            {"code": "MTH_MOL_MIC_PAR.PARASITOLOGY.DIAGNOSIS", "label": "寄生蟲檢驗與防治", "definition": "採檢、濃縮、染色、血液抹片、免疫或分子診斷及防治。", "positive_cues": ["Kato-Katz", "厚薄血片", "濃縮法", "抗酸染色", "寄生蟲診斷"]}
+          ]
+        },
+        {
+          "code": "MTH_MOL_MIC_PAR.MOLECULAR",
+          "label": "醫學分子檢驗",
+          "definition": "核酸與染色體檢驗技術、分子診斷應用、結果判讀及品質管理。",
+          "positive_cues": ["DNA", "RNA", "PCR", "probe", "sequencing", "mutation", "分子診斷"],
+          "exclusions": ["以寄生蟲本身辨識與疾病知識為核心者歸寄生蟲學"],
+          "chapters": [
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.NUCLEIC_ACID", "label": "核酸結構、萃取與品管", "definition": "DNA/RNA結構、複製與轉錄、萃取、純度、完整性及檢體前處理。", "positive_cues": ["A260/A280", "extraction", "DNase", "RNase", "nucleic acid integrity"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.PCR", "label": "PCR與核酸增幅", "definition": "傳統、即時、反轉錄、數位與多重PCR的原理、設計及判讀。", "positive_cues": ["PCR", "qPCR", "RT-PCR", "Ct", "primer", "digital PCR"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.HYBRIDIZATION", "label": "雜交與探針技術", "definition": "Southern/Northern blot、FISH、原位雜交、微陣列與探針設計。", "positive_cues": ["Southern blot", "FISH", "hybridization", "microarray", "probe"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.SEQUENCING", "label": "定序與生物資訊", "definition": "Sanger、次世代定序、讀序品質、變異註解與基礎生物資訊。", "positive_cues": ["Sanger", "NGS", "read depth", "variant", "FASTQ"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.GENETICS", "label": "人類遺傳與細胞遺傳", "definition": "遺傳模式、染色體異常、核型、CNV與遺傳疾病檢驗。", "positive_cues": ["karyotype", "trisomy", "translocation", "CNV", "遺傳模式"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.CLINICAL", "label": "臨床分子診斷應用", "definition": "感染、腫瘤、藥物基因體與其他疾病的分子檢驗策略及臨床判讀。", "positive_cues": ["molecular diagnosis", "fusion gene", "minimal residual disease", "pharmacogenomics"]},
+            {"code": "MTH_MOL_MIC_PAR.MOLECULAR.QC", "label": "分子檢驗品質與污染控制", "definition": "陽陰性對照、抑制、污染、驗證、靈敏度、特異度與實驗室分區。", "positive_cues": ["internal control", "contamination", "carryover", "limit of detection", "validation"]}
+          ]
+        }
+      ]
+    }
+  ]
+}

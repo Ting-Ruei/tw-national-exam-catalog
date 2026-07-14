@@ -143,7 +143,7 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 
 ## 資料庫與索引
 
-資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。入庫前分科排查、Review UI 與人工審核規則見 `docs/database-ingestion-preflight.md`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
+資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。入庫前分科排查、Review UI 與人工審核規則見 `docs/database-ingestion-preflight.md`；降低人工介入、風險分流與抽樣策略見 `docs/review-automation-strategy.md`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
 
 目前可先用 `scripts/build_pdf_asset_index.py` 將已下載、已分類的 PDF manifest 整理成 CSV 索引。這個步驟只產生可審閱的索引檔，不會把資料寫入 PostgreSQL 或其他資料庫。
 
@@ -162,22 +162,22 @@ bash scripts/postgres_smoke_test.sh
 
 ## 入庫前 Review UI
 
-題目內容正式入庫前，先走可丟棄、可重跑的 candidate 層：
+題目內容正式入庫前，先走可重跑的 parser 層與 append-only SQL 審核層：
 
 ```text
 PDF
   ↓
 MinerU markdown / images / layout PDF
   ↓
-question_candidates JSONL
+candidate JSONL / issue CSV 匯入 SQL staging
   ↓
-question_parse_issues CSV
+deterministic QA + AI advisory
   ↓
-Review UI 人工審核
+Review UI 題目 / 答案 / 題組 / 圖片審核
   ↓
-question_review_events JSONL
+SQL review events + formal_sync_queue
   ↓
-未來才升級到正式 questions / answers 表
+正式 questions / answers / groups / assets
 ```
 
 啟動 Review UI：
@@ -186,7 +186,7 @@ question_review_events JSONL
 docker compose up -d review-ui
 ```
 
-Docker Compose 預設會用 `REVIEW_UI_BACKEND=sql` 啟動 Review UI，候選題列表與篩選從 PostgreSQL review staging 查詢；人工審核、答案審核與 AI advisory 仍會同步寫回 append-only JSONL，避免 SQL staging 測試時遺失審核紀錄。若要暫時回到舊的純 JSONL 查詢，可用：
+Docker Compose 預設會用 `REVIEW_UI_BACKEND=sql` 啟動 Review UI，候選題、人工審核、答案核對、AI advisory 與偏好設定都以 PostgreSQL 為主。既有 JSONL 保留作歷史與交換快照，但預設不再由 UI 重複寫入；若短期需要 legacy 備份，可設 `REVIEW_UI_WRITE_LEGACY_JSONL=1`。若要暫時回到舊的純 JSONL 查詢，可用：
 
 ```bash
 REVIEW_UI_BACKEND=jsonl docker compose up -d review-ui
@@ -244,7 +244,7 @@ Forward Port: 8765
 Scheme: http
 ```
 
-如果 NPM 本身是跑在同一台 Mac 的 Docker container，`Forward Hostname / IP` 也可嘗試使用 `host.docker.internal`。實際審核紀錄仍寫回本專案工作資料夾內的 `question_review_events.jsonl`。
+如果 NPM 本身是跑在同一台 Mac 的 Docker container，`Forward Hostname / IP` 也可嘗試使用 `host.docker.internal`。實際審核紀錄寫入 PostgreSQL 的 append-only review event tables。
 
 Review UI 右側 PDF 檢視提供三種來源：
 
@@ -256,29 +256,31 @@ Review UI 右側 PDF 檢視提供三種來源：
 
 Review UI 可以載入全量 candidate，但人工審核應以「流量分流」方式進行：先選考別、科目、年份與考次，再選 `未看過`、`退回未審`、`阻擋入庫` 或 `保留疑問`。其中 `退回未審` 代表題目曾因 parser 規則更新而被重整，例如科學符號、希臘字母、上下標或 OCR 字形正規化；這些題不會保留原本通過狀態，需人工重新確認後再按 `通過`。
 
-Review UI 只會自動刷新 `question_review_events.jsonl`、`answer_review_events.jsonl` 與 `question_ai_review_events.jsonl` 這類小型 append-only logs；大型 `question_candidates__*.jsonl` 與 issue CSV 預設不會在每次請求自動重讀，避免 Docker 記憶體突然暴衝。若 parser / repair script 已改動 candidate 或 issue CSV，頁面上方會提示候選資料已更新，按 `重載資料` 或重啟 `review-ui` 後才會載入新的 candidate 內容。
+SQL 模式直接讀取 staging tables，不會在每次請求重讀大型 candidate JSONL。parser / repair script 更新後，先重新執行 SQL staging 匯入；Review UI 會在下一次查詢看到新資料，不需要使用 JSONL 重載按鈕。
 
 `quality_status=pass` 只表示目前 parser 的機械規則沒有抓到 error/warning，不等於正式入庫通過。正式入庫仍需人工按下 `通過`，且後續答案核對關卡也要完成。自 `moex_mineru_candidate_v0.3` 起，題幹含公式、上下標或 markup 的 `markup_needs_review` 會進 `needs_review`，避免科學符號題被過早視為低風險。
 
 答案表 parser 需同時接受考選部 PDF / MinerU OCR 可能出現的 `題號`、`題序`、`题序` 表頭。若同一科有 `_MOD`，仍以 `_MOD` 為 primary answer；但 `_MOD` 可能是完整更正後答案表，也可能只是局部更正說明，因此後續答案核對關卡要繼續保留 `raw_answer`、`accepted_values` 與 `is_special_correction`。
 
-按下任一審核按鈕後，該題會寫入 `question_review_events.jsonl`，並自動跳到下一題。右側 PDF 不會因為按鈕刷新而跳回頂端；只有切換題目或切換 PDF 來源時才會載入新的 PDF。
+按下任一審核按鈕後，該題會先寫入 SQL `question_review_events`，並自動跳到下一題。題目與答案都通過時，`formal_sync_queue` 會在背景同步正式表，不阻塞按鈕回應。右側 PDF 不會因為按鈕刷新而跳回頂端；只有切換題目或切換 PDF 來源時才會載入新的 PDF。
 
-題目卡片上方提供大型 `通過` / `阻擋入庫` 按鈕，適合快速瀏覽時連續審核。若看到 OCR 小錯、選項順序或題組標籤需要人工修正，可在 `人工校正` 區直接編輯題幹、選項、答案與題組；校正會以 `correction` 寫入 `question_review_events.jsonl`，標成有人工校正，不會覆蓋 parser 原始輸出，也不會單獨解除既有 `block` / `needs_review`。只有按 `儲存並通過` 或 `通過` 時，該題才會進入下一關。後續若再按 `通過`，該題仍會保留人工校正版，正式入庫時應優先使用人工校正版。
+題目卡片上方提供大型 `通過` / `阻擋入庫` 按鈕，適合快速瀏覽時連續審核。若看到 OCR 小錯、選項順序或題組標籤需要人工修正，可在 `人工校正` 區直接編輯題幹、選項、答案與題組；校正會以 `correction` 寫入 SQL `question_review_events`，標成有人工校正，不會覆蓋 parser 原始輸出，也不會單獨解除既有 `block` / `needs_review`。只有按 `儲存並通過` 或 `通過` 時，該題才會進入下一關。後續若再按 `通過`，該題仍會保留人工校正版，正式入庫時應優先使用人工校正版。
 
 上方工具列的 `本頁 pass 批次通過` 用於快速瀏覽流程：先用目前篩選條件打開一批題目，把明顯錯誤的題目逐題標成 `阻擋入庫` 或 `保留疑問`，剩下 parser 狀態為 `pass` 的題目可一次寫入 `accept`。後端會再次防呆，只批次通過目前畫面傳入、parser `pass`、最新人工狀態不是 `block` / `needs_review` / 已通過，且 AI advisory 沒有 `needs_review` / `block` 的題目；批次事件會寫入 `batch_action=accept_visible_pass`，仍是 append-only。
 
-題目審核畫面主要檢查題幹、選項、圖片、題組與 parser 切題品質。畫面仍會顯示目前 parser 抓到的答案，方便完整核對資料；但答案是否正確、整份答案表是否抓到、`MOD` / `ANS` 優先序與答案表解析，會在上方 `答案核對` 模式集中判定並寫入 `answer_review_events.jsonl`。因此 `missing_answer` 不應在題目結構審核階段造成整份考卷 blocked，而是留到答案核對關卡處理。
+題目審核畫面主要檢查題幹、選項、圖片、題組與 parser 切題品質。畫面仍會顯示目前 parser 抓到的答案，方便完整核對資料；但答案是否正確、整份答案表是否抓到、`MOD` / `ANS` 優先序與答案表解析，會在上方 `答案核對` 模式集中判定並寫入 SQL `answer_review_events`。因此 `missing_answer` 不應在題目結構審核階段造成整份考卷 blocked，而是留到答案核對關卡處理。
 
-`題組審核` 模式是題目審核與答案核對之間的結構檢查層。它會把已有 `group_ref` 的題目與疑似題組但尚未綁定的題目，依考別、科目、年份、考次彙整成候選題組；每列提供 `回審此題`，可切回審題頁修正該題 `group_ref` 或人工狀態。這一層目前只做導流與檢查，不會直接把題組寫入正式 `exam.question_groups`；正式入庫仍需題目通過、題組綁定正確、答案核對通過。
+`題組審核` 模式是獨立的結構檢查層。它會把已有 `group_ref` 的題目與疑似題組依考別、科目、年份、考次彙整；人工確認後會寫入題組事件，並同步 `exam.question_groups` 與各題的 group sequence。題組標籤不取代題目與答案 gate。
 
-Review UI 的 AI 區塊只顯示已批次產生的 advisory，不再提供單題即時 `AI 格式稽核` 或 `撤回 AI 稽核` 按鈕，避免人工審核時誤觸耗費模型流量。AI advisory 只做輔助判斷：檢查疑似 OCR 字形錯誤、簡繁混用、科學符號/上下標、選項數量、圖表線索與 parser 結構疑點。結果寫入 `question_ai_review_events.jsonl`，不會自動改變人工審核狀態。若 AI 原始結果是 `pass`，但同時帶有 findings、recommended action、advisory labels 或可套用的 OCR/簡繁校正建議，Review UI 會顯示成 `AI needs_review`，避免「有建議卻看起來通過」。AI 建議校正可以在畫面中套用，但套用後只會保留為 `needs_review` 或原本的 `block` / `exclude`，並停留在同一題讓人工立即核對；必須再由人工按 `通過` 才能進下一關。ChatGPT / Codex 協作通道與 LLM 稽核規劃見 [docs/chatgpt-codex-llm-review-channel.md](/Users/tim/tw-national-exam-catalog/docs/chatgpt-codex-llm-review-channel.md)。
+Review UI 的 AI 區塊只顯示已批次產生的 advisory，不再提供單題即時 `AI 格式稽核` 或 `撤回 AI 稽核` 按鈕，避免人工審核時誤觸耗費模型流量。AI advisory 只做輔助判斷：檢查疑似 OCR 字形錯誤、簡繁混用、科學符號/上下標、選項數量、圖表線索與 parser 結構疑點。批次結果可先用 JSONL 交換，再匯入 SQL `question_ai_review_events`；它不會自動改變人工審核狀態。若 AI 原始結果是 `pass`，但同時帶有 findings、recommended action、advisory labels 或可套用的 OCR/簡繁校正建議，Review UI 會顯示成 `AI needs_review`，避免「有建議卻看起來通過」。AI 建議校正可以在畫面中套用，但套用後只會保留為 `needs_review` 或原本的 `block` / `exclude`，並停留在同一題讓人工立即核對；必須再由人工按 `通過` 才能進下一關。ChatGPT / Codex 協作通道與 LLM 稽核規劃見 [docs/chatgpt-codex-llm-review-channel.md](/Users/tim/tw-national-exam-catalog/docs/chatgpt-codex-llm-review-channel.md)。
 
 圖片審核刻意維持簡單：畫面只分 `待處理`、`有圖`、`錯圖待改`、`沒有圖`。AI 或 Python / SQL 寬篩只負責把可能有圖表問題的題目送進圖片頁，或在 `question_ai_review_events` 留下背景 advisory；它不會出現在主要篩選狀態，也不能直接寫入人工圖片審核結果。人工按鈕只會寫入三種 `visual_review`：`visual_asset_ok`、`visual_asset_problem`、`no_visual_required`。完整流程見 [docs/visual-ai-audit-workflow.md](/Users/tim/tw-national-exam-catalog/docs/visual-ai-audit-workflow.md)。
 
 若要指派 Codex 或其他模型掃描特定考別、科目、年份或考次，請使用 repo 內的 AI 稽核 skill：[docs/skills/national-exam-ai-audit/SKILL.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/SKILL.md)。規則採「通用核心 + 科目覆寫」：所有科目先套用 [core-rules.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/core-rules.md)，再依科目讀取 [subject-overrides.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/subject-overrides.md)。AI 輸出格式見 [output-schema.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/output-schema.md)。
 
 若要穩定用 `5.4` / `5.4-mini` 逐科審核，優先使用「按科目分包」流程，避免 Review UI 的本機 heuristic 或 OpenAI API fallback 污染模型品質判斷。完整流程見 [docs/ai-audit-subject-workflow.md](/Users/tim/tw-national-exam-catalog/docs/ai-audit-subject-workflow.md)。目前可用以下指令產生每個考別＋科目的 task JSONL：
+
+新的 SQL-first 真人視角預審流程整理在 [national-exam-ai-audit skill](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/SKILL.md)。它涵蓋 Review UI 操作、PostgreSQL 最新狀態、PDF/MinerU 來源優先序、問題分關、GLM-5.2 工作包、結果驗證與 advisory-only 匯入；舊 JSONL 不再作為主要審核狀態。
 
 ```bash
 python3 scripts/export_subject_codex_audit_batches.py \
@@ -375,6 +377,8 @@ Schema: exam
 - `exam.answer_review_events`：答案核對紀錄，獨立於題目結構審核。
 - `exam.review_ui_preferences`：Review UI 的篩選條件、目前題目與 PDF 模式。
 - `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets`：正式題庫表；Review UI 在題目審核與答案核對都通過後會自動同步進入。題組與圖片審核屬於額外結構標籤，不阻擋正式可用狀態。
+
+正式表採可追溯的軟退回：曾同步過的 `exam.questions` 列可以保留，但只有 `review_status='accepted'` 且具有 `exam.answers` 的題目才算正式可用、可被資料包匯出。Review UI 會分開顯示「審核已達門檻但待同步」與「正式表可用」。
 
 若要批次檢查或修復歷史資料，可先 dry-run：
 

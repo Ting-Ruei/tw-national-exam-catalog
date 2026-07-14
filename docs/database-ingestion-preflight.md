@@ -161,7 +161,11 @@ python3 scripts/serve_question_review_ui.py \
 
 `scripts/promote_ready_candidates_to_formal_postgres.py` 保留作為批次 dry-run、歷史補同步與異常修復工具；日常審核不需要手動執行 promotion。若某題後續被退回未審、阻擋入庫或標記非題目，Review UI 會同步取消其正式可用狀態，避免資料包匯出時誤收。
 
+`exam.questions` 會保留曾正式同步過的題目列，方便追溯題號、選項與資產歷史；「列仍存在」不等於「目前正式可用」。正式可用必須同時符合 `exam.questions.review_status='accepted'` 且存在 `exam.answers`。退回審核時系統會將題目改成非 `accepted` 並移除正式答案；匯出器、驗證器與外部整合一律只讀目前可用列。
+
 未來供 AI Learning Platform 匯入的題庫包，應從 `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets` 這組正式表匯出，並遵守外部平台的資料包契約：只使用相對資產路徑、保留 `source_question_key` / `source_registry_key` / package version / schema version 等 lineage，不讓平台直接依賴本專案工作目錄。
+
+正式題庫包發布必須通過制度化檢查，而不是靠 AI 臨場記憶。標準流程見 [question-bank-release-validation-flow.md](/Users/tim/tw-national-exam-catalog/docs/question-bank-release-validation-flow.md)：先同步最新題組審核事件到 formal SQL，跑 `scripts/validate_formal_question_bank.py`，匯出 package，再跑 `scripts/validate_question_bank_package.py`。任一 validator exit non-zero 時不得 publish 或交給外部平台匯入。
 
 ## Review UI
 
@@ -183,7 +187,7 @@ http://127.0.0.1:8765/
 docker compose logs -f review-ui
 ```
 
-目前 UI 預設讀取最新的 candidate JSONL 與 issue CSV。人工審核結果會寫回 candidate 資料夾裡的 `question_review_events.jsonl`。
+目前 UI 預設使用 PostgreSQL SQL-first staging。人工審題、答案核對、題組、圖片與 AI advisory 都以 SQL event tables 為主；candidate JSONL、issue CSV 與既有 review JSONL 只保留作匯入來源、交換格式與歷史快照。
 
 上方篩選器可依考別、科目、年份、考次、parser 狀態與審核狀態縮小範圍。篩選條件、目前題目與 PDF 模式會寫入 `exam.review_ui_preferences`，並在 candidate 資料夾保留 `review_ui_preferences.json` 備援。偏好只在頁面初次載入時還原；開頁後使用者切換成 `全部審核`、`未看過`、`未通過`、`全部狀態` 或其他篩選時，畫面當下選擇會立即成為新的偏好，避免舊資料庫設定把下拉選單拉回去。
 
@@ -197,11 +201,11 @@ docker compose logs -f review-ui
 
 答案表 parser 需同時接受 `題號`、`題序`、`题序` 這類表頭。1151 醫事檢驗師微生物曾出現 `_MOD` 內含完整 1-80 答案表，但 MinerU 將表頭辨識為 `题序`，造成舊 parser 整批找不到答案；此類應視為答案表 OCR / parser 規則問題，而不是題目 PDF 缺答案。若 `_MOD` 內的某題答案為 `#`，需用備註解析成 `accepted_values`，例如 `B|C|BC`。
 
-題目審核畫面仍顯示目前 parser 抓到的答案，避免遮蔽資訊；但答案是否正確、整份答案表是否抓到、`MOD` / `ANS` 優先序與答案表解析，會在 `答案核對` 模式統一核對並寫入 `answer_review_events.jsonl`。`missing_answer` 應視為答案關卡疑點，不應在題目結構審核時把整份考卷打成 blocked。
+題目審核畫面仍顯示目前 parser 抓到的答案，避免遮蔽資訊；但答案是否正確、整份答案表是否抓到、`MOD` / `ANS` 優先序與答案表解析，會在 `答案核對` 模式統一核對並寫入 SQL `exam.answer_review_events`。`missing_answer` 應視為答案關卡疑點，不應在題目結構審核時把整份考卷打成 blocked。
 
 `答案核對` 模式以答案表為 review unit。左側是一份答案表 / 一個考次，中間顯示該考次所有已通過題目與答案的對應，右側顯示答案 PDF 或答案 MinerU layout，而不是題目 PDF。答案來源需明確標示 `ANS` 或 `MOD`；若有 `MOD`，正式入庫仍以 `MOD` 優先。此關卡不得繞過題目審核：只有題目審核最新狀態為 `accept` 或 `unblock` 的題目可以被答案通過推進正式入庫，否則必須保留「題目未審核通過」狀態或註記。
 
-答案人工修正以點選 A-D 為主，文字格式只是事件儲存格式。ANS 單選答案若無其他疑點，可沿用 parser 結果；MOD 多答案、特殊更正或 `#` 會在畫面標示警示，人工需看答案 PDF 後點選確認。儲存格式暫定為：單一答案 `A`；多個可接受答案 `A|C`；多個單選加複選皆可接受 `A|C|AC`；複選且需同時符合 `A+C`；送分或特殊答案 `送分` / `一律給分`。若 MOD 需人工確認但仍為 `#` 或空白，前端與後端都不得讓整份答案通過。這些文字格式先寫入 `answer_review_events.jsonl`，正式入庫前再正規化成 answers JSON，例如 `accepted_values`、`requires_all`、`is_special_correction`。
+答案人工修正以點選 A-D 為主，文字格式只是事件儲存格式。ANS 單選答案若無其他疑點，可沿用 parser 結果；MOD 多答案、特殊更正或 `#` 會在畫面標示警示，人工需看答案 PDF 後點選確認。儲存格式暫定為：單一答案 `A`；多個可接受答案 `A|C`；多個單選加複選皆可接受 `A|C|AC`；複選且需同時符合 `A+C`；送分或特殊答案 `送分` / `一律給分`。若 MOD 需人工確認但仍為 `#` 或空白，前端與後端都不得讓整份答案通過。這些文字格式先寫入 SQL `exam.answer_review_events`，正式同步時再正規化成 answers JSON，例如 `accepted_values`、`requires_all`、`is_special_correction`。
 
 Review UI 的題目卡片上方有大型 `通過` / `阻擋入庫` 按鈕，可用於快速瀏覽。若需要人工修正，使用 `人工校正` 區編輯題幹、選項、答案與題組；校正內容會寫入 review event 的 `correction` 欄位，並保留 parser 原始輸出。單純 `儲存人工校正` 只保存內容修補，會保留該題原本的 `block` / `needs_review` / `accept` 狀態；只有 `儲存並通過` 或 `通過` 才會把題目送往答案核對。正式入庫時，若最新有效 review event 帶有 `correction`，應優先使用人工校正版；後續 `accept` 事件也會繼承既有校正，避免通過後遺失人工修正。
 

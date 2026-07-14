@@ -1,0 +1,4 @@
+interface:
+  display_name: "國考題課程章節分類"
+  short_description: "依科目、課程領域與章節標準分類已審核的國考正式題目"
+  default_prompt: "使用 $classify-exam-curriculum，將指定的已審核國考題依課程領域與章節 taxonomy 產生可人工覆核的分類結果。"

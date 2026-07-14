@@ -325,16 +325,54 @@ def run_batch(
 
 
 def count_outputs(output_parent: Path) -> tuple[int, int]:
-    md_count = sum(1 for _ in output_parent.glob("**/*.md"))
-    image_count = sum(1 for p in output_parent.glob("**/*") if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
+    try:
+        md_count = sum(1 for _ in output_parent.glob("**/*.md"))
+        image_count = sum(1 for p in output_parent.glob("**/*") if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
+    except OSError:
+        return 0, 0
     return md_count, image_count
+
+
+def path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def output_dir_for_stem(output_parent: Path, stem: str) -> Path:
+    exact = output_parent / stem
+    if path_exists(exact):
+        return exact
+    if not path_exists(output_parent):
+        return exact
+    try:
+        children = [path for path in output_parent.iterdir() if path.is_dir()]
+    except OSError:
+        return exact
+    matches = [path for path in children if stem.startswith(path.name) or path.name.startswith(stem)]
+    if not matches:
+        return exact
+    return max(matches, key=lambda path: len(path.name))
+
+
+def output_markdown_exists(output_parent: Path, stem: str, expected_md: Path) -> bool:
+    if path_exists(expected_md):
+        return True
+    output_dir = output_dir_for_stem(output_parent, stem)
+    try:
+        return any((output_dir / "vlm").glob("*.md"))
+    except OSError:
+        return False
 
 
 def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: bool) -> MinerUResult:
     output_parent = Path(task.output_parent)
     expected_md = Path(task.expected_md)
-    if expected_md.exists() and not force:
-        md_count, image_count = count_outputs(output_parent / Path(task.pdf_path).stem)
+    stem = Path(task.pdf_path).stem
+    output_dir = output_dir_for_stem(output_parent, stem)
+    if output_markdown_exists(output_parent, stem, expected_md) and not force:
+        md_count, image_count = count_outputs(output_dir)
         return MinerUResult(
             task_id=task.task_id,
             status="skipped_existing",
@@ -366,8 +404,9 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
         elapsed = round(time.monotonic() - started, 3)
-        md_count, image_count = count_outputs(output_parent / Path(task.pdf_path).stem)
-        status = "ok" if result.returncode == 0 and expected_md.exists() else "error"
+        output_dir = output_dir_for_stem(output_parent, stem)
+        md_count, image_count = count_outputs(output_dir)
+        status = "ok" if result.returncode == 0 and output_markdown_exists(output_parent, stem, expected_md) else "error"
         return MinerUResult(
             task_id=task.task_id,
             status=status,
@@ -382,7 +421,8 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
         )
     except subprocess.TimeoutExpired as exc:
         elapsed = round(time.monotonic() - started, 3)
-        md_count, image_count = count_outputs(output_parent / Path(task.pdf_path).stem)
+        output_dir = output_dir_for_stem(output_parent, stem)
+        md_count, image_count = count_outputs(output_dir)
         return MinerUResult(
             task_id=task.task_id,
             status="timeout",

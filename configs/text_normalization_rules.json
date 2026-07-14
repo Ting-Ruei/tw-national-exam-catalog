@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "description": "Confirmed OCR phrase corrections. Add only exact source/target pairs verified against the official PDF.",
+  "rules": [
+    {
+      "id": "pharmacy-ocr-jingshi",
+      "kind": "phrase",
+      "source": "檠師",
+      "target": "藥師",
+      "scope": {
+        "categories": [
+          "藥師",
+          "藥師(一)",
+          "藥師(二)"
+        ]
+      },
+      "confidence": "high",
+      "status": "active",
+      "note": "已對照藥師官方 PDF；類科名稱 OCR 誤辨。"
+    },
+    {
+      "id": "pharmacy-ocr-yaoshi-law",
+      "kind": "phrase",
+      "source": "藁事法",
+      "target": "藥事法",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；藥事法首字 OCR 誤辨。"
+    },
+    {
+      "id": "pharmacy-ocr-yingsu-traditional",
+      "kind": "phrase",
+      "source": "罂粟",
+      "target": "罌粟",
+      "scope": {
+        "categories": [
+          "藥師",
+          "藥師(一)",
+          "藥師(二)"
+        ]
+      },
+      "confidence": "high",
+      "status": "active",
+      "note": "藥師類科官方題目中的簡體 OCR 誤辨；以 PDF 為準。"
+    },
+    {
+      "id": "global-ocr-yaoju",
+      "kind": "phrase",
+      "source": "藁局",
+      "target": "藥局",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；藥局的藥字被 MinerU/OCR 誤辨為藁。只修正完整詞組，不將單獨的藁全域替換。"
+    },
+    {
+      "id": "global-ocr-yao-terms",
+      "kind": "phrase",
+      "source": "藁用",
+      "target": "藥用",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；例如藁用酒精。只修正藥用詞組，不改合法藁本。"
+    },
+    {
+      "id": "global-ocr-yaoming",
+      "kind": "phrase",
+      "source": "藁名",
+      "target": "藥名",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；藥名字形 OCR 誤辨。"
+    },
+    {
+      "id": "global-ocr-yaoshang",
+      "kind": "phrase",
+      "source": "藁商",
+      "target": "藥商",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；藥商字形 OCR 誤辨。"
+    },
+    {
+      "id": "global-ocr-yaohai",
+      "kind": "phrase",
+      "source": "藁害",
+      "target": "藥害",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "跨類科核對官方 PDF；藥害字形 OCR 誤辨。"
+    },
+    {
+      "id": "global-ocr-option-b-yao",
+      "kind": "phrase",
+      "source": "B 藁",
+      "target": "B 藥",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "選項末尾核對官方 PDF；只修正目前確認的選項文字，不延伸替換藁本。"
+    },
+    {
+      "id": "global-ocr-option-c-yao",
+      "kind": "phrase",
+      "source": "C 藁",
+      "target": "C 藥",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "選項末尾核對官方 PDF；只修正目前確認的選項文字，不延伸替換藁本。"
+    }
+  ]
+}

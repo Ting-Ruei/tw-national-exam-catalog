@@ -49,7 +49,7 @@ MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
 GROUP_CONTINUATION_RE = re.compile(r"^\s*[（(]?\s*(承上題|呈上題|上題|前述)\s*[）)]?[，,、：:]?", re.I)
 GROUP_PREFIX_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})\s*(?=\S)")
-GROUP_COUNT_RE = re.compile(r"回答下列\s*(\d{1,2})\s*題")
+GROUP_COUNT_RE = re.compile(r"回答(?:下列|以下)\s*(\d{1,2})\s*題")
 VISUAL_DEPENDENCY_RE = re.compile(
     r"(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表|心電圖|X\s*光|X光|超音波|切片圖|染色圖|鏡檢圖|尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖)",
     re.I,
@@ -66,6 +66,9 @@ QUESTION_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "exclud
 ANSWER_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "unblock", "comment", "reviewed", *RESET_REVIEW_ACTIONS}
 QUESTION_READY_ACTIONS = {"accept", "unblock"}
 ANSWER_READY_ACTIONS = {"accept", "unblock"}
+HUMAN_SUPERSEDES_AI_ACTIONS = {"accept", "unblock", "block", "needs_review", "exclude", "reviewed", "correct"}
+PHARMACIST_TRACK_FILTER = "__pharmacist_track__"
+PHARMACIST_TRACK_CATEGORIES = ("藥師", "藥師(一)", "藥師(二)")
 DEFAULT_AI_MODEL = os.environ.get("OPENAI_REVIEW_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4.1-mini"
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
 AI_REVIEW_PROMPT_VERSION = "question_format_audit_v0.1"
@@ -74,6 +77,7 @@ REPAIR_REVIEWER_PREFIXES = (
     "backfill_",
     "parser_global_refresh",
     "codex-repair",
+    "codex-text-normalization-repair",
 )
 AI_REVIEW_ACTIONS_WITH_WORK = {
     "needs_review",
@@ -91,6 +95,12 @@ AI_REVIEW_ACTIONS_WITH_WORK = {
 
 class SqlWriteError(RuntimeError):
     """Raised when SQL-first review persistence cannot be confirmed."""
+
+
+def category_matches_filter(category: str, category_filter: str) -> bool:
+    if category_filter == PHARMACIST_TRACK_FILTER:
+        return category in PHARMACIST_TRACK_CATEGORIES
+    return category == category_filter
 
 AI_ANSWER_DEFER_LABELS = {"answer_pair_suspect", "needs_human_review", "pass_likely"}
 AI_OCR_TEXT_REPLACEMENTS = [
@@ -561,7 +571,12 @@ def repair_event_info(
     if not (is_repair_event or is_reset_waiting or metadata_sources):
         return {"active": False}
 
-    notes = str((event or {}).get("reset_notes") or (event or {}).get("notes") or "")
+    notes = str(
+        (event or {}).get("reset_notes")
+        or (event or {}).get("notes")
+        or (event or {}).get("previous_notes")
+        or ""
+    )
     return {
         "active": True,
         "label": "已修待複核",
@@ -752,6 +767,7 @@ def openai_question_ai_audit(candidate: dict[str, Any]) -> dict[str, Any]:
                 "content": (
                     "你是台灣國考題 OCR/parser 審核助理。只做格式與字形稽核，不判斷學科答案正確性。"
                     "請檢查疑似 OCR 字形錯誤、簡繁混用、希臘字母/上下標/科學符號、選項數量、題組/圖表線索、表格或圖片引用是否可能缺漏。"
+                    "科學符號必須有原文證據才可建議修正；不要從英文單字片段推導數字或下標。hypo、hypothyroidism 與單獨的 PO 必須原樣保留，只有獨立且原文已出現 PO2/PO₂ 或 P_{O_2} 時才可建議 PO₂。"
                     "不要自動改題，不要宣稱一定錯；用繁體中文回覆 JSON。"
                 ),
             },
@@ -863,6 +879,38 @@ def normalized_correction(value: Any) -> dict[str, Any]:
     return correction
 
 
+def correction_changes_candidate(candidate: dict[str, Any], correction: dict[str, Any]) -> bool:
+    """Return whether an AI correction would change the visible candidate.
+
+    AI events can outlive a deterministic parser repair.  Do not keep showing
+    an "apply suggestion" button when the suggested text is already present;
+    the AI event remains historical and advisory, but the operator has no
+    useful action left to take.
+    """
+    if not isinstance(candidate, dict) or not isinstance(correction, dict):
+        return False
+    for field in ("stem", "answer", "group_ref", "visual_review"):
+        if field in correction and str(candidate.get(field) or "") != str(correction.get(field) or ""):
+            return True
+    for field in ("image_refs", "answer_image_refs", "stem_image"):
+        if field in correction and candidate.get(field) != correction.get(field):
+            return True
+    if isinstance(correction.get("options"), list):
+        current_options = {
+            str(row.get("key") or "").upper(): str(row.get("text") or "")
+            for row in candidate.get("options") or []
+            if isinstance(row, dict)
+        }
+        suggested_options = {
+            str(row.get("key") or "").upper(): str(row.get("text") or "")
+            for row in correction["options"]
+            if isinstance(row, dict)
+        }
+        if current_options != suggested_options:
+            return True
+    return False
+
+
 def normalized_asset_ref(value: dict[str, Any]) -> dict[str, Any]:
     path_value = str(value.get("path") or value.get("path_relative") or "").strip()
     path = safe_file_path(path_value)
@@ -957,11 +1005,38 @@ def effective_ai_audit_status(audit: dict[str, Any] | None, suggested_correction
     return status or None
 
 
+def event_timestamp(event: dict[str, Any] | None) -> float | None:
+    if not isinstance(event, dict):
+        return None
+    value = event.get("created_at")
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def human_review_supersedes_ai(
+    human_event: dict[str, Any] | None,
+    ai_event: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(human_event, dict) or not isinstance(ai_event, dict):
+        return False
+    if human_event.get("action") not in HUMAN_SUPERSEDES_AI_ACTIONS:
+        return False
+    human_at = event_timestamp(human_event)
+    ai_at = event_timestamp(ai_event)
+    return human_at is not None and ai_at is not None and human_at >= ai_at
+
+
 def ai_suggested_correction(candidate: dict[str, Any], audit: dict[str, Any] | None) -> tuple[dict[str, Any] | None, list[str]]:
     if not isinstance(audit, dict):
         return None, []
     if isinstance(audit.get("suggested_correction"), dict):
         normalized = normalized_correction(audit["suggested_correction"])
+        if normalized and not correction_changes_candidate(candidate, normalized):
+            return None, []
         explicit_changes = audit.get("suggested_changes")
         if isinstance(explicit_changes, list):
             changes = [str(item) for item in explicit_changes if str(item).strip()]
@@ -1045,10 +1120,20 @@ class ReviewState:
         }
         self.database_url = os.environ.get("DATABASE_URL")
         self.sql_review_enabled = self.review_backend == "sql" and psycopg is not None and bool(self.database_url)
-        self.legacy_jsonl_backup_enabled = os.environ.get("REVIEW_UI_WRITE_LEGACY_JSONL", "1").lower() not in {"0", "false", "no"}
+        self.legacy_jsonl_backup_enabled = os.environ.get("REVIEW_UI_WRITE_LEGACY_JSONL", "0").lower() not in {"0", "false", "no"}
+        self.defer_formal_sync = self.sql_review_enabled and os.environ.get("REVIEW_UI_DEFER_FORMAL_SYNC", "1").lower() not in {"0", "false", "no"}
         self._sql_local = threading.local()
         self._sql_facets_cache: dict[str, dict[str, list[str]]] = {}
         self._formal_sync_schema_ready = False
+        self._formal_sync_wake = threading.Event()
+        self._formal_sync_status_lock = threading.Lock()
+        self._formal_sync_status: dict[str, Any] = {
+            "enabled": self.defer_formal_sync,
+            "running": False,
+            "queued": 0,
+            "last_completed_at": None,
+            "last_error": None,
+        }
         if self.sql_review_enabled:
             self.candidates = []
             self.candidate_by_key = {}
@@ -1079,6 +1164,15 @@ class ReviewState:
         self._review_log_signature = file_signature(self.review_log)
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         self._ai_review_log_signature = file_signature(self.ai_review_log)
+        if self.defer_formal_sync:
+            try:
+                self._ensure_formal_sync_queue_schema()
+            except Exception as exc:
+                self.defer_formal_sync = False
+                self._formal_sync_status.update({"enabled": False, "last_error": str(exc)})
+            else:
+                threading.Thread(target=self._formal_sync_worker_loop, name="formal-sync", daemon=True).start()
+                self._formal_sync_wake.set()
 
     def candidate_data_status(self) -> dict[str, Any]:
         current_candidate_signature = file_signature(self.candidate_path)
@@ -1096,7 +1190,14 @@ class ReviewState:
             "review_backend": "sql" if self.sql_review_enabled else "jsonl",
             "sql_primary": bool(self.sql_review_enabled),
             "legacy_jsonl_backup": bool(self.legacy_jsonl_backup_enabled),
-            "jsonl_status": "legacy_backup" if self.sql_review_enabled else "primary",
+            "jsonl_status": (
+                "legacy_backup"
+                if self.sql_review_enabled and self.legacy_jsonl_backup_enabled
+                else "disabled"
+                if self.sql_review_enabled
+                else "primary"
+            ),
+            "formal_sync": self.formal_sync_status(),
         }
 
     def reload_candidate_data(self, force: bool = False, block: bool = True) -> dict[str, Any]:
@@ -1233,6 +1334,119 @@ class ReviewState:
                 except Exception:
                     self._discard_sql_connection()
 
+    def _ensure_formal_sync_queue_schema(self) -> None:
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS exam.formal_sync_queue (
+                        candidate_key TEXT PRIMARY KEY REFERENCES exam.question_candidates(candidate_key) ON DELETE CASCADE,
+                        requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        last_attempt_at TIMESTAMPTZ,
+                        last_error TEXT,
+                        processed_at TIMESTAMPTZ
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_formal_sync_queue_pending
+                    ON exam.formal_sync_queue (requested_at, candidate_key)
+                    WHERE processed_at IS NULL
+                    """
+                )
+            conn.commit()
+
+    def _enqueue_formal_sync(self, cur: Any, candidate_key: str) -> None:
+        if not self.defer_formal_sync or not candidate_key:
+            return
+        cur.execute(
+            """
+            INSERT INTO exam.formal_sync_queue (candidate_key, requested_at, processed_at, last_error)
+            VALUES (%s, now(), NULL, NULL)
+            ON CONFLICT (candidate_key) DO UPDATE
+            SET requested_at = now(),
+                processed_at = NULL,
+                last_error = NULL
+            """,
+            (candidate_key,),
+        )
+
+    def formal_sync_status(self) -> dict[str, Any]:
+        with self._formal_sync_status_lock:
+            return dict(self._formal_sync_status)
+
+    def _set_formal_sync_status(self, **updates: Any) -> None:
+        with self._formal_sync_status_lock:
+            self._formal_sync_status.update(updates)
+
+    def _wake_formal_sync_worker(self) -> None:
+        if self.defer_formal_sync:
+            self._formal_sync_wake.set()
+
+    def _formal_sync_worker_loop(self) -> None:
+        while True:
+            self._formal_sync_wake.wait()
+            self._formal_sync_wake.clear()
+            self._set_formal_sync_status(running=True, last_error=None)
+            while True:
+                try:
+                    with self._sql_connect() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                SELECT candidate_key
+                                FROM exam.formal_sync_queue
+                                WHERE processed_at IS NULL
+                                ORDER BY requested_at, candidate_key
+                                LIMIT 250
+                                """
+                            )
+                            keys = [str(row[0]) for row in cur.fetchall()]
+                    if not keys:
+                        self._set_formal_sync_status(running=False, queued=0)
+                        break
+                    self._set_formal_sync_status(queued=len(keys))
+                    result = self.sync_formal_candidates(keys)
+                    errors = [str(error) for error in (result.get("errors") or []) if str(error)]
+                    with self._sql_connect() as conn:
+                        with conn.cursor() as cur:
+                            if errors:
+                                cur.execute(
+                                    """
+                                    UPDATE exam.formal_sync_queue
+                                    SET attempt_count = attempt_count + 1,
+                                        last_attempt_at = now(),
+                                        last_error = %s
+                                    WHERE candidate_key = ANY(%s)
+                                    """,
+                                    ("; ".join(errors)[:4000], keys),
+                                )
+                            else:
+                                cur.execute(
+                                    """
+                                    UPDATE exam.formal_sync_queue
+                                    SET attempt_count = attempt_count + 1,
+                                        last_attempt_at = now(),
+                                        last_error = NULL,
+                                        processed_at = now()
+                                    WHERE candidate_key = ANY(%s)
+                                    """,
+                                    (keys,),
+                                )
+                        conn.commit()
+                    if errors:
+                        self._set_formal_sync_status(running=False, queued=len(keys), last_error="; ".join(errors))
+                        break
+                    self._set_formal_sync_status(
+                        queued=0,
+                        last_completed_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                except Exception as exc:
+                    self._set_formal_sync_status(running=False, last_error=str(exc))
+                    break
+
     def _candidate_by_key_sql(self, candidate_key: str) -> dict[str, Any] | None:
         if not candidate_key:
             return None
@@ -1276,6 +1490,10 @@ class ReviewState:
         }
         for key, (expr, value) in filters.items():
             if key == ignore or not value:
+                continue
+            if key == "category" and value == PHARMACIST_TRACK_FILTER:
+                clauses.append(f"COALESCE({expr}, '') = ANY(%s)")
+                values.append(list(PHARMACIST_TRACK_CATEGORIES))
                 continue
             clauses.append(f"COALESCE({expr}, '') = %s")
             values.append(value)
@@ -1371,25 +1589,31 @@ class ReviewState:
         row_limit = requested_limit * 20
         group_status_clause = ""
         if group_review_status == "unreviewed":
-            group_status_clause = "AND (lg.action IS NULL OR lg.action = 'reset_group_review')"
+            group_status_clause = "WHERE (lg.action IS NULL OR lg.action = 'reset_group_review')"
         elif group_review_status == "reviewed":
-            group_status_clause = "AND lg.action IN ('confirm_group', 'confirm_not_group')"
+            group_status_clause = "WHERE lg.action IN ('confirm_group', 'confirm_not_group')"
         elif group_review_status == "confirmed_group":
-            group_status_clause = "AND lg.action = 'confirm_group'"
+            group_status_clause = "WHERE lg.action = 'confirm_group'"
         elif group_review_status == "confirmed_not_group":
-            group_status_clause = "AND lg.action = 'confirm_not_group'"
+            group_status_clause = "WHERE lg.action = 'confirm_not_group'"
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._sql_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    WITH latest_group AS (
-                        SELECT DISTINCT ON (candidate_key)
-                            candidate_key,
-                            action
-                        FROM exam.question_review_events
-                        WHERE action IN ('confirm_not_group', 'confirm_group', 'reset_group_review')
-                        ORDER BY candidate_key, id DESC
+                    WITH scoped_candidates AS MATERIALIZED (
+                        SELECT *
+                        FROM exam.question_candidates
+                        {where}
+                    ),
+                    latest_group AS (
+                        SELECT DISTINCT ON (e.candidate_key)
+                            e.candidate_key,
+                            e.action
+                        FROM exam.question_review_events e
+                        JOIN scoped_candidates USING (candidate_key)
+                        WHERE e.action IN ('confirm_not_group', 'confirm_group', 'reset_group_review')
+                        ORDER BY e.candidate_key, e.id DESC
                     ),
                     filtered AS (
                         SELECT
@@ -1405,9 +1629,8 @@ class ReviewState:
                             COALESCE(raw_candidate_json->>'group_ref', '') AS group_ref,
                             COALESCE(lg.action, '') AS group_action,
                             CASE WHEN question_number ~ '^[0-9]+$' THEN question_number::integer ELSE 0 END AS qn
-                        FROM exam.question_candidates
+                        FROM scoped_candidates
                         LEFT JOIN latest_group lg USING (candidate_key)
-                        {where}
                         {group_status_clause}
                     ),
                     keyed AS (
@@ -1421,7 +1644,7 @@ class ReviewState:
                         FROM keyed
                         WHERE group_ref <> ''
                            OR group_action IN ('confirm_group', 'confirm_not_group', 'reset_group_review')
-                           OR stem ~ '回答下列[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
+                           OR stem ~ '回答(下列|以下)[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
                            OR stem ~ '^[[:space:]]*[（(]?[[:space:]]*(承上題|呈上題|上題|前述)'
                            OR stem ~ '^[[:space:]]*[0-9]{{1,3}}[[:space:]]*(-|－|~|～|至|到)[[:space:]]*[0-9]{{1,3}}'
                     ),
@@ -1440,8 +1663,8 @@ class ReviewState:
                             (s.group_action IN ('confirm_group', 'confirm_not_group', 'reset_group_review') AND f.candidate_key = s.candidate_key)
                             OR (s.group_ref <> '' AND f.group_ref = s.group_ref)
                             OR (
-                                s.stem ~ '回答下列[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
-                                AND f.qn BETWEEN s.qn AND s.qn + COALESCE(NULLIF(substring(s.stem from '回答下列[[:space:]]*([0-9]{{1,2}})[[:space:]]*題'), '')::integer, 1) - 1
+                                s.stem ~ '回答(下列|以下)[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
+                                AND f.qn BETWEEN s.qn AND s.qn + COALESCE(NULLIF(substring(s.stem from '回答(?:下列|以下)[[:space:]]*([0-9]{{1,2}})[[:space:]]*題'), '')::integer, 1) - 1
                             )
                             OR (
                                 s.stem ~ '^[[:space:]]*[（(]?[[:space:]]*(承上題|呈上題|上題|前述)'
@@ -1468,7 +1691,10 @@ class ReviewState:
                 return rows
 
     def _sql_candidate_filter_parts(self, params: dict[str, str]) -> tuple[str, list[Any]]:
-        clauses, values = self._sql_candidate_where(params)
+        scope_clauses, scope_values = self._sql_candidate_where(params)
+        scope_where = f"WHERE {' AND '.join(scope_clauses)}" if scope_clauses else ""
+        clauses: list[str] = []
+        values: list[Any] = []
         q = (params.get("q") or "").strip().lower()
         status = params.get("status") or ""
         review_status = params.get("reviewStatus") or ""
@@ -1491,14 +1717,15 @@ class ReviewState:
         elif review_status == "formal_drift":
             clauses.append(
                 """
-                physical_in_formal
-                AND NOT ready_for_formal
+                formal_usable <> ready_for_formal
                 """
             )
         elif review_status == "formal":
-            clauses.append("ready_for_formal")
+            clauses.append("formal_usable")
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
+        elif review_status == "repair_pending":
+            clauses.append("COALESCE(review_event_json->>'repair_kind', '') = 'safe_text_normalization'")
         elif review_status == "correct":
             clauses.append(
                 """
@@ -1534,6 +1761,8 @@ class ReviewState:
         if visual_status == "visual":
             clauses.append(
                 """
+                COALESCE(review_action, '') <> 'exclude'
+                AND
                 visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
                 AND NOT has_manual_asset
                 AND (
@@ -1547,6 +1776,8 @@ class ReviewState:
         elif visual_status == "visual_asset_pending":
             clauses.append(
                 """
+                COALESCE(review_action, '') <> 'exclude'
+                AND
                 visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
                 AND NOT has_manual_asset
                 AND (
@@ -1558,6 +1789,8 @@ class ReviewState:
         elif visual_status == "visual_suspect":
             clauses.append(
                 """
+                COALESCE(review_action, '') <> 'exclude'
+                AND
                 visual_review_status NOT IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
                 AND NOT has_manual_asset
                 AND NOT has_visual_asset
@@ -1597,63 +1830,95 @@ class ReviewState:
             values.append(f"%{q}%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cte = f"""
-WITH latest_question AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        corrected_candidate_json,
-        event_json,
-        notes,
-        created_at,
-        id
-    FROM exam.question_review_events
-    WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
-    ORDER BY candidate_key, id DESC
+WITH scoped_candidates AS MATERIALIZED (
+    SELECT *
+    FROM exam.question_candidates
+    {scope_where}
+),
+latest_question AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.corrected_candidate_json,
+        e.event_json,
+        e.notes,
+        e.created_at,
+        e.id
+    FROM exam.question_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    ORDER BY e.candidate_key, e.id DESC
 ),
 latest_visual AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        corrected_candidate_json,
-        event_json,
-        notes,
-        created_at,
-        id
-    FROM exam.question_review_events
-    WHERE corrected_candidate_json ? 'visual_review'
-    ORDER BY candidate_key, id DESC
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.corrected_candidate_json,
+        e.event_json,
+        e.notes,
+        e.created_at,
+        e.id
+    FROM exam.question_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.corrected_candidate_json ? 'visual_review'
+    ORDER BY e.candidate_key, e.id DESC
 ),
 latest_answer AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        created_at,
-        id
-    FROM exam.answer_review_events
-    ORDER BY candidate_key, id DESC
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.created_at,
+        e.id
+    FROM exam.answer_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    ORDER BY e.candidate_key, e.id DESC
 ),
-latest_ai AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        provider,
-        model_name,
-        audit_status,
-        recommended_action,
-        audit_json,
-        event_json,
-        created_at,
-        id
-    FROM exam.question_ai_review_events
-    ORDER BY candidate_key, id DESC
+latest_question_ai AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.provider,
+        e.model_name,
+        e.audit_status,
+        e.recommended_action,
+        e.audit_json,
+        e.event_json,
+        e.created_at,
+        e.id
+    FROM exam.question_ai_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE NOT (
+        COALESCE(e.prompt_version, '') LIKE 'visual_%%'
+        OR COALESCE(e.model_name, '') LIKE '%%visual%%'
+        OR COALESCE(e.audit_json, '{{}}'::jsonb) ? 'visual_status'
+        OR COALESCE(e.audit_json->>'stage', '') = 'image'
+    )
+    ORDER BY e.candidate_key, e.id DESC
+),
+latest_visual_ai AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.audit_json,
+        e.created_at,
+        e.id
+    FROM exam.question_ai_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE
+        COALESCE(e.prompt_version, '') LIKE 'visual_%%'
+        OR COALESCE(e.model_name, '') LIKE '%%visual%%'
+        OR COALESCE(e.audit_json, '{{}}'::jsonb) ? 'visual_status'
+        OR COALESCE(e.audit_json->>'stage', '') = 'image'
+    ORDER BY e.candidate_key, e.id DESC
 ),
 issue_flags AS (
     SELECT
-        candidate_key,
-        bool_or(severity IN ('blocked', 'error')) AS has_blocking_issue,
-        bool_or(severity = 'warning') AS has_warning_issue
-    FROM exam.question_parse_issues
-    WHERE issue_code NOT IN ('missing_answer', 'missing_answer_markdown', 'unexpected_answer_value')
-    GROUP BY candidate_key
+        e.candidate_key,
+        bool_or(e.severity IN ('blocked', 'error')) AS has_blocking_issue,
+        bool_or(e.severity = 'warning') AS has_warning_issue
+    FROM exam.question_parse_issues e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.resolved_at IS NULL
+      AND e.issue_code NOT IN ('missing_answer', 'missing_answer_markdown', 'unexpected_answer_value')
+    GROUP BY e.candidate_key
 ),
 base AS (
     SELECT
@@ -1662,12 +1927,39 @@ base AS (
         c.stem_text,
         c.raw_candidate_json || jsonb_strip_nulls(jsonb_build_object(
             'visual_review',
-            NULLIF(COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', ''), '')
+            NULLIF(COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', ''), ''),
+            'visual_ai_status',
+            NULLIF(COALESCE(
+                lvai.audit_json->>'visual_status',
+                (
+                    SELECT label.value
+                    FROM jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(COALESCE(lvai.audit_json->'labels', '[]'::jsonb)) = 'array'
+                                THEN COALESCE(lvai.audit_json->'labels', '[]'::jsonb)
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS label(value)
+                    WHERE label.value IN ('visual_required_likely', 'visual_not_required_likely', 'visual_uncertain')
+                    LIMIT 1
+                ),
+                ''
+            ), '')
         )) AS raw_candidate_json,
         c.review_status,
         (fq.question_key IS NOT NULL) AS physical_in_formal,
-        (lq.action IN ('accept', 'unblock') AND la.action IN ('accept', 'unblock')) AS ready_for_formal,
-        (fq.question_key IS NOT NULL) AS in_formal,
+        COALESCE(
+            lq.action IN ('accept', 'unblock') AND la.action IN ('accept', 'unblock'),
+            false
+        ) AS ready_for_formal,
+        COALESCE((
+            fq.review_status = 'accepted'
+            AND EXISTS (SELECT 1 FROM exam.answers fa WHERE fa.question_id = fq.id)
+        ), false) AS formal_usable,
+        COALESCE((
+            fq.review_status = 'accepted'
+            AND EXISTS (SELECT 1 FROM exam.answers fa WHERE fa.question_id = fq.id)
+        ), false) AS in_formal,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_category_name', c.raw_candidate_json->'metadata'->>'group_name', '') AS category,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_subject_name', '') AS subject,
         COALESCE(c.raw_candidate_json->'metadata'->>'year', '') AS year,
@@ -1772,12 +2064,20 @@ base AS (
         ) AS has_manual_asset,
         (lai.action IS NOT NULL AND lai.action NOT IN ('unreviewed', 'reset_review', 'reset_ai_review')) AS ai_reviewed,
         (
-            COALESCE(lai.audit_json, '{{}}'::jsonb) ? 'suggested_correction'
-            OR COALESCE(lai.event_json->'audit', '{{}}'::jsonb) ? 'suggested_correction'
-            OR COALESCE(lai.event_json, '{{}}'::jsonb) ? 'suggested_correction'
+            NOT COALESCE((
+                lq.action IN ('accept', 'unblock', 'block', 'needs_review', 'exclude', 'reviewed', 'correct')
+                AND lq.created_at >= lai.created_at
+            ), false)
+            AND (
+                COALESCE(lai.audit_json, '{{}}'::jsonb) ? 'suggested_correction'
+                OR COALESCE(lai.event_json->'audit', '{{}}'::jsonb) ? 'suggested_correction'
+                OR COALESCE(lai.event_json, '{{}}'::jsonb) ? 'suggested_correction'
+            )
         ) AS ai_has_suggestion,
         CASE
             WHEN lai.action IN ('unreviewed', 'reset_review', 'reset_ai_review') OR lai.action IS NULL THEN NULL
+            WHEN lq.action IN ('accept', 'unblock', 'block', 'needs_review', 'exclude', 'reviewed', 'correct')
+                AND lq.created_at >= lai.created_at THEN 'pass'
             WHEN lai.audit_status IN ('block', 'blocked') THEN 'block'
             WHEN lai.audit_status = 'needs_review' THEN 'needs_review'
             WHEN jsonb_typeof(COALESCE(lai.audit_json->'findings', '[]'::jsonb)) = 'array'
@@ -1786,34 +2086,38 @@ base AS (
             WHEN COALESCE(lai.audit_json, '{{}}'::jsonb) ? 'suggested_correction' THEN 'needs_review'
             ELSE COALESCE(lai.audit_status, 'pass')
         END AS ai_effective_status,
-        COALESCE(
-            NULLIF(lai.audit_json->>'visual_status', ''),
-            (
-                SELECT label.value
-                FROM jsonb_array_elements_text(
-                    CASE
-                        WHEN jsonb_typeof(COALESCE(lai.audit_json->'labels', '[]'::jsonb)) = 'array'
-                            THEN COALESCE(lai.audit_json->'labels', '[]'::jsonb)
-                        ELSE '[]'::jsonb
-                    END
-                ) AS label(value)
-                WHERE label.value IN ('visual_required_likely', 'visual_not_required_likely', 'visual_uncertain')
-                LIMIT 1
-            ),
-            ''
-        ) AS visual_ai_status,
+        CASE
+            WHEN lv.created_at >= lvai.created_at THEN ''
+            ELSE COALESCE(
+                NULLIF(lvai.audit_json->>'visual_status', ''),
+                (
+                    SELECT label.value
+                    FROM jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(COALESCE(lvai.audit_json->'labels', '[]'::jsonb)) = 'array'
+                                THEN COALESCE(lvai.audit_json->'labels', '[]'::jsonb)
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS label(value)
+                    WHERE label.value IN ('visual_required_likely', 'visual_not_required_likely', 'visual_uncertain')
+                    LIMIT 1
+                ),
+                ''
+            )
+        END AS visual_ai_status,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'year', '') ~ '^[0-9]+$'
             THEN (c.raw_candidate_json->'metadata'->>'year')::integer ELSE 0 END AS year_sort,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'exam_ordinal', '') ~ '^[0-9]+$'
             THEN (c.raw_candidate_json->'metadata'->>'exam_ordinal')::integer ELSE 0 END AS ordinal_sort,
         CASE WHEN c.question_number ~ '^[0-9]+$' THEN c.question_number::integer ELSE 0 END AS question_sort
-    FROM exam.question_candidates c
+    FROM scoped_candidates c
     LEFT JOIN exam.questions fq ON fq.question_key = c.candidate_key
     LEFT JOIN issue_flags i ON i.candidate_key = c.candidate_key
     LEFT JOIN latest_question lq ON lq.candidate_key = c.candidate_key
     LEFT JOIN latest_visual lv ON lv.candidate_key = c.candidate_key
     LEFT JOIN latest_answer la ON la.candidate_key = c.candidate_key
-    LEFT JOIN latest_ai lai ON lai.candidate_key = c.candidate_key
+    LEFT JOIN latest_question_ai lai ON lai.candidate_key = c.candidate_key
+    LEFT JOIN latest_visual_ai lvai ON lvai.candidate_key = c.candidate_key
 ),
 filtered AS (
     SELECT *
@@ -1821,7 +2125,7 @@ filtered AS (
     {where}
 )
 """
-        return cte, values
+        return cte, [*scope_values, *values]
 
     def _sql_can_use_light_candidate_query(self, params: dict[str, str]) -> bool:
         return (
@@ -1829,10 +2133,16 @@ filtered AS (
             and not (params.get("status") or "")
             and not (params.get("aiReviewStatus") or "")
             and not (params.get("visualStatus") or "")
+            # `repair_pending` depends on repair_kind inside the latest event;
+            # the lightweight query intentionally does not load that payload.
+            and (params.get("reviewStatus") or "") != "repair_pending"
         )
 
     def _sql_light_candidate_filter_parts(self, params: dict[str, str]) -> tuple[str, list[Any]]:
-        clauses, values = self._sql_candidate_where(params)
+        scope_clauses, scope_values = self._sql_candidate_where(params)
+        scope_where = f"WHERE {' AND '.join(scope_clauses)}" if scope_clauses else ""
+        clauses: list[str] = []
+        values: list[Any] = []
         review_status = params.get("reviewStatus") or ""
         if review_status != "exclude":
             clauses.append("COALESCE(review_action, '') <> 'exclude'")
@@ -1849,12 +2159,11 @@ filtered AS (
         elif review_status == "formal_drift":
             clauses.append(
                 """
-                physical_in_formal
-                AND NOT ready_for_formal
+                formal_usable <> ready_for_formal
                 """
             )
         elif review_status == "formal":
-            clauses.append("ready_for_formal")
+            clauses.append("formal_usable")
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
         elif review_status == "correct":
@@ -1878,27 +2187,34 @@ filtered AS (
             values.append(review_status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cte = f"""
-WITH latest_question AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        corrected_candidate_json,
-        event_json,
-        notes,
-        created_at,
-        id
-    FROM exam.question_review_events
-    WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
-    ORDER BY candidate_key, id DESC
+WITH scoped_candidates AS MATERIALIZED (
+    SELECT *
+    FROM exam.question_candidates
+    {scope_where}
+),
+latest_question AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.corrected_candidate_json,
+        e.event_json,
+        e.notes,
+        e.created_at,
+        e.id
+    FROM exam.question_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    ORDER BY e.candidate_key, e.id DESC
 ),
 latest_answer AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        created_at,
-        id
-    FROM exam.answer_review_events
-    ORDER BY candidate_key, id DESC
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.created_at,
+        e.id
+    FROM exam.answer_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    ORDER BY e.candidate_key, e.id DESC
 ),
 base AS (
     SELECT
@@ -1907,8 +2223,18 @@ base AS (
         c.raw_candidate_json,
         c.review_status,
         (fq.question_key IS NOT NULL) AS physical_in_formal,
-        (lq.action IN ('accept', 'unblock') AND la.action IN ('accept', 'unblock')) AS ready_for_formal,
-        (fq.question_key IS NOT NULL) AS in_formal,
+        COALESCE(
+            lq.action IN ('accept', 'unblock') AND la.action IN ('accept', 'unblock'),
+            false
+        ) AS ready_for_formal,
+        COALESCE((
+            fq.review_status = 'accepted'
+            AND EXISTS (SELECT 1 FROM exam.answers fa WHERE fa.question_id = fq.id)
+        ), false) AS formal_usable,
+        COALESCE((
+            fq.review_status = 'accepted'
+            AND EXISTS (SELECT 1 FROM exam.answers fa WHERE fa.question_id = fq.id)
+        ), false) AS in_formal,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_category_name', c.raw_candidate_json->'metadata'->>'group_name', '') AS category,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_subject_name', '') AS subject,
         COALESCE(c.raw_candidate_json->'metadata'->>'year', '') AS year,
@@ -1923,7 +2249,7 @@ base AS (
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'exam_ordinal', '') ~ '^[0-9]+$'
             THEN (c.raw_candidate_json->'metadata'->>'exam_ordinal')::integer ELSE 0 END AS ordinal_sort,
         CASE WHEN c.question_number ~ '^[0-9]+$' THEN c.question_number::integer ELSE 0 END AS question_sort
-    FROM exam.question_candidates c
+    FROM scoped_candidates c
     LEFT JOIN exam.questions fq ON fq.question_key = c.candidate_key
     LEFT JOIN latest_question lq ON lq.candidate_key = c.candidate_key
     LEFT JOIN latest_answer la ON la.candidate_key = c.candidate_key
@@ -1934,7 +2260,7 @@ filtered AS (
     {where}
 )
 """
-        return cte, values
+        return cte, [*scope_values, *values]
 
     def _sql_plain_candidate_rows_and_counts(
         self,
@@ -2068,6 +2394,7 @@ filtered AS (
                     SELECT candidate_key, issue_code, severity, message, issue_json
                     FROM exam.question_parse_issues
                     WHERE candidate_key = ANY(%s)
+                      AND resolved_at IS NULL
                     ORDER BY id
                     """,
                     (keys,),
@@ -2092,17 +2419,28 @@ filtered AS (
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT question_key, id, review_status, created_at
-                    FROM exam.questions
-                    WHERE question_key = ANY(%s)
+                    SELECT
+                        q.question_key,
+                        q.id,
+                        q.review_status,
+                        q.created_at,
+                        EXISTS (
+                            SELECT 1
+                            FROM exam.answers a
+                            WHERE a.question_id = q.id
+                        ) AS has_answer
+                    FROM exam.questions q
+                    WHERE q.question_key = ANY(%s)
                     """,
                     (keys,),
                 )
-                for question_key, question_id, review_status, created_at in cur.fetchall():
+                for question_key, question_id, review_status, created_at, has_answer in cur.fetchall():
                     formal[str(question_key)] = {
                         "in_formal": True,
                         "question_id": int(question_id),
                         "review_status": review_status,
+                        "has_answer": bool(has_answer),
+                        "usable": bool(review_status == "accepted" and has_answer),
                         "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
                     }
         return formal
@@ -2131,6 +2469,19 @@ filtered AS (
         except Exception as exc:
             if self.sql_review_enabled:
                 return {"ok": False, "enabled": True, "path": str(path), "error": str(exc)}
+            raise
+
+    def _legacy_jsonl_storage_many(self, path: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+        if not self.legacy_jsonl_backup_enabled and self.sql_review_enabled:
+            return {"ok": True, "enabled": False, "path": str(path), "count": len(events)}
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                for event in events:
+                    f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            return {"ok": True, "enabled": True, "path": str(path), "count": len(events)}
+        except Exception as exc:
+            if self.sql_review_enabled:
+                return {"ok": False, "enabled": True, "path": str(path), "error": str(exc), "count": len(events)}
             raise
 
     def _sql_latest_question_review_event(self, candidate_key: str) -> dict[str, Any] | None:
@@ -2206,12 +2557,16 @@ filtered AS (
                         },
                     )
                     counts[key] = counts.get(key, 0) + 1
+                    # Keep reset events separate from the latest human review.
+                    # A parser repair may carry a correction so the UI can show
+                    # the repaired text while still requiring a new human pass.
                     if event.get("action") in RESET_REVIEW_ACTIONS:
                         latest.pop(key, None)
                         latest_reset[key] = event
                         continue
-                    if "correction" not in event and key in latest and latest[key].get("correction"):
-                        event["correction"] = latest[key]["correction"]
+                    previous = latest.get(key) or latest_reset.get(key)
+                    if "correction" not in event and previous and previous.get("correction"):
+                        event["correction"] = previous["correction"]
                     latest[key] = event
                     latest_reset.pop(key, None)
         return latest, counts, latest_reset
@@ -2272,6 +2627,12 @@ filtered AS (
                 SELECT candidate_key, action, audit_json, event_json, notes, reviewer, provider, model_name, prompt_version, input_hash, created_at
                 FROM exam.question_ai_review_events
                 WHERE candidate_key = ANY(%s)
+                  AND NOT (
+                      COALESCE(prompt_version, '') LIKE 'visual_%%'
+                      OR COALESCE(model_name, '') LIKE '%%visual%%'
+                      OR COALESCE(audit_json, '{}'::jsonb) ? 'visual_status'
+                      OR COALESCE(audit_json->>'stage', '') = 'image'
+                  )
                 ORDER BY candidate_key, id
             """
         else:
@@ -2323,6 +2684,7 @@ filtered AS (
 
     def batch_accept_questions(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "") -> dict[str, Any]:
         saved: list[dict[str, Any]] = []
+        pending_events: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         seen: set[str] = set()
         ordered_keys = []
@@ -2340,6 +2702,7 @@ filtered AS (
             reset_actions=AI_RESET_REVIEW_ACTIONS,
             ai=True,
         ) if self.sql_review_enabled else ({}, {}, {})
+        sql_latest_reviews, _sql_review_counts, _sql_review_resets = self._sql_question_review_maps(ordered_keys) if self.sql_review_enabled else ({}, {}, {})
         for raw_key in candidate_keys:
             key = str(raw_key or "")
             if not key or key in seen:
@@ -2349,7 +2712,7 @@ filtered AS (
             if not item:
                 skipped.append({"candidate_key": key, "reason": "not_found"})
                 continue
-            latest = self.current_question_review(key)
+            latest = sql_latest_reviews.get(key) if self.sql_review_enabled else self.current_question_review(key)
             latest_action = latest.get("action") if latest else None
             if latest_action in {"block", "exclude", "needs_review"}:
                 skipped.append({"candidate_key": key, "reason": f"manual_{latest_action}"})
@@ -2380,10 +2743,15 @@ filtered AS (
             correction = normalized_correction(latest.get("correction") if latest else None)
             if correction:
                 event["correction"] = correction
+            pending_events.append(event)
+        if pending_events:
             try:
-                saved.append(self.append_review(event))
+                saved = self.append_reviews_batch(pending_events)
             except SqlWriteError as exc:
-                skipped.append({"candidate_key": key, "reason": f"sql_write_failed: {exc}"})
+                skipped.extend(
+                    {"candidate_key": str(event.get("candidate_key") or ""), "reason": f"sql_write_failed: {exc}"}
+                    for event in pending_events
+                )
         return {"saved": saved, "skipped": skipped}
 
     def confirm_not_group(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "", group_sheet_key: str = "") -> dict[str, Any]:
@@ -2515,10 +2883,11 @@ filtered AS (
         group_type: str,
         shared_stem: str,
         metadata: dict[str, Any],
+        candidate_rows: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.sql_review_enabled:
             return {"ok": True, "sql_primary": False}
-        rows = self._candidate_rows_for_group(candidate_keys)
+        rows = candidate_rows if candidate_rows is not None else self._candidate_rows_for_group(candidate_keys)
         if not rows:
             return {"ok": False, "error": "no candidate rows for group"}
         rows.sort(key=lambda row: int_or_zero(row.get("question_number")))
@@ -2534,6 +2903,7 @@ filtered AS (
             "question_numbers": question_numbers,
             "source_registry_key": source_registry_key,
             "group_ref": group_ref,
+            "shared_stem_updated_by_review": True,
         }
         with self._sql_connect() as conn:
             with conn.cursor() as cur:
@@ -2565,24 +2935,27 @@ filtered AS (
                         official_document_id,
                         group_key,
                         group_type,
-                        shared_stem or None,
-                        shared_stem or None,
-                        Jsonb({"text": shared_stem}) if Jsonb is not None and shared_stem else None,
+                        shared_stem,
+                        shared_stem,
+                        Jsonb({"text": shared_stem}) if Jsonb is not None else json.dumps({"text": shared_stem}, ensure_ascii=False),
                         Jsonb(metadata_payload) if Jsonb is not None else json.dumps(metadata_payload, ensure_ascii=False),
                         range_label,
                     ),
                 )
                 group_id = int(cur.fetchone()[0])
-                for sequence_no, key in enumerate(candidate_keys, start=1):
-                    cur.execute(
-                        """
-                        UPDATE exam.questions
-                        SET question_group_id = %s,
-                            group_sequence_no = %s
-                        WHERE question_key = %s
-                        """,
-                        (group_id, sequence_no, key),
-                    )
+                cur.execute(
+                    """
+                    UPDATE exam.questions q
+                    SET question_group_id = %s,
+                        group_sequence_no = data.sequence_no
+                    FROM (
+                        SELECT unnest(%s::text[]) AS question_key,
+                               unnest(%s::int[]) AS sequence_no
+                    ) AS data
+                    WHERE q.question_key = data.question_key
+                    """,
+                    (group_id, candidate_keys, list(range(1, len(candidate_keys) + 1))),
+                )
                 cur.execute(
                     """
                     UPDATE exam.question_groups g
@@ -2595,6 +2968,25 @@ filtered AS (
                 )
             conn.commit()
         return {"ok": True, "sql_primary": True, "group_id": group_id, "group_key": group_key}
+
+    def append_group_reviews(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        created_at = datetime.now().isoformat(timespec="seconds")
+        for event in events:
+            prepared_event = dict(event)
+            prepared_event.setdefault("created_at", created_at)
+            prepared.append(prepared_event)
+        sql_storage_by_key = self._insert_sql_group_review_events(prepared)
+        jsonl_storage = self._legacy_jsonl_storage_many(self.review_log, prepared)
+        self._review_log_signature = file_signature(self.review_log)
+        saved: list[dict[str, Any]] = []
+        for event in prepared:
+            key = str(event.get("candidate_key") or "")
+            self.review_counts[key] = self.review_counts.get(key, 0) + 1
+            self.latest_group_reviews[key] = event
+            storage = {**sql_storage_by_key.get(key, {}), "legacy_jsonl_backup": jsonl_storage}
+            saved.append({**event, "storage": storage})
+        return saved
 
     def confirm_group(
         self,
@@ -2640,15 +3032,25 @@ filtered AS (
                 "shared_stem": shared_stem,
             }
             try:
-                saved.append(self.append_review(event))
+                saved.append(event)
             except SqlWriteError as exc:
                 skipped.append({"candidate_key": key, "reason": f"sql_write_failed: {exc}"})
-        group_result = self._upsert_sql_question_group(
-            ordered_keys,
-            group_ref=group_ref,
-            group_type=group_type,
-            shared_stem=shared_stem,
-            metadata={"group_sheet_key": group_sheet_key, "reviewer": reviewer},
+        if saved:
+            try:
+                saved = self.append_group_reviews(saved)
+            except SqlWriteError as exc:
+                skipped.extend({"candidate_key": key, "reason": f"sql_write_failed: {exc}"} for key in ordered_keys)
+                saved = []
+        group_result = (
+            self._upsert_sql_question_group(
+                ordered_keys,
+                group_ref=group_ref,
+                group_type=group_type,
+                shared_stem=shared_stem,
+                metadata={"group_sheet_key": group_sheet_key, "reviewer": reviewer},
+                candidate_rows=rows,
+            )
+            if saved else {"ok": False, "error": "group review events were not saved"}
         )
         return {"saved": saved, "skipped": skipped, "group": group_result}
 
@@ -2692,6 +3094,71 @@ filtered AS (
         rows = [
             item for item in self.candidates
             if str(item.get("source_registry_key") or "") == seed_source
+            and start <= int_or_zero(item.get("question_number")) <= end
+        ]
+        rows.sort(key=lambda item: int_or_zero(item.get("question_number")))
+        return [str(item.get("candidate_key")) for item in rows if item.get("candidate_key")]
+
+    def candidate_keys_for_manual_group_filters(
+        self,
+        *,
+        category: str = "",
+        subject: str = "",
+        year: str = "",
+        ordinal: str = "",
+        range_text: str = "",
+    ) -> list[str]:
+        match = re.search(r"(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})", str(range_text or ""))
+        if not match:
+            return []
+        start, end = int(match.group(1)), int(match.group(2))
+        if start <= 0 or end < start or end > start + 30:
+            return []
+        category = str(category or "").strip()
+        subject = str(subject or "").strip()
+        year = str(year or "").strip()
+        ordinal = str(ordinal or "").strip()
+        if not (category and subject and year and ordinal):
+            return []
+        if self.sql_review_enabled:
+            with self._sql_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        WITH matched AS (
+                            SELECT
+                                candidate_key,
+                                source_registry_key,
+                                CASE WHEN question_number ~ '^[0-9]+$' THEN question_number::integer ELSE 0 END AS qn
+                            FROM exam.question_candidates
+                            WHERE COALESCE(raw_candidate_json->'metadata'->>'normalized_category_name', raw_candidate_json->'metadata'->>'group_name', '') = %s
+                              AND COALESCE(raw_candidate_json->'metadata'->>'normalized_subject_name', '') = %s
+                              AND COALESCE(raw_candidate_json->'metadata'->>'year', '') = %s
+                              AND COALESCE(raw_candidate_json->'metadata'->>'exam_ordinal', '') = %s
+                              AND question_number ~ '^[0-9]+$'
+                              AND question_number::integer BETWEEN %s AND %s
+                        ),
+                        source_counts AS (
+                            SELECT source_registry_key, count(*) AS row_count
+                            FROM matched
+                            GROUP BY source_registry_key
+                            ORDER BY row_count DESC, source_registry_key
+                            LIMIT 1
+                        )
+                        SELECT m.candidate_key
+                        FROM matched m
+                        JOIN source_counts s USING (source_registry_key)
+                        ORDER BY m.qn, m.candidate_key
+                        """,
+                        (category, subject, year, ordinal, start, end),
+                    )
+                    return [str(row[0]) for row in cur.fetchall()]
+        rows = [
+            item for item in self.candidates
+            if str((item.get("metadata") or {}).get("normalized_category_name") or (item.get("metadata") or {}).get("group_name") or "") == category
+            and str((item.get("metadata") or {}).get("normalized_subject_name") or "") == subject
+            and str((item.get("metadata") or {}).get("year") or "") == year
+            and str((item.get("metadata") or {}).get("exam_ordinal") or "") == ordinal
             and start <= int_or_zero(item.get("question_number")) <= end
         ]
         rows.sort(key=lambda item: int_or_zero(item.get("question_number")))
@@ -2790,7 +3257,12 @@ filtered AS (
         elif placement == "answer":
             asset_ref["asset_role"] = "manual_answer_image"
             asset_ref["placement"] = "answer"
-            existing_refs = [] if replace_existing else list(existing_correction.get("answer_image_refs") or candidate.get("answer_image_refs") or [])
+            if replace_existing:
+                existing_refs = []
+            elif "answer_image_refs" in existing_correction:
+                existing_refs = list(existing_correction.get("answer_image_refs") or [])
+            else:
+                existing_refs = list(candidate.get("answer_image_refs") or [])
             existing_paths = {
                 str(ref.get("path") or ref.get("path_relative") or "")
                 for ref in existing_refs
@@ -2808,7 +3280,12 @@ filtered AS (
                 asset_ref["asset_role"] = asset_role or "manual_question_image"
                 placement = "stem"
             asset_ref["placement"] = placement
-            existing_refs = [] if replace_existing else list(existing_correction.get("image_refs") or candidate.get("image_refs") or [])
+            if replace_existing:
+                existing_refs = []
+            elif "image_refs" in existing_correction:
+                existing_refs = list(existing_correction.get("image_refs") or [])
+            else:
+                existing_refs = list(candidate.get("image_refs") or [])
             existing_paths = {
                 str(ref.get("path") or ref.get("path_relative") or "")
                 for ref in existing_refs
@@ -2872,7 +3349,8 @@ filtered AS (
         latest_review = latest_reviews.get(key)
         latest_reset_review = latest_reset_reviews.get(key)
         copy["repair_status"] = repair_event_info(latest_review, latest_reset_review, metadata)
-        correction = normalized_correction(latest_review.get("correction") if latest_review else None)
+        review_event = latest_review or latest_reset_review
+        correction = normalized_correction(review_event.get("correction") if review_event else None)
         if correction:
             copy["parser_original"] = {
                 "stem": item.get("stem"),
@@ -2917,12 +3395,17 @@ filtered AS (
                 copy["group_sequence_no"] = group_review.get("group_sequence_no")
             if group_review.get("group_type"):
                 copy["group_type"] = group_review.get("group_type")
+            if "shared_stem" in group_review:
+                copy["shared_stem"] = group_review.get("shared_stem") or ""
         copy["group_review"] = group_review
         copy["review"] = {
             "status": "reviewed" if latest_review else "unreviewed",
-            "action": latest_review.get("action") if latest_review else None,
-            "notes": latest_review.get("notes") if latest_review else None,
-            "updated_at": latest_review.get("created_at") if latest_review else None,
+            "action": review_event.get("action") if review_event else None,
+            "notes": (
+                (review_event.get("notes") or review_event.get("previous_notes"))
+                if review_event else None
+            ),
+            "updated_at": review_event.get("created_at") if review_event else None,
             "event_count": review_counts.get(key, 0),
             "has_correction": bool(correction),
             "correction": correction or None,
@@ -2932,6 +3415,7 @@ filtered AS (
         latest_action = latest_review.get("action") if latest_review else None
         formal = dict(formal_question_map.get(key) or {"in_formal": False})
         physical_in_formal = bool(formal.get("in_formal"))
+        formal_usable = bool(formal.get("usable"))
         latest_answer_review = latest_answer_reviews.get(key)
         latest_answer_action = latest_answer_review.get("action") if latest_answer_review else None
         copy["answer_review"] = {
@@ -2948,23 +3432,33 @@ filtered AS (
         formal.update(
             {
                 "physical_in_formal": physical_in_formal,
+                "formal_usable": formal_usable,
                 "question_ready": question_ready,
                 "answer_ready": answer_ready,
                 "ready_for_formal": ready_for_formal,
-                "pending_promotion": bool(ready_for_formal and not physical_in_formal),
-                "review_drift": bool(physical_in_formal and not ready_for_formal),
-                "in_formal": ready_for_formal,
+                "pending_promotion": bool(ready_for_formal and not formal_usable),
+                "review_drift": bool(formal_usable and not ready_for_formal),
+                "soft_withdrawn": bool(physical_in_formal and not formal_usable and not ready_for_formal),
+                "in_formal": formal_usable,
             }
         )
         copy["formal"] = formal
         latest_ai_review = latest_ai_reviews.get(key)
-        ai_audit = latest_ai_review.get("audit") if latest_ai_review else None
+        historical_ai_audit = latest_ai_review.get("audit") if latest_ai_review else None
+        ai_superseded = human_review_supersedes_ai(latest_review, latest_ai_review)
+        ai_audit = None if ai_superseded else historical_ai_audit
         ai_suggestion, ai_suggestion_changes = ai_suggested_correction(copy, ai_audit)
         copy["ai_review"] = {
             "status": "reviewed" if latest_ai_review else "unreviewed",
+            "active": bool(latest_ai_review and not ai_superseded),
+            "superseded_by_human": ai_superseded,
             "audit_status": effective_ai_audit_status(ai_audit, ai_suggestion),
-            "raw_audit_status": ai_audit.get("status") if isinstance(ai_audit, dict) else None,
-            "visual_status": ai_visual_status(ai_audit),
+            "raw_audit_status": historical_ai_audit.get("status") if isinstance(historical_ai_audit, dict) else None,
+            "visual_status": (
+                None
+                if copy.get("visual_review")
+                else copy.get("visual_ai_status") or ai_visual_status(historical_ai_audit)
+            ),
             "recommended_action": ai_audit.get("recommended_action") if isinstance(ai_audit, dict) else None,
             "summary": ai_audit.get("summary") if isinstance(ai_audit, dict) else None,
             "findings": ai_audit.get("findings") if isinstance(ai_audit, dict) else [],
@@ -2974,6 +3468,7 @@ filtered AS (
             "provider": latest_ai_review.get("provider") if latest_ai_review else None,
             "model": latest_ai_review.get("model") if latest_ai_review else None,
             "updated_at": latest_ai_review.get("created_at") if latest_ai_review else None,
+            "superseded_at": latest_review.get("created_at") if ai_superseded and latest_review else None,
             "event_count": ai_review_counts.get(key, 0),
         }
         copy["source_files"] = {
@@ -3315,6 +3810,8 @@ filtered AS (
         blocked_count = 0
         needs_review_count = 0
         group_review_actions: list[str] = []
+        shared_stem = ""
+        group_type = ""
         for item in payload_items:
             reasons = self.group_suspect_reasons(item)
             for reason in reasons:
@@ -3322,6 +3819,10 @@ filtered AS (
             group_action = (item.get("group_review") or {}).get("action") or ""
             if group_action in {"confirm_group", "confirm_not_group"}:
                 group_review_actions.append(str(group_action))
+            if not shared_stem:
+                shared_stem = str((item.get("group_review") or {}).get("shared_stem") or item.get("shared_stem") or "").strip()
+            if not group_type:
+                group_type = str((item.get("group_review") or {}).get("group_type") or item.get("group_type") or "").strip()
             action = (item.get("review") or {}).get("action")
             if action in {"accept", "unblock"}:
                 accepted_count += 1
@@ -3362,6 +3863,8 @@ filtered AS (
             "group_sheet_key": self.group_sheet_key(first),
             "group_review_status": group_review_status,
             "group_ref": group_ref,
+            "group_type": group_type,
+            "shared_stem": shared_stem,
             "inferred_group_ref": inferred_group_ref,
             "inferred_group_kind": inferred_group_kind,
             "group_label": "已確認非題組" if is_confirmed_not_group else group_ref or (
@@ -3504,7 +4007,7 @@ filtered AS (
                     continue
             if not review_match:
                 continue
-            if category_filter and category != category_filter:
+            if category_filter and not category_matches_filter(category, category_filter):
                 continue
             if subject_filter and subject != subject_filter:
                 continue
@@ -3550,7 +4053,9 @@ filtered AS (
         if focus_key and all(payload.get("candidate_key") != focus_key for payload in payloads):
             focus_item = self.candidate_by_key.get(focus_key)
             if focus_item:
-                payloads.insert(0, self.candidate_payload(focus_item))
+                focus_payload = self.candidate_payload(focus_item)
+                focus_payload["focus_injected"] = True
+                payloads.insert(0, focus_payload)
         return {
             "candidates": payloads,
             "total_count": len(self.candidates),
@@ -3572,6 +4077,7 @@ filtered AS (
         if focus_key and all(str(item.get("candidate_key") or "") != focus_key for item in rows):
             focus_row = self._candidate_by_key_sql(focus_key)
             if focus_row:
+                focus_row["focus_injected"] = True
                 rows.insert(0, focus_row)
         keys = [str(item.get("candidate_key")) for item in rows if item.get("candidate_key")]
         issues_by_key = self._sql_issue_map(keys)
@@ -3648,7 +4154,7 @@ filtered AS (
             metadata = item.get("metadata") or {}
             category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
             subject = metadata.get("normalized_subject_name") or ""
-            if category_filter and category != category_filter:
+            if category_filter and not category_matches_filter(category, category_filter):
                 continue
             if subject_filter and subject != subject_filter:
                 continue
@@ -3761,7 +4267,7 @@ filtered AS (
 
     def _sql_answer_sheet_cte(self, params: dict[str, str]) -> tuple[str, list[Any]]:
         clauses, values = self._sql_answer_filter_values(params)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        scope_where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         q = (params.get("q") or "").strip().lower()
         answer_review_status = params.get("answerReviewStatus") or ""
         answer_filter_sql = ""
@@ -3782,30 +4288,37 @@ filtered AS (
         elif answer_review_status == "comment":
             answer_filter_sql = "WHERE comment_count > 0"
         cte = f"""
-WITH latest_question AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        corrected_candidate_json,
-        event_json,
-        notes,
-        created_at,
-        id
-    FROM exam.question_review_events
-    WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
-    ORDER BY candidate_key, id DESC
+WITH scoped_candidates AS MATERIALIZED (
+    SELECT c.*
+    FROM exam.question_candidates c
+    {scope_where}
+),
+latest_question AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.corrected_candidate_json,
+        e.event_json,
+        e.notes,
+        e.created_at,
+        e.id
+    FROM exam.question_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    ORDER BY e.candidate_key, e.id DESC
 ),
 latest_answer AS (
-    SELECT DISTINCT ON (candidate_key)
-        candidate_key,
-        action,
-        corrected_answer_json,
-        event_json,
-        notes,
-        created_at,
-        id
-    FROM exam.answer_review_events
-    ORDER BY candidate_key, id DESC
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.action,
+        e.corrected_answer_json,
+        e.event_json,
+        e.notes,
+        e.created_at,
+        e.id
+    FROM exam.answer_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    ORDER BY e.candidate_key, e.id DESC
 ),
 eligible AS (
     SELECT
@@ -3850,11 +4363,10 @@ eligible AS (
                 la.event_json::text
             )) LIKE %s
         ) AS query_match
-    FROM exam.question_candidates c
+    FROM scoped_candidates c
     JOIN latest_question lq ON lq.candidate_key = c.candidate_key
     LEFT JOIN latest_answer la ON la.candidate_key = c.candidate_key
-    {where}
-      AND lq.action IN ('accept', 'unblock')
+    WHERE lq.action IN ('accept', 'unblock')
 ),
 sheet_stats AS (
     SELECT
@@ -3889,7 +4401,7 @@ filtered_sheets AS (
     {answer_filter_sql}
 )
 """
-        return cte, [q, f"%{q}%", *values]
+        return cte, [*values, q, f"%{q}%"]
 
     def _sql_answer_sheet_rows_and_counts(
         self,
@@ -3903,24 +4415,28 @@ filtered_sheets AS (
                     f"""
                     {cte}
                     , selected_sheets AS (
-                        SELECT
-                            sheet_key,
-                            (SELECT COALESCE(sum(question_count), 0)::integer FROM query_sheets) AS eligible_count,
-                            (SELECT COALESCE(sum(reviewed_count), 0)::integer FROM query_sheets) AS reviewed_count,
-                            (SELECT count(*)::integer FROM query_sheets) AS sheet_count,
-                            (SELECT COALESCE(sum(question_count), 0)::integer FROM filtered_sheets) AS filtered_count
+                        SELECT *
                         FROM filtered_sheets
                         ORDER BY category, subject, year_sort DESC, ordinal_sort DESC, answer_role, sheet_key
                         LIMIT %s
+                    ),
+                    counts AS (
+                        SELECT
+                            COALESCE(sum(question_count), 0)::integer AS eligible_count,
+                            COALESCE(sum(reviewed_count), 0)::integer AS reviewed_count,
+                            count(*)::integer AS sheet_count,
+                            (SELECT COALESCE(sum(question_count), 0)::integer FROM filtered_sheets) AS filtered_count
+                        FROM query_sheets
                     )
                     SELECT
                         e.raw_candidate_json,
-                        s.eligible_count,
-                        s.reviewed_count,
-                        s.sheet_count,
-                        s.filtered_count
-                    FROM eligible e
-                    JOIN selected_sheets s ON s.sheet_key = e.sheet_key
+                        counts.eligible_count,
+                        counts.reviewed_count,
+                        counts.sheet_count,
+                        counts.filtered_count
+                    FROM counts
+                    LEFT JOIN selected_sheets s ON true
+                    LEFT JOIN eligible e ON s.sheet_key = e.sheet_key
                     ORDER BY e.category, e.subject, e.year_sort DESC, e.ordinal_sort DESC, e.answer_role, e.sheet_key, e.question_sort, e.candidate_key
                     """,
                     [*values, limit],
@@ -3939,22 +4455,6 @@ filtered_sheets AS (
                         rows.append(raw_candidate)
                     elif isinstance(raw_candidate, str):
                         rows.append(json.loads(raw_candidate))
-                if not rows:
-                    cur.execute(
-                        f"""
-                        {cte}
-                        SELECT
-                            COALESCE(sum(question_count), 0)::integer AS eligible_count,
-                            COALESCE(sum(reviewed_count), 0)::integer AS reviewed_count,
-                            count(*)::integer AS sheet_count,
-                            (SELECT COALESCE(sum(question_count), 0)::integer FROM filtered_sheets) AS filtered_count
-                        FROM query_sheets
-                        """,
-                        values,
-                    )
-                    count_row = cur.fetchone()
-                    if count_row:
-                        eligible_count, reviewed_count, sheet_count, filtered_count = [int(value or 0) for value in count_row]
         return rows, eligible_count, reviewed_count, sheet_count, filtered_count
 
     def filtered_answer_payloads_sql(self, params: dict[str, str]) -> dict[str, Any]:
@@ -4136,6 +4636,37 @@ filtered_sheets AS (
             )
             for items in payloads_by_key.values()
         ]
+        sheets_by_semantic_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        status_rank = {"confirmed_group": 4, "confirmed_not_group": 3, "reviewed": 2, "unreviewed": 1}
+        for sheet in sheets:
+            metadata = sheet.get("metadata") or {}
+            group_range = str(sheet.get("group_ref") or sheet.get("inferred_group_ref") or sheet.get("group_label") or "")
+            semantic_key = (
+                str(metadata.get("normalized_category_name") or metadata.get("group_name") or ""),
+                str(metadata.get("normalized_subject_name") or ""),
+                str(metadata.get("year") or ""),
+                str(metadata.get("exam_ordinal") or ""),
+                group_range,
+            )
+            current_sheet = sheets_by_semantic_key.get(semantic_key)
+            if not current_sheet:
+                sheets_by_semantic_key[semantic_key] = sheet
+                continue
+            current_score = (
+                status_rank.get(str(current_sheet.get("group_review_status") or "unreviewed"), 0),
+                1 if current_sheet.get("group_ref") else 0,
+                1 if str(current_sheet.get("group_sheet_key") or current_sheet.get("candidate_key") or "").startswith("group_ref|") else 0,
+                len(current_sheet.get("rows") or []),
+            )
+            next_score = (
+                status_rank.get(str(sheet.get("group_review_status") or "unreviewed"), 0),
+                1 if sheet.get("group_ref") else 0,
+                1 if str(sheet.get("group_sheet_key") or sheet.get("candidate_key") or "").startswith("group_ref|") else 0,
+                len(sheet.get("rows") or []),
+            )
+            if next_score > current_score:
+                sheets_by_semantic_key[semantic_key] = sheet
+        sheets = list(sheets_by_semantic_key.values())
         group_review_status = params.get("groupReviewStatus") or ""
         if group_review_status:
             if group_review_status == "reviewed":
@@ -4151,6 +4682,7 @@ filtered_sheets AS (
                         sheet.get("group_sheet_key"),
                         sheet.get("group_ref"),
                         sheet.get("group_label"),
+                        sheet.get("shared_stem"),
                         (sheet.get("metadata") or {}).get("normalized_category_name"),
                         (sheet.get("metadata") or {}).get("normalized_subject_name"),
                         (sheet.get("metadata") or {}).get("year"),
@@ -4317,9 +4849,137 @@ filtered_sheets AS (
                         """,
                         (status, event.get("candidate_key")),
                     )
+                    self._enqueue_formal_sync(cur, str(event.get("candidate_key") or ""))
             conn.commit()
         self._sql_facets_cache.clear()
         return {"ok": True, "sql_primary": True, "table": "exam.question_review_events", "event_id": event_id}
+
+    def _insert_sql_group_review_events(self, events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        if not self.sql_review_enabled:
+            return {
+                str(event.get("candidate_key") or ""): {"ok": True, "sql_primary": False, "table": "exam.question_review_events"}
+                for event in events
+            }
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        storage_by_key: dict[str, dict[str, Any]] = {}
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                for event in events:
+                    key = str(event.get("candidate_key") or "")
+                    cur.execute(
+                        """
+                        INSERT INTO exam.question_review_events (
+                            candidate_id,
+                            candidate_key,
+                            reviewer,
+                            action,
+                            corrected_candidate_json,
+                            event_json,
+                            notes,
+                            created_at
+                        )
+                        SELECT id, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                        FROM exam.question_candidates
+                        WHERE candidate_key = %s
+                        RETURNING id
+                        """,
+                        (
+                            key,
+                            event.get("reviewer"),
+                            event.get("action"),
+                            Jsonb(event.get("correction")) if event.get("correction") is not None else None,
+                            Jsonb(event),
+                            event.get("notes") or "",
+                            event.get("created_at"),
+                            key,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise SqlWriteError(f"candidate_key not found in SQL: {key}")
+                    storage_by_key[key] = {
+                        "ok": True,
+                        "sql_primary": True,
+                        "table": "exam.question_review_events",
+                        "event_id": int(row[0]),
+                    }
+            conn.commit()
+        self._sql_facets_cache.clear()
+        return storage_by_key
+
+    def _insert_sql_question_review_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not events:
+            return []
+        if not self.sql_review_enabled:
+            return [{"ok": True, "sql_primary": False, "table": "exam.question_review_events"} for _event in events]
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        status_by_action = {
+            "accept": "accepted",
+            "correct": "corrected",
+            "needs_review": "needs_review",
+            "block": "blocked",
+            "reviewed": "accepted",
+            "unblock": "accepted",
+            "comment": "needs_review",
+            "exclude": "excluded",
+            "unreviewed": "unreviewed",
+            "reset_review": "unreviewed",
+        }
+        storage_rows: list[dict[str, Any]] = []
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                for event in events:
+                    key = str(event.get("candidate_key") or "")
+                    action = str(event.get("action") or "")
+                    cur.execute(
+                        """
+                        INSERT INTO exam.question_review_events (
+                            candidate_id,
+                            candidate_key,
+                            reviewer,
+                            action,
+                            corrected_candidate_json,
+                            event_json,
+                            notes,
+                            created_at
+                        )
+                        SELECT id, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                        FROM exam.question_candidates
+                        WHERE candidate_key = %s
+                        RETURNING id
+                        """,
+                        (
+                            key,
+                            event.get("reviewer"),
+                            action,
+                            Jsonb(event.get("correction")) if event.get("correction") is not None else None,
+                            Jsonb(event),
+                            event.get("notes") or "",
+                            event.get("created_at"),
+                            key,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise SqlWriteError(f"candidate_key not found in SQL: {key}")
+                    cur.execute(
+                        """
+                        UPDATE exam.question_candidates
+                        SET review_status = %s,
+                            updated_at = now()
+                        WHERE candidate_key = %s
+                        """,
+                        (status_by_action.get(action, "unreviewed"), key),
+                    )
+                    self._enqueue_formal_sync(cur, key)
+                    storage_rows.append(
+                        {"ok": True, "sql_primary": True, "table": "exam.question_review_events", "event_id": int(row[0])}
+                    )
+            conn.commit()
+        self._sql_facets_cache.clear()
+        return storage_rows
 
     def _insert_sql_answer_review_event(self, event: dict[str, Any]) -> dict[str, Any]:
         if not self.sql_review_enabled:
@@ -4364,6 +5024,7 @@ filtered_sheets AS (
                 if not row:
                     raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
                 event_id = int(row[0])
+                self._enqueue_formal_sync(cur, str(event.get("candidate_key") or ""))
             conn.commit()
         self._sql_facets_cache.clear()
         return {"ok": True, "sql_primary": True, "table": "exam.answer_review_events", "event_id": event_id}
@@ -4415,6 +5076,7 @@ filtered_sheets AS (
                     if not row:
                         raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
                     storage_rows.append({"ok": True, "sql_primary": True, "table": "exam.answer_review_events", "event_id": int(row[0])})
+                    self._enqueue_formal_sync(cur, str(event.get("candidate_key") or ""))
             conn.commit()
         self._sql_facets_cache.clear()
         return storage_rows
@@ -4623,7 +5285,7 @@ filtered_sheets AS (
                     FROM exam.official_documents
                     WHERE registry_key = %s
                     ON CONFLICT (group_key) DO UPDATE
-                    SET shared_stem_json = EXCLUDED.shared_stem_json,
+                    SET shared_stem_json = COALESCE(exam.question_groups.shared_stem_json, EXCLUDED.shared_stem_json),
                         review_status = EXCLUDED.review_status
                     RETURNING id
                     """,
@@ -4778,6 +5440,7 @@ filtered_sheets AS (
                     ),
                 )
 
+            cur.execute("DELETE FROM exam.question_assets WHERE question_id = %s", (question_id,))
             asset_keys: list[str] = []
             for index, asset in enumerate(assets_by_key.get(question_key, []), start=1):
                 asset_key = str(asset.get("asset_key") or "").strip()
@@ -4933,10 +5596,50 @@ filtered_sheets AS (
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
-        formal_sync = self.sync_formal_candidates([str(key)]) if key and event.get("action") not in NON_QUESTION_REVIEW_ACTIONS else None
+        formal_sync = None
+        if key and event.get("action") not in NON_QUESTION_REVIEW_ACTIONS:
+            if self.defer_formal_sync:
+                self._wake_formal_sync_worker()
+                formal_sync = {"ok": True, "enabled": True, "queued": True}
+            else:
+                formal_sync = self.sync_formal_candidates([str(key)])
         if formal_sync is not None:
             storage["formal_sync"] = formal_sync
         return {**event, "storage": storage}
+
+    def append_reviews_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized_events: list[dict[str, Any]] = []
+        created_at = datetime.now().isoformat(timespec="seconds")
+        for raw_event in events:
+            event = dict(raw_event)
+            if not str(event.get("candidate_key") or ""):
+                continue
+            event.setdefault("created_at", created_at)
+            normalized_events.append(event)
+        if not normalized_events:
+            return []
+        sql_storages = self._insert_sql_question_review_events(normalized_events)
+        jsonl_storage = self._legacy_jsonl_storage_many(self.review_log, normalized_events)
+        self._review_log_signature = file_signature(self.review_log)
+        saved: list[dict[str, Any]] = []
+        for event, sql_storage in zip(normalized_events, sql_storages):
+            key = str(event.get("candidate_key") or "")
+            self.review_counts[key] = self.review_counts.get(key, 0) + 1
+            if event.get("action") in RESET_REVIEW_ACTIONS:
+                self.latest_reviews.pop(key, None)
+                self.latest_reset_reviews[key] = event
+            else:
+                self.latest_reviews[key] = event
+                self.latest_reset_reviews.pop(key, None)
+            saved.append({**event, "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage}})
+        if self.defer_formal_sync:
+            self._wake_formal_sync_worker()
+            formal_sync = {"ok": True, "enabled": True, "queued": True}
+        else:
+            formal_sync = self.sync_formal_candidates([str(event.get("candidate_key") or "") for event in normalized_events])
+        for saved_event in saved:
+            saved_event["storage"]["formal_sync"] = formal_sync
+        return saved
 
     def append_answer_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
@@ -4959,7 +5662,11 @@ filtered_sheets AS (
             else:
                 self.latest_answer_reviews[key] = event
                 self.latest_answer_reset_reviews.pop(key, None)
-        formal_sync = self.sync_formal_candidates([str(key)]) if key else None
+        if key and self.defer_formal_sync:
+            self._wake_formal_sync_worker()
+            formal_sync = {"ok": True, "enabled": True, "queued": True}
+        else:
+            formal_sync = self.sync_formal_candidates([str(key)]) if key else None
         if formal_sync is not None:
             storage["formal_sync"] = formal_sync
         return {**event, "storage": storage}
@@ -5020,7 +5727,11 @@ filtered_sheets AS (
                     self.latest_answer_reviews[key] = event
                     self.latest_answer_reset_reviews.pop(key, None)
             saved.append({**event, "storage": storage})
-        formal_sync = self.sync_formal_candidates([str(event.get("candidate_key") or "") for event in normalized_events])
+        if self.defer_formal_sync:
+            self._wake_formal_sync_worker()
+            formal_sync = {"ok": True, "enabled": True, "queued": True}
+        else:
+            formal_sync = self.sync_formal_candidates([str(event.get("candidate_key") or "") for event in normalized_events])
         for saved_event in saved:
             saved_event.setdefault("storage", {})["formal_sync"] = formal_sync
         return saved
@@ -5252,7 +5963,15 @@ filtered_sheets AS (
                     )
                     SELECT
                         count(*),
-                        count(*) FILTER (WHERE fq.question_key IS NULL)
+                        count(*) FILTER (
+                            WHERE fq.question_key IS NULL
+                               OR fq.review_status <> 'accepted'
+                               OR NOT EXISTS (
+                                   SELECT 1
+                                   FROM exam.answers fa
+                                   WHERE fa.question_id = fq.id
+                               )
+                        )
                     FROM ready r
                     LEFT JOIN exam.questions fq ON fq.question_key = r.candidate_key
                     """
@@ -5282,7 +6001,18 @@ filtered_sheets AS (
                     counts["ai_reviewed"] = int(row[0] or 0)
                     counts["ai_needs_review"] = int(row[1] or 0)
                     counts["ai_blocked"] = int(row[2] or 0)
-                cur.execute("SELECT count(*) FROM exam.questions")
+                cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM exam.questions q
+                    WHERE q.review_status = 'accepted'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM exam.answers a
+                          WHERE a.question_id = q.id
+                      )
+                    """
+                )
                 counts["formal_questions"] = int(cur.fetchone()[0] or 0)
                 cur.execute(
                     """
@@ -5301,10 +6031,16 @@ filtered_sheets AS (
                     FROM exam.questions q
                     LEFT JOIN latest l ON l.candidate_key = q.question_key
                     LEFT JOIN latest_answer a ON a.candidate_key = q.question_key
-                    WHERE NOT (
+                    WHERE q.review_status = 'accepted'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM exam.answers fa
+                          WHERE fa.question_id = q.id
+                      )
+                      AND NOT (
                         COALESCE(l.action, '') IN ('accept', 'unblock')
                         AND COALESCE(a.action, '') IN ('accept', 'unblock')
-                    )
+                      )
                     """
                 )
                 counts["formal_review_drift"] = int(cur.fetchone()[0] or 0)
@@ -5382,7 +6118,14 @@ filtered_sheets AS (
                 "review_backend": "sql" if self.sql_review_enabled else "jsonl",
                 "sql_primary": bool(self.sql_review_enabled),
                 "legacy_jsonl_backup": bool(self.legacy_jsonl_backup_enabled),
-                "jsonl_status": "legacy_backup" if self.sql_review_enabled else "primary",
+                "jsonl_status": (
+                    "legacy_backup"
+                    if self.sql_review_enabled and self.legacy_jsonl_backup_enabled
+                    else "disabled"
+                    if self.sql_review_enabled
+                    else "primary"
+                ),
+                "formal_sync": self.formal_sync_status(),
             },
             "candidate_source_jsonl": str(self.candidate_path),
             "issue_source_csv": str(self.issue_path) if self.issue_path else None,
@@ -5451,10 +6194,10 @@ filtered_sheets AS (
                     "tables": ["exam.question_groups", "exam.questions", "exam.question_options", "exam.answers", "exam.question_assets"],
                     "status": "usable_bank",
                     "count": counts.get("ready_for_formal", 0),
-                    "description": "最新題目審核與答案核對都通過的目前可用題目。實體正式表可稍後用 promotion 同步，題組審核是額外結構標籤，不阻擋可用狀態。",
+                    "description": "最新題目審核與答案核對都通過的目前可用題目。SQL 審核事件提交後由 formal sync queue 背景同步正式表；題組審核是額外結構標籤，不阻擋可用狀態。",
                     "breakdown": {
                         "ready_for_formal": counts.get("ready_for_formal", 0),
-                        "formal_questions_physical": counts.get("formal_questions", 0),
+                        "formal_questions_usable": counts.get("formal_questions", 0),
                         "pending_promotion": counts.get("formal_pending_promotion", 0),
                         "physical_review_drift": counts.get("formal_review_drift", 0),
                     },
@@ -5697,6 +6440,14 @@ class Handler(BaseHTTPRequestHandler):
                 keys = self.state.candidate_keys_for_manual_group_range(
                     str(payload.get("seed_candidate_key") or ""),
                     str(payload.get("range") or ""),
+                )
+            if not keys and payload.get("range"):
+                keys = self.state.candidate_keys_for_manual_group_filters(
+                    category=str(payload.get("category") or ""),
+                    subject=str(payload.get("subject") or ""),
+                    year=str(payload.get("year") or ""),
+                    ordinal=str(payload.get("ordinal") or ""),
+                    range_text=str(payload.get("range") or ""),
                 )
             if not keys:
                 self.send_json({"ok": False, "error": "candidate_keys or a valid seed_candidate_key/range is required"}, status=400)
@@ -5975,6 +6726,8 @@ PAGE_HTML = r"""<!doctype html>
     .panel { background:white; border:1px solid var(--line); border-radius:8px; margin-bottom:12px; overflow:hidden; }
     .panel h2 { margin:0; padding:10px 12px; font-size:14px; border-bottom:1px solid var(--line); background:#fbfcff; }
     .panel .body { padding:12px; }
+    details.panel > summary { cursor:pointer; padding:10px 12px; font-size:14px; font-weight:700; background:#fbfcff; border-bottom:1px solid transparent; }
+    details.panel[open] > summary { border-bottom-color:var(--line); }
     .stem { white-space:pre-wrap; line-height:1.55; }
     .stem table { white-space:normal; width:100%; border-collapse:collapse; margin:10px 0; font-size:12px; }
     .stem th, .stem td { border:1px solid var(--line); padding:5px 6px; vertical-align:top; }
@@ -6004,12 +6757,15 @@ PAGE_HTML = r"""<!doctype html>
     .edit-grid { display:grid; gap:8px; }
     .edit-option { display:grid; grid-template-columns:34px 1fr; gap:8px; align-items:start; }
     .manual-correction { border-left:4px solid var(--blue); background:#f5f8ff; padding:8px 10px; margin:8px 0; }
-    .correction-tools { display:grid; gap:8px; padding:10px; border:1px solid #bfd0ff; border-radius:8px; background:#fbfcff; margin-bottom:10px; }
     .symbol-toolbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
     .symbol-toolbar button { border:1px solid var(--line); border-radius:6px; min-width:34px; min-height:30px; padding:5px 8px; background:white; cursor:pointer; font-weight:700; }
     .symbol-toolbar button:hover { border-color:var(--blue); background:#eef4ff; color:var(--blue); }
     .symbol-toolbar .tool-group-label { color:var(--muted); font-size:12px; margin-right:2px; }
-    .correction-preview { display:grid; gap:6px; grid-template-columns:1fr; }
+    .correction-preview { border:1px solid #bfd0ff; border-radius:8px; background:#fbfcff; margin-bottom:10px; }
+    .correction-preview summary { cursor:pointer; padding:9px 10px; color:#0f2f5f; font-weight:700; }
+    .correction-preview[open] summary { border-bottom:1px solid #dbe5ff; }
+    .correction-preview-content { display:grid; gap:10px; padding:10px; }
+    .preview-entry { display:grid; gap:4px; }
     .preview-box { border:1px dashed #b8c1d1; border-radius:6px; background:white; padding:8px; min-height:38px; white-space:pre-wrap; line-height:1.55; }
     .preview-box.empty { color:var(--muted); }
     .quick-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fbfcff; margin:10px 0; }
@@ -6113,6 +6869,7 @@ PAGE_HTML = r"""<!doctype html>
       <option value="">全部審核</option>
       <option value="unreviewed" selected>未看過</option>
       <option value="reset_review">退回未審</option>
+      <option value="repair_pending">修復待複核</option>
       <option value="not_accept">未通過</option>
       <option value="exclude">非題目/已排除</option>
       <option value="formal">已入正式庫</option>
@@ -6166,7 +6923,6 @@ PAGE_HTML = r"""<!doctype html>
     <span id="count" class="meta"></span>
     <span id="progress" class="meta"></span>
     <button class="nav question-only batch-accept" onclick="batchAcceptVisiblePass()">批次通過本頁 pass</button>
-    <button class="nav" onclick="reloadCandidateData()">重載資料</button>
     <button class="nav" onclick="showPipeline()">資料庫層級</button>
     <span id="dataStatus" class="meta"></span>
     <span id="batchStatus" class="meta"></span>
@@ -6206,6 +6962,7 @@ let fetchAbortController = null;
 let candidateDataStatus = null;
 let refillTimer = null;
 let modeRefreshTimer = null;
+let searchFilterTimer = null;
 const modeDataCache = new Map();
 const modeSnapshots = new Map();
 const MODE_CACHE_MAX_AGE_MS = 120000;
@@ -6262,6 +7019,30 @@ function aiStatusLabel(status) {
   return STATUS_LABELS[`ai_${normalized}`] || `AI ${normalized}`;
 }
 
+function systemListLabel(status) {
+  if (status === 'blocked') return '系統阻擋';
+  if (status === 'needs_review') return '系統提醒';
+  return statusLabel(status);
+}
+
+function humanListLabel(review) {
+  if (review?.is_reset_unreviewed) return '退回未審';
+  const action = String(review?.action || '').trim();
+  const labels = {
+    accept: '人工通過',
+    unblock: '人工通過',
+    block: '人工阻擋',
+    needs_review: '人工待看',
+    exclude: '非題目',
+    correct: '人工校正',
+    comment: '有註記',
+    reviewed: '人工已看',
+    reset_review: '退回未審',
+    unreviewed: '未看'
+  };
+  return labels[action] || '未看';
+}
+
 function visualAiStatus(item) {
   const review = item?.ai_review || {};
   const direct = String(review.visual_status || '').trim();
@@ -6276,11 +7057,6 @@ function visualSourceBadges(item) {
   if (profile.has_visual_asset) badges.push('<span class="badge visual">已有圖</span>');
   if (profile.has_manual_asset) badges.push('<span class="badge visual">人工補圖</span>');
   if (item?.table_markup_suppressed || profile.has_structured_table) badges.push('<span class="badge visual">表格</span>');
-  if (profile.has_visual_dependency) badges.push('<span class="badge reviewed">Python候選</span>');
-  const aiVisual = visualAiStatus(item);
-  if (aiVisual === 'visual_required_likely') badges.push('<span class="badge reviewed">AI檢查: 可能需圖</span>');
-  else if (aiVisual === 'visual_not_required_likely') badges.push('<span class="badge reviewed">AI檢查: 可能無圖</span>');
-  else if (aiVisual === 'visual_uncertain') badges.push('<span class="badge needs_review">AI檢查: 不確定</span>');
   return badges.join(' ');
 }
 
@@ -6396,7 +7172,7 @@ async function saveManualAsset(options = {}) {
     if (status) status.textContent = `補圖失敗：${data.error}`;
     return;
   }
-  clearCandidateCache();
+  invalidateModeCaches(['visual', 'question']);
   pendingManualAssetDataUrl = '';
   if (data.event?.correction) {
     const action = data.event.action || current.review?.action || 'reviewed';
@@ -6618,7 +7394,8 @@ const compactJson = (value) => {
 function storageLabel(storage) {
   if (!storage) return '';
   if (storage.sql_primary) {
-    return `SQL 已寫入 ${storage.table || ''}${storage.event_id ? ` #${storage.event_id}` : ''}`;
+    const syncText = storage.formal_sync?.queued ? '；正式庫背景同步中' : '';
+    return `SQL 已寫入 ${storage.table || ''}${storage.event_id ? ` #${storage.event_id}` : ''}${syncText}`;
   }
   if (storage.sql_primary === false) return 'JSONL primary 已寫入';
   return '';
@@ -6681,6 +7458,7 @@ function renderInlineMarkupEscaped(value) {
   return value
     .replace(/([A-Za-zΑ-ω]+)_\{([^{}<>]+)\}/g, '$1<sub>$2</sub>')
     .replace(/([A-Za-zΑ-ω]+)\^\{([^{}<>]+)\}/g, '$1<sup>$2</sup>')
+    .replace(/\^\{([^{}<>]+)\}/g, '<sup>$1</sup>')
     .replace(/([A-Za-zΑ-ω]+)_([A-Za-z0-9+\-₀-₉]+)/g, '$1<sub>$2</sub>')
     .replace(/([A-Za-zΑ-ω]+)\^([A-Za-z0-9+\-₀-₉]+)/g, '$1<sup>$2</sup>');
 }
@@ -6695,8 +7473,9 @@ function renderText(value) {
     return renderInlineMarkupEscaped(esc(normalizeInlineScienceText(part)))
       .replace(/&lt;(table|thead|tbody|tfoot|tr|td|th)(?:\s+[^<>]*?)?&gt;/g, '<$1>')
       .replace(/&lt;\/(table|thead|tbody|tfoot|tr|td|th)&gt;/g, '</$1>')
-      .replace(/&lt;sub&gt;(.+?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
-      .replace(/&lt;sup&gt;(.+?)&lt;\/sup&gt;/g, '<sup>$1</sup>');
+      .replace(/&lt;sub&gt;([\s\S]*?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
+      .replace(/&lt;sup&gt;([\s\S]*?)&lt;\/sup&gt;/g, '<sup>$1</sup>')
+      .replace(/([A-Za-z0-9\u4e00-\u9fff])\s+<sup>([®™])<\/sup>/g, '$1<sup>$2</sup>');
   }).join('');
 }
 
@@ -6708,10 +7487,28 @@ function correctionFields() {
   return Array.from(document.querySelectorAll('#editStem, #editAnswer, #editGroupRef, .edit-option-text'));
 }
 
+let lastCorrectionField = null;
+
+function rememberCorrectionField(field) {
+  if (!field) return;
+  lastCorrectionField = field;
+  correctionFields().forEach(candidate => {
+    if (candidate === field) candidate.dataset.activeCorrectionField = '1';
+    else delete candidate.dataset.activeCorrectionField;
+  });
+}
+
 function activeCorrectionField() {
   const active = document.activeElement;
-  if (active && correctionFields().includes(active)) return active;
-  return document.getElementById('editStem') || correctionFields()[0] || null;
+  if (active && correctionFields().includes(active)) {
+    rememberCorrectionField(active);
+    return active;
+  }
+  if (lastCorrectionField && lastCorrectionField.isConnected && correctionFields().includes(lastCorrectionField)) {
+    return lastCorrectionField;
+  }
+  const remembered = correctionFields().find(field => field.dataset.activeCorrectionField === '1');
+  return remembered || document.getElementById('editStem') || correctionFields()[0] || null;
 }
 
 function insertIntoCorrectionField(text) {
@@ -6724,6 +7521,7 @@ function insertIntoCorrectionField(text) {
   const next = start + text.length;
   field.focus();
   if (field.setSelectionRange) field.setSelectionRange(next, next);
+  rememberCorrectionField(field);
   field.dispatchEvent(new Event('input', {bubbles: true}));
 }
 
@@ -6733,7 +7531,7 @@ function wrapCorrectionSelection(tag) {
   const start = field.selectionStart ?? 0;
   const end = field.selectionEnd ?? start;
   const value = String(field.value || '');
-  const selected = value.slice(start, end) || (tag === 'sub' ? '2' : '1');
+  const selected = value.slice(start, end);
   const replacement = `<${tag}>${selected}</${tag}>`;
   field.value = value.slice(0, start) + replacement + value.slice(end);
   field.focus();
@@ -6741,20 +7539,27 @@ function wrapCorrectionSelection(tag) {
     const innerStart = start + tag.length + 2;
     field.setSelectionRange(innerStart, innerStart + selected.length);
   }
+  rememberCorrectionField(field);
   field.dispatchEvent(new Event('input', {bubbles: true}));
 }
 
 function normalizeCorrectionNotation(value) {
   return String(value ?? '')
+    .replace(/\\+\s*%/g, '%')
+    .replace(/\^\s*\{\s*\\+\s*circ\s*\}\s*C/gi, '°C')
+    .replace(/\\+\s*circ\s*C/gi, '°C')
+    .replace(/(\d)\s*\\+\s*circ\b/gi, '$1°')
     .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
-    .replace(/\^\{\\circ\}\s*C/g, '°C')
+    .replace(/\^\{\\+\s*circ\}\s*C/g, '°C')
     .replace(/\^\{o\}\s*C/g, '°C')
     .replace(/\^\{0\}\s*C/g, '°C')
     .replace(/℃/g, '°C')
     .replace(/°\s+C/g, '°C')
     .replace(/([Α-ωA-Za-z])\s*([₀₁₂₃₄₅₆₇₈₉])\b/g, '$1$2')
     .replace(/([αβγδκλμθφω])\s+([0-9]+)\b/g, '$1<sub>$2</sub>')
-    .replace(/\b(HCO|PCO|PO|CO|O)([0-9]+)([+\-])?(?=\s|$|[，。,；;、）)\]])/g, (_, prefix, number, charge) => `${prefix}<sub>${number}</sub>${charge ? `<sup>${charge}</sup>` : ''}`)
+    // Convert only an independent formula token.  Do not match the PO in
+    // `hypo`/`hypothyroidism` or any other Latin word.
+    .replace(/(^|[^A-Za-z0-9])(HCO|PCO|PO|CO|O)([0-9]+)([+\-])?(?=\s|$|[，。,；;、）)\]])/g, (_, lead, prefix, number, charge) => `${lead}${prefix}<sub>${number}</sub>${charge ? `<sup>${charge}</sup>` : ''}`)
     .replace(/\b(O|CO|COO|HCO|PCO|PO|H|NADP|NAD|FAD|IgG|IgM|IgA|CD|T|B)_\{([^{}<>]+)\}/g, '$1<sub>$2</sub>')
     .replace(/\b(O|CO|COO|HCO|PCO|PO|H|NADP|NAD|FAD|IgG|IgM|IgA|CD|T|B)\^([+\-0-9]+)\b/g, '$1<sup>$2</sup>');
 }
@@ -6783,22 +7588,26 @@ function updateCorrectionPreview() {
   if (!previewStem && !previewAnswer) return;
   const stem = document.getElementById('editStem')?.value || '';
   const answer = document.getElementById('editAnswer')?.value || '';
-  if (previewStem) {
-    previewStem.innerHTML = stem.trim() ? renderText(stem) : '題幹預覽';
-    previewStem.classList.toggle('empty', !stem.trim());
-  }
-  if (previewAnswer) {
-    previewAnswer.innerHTML = answer.trim() ? renderText(answer) : '答案預覽';
-    previewAnswer.classList.toggle('empty', !answer.trim());
-  }
+  const updatePreviewBox = (preview, value, emptyLabel) => {
+    if (!preview) return;
+    preview.innerHTML = value.trim() ? renderText(value) : emptyLabel;
+    preview.classList.toggle('empty', !value.trim());
+  };
+  updatePreviewBox(previewStem, stem, '題幹預覽');
+  document.querySelectorAll('.edit-option-text').forEach(field => {
+    const key = String(field.dataset.key || '').toUpperCase();
+    updatePreviewBox(document.getElementById(`correctionPreviewOption${key}`), field.value || '', `選項 ${key} 預覽`);
+  });
+  updatePreviewBox(previewAnswer, answer, '答案預覽');
 }
 
 function initCorrectionTools() {
   correctionFields().forEach(field => {
     field.addEventListener('input', updateCorrectionPreview);
     field.addEventListener('focus', () => {
-      field.dataset.activeCorrectionField = '1';
+      rememberCorrectionField(field);
     });
+    field.addEventListener('click', () => rememberCorrectionField(field));
   });
   updateCorrectionPreview();
 }
@@ -6821,7 +7630,10 @@ function uniqueSorted(values, numeric = false) {
 function populateSelect(id, values, numeric = false) {
   const select = document.getElementById(id);
   const currentValue = select.value;
-  select.innerHTML = '<option value="">全部</option>' + uniqueSorted(values, numeric).map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  const specialOptions = id === 'categoryFilter'
+    ? '<option value="__pharmacist_track__">藥師制度群組</option>'
+    : '';
+  select.innerHTML = '<option value="">全部</option>' + specialOptions + uniqueSorted(values, numeric).map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
   if ([...select.options].some(option => option.value === currentValue)) select.value = currentValue;
 }
 
@@ -6965,10 +7777,13 @@ async function showPipeline() {
 
 function queryParams(options = {}) {
   const params = new URLSearchParams();
+  const questionReviewStatus = filterValue('reviewStatus');
   params.set('q', filterValue('search').trim());
   params.set('status', mode === 'question' ? filterValue('status') : '');
-  params.set('reviewStatus', mode === 'question' ? filterValue('reviewStatus') : '');
-  params.set('aiReviewStatus', mode === 'question' ? filterValue('aiReviewStatus') : '');
+  params.set('reviewStatus', mode === 'question' ? questionReviewStatus : '');
+  // A parser repair must remain discoverable even when the reviewer normally
+  // works through an AI-only queue.
+  params.set('aiReviewStatus', mode === 'question' && questionReviewStatus !== 'repair_pending' ? filterValue('aiReviewStatus') : '');
   params.set('visualStatus', mode === 'visual' ? (filterValue('visualStatus') || VISUAL_DEFAULT_FILTER) : '');
   params.set('answerReviewStatus', mode === 'answer' ? filterValue('answerReviewStatus') : '');
   params.set('groupReviewStatus', mode === 'group' ? filterValue('groupReviewStatus') : '');
@@ -6976,7 +7791,8 @@ function queryParams(options = {}) {
   params.set('subject', filterValue('subjectFilter'));
   params.set('year', filterValue('yearFilter'));
   params.set('ordinal', filterValue('ordinalFilter'));
-  params.set('limit', mode === 'group' ? '200' : '500');
+  const pageSize = mode === 'answer' ? 40 : mode === 'group' ? 80 : mode === 'visual' ? 120 : 160;
+  params.set('limit', String(pageSize));
   const focusKey = options.focusKey || '';
   if (focusKey) params.set('focusKey', focusKey);
   return params;
@@ -6993,6 +7809,15 @@ function requestKeyForCurrentMode(endpoint, params) {
 function clearCandidateCache() {
   modeDataCache.clear();
   modeSnapshots.clear();
+}
+
+function invalidateModeCaches(modes) {
+  const targets = new Set(modes || []);
+  for (const key of [...modeDataCache.keys()]) {
+    const keyMode = key.split(' ', 1)[0];
+    if (targets.has(keyMode)) modeDataCache.delete(key);
+  }
+  for (const target of targets) modeSnapshots.delete(target);
 }
 
 function cacheCandidateData(key, data) {
@@ -7036,10 +7861,10 @@ function latestModeCache() {
 function applyCandidateData(data, preferredKey = null, preferredIndex = null, skipKey = null) {
   candidates = data.candidates || [];
   filtered = candidates;
-  totalCount = mode === 'answer' ? (data.eligible_count || candidates.length) : (data.total_count || candidates.length);
-  filteredCount = data.filtered_count || candidates.length;
-  sheetCount = data.sheet_count || candidates.length;
-  reviewedCount = data.reviewed_count || 0;
+  totalCount = mode === 'answer' ? (data.eligible_count ?? candidates.length) : (data.total_count ?? candidates.length);
+  filteredCount = data.filtered_count ?? candidates.length;
+  sheetCount = data.sheet_count ?? candidates.length;
+  reviewedCount = data.reviewed_count ?? 0;
   candidateDataStatus = data.candidate_data || null;
   updateCandidateDataStatus();
   if (data.facets) populateFiltersFromFacets(data.facets);
@@ -7110,6 +7935,10 @@ function updateCandidateDataStatus() {
   }
   if (candidateDataStatus.busy) {
     element.textContent = '資料重載中';
+  } else if (candidateDataStatus.formal_sync?.running || candidateDataStatus.formal_sync?.queued) {
+    element.textContent = `正式庫背景同步中${candidateDataStatus.formal_sync?.queued ? `（${candidateDataStatus.formal_sync.queued}）` : ''}`;
+  } else if (candidateDataStatus.formal_sync?.last_error) {
+    element.textContent = '正式庫同步待重試';
   } else if (candidateDataStatus.candidate_stale || candidateDataStatus.issue_stale) {
     element.textContent = '候選資料已更新，請按重載資料';
   } else {
@@ -7176,10 +8005,10 @@ function itemMatchesCurrentReviewFilter(item) {
     return Boolean(review.is_reset_unreviewed);
   }
   if (reviewStatus === 'formal') {
-    return Boolean(item.formal?.ready_for_formal);
+    return Boolean(item.formal?.in_formal);
   }
   if (reviewStatus === 'formal_drift') {
-    return Boolean(item.formal?.review_drift);
+    return Boolean(item.formal?.review_drift || item.formal?.pending_promotion);
   }
   if (reviewStatus === 'answer_stage') {
     return ['accept', 'unblock'].includes(action);
@@ -7311,31 +8140,22 @@ function renderList() {
     }
     const review = mode === 'answer' ? (item.answer_review || {}) : (item.review || {});
     const reviewBadge = review.is_reset_unreviewed ? 'reset_review' : (review.action || review.status || 'unreviewed');
-    const reviewLabel = review.is_reset_unreviewed ? '退回未審' : statusLabel(reviewBadge);
+    const reviewLabel = humanListLabel(review);
     const aiReview = item.ai_review || {};
-    const aiBadge = mode !== 'visual' && aiReview.audit_status && aiReview.audit_status !== 'pass'
+    const aiBadge = mode !== 'visual' && aiReview.active !== false && aiReview.audit_status && aiReview.audit_status !== 'pass'
       ? `<span class="badge ai-warning">${esc(aiStatusLabel(aiReview.audit_status))}</span>`
       : '';
     const formal = item.formal || {};
-    const formalBadge = formal.review_drift
-      ? '<span class="badge formal_drift">正式庫待同步</span>'
-      : formal.ready_for_formal
-        ? '<span class="badge formal">已入正式庫</span>'
-        : formal.physical_in_formal
-          ? '<span class="badge formal_drift">正式表舊資料</span>'
-        : '';
-    const firstAiFinding = (aiReview.findings || [])[0];
-    const aiSummary = mode === 'visual'
-      ? ''
-      : firstAiFinding
-      ? `<div class="meta ai-list-note">AI 建議：${esc(firstAiFinding.message || firstAiFinding.suggestion || firstAiFinding.code || '')}</div>`
-      : aiReview.summary && aiReview.audit_status && aiReview.audit_status !== 'pass'
-        ? `<div class="meta ai-list-note">AI 摘要：${esc(aiReview.summary)}</div>`
+    const formalBadge = formal.pending_promotion
+      ? '<span class="badge formal_drift">待同步正式庫</span>'
+      : formal.review_drift
+        ? '<span class="badge formal_drift">待撤回正式庫</span>'
         : '';
     const visualSources = mode === 'visual' ? visualSourceBadges(item) : '';
+    const focusBadge = item.focus_injected ? '<span class="badge unreviewed">目前題（篩選外）</span>' : '';
     const statusText = mode === 'answer' ? (item.answer_gate_status || 'pass') : (item.question_quality_status || item.quality_status);
     const statusBadge = statusText && statusText !== 'pass'
-      ? `<span class="badge ${esc(statusText)}">${esc(statusLabel(statusText))}</span>`
+      ? `<span class="badge ${esc(statusText)}">${esc(systemListLabel(statusText))}</span>`
       : '';
     const visualStatus = item.visual_profile?.visual_review_status || item.visual_review || '';
     const isManualVisual = Boolean(item.visual_profile?.has_manual_asset);
@@ -7348,12 +8168,24 @@ function renderList() {
           : item.is_visual_question
             ? '<span class="badge visual">待處理</span>'
             : '';
+    if (mode === 'visual') {
+      return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
+        <div>${focusBadge} ${visualBadge || '<span class="badge visual">待處理</span>'} 第 ${esc(item.question_number)} 題</div>
+        <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
+        ${visualSources ? `<div class="meta">資產：${visualSources}</div>` : '<div class="meta">目前沒有圖片資產</div>'}
+      </button>`;
+    }
+    const visualMarker = (
+      visualStatus === 'visual_asset_ok'
+      || visualStatus === 'visual_asset_problem'
+      || isManualVisual
+      || (item.is_visual_question && visualStatus !== 'no_visual_required')
+    ) ? '・圖片' : '';
     return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-      <div>${statusBadge} ${formalBadge} ${visualBadge} ${aiBadge} <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> 第 ${esc(item.question_number)} 題</div>
+      <div>${focusBadge} ${statusBadge} ${aiBadge} <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> 第 ${esc(item.question_number)} 題${visualMarker}</div>
       <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
       <div class="meta">${mode === 'answer' ? esc(item.answer_issue_count || 0) + ' 個答案疑點' : esc(item.question_issue_count ?? item.issue_count ?? 0) + ' 個題目疑點'}</div>
-      ${visualSources ? `<div class="meta">來源：${visualSources}</div>` : ''}
-      ${aiSummary}
+      ${formalBadge ? `<div class="meta">${formalBadge}</div>` : ''}
     </button>`;
   }).join('');
   scrollCurrentListItemIntoView();
@@ -7617,6 +8449,14 @@ function fixedOptionRows(options) {
 
 function renderDetail() {
   if (!current) {
+    if (mode === 'group') {
+      document.getElementById('detail').innerHTML = emptyGroupManualPanel();
+      document.getElementById('pdf').src = '';
+      lastPdfUrl = '';
+      document.getElementById('pdfOpen').removeAttribute('href');
+      document.getElementById('pdfPath').textContent = '';
+      return;
+    }
     document.getElementById('detail').innerHTML = `<div class="panel"><h2>目前沒有符合條件的題目</h2><div class="body"><p class="meta">可以切換審核篩選，或開始產生下一批 candidate。</p></div></div>`;
     document.getElementById('pdf').src = '';
     lastPdfUrl = '';
@@ -7651,6 +8491,9 @@ function renderDetail() {
   ).join('');
   const editOptions = optionRows.map(opt =>
     `<div class="edit-option"><b>(${esc(opt.key)})</b><textarea class="edit-field edit-option-text" data-key="${esc(opt.key)}">${editableText(opt.text)}</textarea></div>`
+  ).join('');
+  const correctionPreviewOptions = optionRows.map(opt =>
+    `<div class="preview-entry"><div class="meta">選項 ${esc(opt.key)}</div><div id="correctionPreviewOption${esc(String(opt.key || '').toUpperCase())}" class="preview-box empty"></div></div>`
   ).join('');
   const answerText = current.answer !== undefined && current.answer !== null && String(current.answer).trim() !== ''
     ? renderText(current.answer)
@@ -7691,7 +8534,12 @@ function renderDetail() {
       <p class="meta">parser 原始內容仍保留於 candidate，正式入庫時可比對人工校正版與 parser 原始版。</p>
     </div>` : '';
   const aiReview = current.ai_review || {};
-  const aiBadge = !isVisualMode && aiReview.audit_status && aiReview.audit_status !== 'pass'
+  const aiNeedsAttention = aiReview.active !== false && (
+    (aiReview.audit_status && aiReview.audit_status !== 'pass')
+    || Boolean(aiReview.suggested_correction)
+    || (aiReview.findings || []).length > 0
+  );
+  const aiBadge = !isVisualMode && aiNeedsAttention
     ? `<span class="badge ai-warning">${esc(aiStatusLabel(aiReview.audit_status))}</span>`
     : '';
   const aiRawNote = aiReview.raw_audit_status && aiReview.raw_audit_status !== aiReview.audit_status
@@ -7713,35 +8561,35 @@ function renderDetail() {
       <button class="action" onclick="applyAiSuggestedCorrection()">套用 AI 建議校正</button>
       <span class="meta">套用後會保留在需人工複核狀態，不會自動通過。</span>
     </div>` : '';
-  const aiPanel = `
+  const aiPanel = aiNeedsAttention ? `
     <div class="panel"><h2>AI 格式稽核</h2><div class="body">
       <p class="meta">${aiReview.status === 'reviewed' ? `上次：${esc(aiReview.provider || '')} ${esc(aiReview.model || '')} / ${esc(aiReview.audit_status || '')} ${esc(aiReview.updated_at || '')}` : '尚未稽核'}</p>
       <p>${aiBadge} ${aiRawNote}</p>
       ${aiReview.summary ? `<p>${esc(aiReview.summary)}</p>` : '<p class="meta">AI 稽核只檢查字形、格式、選項、圖表與 parser 結構疑點，不會修改人工審核狀態。</p>'}
       ${aiCorrectionPanel}
       ${aiFindings || '<div class="meta">目前沒有 AI 稽核疑點。</div>'}
-    </div></div>`;
+    </div></div>` : '';
   const statusText = current.question_quality_status || current.quality_status || 'pass';
   const statusBadge = statusText && statusText !== 'pass'
     ? `<span class="badge ${esc(statusText)}">${esc(statusLabel(statusText))}</span>`
     : '';
   const formal = current.formal || {};
-  const formalBadge = formal.review_drift
-    ? '<span class="badge formal_drift">正式庫待同步</span>'
-    : formal.ready_for_formal
-      ? '<span class="badge formal">已入正式庫</span>'
-      : formal.physical_in_formal
-        ? '<span class="badge formal_drift">正式表舊資料</span>'
-      : '';
+  const formalBadge = formal.pending_promotion
+    ? '<span class="badge formal_drift">待同步正式庫</span>'
+    : formal.review_drift
+      ? '<span class="badge formal_drift">待撤回正式庫</span>'
+      : formal.in_formal
+        ? '<span class="badge formal">已入正式庫</span>'
+        : '';
   const formalNote = formal.review_drift ? `
     <div class="issue warning">
       <b>正式題庫與審核層不同步</b><br>
-      此題曾寫入正式表，但最新題目審核或答案核對已不再同時通過；目前不應視為可用題，需回審後重新同步正式庫。
+      此題的正式列仍是可用狀態，但最新題目審核或答案核對已不再同時通過；同步完成前不得匯出。
       <br><span class="meta">formal question id: ${esc(formal.question_id || '')}</span>
     </div>` : formal.pending_promotion ? `
     <div class="issue info">
       <b>已達可用狀態，待同步正式表</b><br>
-      最新題目審核與答案核對都已通過，系統已把此題視為正式可用；下一次 promotion 會寫入 <code>exam.questions</code> / <code>exam.answers</code>。
+      最新題目審核與答案核對都已通過，但正式表尚未具備 <code>accepted</code> 題目與答案；同步完成後才算正式可用。
     </div>` : '';
   const visualProfile = current.visual_profile || {};
   const visualReviewStatus = visualProfile.visual_review_status || current.visual_review || '';
@@ -7768,8 +8616,8 @@ function renderDetail() {
       </div>
     </div>` : '';
   const imageReviewAssetPanel = `
-    <div class="panel"><h2>圖片</h2><div class="body">
-      <div class="asset-grid">${images || '<span class="meta">未偵測到圖片引用。</span>'}</div>
+    <div class="panel"><h2>補圖與綁定</h2><div class="body">
+      <p class="meta">${images ? '目前圖片已直接顯示在上方題目預覽；解除綁定也在各圖片旁操作。' : '目前未偵測到圖片引用，可在下方補上正確圖片。'}</p>
       <div class="manual-asset-controls">
         <p class="meta">${isVisualMode
           ? '圖片審核頁只判斷圖片或表格資產是否正確；若需要補圖，也可以在這裡貼上並綁定位置。'
@@ -7794,7 +8642,7 @@ function renderDetail() {
         <input id="manualAssetRole" type="hidden" value="manual_question_image">
         <label class="meta"><input type="checkbox" id="manualAssetReplace"> 取代既有圖片</label>
         <input id="manualAssetCaption" placeholder="圖片說明，例如：第 7 題表格人工截圖">
-        <textarea id="manualAssetNotes" placeholder="補圖註記，例如：MinerU 原圖裁切不完整，人工截圖補正。">${esc(reviewState.notes || '')}</textarea>
+        <textarea id="manualAssetNotes" placeholder="補圖註記，例如：MinerU 原圖裁切不完整，人工截圖補正。"></textarea>
         <div class="toolbar">
           <button class="action" onclick="saveManualAsset()">儲存補圖</button>
           <button class="action accept" onclick="saveManualAsset({acceptAfterSave: true})">儲存補圖並通過</button>
@@ -7803,18 +8651,19 @@ function renderDetail() {
       </div>
     </div></div>`;
   const symbolToolsPanel = `
-    <div class="panel question-correction-panel"><h2>符號模板</h2><div class="body">
+    <details class="panel question-correction-panel"><summary>符號模板</summary><div class="body">
       <div class="symbol-toolbar" aria-label="常用符號模板">
         <span class="tool-group-label">希臘</span>
         ${['α','β','γ','δ','ε','κ','λ','μ','θ','φ','ω','Δ','Σ'].map(symbol => `<button type="button" title="插入 ${symbol}" onclick="insertIntoCorrectionField('${symbol}')">${symbol}</button>`).join('')}
         <span class="tool-group-label">格式</span>
-        <button type="button" title="下標：選中文字後套用" onclick="wrapCorrectionSelection('sub')">x<sub>2</sub></button>
-        <button type="button" title="上標：選中文字後套用" onclick="wrapCorrectionSelection('sup')">x<sup>2</sup></button>
+        <button type="button" title="插入空下標模板，游標會放在標籤內" onclick="wrapCorrectionSelection('sub')">x<sub>□</sub></button>
+        <button type="button" title="插入空上標模板，游標會放在標籤內" onclick="wrapCorrectionSelection('sup')">x<sup>□</sup></button>
         <button type="button" title="攝氏溫度" onclick="insertIntoCorrectionField('°C')">°C</button>
         <button type="button" title="正負號" onclick="insertIntoCorrectionField('±')">±</button>
         <button type="button" title="乘號" onclick="insertIntoCorrectionField('×')">×</button>
         <button type="button" title="箭頭" onclick="insertIntoCorrectionField('→')">→</button>
         <button type="button" title="可逆反應" onclick="insertIntoCorrectionField('↔')">↔</button>
+        <button type="button" title="無限大" onclick="insertIntoCorrectionField('∞')">∞</button>
         <span class="tool-group-label">模板</span>
         <button type="button" title="CO2 下標" onclick="insertIntoCorrectionField('CO\\u003csub\\u003e2\\u003c/sub\\u003e')">CO<sub>2</sub></button>
         <button type="button" title="O2 下標" onclick="insertIntoCorrectionField('O\\u003csub\\u003e2\\u003c/sub\\u003e')">O<sub>2</sub></button>
@@ -7823,8 +8672,8 @@ function renderDetail() {
         <button type="button" title="alpha 1" onclick="insertIntoCorrectionField('α\\u003csub\\u003e1\\u003c/sub\\u003e')">α<sub>1</sub></button>
         <button type="button" title="套用安全正規化到目前欄位或選取文字" onclick="normalizeActiveCorrectionField()">正規化</button>
       </div>
-      <p class="meta">先點人工校正裡的題幹或選項欄位，再按符號；這裡只負責產生常用符號，不改變審核狀態。</p>
-    </div></div>`;
+      <p class="meta">先把游標放在題幹、A–D 選項、答案或題組欄位，再按符號；會插入原欄位的游標位置，不改變審核狀態。</p>
+    </div></details>`;
   const questionQuickActions = isVisualMode ? '' : `
       <div class="quick-actions">
         <button class="action primary-accept" onclick="review('accept')">通過</button>
@@ -7853,6 +8702,10 @@ function renderDetail() {
   const correctionActions = isVisualMode
     ? `<button class="action" onclick="saveCorrection(false)">儲存人工校正</button><span id="saved" class="meta"></span>`
     : `<button class="action" onclick="saveCorrection(false)">儲存人工校正</button><button class="action accept" onclick="saveCorrection(true)">儲存並通過</button>`;
+  const correctionPanelStart = isVisualMode
+    ? `<details class="panel question-correction-panel"><summary>${correctionTitle}</summary><div class="body">`
+    : `<div class="panel question-correction-panel"><h2>${correctionTitle}</h2><div class="body">`;
+  const correctionPanelEnd = isVisualMode ? '</div></details>' : '</div></div>';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題目</h2><div class="body">
       <div class="meta"><code>${esc(current.candidate_key)}</code></div>
@@ -7879,14 +8732,15 @@ function renderDetail() {
     ${isVisualMode ? '' : aiPanel}
     ${imageReviewAssetPanel}
     ${manualReviewPanel}
-    <div class="panel question-correction-panel"><h2>${correctionTitle}</h2><div class="body">
-      <div class="correction-tools">
-        <div class="correction-preview">
-          <div class="meta">即時顯示預覽（與審題畫面使用同一個 renderer）</div>
-          <div id="correctionPreviewStem" class="preview-box empty"></div>
-          <div id="correctionPreviewAnswer" class="preview-box empty"></div>
+    ${correctionPanelStart}
+      <details class="correction-preview">
+        <summary>即時顯示預覽</summary>
+        <div class="correction-preview-content">
+          <div class="preview-entry"><div class="meta">題幹</div><div id="correctionPreviewStem" class="preview-box empty"></div></div>
+          ${correctionPreviewOptions}
+          <div class="preview-entry"><div class="meta">答案</div><div id="correctionPreviewAnswer" class="preview-box empty"></div></div>
         </div>
-      </div>
+      </details>
       <div class="edit-grid">
         <label class="meta">題幹<textarea id="editStem" class="edit-field">${editableText(current.stem)}</textarea></label>
         <div>
@@ -7901,14 +8755,14 @@ function renderDetail() {
         ${correctionActions}
       </div>
       <p class="meta">人工校正會寫入 review event，不會覆蓋 parser 原始輸出；單純儲存校正會保留原本通過、阻擋或疑問狀態。</p>
-    </div></div>
+    ${correctionPanelEnd}
     ${symbolToolsPanel}
-    <div class="panel"><h2>來源</h2><div class="body">
+    <details class="panel"><summary>來源</summary><div class="body">
       <p class="meta">官方 PDF: <code>${esc((current.source_files || {}).official_pdf || '')}</code></p>
       <p class="meta">MinerU layout: <code>${esc((current.source_files || {}).mineru_layout_pdf || '')}</code></p>
       <p class="meta">MinerU origin: <code>${esc((current.source_files || {}).mineru_origin_pdf || '')}</code></p>
       <p class="meta">Markdown: <code>${esc((current.source_files || {}).question_markdown || '')}</code></p>
-    </div></div>`;
+    </div></details>`;
   initCorrectionTools();
 }
 
@@ -8033,7 +8887,13 @@ function renderGroupDetail() {
         ? ' <span class="badge not_group">確認非題組</span>'
         : '';
     const aiStatus = row.ai_review?.audit_status || '';
-    const visualBadge = row.is_visual_question ? ' <span class="badge visual">圖片待處理</span>' : '';
+    const aiStatusBadge = aiStatus && aiStatus !== 'pass'
+      ? ` <span class="badge ai-warning">AI ${esc(aiStatus)}</span>`
+      : '';
+    const visualReviewStatus = row.visual_profile?.visual_review_status || row.visual_review || '';
+    const visualBadge = row.is_visual_question && !['visual_asset_ok', 'no_visual_required'].includes(visualReviewStatus)
+      ? ' <span class="badge visual">圖片待處理</span>'
+      : '';
     const reasons = (row.reasons || []).map(reason => `<span class="badge needs_review">${esc(reason)}</span>`).join(' ');
     const rowGroupRef = row.group_ref || row.inferred_group_ref || '無';
     const rowGroupKind = row.group_ref
@@ -8046,7 +8906,7 @@ function renderGroupDetail() {
     return `<tr>
       <td><b>第 ${esc(row.question_number)} 題</b>${row.question_number_occurrence && row.question_number_occurrence !== 1 ? ` <span class="meta">occ ${esc(row.question_number_occurrence)}</span>` : ''}</td>
       <td><code>${esc(row.candidate_key)}</code><div class="meta">${esc(rowGroupKind)}: ${esc(rowGroupRef)}</div></td>
-      <td><span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span>${groupReviewBadge}${visualBadge}${aiStatus ? ` <span class="badge ${aiStatus === 'pass' ? 'ai' : 'ai-warning'}">AI ${esc(aiStatus)}</span>` : ''}</td>
+      <td><span class="badge ${esc(reviewBadge)}">${esc(reviewBadge)}</span>${groupReviewBadge}${visualBadge}${aiStatusBadge}</td>
       <td>${reasons || '<span class="meta">題組線索</span>'}</td>
       <td class="stem-cell">${renderText(String(row.stem || '').slice(0, 260))}${String(row.stem || '').length > 260 ? '...' : ''}</td>
       <td><button class="action" data-key="${esc(row.candidate_key)}" onclick="openQuestionCandidate(this.dataset.key)">回審此題</button></td>
@@ -8056,6 +8916,8 @@ function renderGroupDetail() {
     <div class="group-warning">
       這一組是「未綁疑似題組」。若右側 PDF 與題幹確認它們共享共同情境，請在本頁使用「確認為題組」或「人工範圍建立題組」。
     </div>`;
+  const selectedGroupType = current.group_type || 'shared_stem';
+  const sharedStemText = current.shared_stem || '';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>題組審核</h2><div class="body">
       <div class="meta"><code>${esc(current.group_sheet_key || current.candidate_key)}</code></div>
@@ -8068,22 +8930,42 @@ function renderGroupDetail() {
         <div><span class="meta">阻擋/非題</span><b>${esc(current.blocked_count || 0)}</b></div>
         <div><span class="meta">保留疑問</span><b>${esc(current.needs_review_count || 0)}</b></div>
       </div>
-      <div class="toolbar">
-        <button class="action primary-accept" onclick="confirmCurrentSheetGroup()">確認為題組</button>
-        <button class="action" onclick="confirmCurrentSheetNotGroup()">確認非題組</button>
-        <button class="action danger-small" onclick="resetCurrentSheetGroupReview()">退回題組未審</button>
-        <select id="groupConfirmType" class="edit-field" style="max-width:170px">
-          <option value="shared_stem">共同題幹</option>
-          <option value="chained_context">承上題脈絡</option>
-          <option value="manual_range">人工範圍</option>
-          <option value="unknown">待定</option>
-        </select>
-        <input id="groupConfirmRef" class="edit-field" style="max-width:140px" value="${esc(current.group_ref || current.inferred_group_ref || '')}" placeholder="q011-q012">
-        <span id="groupSaved" class="meta">確認題組只寫題組層；確認非題組會從題組待審清單排除。</span>
+      <div class="manual-correction">
+        <b>審核決策</b>
+        <p class="meta">這裡只決定目前這一組是不是題組；補漏與改範圍工具放在下方備援區。</p>
+        <div class="toolbar">
+          <button class="action primary-accept" onclick="confirmCurrentSheetGroup()">確認為題組</button>
+          <button class="action" onclick="confirmCurrentSheetNotGroup()">確認非題組</button>
+          <button class="action danger-small" onclick="resetCurrentSheetGroupReview()">退回題組未審</button>
+          <span id="groupSaved" class="meta">確認題組只寫題組層；確認非題組會從題組待審清單排除。</span>
+        </div>
       </div>
       <div class="manual-correction">
-        <b>人工範圍建立題組</b>
-        <p class="meta">如果系統沒抓到題組，先用上方篩選到同一考別、科目、年份與考次，再輸入範圍，例如 <code>7-9</code> 或 <code>11-12</code>。系統會以目前題組候選中的第一題作為同份試題定位點，尋找連續題號並寫入題組層。</p>
+        <b>題組欄位</b>
+        <p class="meta">題組標籤與共同題目會寫入題組層，不會覆蓋各題自己的題幹。</p>
+        <div class="toolbar">
+          <select id="groupConfirmType" class="edit-field" style="max-width:170px">
+            <option value="shared_stem" ${selectedGroupType === 'shared_stem' ? 'selected' : ''}>共同題幹</option>
+            <option value="chained_context" ${selectedGroupType === 'chained_context' ? 'selected' : ''}>承上題脈絡</option>
+            <option value="manual_range" ${selectedGroupType === 'manual_range' ? 'selected' : ''}>人工範圍</option>
+            <option value="unknown" ${selectedGroupType === 'unknown' ? 'selected' : ''}>待定</option>
+          </select>
+          <input id="groupConfirmRef" class="edit-field" style="max-width:140px" value="${esc(current.group_ref || current.inferred_group_ref || '')}" placeholder="q011-q012">
+        </div>
+      </div>
+      <p class="meta">題組層目前只做結構檢查與導流；真正是否可入庫仍取決於每題審題通過、題組綁定正確，以及後續答案核對通過。</p>
+    </div></div>
+    <div class="panel"><h2>題組題目</h2><div class="body">
+      <table class="group-table">
+        <thead><tr><th>題號</th><th>候選鍵 / 題組</th><th>狀態</th><th>題組線索</th><th>題幹摘要</th><th>操作</th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="6" class="meta">目前沒有題組候選。</td></tr>'}</tbody>
+      </table>
+    </div></div>
+    <div class="panel"><h2>手動新增與調整</h2><div class="body">
+      ${manualGroupByFilterPanel('globalManualGroup')}
+      <div class="manual-correction">
+        <b>調整目前題組範圍</b>
+        <p class="meta">如果目前候選範圍錯了，可輸入新範圍，例如 <code>7-9</code> 或 <code>11-12</code>。系統會以目前題組候選中的第一題作為同份試題定位點，尋找連續題號並寫入題組層。</p>
         <div class="toolbar">
           <input id="manualGroupRange" class="edit-field" style="max-width:120px" placeholder="7-9">
           <select id="manualGroupType" class="edit-field" style="max-width:170px">
@@ -8097,13 +8979,15 @@ function renderGroupDetail() {
           <span id="manualGroupSaved" class="meta"></span>
         </div>
       </div>
-      <p class="meta">題組層目前只做結構檢查與導流；真正是否可入庫仍取決於每題審題通過、題組綁定正確，以及後續答案核對通過。</p>
-    </div></div>
-    <div class="panel"><h2>題組題目</h2><div class="body">
-      <table class="group-table">
-        <thead><tr><th>題號</th><th>候選鍵 / 題組</th><th>狀態</th><th>題組線索</th><th>題幹摘要</th><th>操作</th></tr></thead>
-        <tbody>${rowsHtml || '<tr><td colspan="6" class="meta">目前沒有題組候選。</td></tr>'}</tbody>
-      </table>
+      <div class="manual-correction">
+        <b>共同題目</b>
+        <p class="meta">只有 PDF 真的有共用題幹、共用案例或共同題目時才填。這會寫入題組層，不會覆蓋各題自己的題幹。</p>
+        <textarea id="groupSharedStem" class="edit-field" rows="4" placeholder="例如：某病人資料、共同圖表說明，或第 44-48 題共同題目。">${esc(sharedStemText)}</textarea>
+        <div class="toolbar">
+          <button class="action primary-accept" onclick="saveCurrentGroupSharedStem()">儲存共同題目</button>
+          <span id="groupSharedStemSaved" class="meta">只更新題組層；不切換題目、不改審題或答案狀態。</span>
+        </div>
+      </div>
     </div></div>`;
 }
 
@@ -8121,6 +9005,69 @@ function uniqueRowsByKey(rows) {
 
 function uniqueCandidateKeys(rows) {
   return uniqueRowsByKey(rows).map(row => row.candidate_key).filter(Boolean);
+}
+
+function selectedFilterContext() {
+  return {
+    category: filterValue('categoryFilter'),
+    subject: filterValue('subjectFilter'),
+    year: filterValue('yearFilter'),
+    ordinal: filterValue('ordinalFilter')
+  };
+}
+
+function selectedGroupManualContext() {
+  const ctx = selectedFilterContext();
+  if (ctx.category && ctx.subject && ctx.year && ctx.ordinal) return ctx;
+  if (mode === 'group' && current?.metadata) {
+    const meta = current.metadata || {};
+    return {
+      category: ctx.category || meta.normalized_category_name || meta.group_name || '',
+      subject: ctx.subject || meta.normalized_subject_name || '',
+      year: ctx.year || String(meta.year || ''),
+      ordinal: ctx.ordinal || String(meta.exam_ordinal || '')
+    };
+  }
+  return ctx;
+}
+
+function manualGroupByFilterPanel(prefix = 'globalManualGroup', options = {}) {
+  const ctx = selectedGroupManualContext();
+  const hasContext = Boolean(ctx.category && ctx.subject && ctx.year && ctx.ordinal);
+  const contextText = hasContext
+    ? `${ctx.category} / ${ctx.subject} / ${ctx.year} 年第 ${ctx.ordinal} 次`
+    : '請先在上方選定考別、科目、年份與考次';
+  const title = options.title || '手動新增漏抓題組';
+  const description = options.description || '當 PDF 明確是題組，但系統沒有列為題組候選時，請用目前篩選條件加題號範圍建立。此操作只寫題組層，不改審題或答案狀態。';
+  return `
+    <div class="manual-correction">
+      <b>${esc(title)}</b>
+      <p class="meta">${esc(description)}</p>
+      <p><b>目前篩選：</b>${esc(contextText)}</p>
+      <div class="toolbar">
+        <input id="${esc(prefix)}Range" class="edit-field" style="max-width:120px" placeholder="38-40">
+        <select id="${esc(prefix)}Type" class="edit-field" style="max-width:170px">
+          <option value="shared_stem">共同題幹</option>
+          <option value="chained_context">承上題脈絡</option>
+          <option value="manual_range">人工範圍</option>
+          <option value="unknown">待定</option>
+        </select>
+        <button class="action primary-accept" onclick="confirmManualGroupByFilters('${esc(prefix)}')" ${hasContext ? '' : 'disabled'}>建立題組</button>
+        <span id="${esc(prefix)}Saved" class="meta"></span>
+      </div>
+      <textarea id="${esc(prefix)}Stem" class="edit-field" rows="3" placeholder="可選：共同題目、共同題幹、共同圖表說明或 PDF 註記。"></textarea>
+    </div>`;
+}
+
+function emptyGroupManualPanel() {
+  return `
+    <div class="panel"><h2>目前沒有符合條件的題組候選</h2><div class="body">
+      <p class="meta">若 PDF 明確存在題組，但系統沒有抓到，可以在這裡直接用目前篩選條件與題號範圍補登題組。</p>
+      ${manualGroupByFilterPanel('emptyManualGroup', {
+        title: '手動建立題組',
+        description: '此操作只寫入題組層，不改變審題、答案核對或正式入庫狀態。請確認上方篩選已鎖定同一份試題後再送出。'
+      })}
+    </div></div>`;
 }
 
 function collectCorrection() {
@@ -8242,7 +9189,7 @@ async function batchAcceptVisiblePass() {
     status.textContent = `批次通過失敗：${data.error}`;
     return;
   }
-  clearCandidateCache();
+  invalidateModeCaches(['question', 'answer']);
   status.textContent = `批次通過 ${data.saved_count} 題，略過 ${data.skipped_count} 題。`;
   await fetchCandidates(null, null, current?.candidate_key || null);
 }
@@ -8273,7 +9220,6 @@ async function confirmCurrentSheetNotGroup() {
     if (status) status.textContent = `確認非題組失敗：${data.error}`;
     return;
   }
-  clearCandidateCache();
   if (status) status.textContent = `已確認非題組 ${data.saved_count} 題，略過 ${data.skipped_count} 題。`;
   await advanceAfterGroupReview(current.candidate_key, 'confirmed_not_group', data.events || []);
 }
@@ -8289,6 +9235,10 @@ function currentGroupMatchesFilter(status) {
 function applyGroupReviewEventsToCurrent(status, events) {
   if (!current || mode !== 'group') return;
   const byKey = new Map((events || []).filter(event => event.candidate_key).map(event => [event.candidate_key, event]));
+  const sharedStemInput = document.getElementById('groupSharedStem');
+  const groupTypeInput = document.getElementById('groupConfirmType');
+  const groupRefInput = document.getElementById('groupConfirmRef');
+  const explicitSharedStem = sharedStemInput ? sharedStemInput.value : undefined;
   current.rows = uniqueRowsByKey(current.rows || []).map(row => {
     const event = byKey.get(row.candidate_key);
     if (!event) return row;
@@ -8304,7 +9254,9 @@ function applyGroupReviewEventsToCurrent(status, events) {
   current.group_review_status = status;
   if (status === 'confirmed_group') {
     current.gate_status = 'linked';
-    current.group_ref = document.getElementById('groupConfirmRef')?.value || current.group_ref || current.inferred_group_ref || '';
+    current.group_ref = groupRefInput?.value || current.group_ref || current.inferred_group_ref || '';
+    current.group_type = groupTypeInput?.value || current.group_type || 'shared_stem';
+    if (explicitSharedStem !== undefined) current.shared_stem = explicitSharedStem;
     current.group_label = current.group_ref || current.group_label;
   }
   const index = filtered.findIndex(item => item.candidate_key === current.candidate_key);
@@ -8312,20 +9264,35 @@ function applyGroupReviewEventsToCurrent(status, events) {
 }
 
 async function advanceAfterGroupReview(reviewedKey, confirmedStatus, events = []) {
-  if (currentGroupMatchesFilter(confirmedStatus)) {
-    const reviewedIndex = filtered.findIndex(item => item.candidate_key === reviewedKey);
-    applyGroupReviewEventsToCurrent(confirmedStatus, events);
-    const next = filtered.find((item, index) => index > reviewedIndex && item.candidate_key !== reviewedKey)
-      || filtered.find((item, index) => index < reviewedIndex && item.candidate_key !== reviewedKey)
-      || current;
-    current = next;
+  const reviewedIndex = filtered.findIndex(item => item.candidate_key === reviewedKey);
+  const stillMatches = currentGroupMatchesFilter(confirmedStatus);
+  applyGroupReviewEventsToCurrent(confirmedStatus, events);
+  if (!stillMatches) {
+    const oldLength = filtered.length;
+    filtered = filtered.filter(item => item.candidate_key !== reviewedKey);
+    candidates = candidates.filter(item => item.candidate_key !== reviewedKey);
+    if (filtered.length < oldLength) {
+      filteredCount = Math.max(filteredCount - 1, 0);
+      sheetCount = Math.max(sheetCount - 1, 0);
+    }
+    const nextIndex = Math.min(Math.max(reviewedIndex, 0), filtered.length - 1);
+    current = filtered[nextIndex] || null;
     updateCountLabels();
     renderList();
     renderDetail();
     savePreferencesSoon();
+    scheduleModeBackgroundRefresh(current?.candidate_key || null);
     return;
   }
-  await fetchCandidates(null, null, reviewedKey);
+  const next = filtered.find((item, index) => index > reviewedIndex && item.candidate_key !== reviewedKey)
+    || filtered.find((item, index) => index < reviewedIndex && item.candidate_key !== reviewedKey)
+    || current;
+  current = next;
+  updateCountLabels();
+  renderList();
+  renderDetail();
+  savePreferencesSoon();
+  scheduleModeBackgroundRefresh(current?.candidate_key || null);
 }
 
 async function confirmCurrentSheetGroup() {
@@ -8334,6 +9301,8 @@ async function confirmCurrentSheetGroup() {
   const status = document.getElementById('groupSaved');
   const groupRef = document.getElementById('groupConfirmRef')?.value || current.group_ref || current.inferred_group_ref || '';
   const groupType = document.getElementById('groupConfirmType')?.value || 'shared_stem';
+  const sharedStemInput = document.getElementById('groupSharedStem');
+  const sharedStem = sharedStemInput ? sharedStemInput.value : (current.shared_stem || '');
   if (!keys.length) {
     if (status) status.textContent = '這組沒有可寫入的題目。';
     return;
@@ -8351,6 +9320,7 @@ async function confirmCurrentSheetGroup() {
       group_sheet_key: current.group_sheet_key || current.candidate_key || '',
       group_ref: groupRef,
       group_type: groupType,
+      shared_stem: sharedStem,
       reviewer,
       notes: `題組審核：人工確認為 ${groupRef}。`
     })
@@ -8360,9 +9330,50 @@ async function confirmCurrentSheetGroup() {
     if (status) status.textContent = `確認題組失敗：${data.error}`;
     return;
   }
-  clearCandidateCache();
   if (status) status.textContent = `已確認題組 ${data.saved_count} 題；${data.group?.group_key ? 'SQL group 已建立' : '已寫入題組事件'}。`;
   await advanceAfterGroupReview(current.candidate_key, 'confirmed_group', data.events || []);
+}
+
+async function saveCurrentGroupSharedStem() {
+  if (!current || mode !== 'group') return;
+  const keys = uniqueCandidateKeys(current.rows || []);
+  const status = document.getElementById('groupSharedStemSaved');
+  const groupRef = document.getElementById('groupConfirmRef')?.value || current.group_ref || current.inferred_group_ref || '';
+  const groupType = document.getElementById('groupConfirmType')?.value || current.group_type || 'shared_stem';
+  const sharedStemInput = document.getElementById('groupSharedStem');
+  const sharedStem = sharedStemInput ? sharedStemInput.value : '';
+  if (!keys.length) {
+    if (status) status.textContent = '這組沒有可寫入的題目。';
+    return;
+  }
+  if (!groupRef) {
+    if (status) status.textContent = '請先填入題組標籤，例如 q044-q048。';
+    return;
+  }
+  if (status) status.textContent = '共同題目儲存中...';
+  const res = await fetch('/api/group-confirm-group', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      candidate_keys: keys,
+      group_sheet_key: current.group_sheet_key || current.candidate_key || '',
+      group_ref: groupRef,
+      group_type: groupType,
+      shared_stem: sharedStem,
+      reviewer,
+      notes: `題組審核：更新 ${groupRef} 的共同題目。`
+    })
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    if (status) status.textContent = `共同題目儲存失敗：${data.error}`;
+    return;
+  }
+  current.shared_stem = sharedStem;
+  current.group_ref = groupRef;
+  current.group_type = groupType;
+  invalidateModeCaches(['group']);
+  if (status) status.textContent = `已儲存共同題目；${data.saved_count} 題維持綁定。`;
 }
 
 async function resetCurrentSheetGroupReview() {
@@ -8391,7 +9402,7 @@ async function resetCurrentSheetGroupReview() {
     if (status) status.textContent = `退回題組未審失敗：${data.error}`;
     return;
   }
-  clearCandidateCache();
+  invalidateModeCaches(['group']);
   if (status) status.textContent = `已退回題組未審 ${data.saved_count} 題，略過 ${data.skipped_count} 題。`;
   await advanceAfterGroupReview(current.candidate_key, 'unreviewed', data.events || []);
 }
@@ -8400,6 +9411,8 @@ async function confirmManualGroupFromCurrent() {
   if (!current || mode !== 'group') return;
   const range = document.getElementById('manualGroupRange')?.value || '';
   const groupType = document.getElementById('manualGroupType')?.value || 'shared_stem';
+  const sharedStemInput = document.getElementById('groupSharedStem');
+  const sharedStem = sharedStemInput ? sharedStemInput.value : (current.shared_stem || '');
   const status = document.getElementById('manualGroupSaved');
   const seedKey = (current.rows || []).map(row => row.candidate_key).filter(Boolean)[0] || '';
   if (!range.trim()) {
@@ -8421,6 +9434,7 @@ async function confirmManualGroupFromCurrent() {
       range,
       group_ref: groupRef,
       group_type: groupType,
+      shared_stem: sharedStem,
       reviewer,
       notes: `題組審核：人工從題組審核頁手動建立 ${groupRef || range}。`
     })
@@ -8432,6 +9446,58 @@ async function confirmManualGroupFromCurrent() {
   }
   if (status) status.textContent = `已建立題組 ${data.saved_count} 題；${data.group?.group_key ? 'SQL group 已建立' : '已寫入題組事件'}。`;
   await fetchCandidates(current.candidate_key, null, null);
+}
+
+async function confirmManualGroupByFilters(prefix = 'emptyManualGroup') {
+  if (mode !== 'group') return;
+  const range = document.getElementById(`${prefix}Range`)?.value || '';
+  const groupType = document.getElementById(`${prefix}Type`)?.value || 'shared_stem';
+  const sharedStem = document.getElementById(`${prefix}Stem`)?.value || '';
+  const status = document.getElementById(`${prefix}Saved`);
+  const ctx = selectedGroupManualContext();
+  if (!ctx.category || !ctx.subject || !ctx.year || !ctx.ordinal) {
+    if (status) status.textContent = '請先選定考別、科目、年份與考次。';
+    return;
+  }
+  if (!range.trim()) {
+    if (status) status.textContent = '請輸入題組範圍，例如 44-48。';
+    return;
+  }
+  const match = range.match(/(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})/);
+  const groupRef = match ? `q${String(Number(match[1])).padStart(3, '0')}-q${String(Number(match[2])).padStart(3, '0')}` : '';
+  if (!groupRef) {
+    if (status) status.textContent = '題組範圍格式無法辨識，請用 44-48 這類格式。';
+    return;
+  }
+  const ok = window.confirm(`將 ${ctx.category} / ${ctx.subject} / ${ctx.year} 年第 ${ctx.ordinal} 次的 ${range} 補登為題組？`);
+  if (!ok) return;
+  if (status) status.textContent = '依篩選條件尋找題號並建立題組...';
+  const res = await fetch('/api/group-confirm-group', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ...ctx,
+      range,
+      group_ref: groupRef,
+      group_type: groupType,
+      shared_stem: sharedStem,
+      group_sheet_key: `manual_range|${ctx.category}|${ctx.subject}|${ctx.year}|${ctx.ordinal}|${groupRef}`,
+      reviewer,
+      notes: `題組審核：人工從空題組頁手動建立 ${groupRef}。`
+    })
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    if (status) status.textContent = `建立題組失敗：${data.error}`;
+    return;
+  }
+  invalidateModeCaches(['group']);
+  if (status) status.textContent = `已建立題組 ${data.saved_count} 題；${data.group?.group_key ? 'SQL group 已建立' : '已寫入題組事件'}。`;
+  await fetchCandidates(null, null, null, {useCache: false});
+}
+
+async function confirmManualGroupFromFilters() {
+  return confirmManualGroupByFilters('emptyManualGroup');
 }
 
 async function adjustCurrentGroupToManualRange() {
@@ -8514,7 +9580,7 @@ async function answerSheetReviewAction(action, aiRequested = false) {
   });
   const data = await res.json();
   if (data.ok) {
-    clearCandidateCache();
+    invalidateModeCaches(['answer', 'question']);
     const storageText = storageLabel((data.events || [])[0]?.storage);
     const reviewedAction = (data.events || [])[0]?.action || action;
     const answerEventsByKey = new Map((data.events || []).filter(event => event.candidate_key).map(event => [event.candidate_key, event]));
@@ -8589,7 +9655,7 @@ async function answerReviewAction(action) {
   });
   const data = await res.json();
   if (data.ok) {
-    clearCandidateCache();
+    invalidateModeCaches(['answer', 'question']);
     current.answer_review = {
       status: 'reviewed',
       action: data.event.action,
@@ -8627,10 +9693,10 @@ async function review(action, correction = null, options = {}) {
   });
   const data = await res.json();
   if (data.ok) {
-    clearCandidateCache();
     const savedAction = data.event.action || action;
     const savedCorrection = data.event.correction || current.review?.correction || null;
     const isVisualReviewAction = savedAction === 'human_review_pdf_visual';
+    invalidateModeCaches(isVisualReviewAction ? ['visual', 'question'] : ['question', 'answer']);
     if (savedCorrection) {
       applyCorrectionToCurrent(savedCorrection);
     }
@@ -8690,7 +9756,10 @@ async function review(action, correction = null, options = {}) {
   }
 }
 
-document.getElementById('search').addEventListener('input', applyFilter);
+document.getElementById('search').addEventListener('input', () => {
+  clearTimeout(searchFilterTimer);
+  searchFilterTimer = setTimeout(() => applyFilter(), 300);
+});
 document.getElementById('status').addEventListener('change', applyFilter);
 document.getElementById('reviewStatus').addEventListener('change', applyFilter);
 document.getElementById('aiReviewStatus').addEventListener('change', applyFilter);

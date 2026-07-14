@@ -184,29 +184,74 @@ def question_asset_role(ref: dict[str, Any]) -> str:
     return "figure"
 
 
+def asset_ref_path(ref: Any) -> str:
+    if isinstance(ref, str):
+        return ref.strip()
+    if not isinstance(ref, dict):
+        return ""
+    return str(ref.get("path") or ref.get("path_relative") or ref.get("relative_path") or ref.get("raw_ref") or "").strip()
+
+
 def iter_asset_refs(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
+    option_paths: set[str] = set()
+    seen_paths: set[str] = set()
+    option_refs: list[dict[str, Any]] = []
+    for option in candidate.get("options") or []:
+        if not isinstance(option, dict) or not option.get("image"):
+            continue
+        image = option["image"]
+        if isinstance(image, str):
+            ref = {"path": image, "asset_role": "option_image", "raw_ref": image, "option_label": option.get("key")}
+        elif isinstance(image, dict):
+            ref = dict(image)
+            ref.setdefault("asset_role", "option_image")
+            ref.setdefault("option_label", option.get("key"))
+        else:
+            continue
+        path = asset_ref_path(ref)
+        if path:
+            option_paths.add(path)
+            seen_paths.add(path)
+        option_refs.append(ref)
     for ref in candidate.get("image_refs") or []:
         if isinstance(ref, str):
-            refs.append({"path": ref, "raw_ref": ref})
+            path = ref.strip()
+            if path and path not in option_paths and path not in seen_paths:
+                refs.append({"path": ref, "raw_ref": ref})
+                seen_paths.add(path)
         elif isinstance(ref, dict):
-            refs.append(ref)
+            path = asset_ref_path(ref)
+            if path and path not in option_paths and path not in seen_paths:
+                refs.append(ref)
+                seen_paths.add(path)
     stem_image = candidate.get("stem_image")
     if isinstance(stem_image, str):
-        refs.append({"path": stem_image, "asset_role": "stem_figure", "raw_ref": stem_image})
+        path = stem_image.strip()
+        if path and path not in seen_paths:
+            refs.append({"path": stem_image, "asset_role": "stem_figure", "raw_ref": stem_image})
+            seen_paths.add(path)
     elif isinstance(stem_image, dict):
-        refs.append(stem_image)
-    for option in candidate.get("options") or []:
-        if isinstance(option, dict) and option.get("image"):
-            image = option["image"]
-            if isinstance(image, str):
-                refs.append({"path": image, "asset_role": "option_image", "raw_ref": image, "option_label": option.get("key")})
-            elif isinstance(image, dict):
-                image = dict(image)
-                image.setdefault("asset_role", "option_image")
-                image.setdefault("option_label", option.get("key"))
-                refs.append(image)
+        path = asset_ref_path(stem_image)
+        if path and path not in seen_paths:
+            refs.append(stem_image)
+            seen_paths.add(path)
+    refs.extend(option_refs)
     return refs
+
+
+def canonical_options(options: list[Any]) -> list[dict[str, Any]]:
+    by_label: dict[str, dict[str, Any]] = {}
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        label = str(option.get("key") or option.get("label") or "").strip().upper()
+        if not label:
+            continue
+        normalized = dict(option)
+        normalized["key"] = label
+        by_label[label] = normalized
+    return [by_label[label] for label in sorted(by_label)]
 
 
 def build_rows(
@@ -236,6 +281,7 @@ def build_rows(
             continue
         correction = question_event.get("correction") or question_event.get("corrected_candidate_json") or {}
         effective = preflight.apply_review_correction(candidate, correction if isinstance(correction, dict) else None)
+        options = canonical_options(effective.get("options") or [])
         metadata = candidate.get("metadata") or {}
         question_json = {
             "candidate_key": key,
@@ -243,7 +289,7 @@ def build_rows(
             "metadata": metadata,
             "stem": effective.get("stem"),
             "stem_markup": effective.get("stem_markup"),
-            "options": effective.get("options") or [],
+            "options": options,
             "group_ref": effective.get("group_ref"),
             "image_refs": effective.get("image_refs") or [],
             "preflight_warnings": preflight_row.get("warnings"),
@@ -265,10 +311,8 @@ def build_rows(
                 "group_key": effective.get("group_ref") or "",
             }
         )
-        for option in effective.get("options") or []:
-            if not isinstance(option, dict):
-                continue
-            label = str(option.get("key") or option.get("label") or "").strip().upper()
+        for option in options:
+            label = str(option.get("key") or "").strip().upper()
             if not label:
                 continue
             option_rows.append(
@@ -448,7 +492,7 @@ FROM exam_staging.formal_questions s
 JOIN exam.official_documents od ON od.registry_key = s.source_registry_key
 WHERE NULLIF(s.group_key, '') IS NOT NULL
 ON CONFLICT (group_key) DO UPDATE
-SET shared_stem_json = EXCLUDED.shared_stem_json,
+SET shared_stem_json = COALESCE(exam.question_groups.shared_stem_json, EXCLUDED.shared_stem_json),
     review_status = EXCLUDED.review_status;
 
 INSERT INTO exam.questions (
@@ -485,7 +529,7 @@ JOIN exam.official_documents od ON od.registry_key = s.source_registry_key
 LEFT JOIN exam.question_groups g ON g.group_key = NULLIF(s.group_key, '')
 ON CONFLICT (question_key) DO UPDATE
 SET official_document_id = EXCLUDED.official_document_id,
-    question_group_id = EXCLUDED.question_group_id,
+    question_group_id = COALESCE(EXCLUDED.question_group_id, exam.questions.question_group_id),
     question_number = EXCLUDED.question_number,
     question_text = EXCLUDED.question_text,
     normalized_text = EXCLUDED.normalized_text,
@@ -493,7 +537,13 @@ SET official_document_id = EXCLUDED.official_document_id,
     question_markup_json = EXCLUDED.question_markup_json,
     question_raw_json = EXCLUDED.question_raw_json,
     human_corrected_json = EXCLUDED.human_corrected_json,
-    question_json = EXCLUDED.question_json,
+    question_json = CASE
+        WHEN exam.questions.question_group_id IS NOT NULL
+         AND NULLIF(EXCLUDED.question_json->>'group_ref', '') IS NULL
+         AND NULLIF(exam.questions.question_json->>'group_ref', '') IS NOT NULL
+        THEN jsonb_set(EXCLUDED.question_json, '{group_ref}', to_jsonb(exam.questions.question_json->>'group_ref'), true)
+        ELSE EXCLUDED.question_json
+    END,
     parser_version = EXCLUDED.parser_version,
     review_status = EXCLUDED.review_status;
 
@@ -571,6 +621,11 @@ SET asset_type = EXCLUDED.asset_type,
     asset_path = EXCLUDED.asset_path,
     relative_asset_path = EXCLUDED.relative_asset_path,
     mime_type = EXCLUDED.mime_type;
+
+DELETE FROM exam.question_assets qa
+USING exam.questions q
+JOIN exam_staging.formal_questions s ON s.question_key = q.question_key
+WHERE qa.question_id = q.id;
 
 INSERT INTO exam.question_assets (
     question_id,

@@ -241,7 +241,7 @@ CREATE TABLE IF NOT EXISTS exam.answer_review_events (
 
 CREATE TABLE IF NOT EXISTS exam.model_runs (
     id BIGSERIAL PRIMARY KEY,
-    task_type TEXT NOT NULL CHECK (task_type IN ('question_format_audit', 'answer_audit', 'explanation', 'relation', 'concept_map_spec', 'verification', 'embedding', 'rerank')),
+    task_type TEXT NOT NULL CHECK (task_type IN ('question_format_audit', 'answer_audit', 'classification', 'explanation', 'relation', 'concept_map_spec', 'verification', 'embedding', 'rerank')),
     provider TEXT NOT NULL DEFAULT 'local',
     model_name TEXT,
     prompt_version TEXT,
@@ -277,10 +277,93 @@ CREATE TABLE IF NOT EXISTS exam.question_ai_review_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Curriculum classification is an auxiliary, versioned knowledge layer.
+-- It never replaces or mutates formal question/answer content.
+CREATE TABLE IF NOT EXISTS exam.curriculum_taxonomies (
+    id BIGSERIAL PRIMARY KEY,
+    taxonomy_code TEXT NOT NULL,
+    taxonomy_version TEXT NOT NULL,
+    category_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'retired')),
+    definition TEXT,
+    source_path TEXT,
+    source_sha256 TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (taxonomy_code, taxonomy_version)
+);
+
+CREATE TABLE IF NOT EXISTS exam.curriculum_nodes (
+    id BIGSERIAL PRIMARY KEY,
+    taxonomy_id BIGINT NOT NULL REFERENCES exam.curriculum_taxonomies(id) ON DELETE CASCADE,
+    node_code TEXT NOT NULL,
+    parent_node_code TEXT,
+    node_kind TEXT NOT NULL CHECK (node_kind IN ('subject', 'domain', 'chapter')),
+    subject_name TEXT NOT NULL,
+    subject_aliases TEXT[] NOT NULL DEFAULT '{}',
+    label TEXT NOT NULL,
+    definition TEXT NOT NULL,
+    depth INTEGER NOT NULL CHECK (depth BETWEEN 0 AND 8),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_selectable BOOLEAN NOT NULL DEFAULT true,
+    decision_rules JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (taxonomy_id, node_code)
+);
+
+ALTER TABLE exam.curriculum_nodes ADD COLUMN IF NOT EXISTS subject_aliases TEXT[] NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS exam.question_classification_events (
+    id BIGSERIAL PRIMARY KEY,
+    question_id BIGINT NOT NULL REFERENCES exam.questions(id) ON DELETE CASCADE,
+    question_key TEXT NOT NULL,
+    taxonomy_id BIGINT NOT NULL REFERENCES exam.curriculum_taxonomies(id),
+    model_run_id BIGINT REFERENCES exam.model_runs(id) ON DELETE SET NULL,
+    reviewer TEXT,
+    source TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human', 'ai', 'import', 'system')),
+    action TEXT NOT NULL CHECK (action IN ('ai_suggest', 'accept', 'replace', 'needs_review', 'reset')),
+    primary_node_code TEXT,
+    selected_node_codes TEXT[] NOT NULL DEFAULT '{}',
+    is_comprehensive BOOLEAN NOT NULL DEFAULT false,
+    confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),
+    evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    notes TEXT,
+    event_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (primary_node_code IS NULL OR primary_node_code = ANY(selected_node_codes))
+);
+
+-- Current human-approved projection. All history remains in the append-only
+-- event table; AI suggestions never update this table directly.
+CREATE TABLE IF NOT EXISTS exam.question_classifications (
+    question_id BIGINT NOT NULL REFERENCES exam.questions(id) ON DELETE CASCADE,
+    taxonomy_id BIGINT NOT NULL REFERENCES exam.curriculum_taxonomies(id),
+    primary_node_code TEXT,
+    selected_node_codes TEXT[] NOT NULL DEFAULT '{}',
+    is_comprehensive BOOLEAN NOT NULL DEFAULT false,
+    review_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK (review_status IN ('unreviewed', 'accepted', 'needs_review')),
+    source TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human', 'ai_accepted', 'import')),
+    reviewer TEXT,
+    latest_event_id BIGINT REFERENCES exam.question_classification_events(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (question_id, taxonomy_id),
+    CHECK (primary_node_code IS NULL OR primary_node_code = ANY(selected_node_codes))
+);
+
 CREATE TABLE IF NOT EXISTS exam.review_ui_preferences (
     reviewer TEXT PRIMARY KEY,
     preferences_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS exam.formal_sync_queue (
+    candidate_key TEXT PRIMARY KEY REFERENCES exam.question_candidates(candidate_key) ON DELETE CASCADE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMPTZ,
+    last_error TEXT,
+    processed_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS exam.canonical_subject_mappings (
@@ -322,16 +405,32 @@ CREATE INDEX IF NOT EXISTS idx_question_ai_review_events_candidate ON exam.quest
 CREATE INDEX IF NOT EXISTS idx_question_review_events_latest ON exam.question_review_events (candidate_key, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_answer_review_events_latest ON exam.answer_review_events (candidate_key, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_question_ai_review_events_latest ON exam.question_ai_review_events (candidate_key, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_curriculum_nodes_subject ON exam.curriculum_nodes (subject_name, taxonomy_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_curriculum_nodes_parent ON exam.curriculum_nodes (taxonomy_id, parent_node_code, sort_order);
+CREATE INDEX IF NOT EXISTS idx_question_classification_events_latest ON exam.question_classification_events (question_id, taxonomy_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_classification_events_source ON exam.question_classification_events (source, action, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_question_classifications_status ON exam.question_classifications (taxonomy_id, review_status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_formal_sync_queue_pending
+ON exam.formal_sync_queue (requested_at, candidate_key)
+WHERE processed_at IS NULL;
 
 ALTER TABLE exam.question_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
 ALTER TABLE exam.answer_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
 ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'ai_audit';
 ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
 
+ALTER TABLE exam.model_runs DROP CONSTRAINT IF EXISTS model_runs_task_type_check;
+ALTER TABLE exam.model_runs
+ADD CONSTRAINT model_runs_task_type_check
+CHECK (task_type IN ('question_format_audit', 'answer_audit', 'classification', 'explanation', 'relation', 'concept_map_spec', 'verification', 'embedding', 'rerank'));
+
 ALTER TABLE exam.question_review_events DROP CONSTRAINT IF EXISTS question_review_events_action_check;
 ALTER TABLE exam.question_review_events
 ADD CONSTRAINT question_review_events_action_check
-CHECK (action IN ('accept', 'correct', 'needs_review', 'block', 'exclude', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review'));
+CHECK (action IN (
+    'accept', 'correct', 'needs_review', 'block', 'exclude', 'unblock', 'comment', 'reviewed', 'unreviewed', 'reset_review',
+    'confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual'
+));
 
 ALTER TABLE exam.answer_review_events DROP CONSTRAINT IF EXISTS answer_review_events_action_check;
 ALTER TABLE exam.answer_review_events

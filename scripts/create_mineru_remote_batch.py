@@ -113,6 +113,39 @@ def expected_markdown_for_relative(relative_pdf: str) -> Path:
     return OUTPUT_ROOT / rel_under_pdf_root.parent / pdf_path.stem / "vlm" / f"{pdf_path.stem}.md"
 
 
+def path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def output_markdown_exists_for_relative(relative_pdf: str) -> bool:
+    expected = expected_markdown_for_relative(relative_pdf)
+    if path_exists(expected):
+        return True
+
+    pdf_path = project_pdf_path(relative_pdf)
+    rel_under_pdf_root = pdf_path.relative_to(PDF_ROOT)
+    output_parent = OUTPUT_ROOT / rel_under_pdf_root.parent
+    if not path_exists(output_parent):
+        return False
+
+    stem = pdf_path.stem
+    try:
+        children = [path for path in output_parent.iterdir() if path.is_dir()]
+    except OSError:
+        return False
+    for child in children:
+        if stem.startswith(child.name) or child.name.startswith(stem):
+            try:
+                if any((child / "vlm").glob("*.md")):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def result_completed_relatives() -> set[str]:
     completed: set[str] = set()
     for path in RUN_LOG_DIR.glob("**/mineru_results__*.csv"):
@@ -153,7 +186,7 @@ def reserved_relatives() -> set[str]:
 def is_done(relative_pdf: str, completed_relatives: set[str]) -> bool:
     if relative_pdf in completed_relatives:
         return True
-    return expected_markdown_for_relative(relative_pdf).exists()
+    return output_markdown_exists_for_relative(relative_pdf)
 
 
 def add_candidate(candidates: dict[str, Candidate], candidate: Candidate) -> None:

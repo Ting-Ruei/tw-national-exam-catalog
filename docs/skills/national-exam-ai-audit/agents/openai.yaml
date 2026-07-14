@@ -1,7 +1,4 @@
 interface:
-  display_name: "National Exam AI Audit"
-  short_description: "Audit exam candidates for parser issues"
-  default_prompt: "Use $national-exam-ai-audit to scan selected exam candidates and emit advisory review labels."
-
-policy:
-  allow_implicit_invocation: true
+  display_name: "國考題真人視角預審"
+  short_description: "以 SQL、PDF 與 Review UI 預審題庫並產生可驗證的 AI 建議"
+  default_prompt: "使用 $national-exam-ai-audit，以真人審題者視角檢查指定 SQL 題庫範圍與 Review UI；先盤點、再修 deterministic 問題，最後只輸出 advisory 結果。"

@@ -163,9 +163,8 @@ def apply_review_correction(candidate: dict[str, Any], correction: dict[str, Any
     ):
         if field in correction:
             effective[field] = correction[field]
-    if correction.get("image_refs"):
-        existing = effective.get("image_refs") or []
-        effective["image_refs"] = [*existing, *correction["image_refs"]]
+    if "image_refs" in correction:
+        effective["image_refs"] = correction.get("image_refs") or []
     return effective
 
 
@@ -182,17 +181,19 @@ def issue_resolved_by_effective_candidate(issue: dict[str, str], effective: dict
 
 def image_refs(candidate: dict[str, Any], correction: dict[str, Any] | None) -> list[Any]:
     refs: list[Any] = []
-    refs.extend(candidate.get("image_refs") or [])
+    correction = correction or {}
+    if "image_refs" in correction:
+        refs.extend(correction.get("image_refs") or [])
+    else:
+        refs.extend(candidate.get("image_refs") or [])
     stem_image = candidate.get("stem_image")
     if stem_image:
         refs.append(stem_image)
     for option in candidate.get("options") or []:
         if isinstance(option, dict) and option.get("image"):
             refs.append(option["image"])
-    correction = correction or {}
     if correction.get("stem_image"):
         refs.append(correction["stem_image"])
-    refs.extend(correction.get("image_refs") or [])
     for option in correction.get("options") or []:
         if isinstance(option, dict) and option.get("image"):
             refs.append(option["image"])
