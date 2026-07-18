@@ -137,9 +137,13 @@ def output_markdown_exists_for_relative(relative_pdf: str) -> bool:
     except OSError:
         return False
     for child in children:
-        if stem.startswith(child.name) or child.name.startswith(stem):
+        # MinerU truncates only names near the filesystem component limit. Do not
+        # treat a question output as the matching answer output (for example,
+        # ``題本`` versus ``題本_ANS``) merely because it shares a prefix.
+        is_truncated_match = len(child.name) >= 200 and stem.startswith(child.name)
+        if child.name == stem or is_truncated_match:
             try:
-                if any((child / "vlm").glob("*.md")):
+                if any(any((child / output_kind).glob("*.md")) for output_kind in ("vlm", "ocr")):
                     return True
             except OSError:
                 continue
@@ -171,21 +175,22 @@ def reserved_relatives() -> set[str]:
     reserved: set[str] = set()
     if not REMOTE_BATCH_ROOT.exists():
         return reserved
-    for manifest_path in REMOTE_BATCH_ROOT.glob("**/batch_manifest.csv"):
-        try:
-            rows = read_csv(manifest_path)
-        except UnicodeDecodeError:
-            continue
-        for row in rows:
-            relative = row.get("pdf_relative", "")
-            if relative:
-                reserved.add(relative)
+    for state in ("outgoing", "assigned", "local_running"):
+        for manifest_path in (REMOTE_BATCH_ROOT / state).glob("**/batch_manifest.csv"):
+            try:
+                rows = read_csv(manifest_path)
+            except UnicodeDecodeError:
+                continue
+            for row in rows:
+                relative = row.get("pdf_relative", "")
+                if relative:
+                    reserved.add(relative)
     return reserved
 
 
 def is_done(relative_pdf: str, completed_relatives: set[str]) -> bool:
-    if relative_pdf in completed_relatives:
-        return True
+    # Historical skipped_existing rows may come from an older, faulty output
+    # detector. The filesystem output is the source of truth for completion.
     return output_markdown_exists_for_relative(relative_pdf)
 
 

@@ -350,7 +350,11 @@ def output_dir_for_stem(output_parent: Path, stem: str) -> Path:
         children = [path for path in output_parent.iterdir() if path.is_dir()]
     except OSError:
         return exact
-    matches = [path for path in children if stem.startswith(path.name) or path.name.startswith(stem)]
+    matches = [
+        path
+        for path in children
+        if path.name == stem or (len(path.name) >= 200 and stem.startswith(path.name))
+    ]
     if not matches:
         return exact
     return max(matches, key=lambda path: len(path.name))
@@ -361,7 +365,7 @@ def output_markdown_exists(output_parent: Path, stem: str, expected_md: Path) ->
         return True
     output_dir = output_dir_for_stem(output_parent, stem)
     try:
-        return any((output_dir / "vlm").glob("*.md"))
+        return any(any((output_dir / output_kind).glob("*.md")) for output_kind in ("vlm", "ocr"))
     except OSError:
         return False
 
