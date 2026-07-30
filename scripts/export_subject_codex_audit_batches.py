@@ -35,6 +35,7 @@ UNRELIABLE_AI_REVIEWERS = {
     "codex-5.4mini-pilot",
     "codex-pilot-5parts",
 }
+PROMPT_VERSION = "codex_gpt56_luna_question_audit_v3"
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         default="pending-or-unreliable",
         help="Which candidates to export based on the latest AI review event.",
     )
-    parser.add_argument("--model-target", default="5.4", help="Model name to write into prompts for the human/Codex runner.")
+    parser.add_argument("--model-target", default="gpt-5.6-luna", help="Model name to write into prompts for the Codex subagent runner.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_CANDIDATE_ROOT / "subject_codex_audit_tasks")
     return parser.parse_args()
 
@@ -112,16 +113,24 @@ def write_prompt(path: Path, *, category: str, subject: str, model_target: str, 
                 f"建議模型：`{model_target}`",
                 f"考別：`{category}`",
                 f"科目：`{subject}`",
+                f"Prompt version：`{PROMPT_VERSION}`",
                 "",
                 "使用 `docs/skills/national-exam-ai-audit/SKILL.md`。",
-                "逐行讀取本資料夾 `chunks/` 內的 task JSONL，只輸出 advisory AI labels，不要修改人工審核狀態。",
+                "完整執行提示詞：`docs/skills/national-exam-ai-audit/references/codex-gpt56-luna-v3-prompt.md`。",
+                "由目前 Codex task fork 的 subagent 逐行讀取本資料夾 `chunks/` 內的 task JSONL；不要使用 ask-bridge、OpenAI API 或本機 heuristic 代替模型判讀。",
+                "只輸出 advisory AI labels，不要修改人工審核狀態。",
                 "",
                 f"任務切片資料夾：`{chunk_dir}`",
                 "每個 part 請輸出同名 `codex_question_audit_results__...__partXXXX.jsonl`。",
                 "",
                 "每行輸出 `docs/skills/national-exam-ai-audit/references/output-schema.md` 定義的 JSON 物件。",
+                f"每行的 `model` 固定為 `{model_target}`，`prompt_version` 固定為 `{PROMPT_VERSION}`。",
                 "題目格式稽核只判斷題幹、選項、圖表、題組與 parser 邊界；答案缺漏、多答案格式、MOD/ANS 優先序請用 `recommended_action: \"defer_to_answer_audit\"` 留到答案核對，不要因此降低題目 status。",
-                "若能提出安全的 OCR/格式修正，請填 `suggested_correction` 與 `suggested_changes`；它只會成為 Review UI 的一鍵套用建議，不會自動通過。",
+                "採 correction-first：只要 OCR、簡繁、異體字、上下標、單位或局部格式錯誤能由目前文字安全確定，就必須填完整 `suggested_correction`、`suggested_changes`，並設 `correction_coverage: \"complete\"`。",
+                "若修正任何選項，`suggested_correction.options` 必須依原順序回傳完整 A-D（或原題實際全部選項），未修改的選項也要原樣保留；禁止只回傳被修改的單一選項，因為 UI 會以整個陣列套用。",
+                "只有 parser 邊界、缺圖、題組範圍或必須核對 PDF 才能決定的內容，才可省略 correction；每一項都必須在 `uncorrected_findings` 寫明原因。",
+                "不要重複 parser、舊 AI 與答案關卡已擁有的同一疑點；每個問題只保留一個 owner stage。",
+                "建議只會成為 Review UI 的一鍵套用按鈕，套用後仍維持人工複核，不會自動通過。",
                 "不要呼叫本機 heuristic，也不要呼叫 OpenAI API fallback；模型審核結果必須由目前指定的 Codex/ChatGPT 模型直接產生。",
             ]
         )

@@ -38,6 +38,7 @@ ACTION_MAP = {
     "human_can_quick_accept": "no_action",
     "human_review_text": "human_review",
     "human_review_pdf_visual": "manual_image_check",
+    "review_group": "human_review",
     "fix_parser_rule": "parser_fix",
     "add_manual_asset": "manual_image_check",
     "defer_to_answer_audit": "human_review",
@@ -103,18 +104,54 @@ def normalize_record(record: dict[str, Any], fallback_model: str) -> dict[str, A
     reason = str(record.get("reason") or "")
     evidence = normalize_evidence(record.get("evidence"))
     severity = "info" if status == "pass" else "error" if status == "block" else "warning"
-    findings = [] if status == "pass" else [
-        {
-            "code": ",".join(labels),
-            "severity": severity,
-            "field": "parser",
-            "message": reason,
-            "evidence": evidence,
-            "suggestion": action,
-        }
-    ]
+    findings: list[dict[str, Any]] = []
+    raw_findings = record.get("findings")
+    if status != "pass" and isinstance(raw_findings, list):
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
+            item_severity = str(item.get("severity") or "warning")
+            if item_severity not in {"info", "warning", "error"}:
+                item_severity = "warning"
+            findings.append(
+                {
+                    "code": str(item.get("code") or ",".join(labels)),
+                    "severity": item_severity,
+                    "field": str(item.get("field") or "parser"),
+                    "message": str(item.get("message") or reason),
+                    "evidence": normalize_evidence(item.get("evidence")),
+                    "suggestion": str(item.get("suggestion") or action),
+                    **(
+                        {"audit_lane": str(item["audit_lane"])}
+                        if item.get("audit_lane")
+                        else {}
+                    ),
+                    **(
+                        {"confidence": confidence_value}
+                        if isinstance((confidence_value := item.get("confidence")), (int, float))
+                        else {}
+                    ),
+                    **(
+                        {"evidence_validated": bool(item["evidence_validated"])}
+                        if "evidence_validated" in item
+                        else {}
+                    ),
+                }
+            )
+    if status != "pass" and not findings:
+        findings = [
+            {
+                "code": ",".join(labels),
+                "severity": severity,
+                "field": "parser",
+                "message": reason,
+                "evidence": evidence,
+                "suggestion": action,
+            }
+        ]
+    provider = str(record.get("provider") or "codex")
     audit = {
-        "provider": "codex",
+        "provider": provider,
         "model": str(record.get("model") or fallback_model),
         "status": status,
         "confidence": confidence,
@@ -126,6 +163,14 @@ def normalize_record(record: dict[str, Any], fallback_model: str) -> dict[str, A
         "skill_recommended_action": action,
         "findings": findings,
     }
+    checks = record.get("checks")
+    if isinstance(checks, dict):
+        audit["checks"] = checks
+    channel_results = record.get("channel_results")
+    if isinstance(channel_results, dict):
+        audit["channel_results"] = channel_results
+    if record.get("prompt_version"):
+        audit["prompt_version"] = str(record["prompt_version"])
     suggested_correction = normalized_correction(record.get("suggested_correction"))
     if suggested_correction:
         audit["suggested_correction"] = suggested_correction
@@ -171,8 +216,8 @@ def main() -> None:
                     "candidate_key": key,
                     "reviewer": args.reviewer,
                     "action": "ai_audit",
-                    "prompt_version": PROMPT_VERSION,
-                    "provider": "codex",
+                    "prompt_version": str(record.get("prompt_version") or PROMPT_VERSION),
+                    "provider": audit["provider"],
                     "model": audit["model"],
                     "input_hash": hashlib.sha256(json.dumps(audit_input, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
                     "notes": args.notes,

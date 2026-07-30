@@ -23,6 +23,7 @@ Question:
 - `option_structure`
 - `ocr_character`
 - `notation_markup`
+- `semantic_disfluency` (only an obvious transcription-caused sentence break; never judge medical correctness)
 - `visual_dependency` (route to image; do not decide crop correctness)
 - `group_dependency` (route to group; do not decide final range)
 

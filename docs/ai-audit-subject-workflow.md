@@ -4,9 +4,10 @@ This workflow separates task export, model review, and result import. It is desi
 
 ## Current Model Decision
 
-- `5.4` is the current balanced choice for quality and cost.
-- `5.4-mini` still needs validation. Do not treat `gpt-5.4-mini` pilot labels as reliable until a clean task/result loop is proven.
-- Local `heuristic` labels are useful as a cheap smoke test, but they are not model review.
+- `gpt-5.6-luna` through Codex subagents is the current high-quality review path.
+- Fork subagents from the current Codex task so they inherit the parent model and repository context. Do not route LUNA work through ask-bridge or the ChatGPT website.
+- Local `heuristic` labels remain useful as a cheap smoke test, but they are not model review.
+- Current correction-first prompt version: `codex_gpt56_luna_question_audit_v3`.
 
 ## Export By Subject
 
@@ -15,7 +16,7 @@ Generate subject-separated tasks:
 ```bash
 python3 scripts/export_subject_codex_audit_batches.py \
   --chunk-size 500 \
-  --model-target 5.4 \
+  --model-target gpt-5.6-luna \
   --ai-policy pending-or-unreliable
 ```
 
@@ -44,11 +45,11 @@ Output structure:
 - reviewer `codex-5.4mini-pilot`
 - reviewer `codex-pilot-5parts`
 
-## Run One Subject With Codex
+## Run One Subject With A Codex Subagent
 
 Pick one row from `subject_audit_manifest__<timestamp>.csv`, then ask Codex/ChatGPT to read that subject folder's `CODEX_SUBJECT_AUDIT_PROMPT.md`.
 
-The model should:
+The subagent should:
 
 - read only the task JSONL in that subject's `chunks/`;
 - output one JSON object per input candidate;
@@ -57,6 +58,8 @@ The model should:
 - never call local heuristic scripts;
 - never call OpenAI API fallback;
 - never edit human review events.
+- provide a complete, UI-safe correction whenever a local text/notation replacement is safe;
+- include every original option in order whenever `suggested_correction.options` is present.
 
 ## Import Results
 
@@ -65,9 +68,9 @@ Import one subject:
 ```bash
 python3 scripts/import_codex_audit_results.py \
   "國考題資料夾/30_normalized_items/question_candidates/subject_codex_audit_tasks/<timestamp>/<subject_dir>" \
-  --model 5.4 \
-  --reviewer codex-5.4-subject-audit \
-  --notes "Codex 5.4 subject audit; advisory only."
+  --model gpt-5.6-luna \
+  --reviewer codex-gpt56-luna-subject-audit \
+  --notes "Codex GPT-5.6 LUNA subject audit v3; advisory only."
 ```
 
 Import a whole run after multiple subjects are finished:
@@ -75,9 +78,9 @@ Import a whole run after multiple subjects are finished:
 ```bash
 python3 scripts/import_codex_audit_results.py \
   "國考題資料夾/30_normalized_items/question_candidates/subject_codex_audit_tasks/<timestamp>" \
-  --model 5.4 \
-  --reviewer codex-5.4-subject-audit \
-  --notes "Codex 5.4 subject audit; advisory only."
+  --model gpt-5.6-luna \
+  --reviewer codex-gpt56-luna-subject-audit \
+  --notes "Codex GPT-5.6 LUNA subject audit v3; advisory only."
 ```
 
 The import script appends to `question_ai_review_events.jsonl` only. It does not change human review state.
@@ -94,8 +97,8 @@ That script is useful for the Review UI button and local/API smoke tests, but it
 
 ## Suggested Validation Loop
 
-1. Run one subject with `5.4`.
-2. Import results with reviewer `codex-5.4-subject-audit`.
+1. Run one representative subject pilot with `gpt-5.6-luna`.
+2. Import results with reviewer `codex-gpt56-luna-subject-audit`.
 3. In Review UI, filter by the model/reviewer and inspect `AI 有疑點` plus `AI 有建議校正`.
-4. Run the same subject, or a matched chunk, with `5.4-mini`.
-5. Compare false positives, missed OCR issues, table/image handling, and suggested corrections before scaling `5.4-mini`.
+4. Verify every option correction preserves the complete option set and order.
+5. Compare false positives, missed OCR issues, table/image handling, and one-click correction coverage before scaling the run.

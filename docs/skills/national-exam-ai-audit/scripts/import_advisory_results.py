@@ -19,8 +19,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--validation-report", type=Path)
     parser.add_argument("--provider", default="local")
-    parser.add_argument("--model", default="glm-5.2")
-    parser.add_argument("--prompt-version", default="national_exam_ai_audit_v1")
+    parser.add_argument("--model", default="gpt-5.6-luna")
+    parser.add_argument("--prompt-version", default="codex_gpt56_luna_question_audit_v3")
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument("--apply", action="store_true", help="Without this flag the command is a dry run")
     return parser.parse_args()
@@ -42,18 +42,52 @@ def read_results(path: Path) -> list[dict[str, Any]]:
 def audit_payload(row: dict[str, Any]) -> dict[str, Any]:
     status = str(row["status"])
     issue_families = [str(value) for value in row.get("issue_families") or []]
-    findings = []
+    findings: list[dict[str, Any]] = []
     if status != "pass":
-        for issue in issue_families:
+        for finding in row.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            family = str(finding.get("issue_family") or finding.get("code") or "")
+            observed = str(finding.get("observed") or "")
+            suggested = finding.get("suggested")
+            evidence = finding.get("evidence")
+            if not evidence and observed:
+                evidence = [
+                    {
+                        "field": finding.get("location") or "content",
+                        "before": observed,
+                        **({"after": suggested} if suggested is not None else {}),
+                    }
+                ]
             findings.append(
                 {
-                    "code": issue,
+                    **finding,
+                    "code": family or ",".join(issue_families),
                     "severity": "error" if status == "block" else "warning",
-                    "message": row.get("reason") or "",
-                    "evidence": row.get("evidence") or [],
-                    "suggestion": row.get("recommended_action") or "",
+                    "field": finding.get("location") or finding.get("field") or "content",
+                    "message": finding.get("message") or row.get("reason") or "",
+                    "evidence": evidence or row.get("evidence") or [],
+                    "suggestion": (
+                        suggested
+                        if suggested is not None
+                        else finding.get("correction_omission_reason")
+                        or row.get("recommended_action")
+                        or ""
+                    ),
                 }
             )
+        if not findings:
+            for issue in issue_families:
+                findings.append(
+                    {
+                        "code": issue,
+                        "severity": "error" if status == "block" else "warning",
+                        "field": "content",
+                        "message": row.get("reason") or "",
+                        "evidence": row.get("evidence") or [],
+                        "suggestion": row.get("recommended_action") or "",
+                    }
+                )
     return {
         **row,
         "labels": issue_families or ["pass_likely"],
@@ -61,6 +95,40 @@ def audit_payload(row: dict[str, Any]) -> dict[str, Any]:
         "summary": row.get("reason") or "",
         "recommended_action": row.get("recommended_action") or "none",
     }
+
+
+def assert_question_candidates_still_unreviewed(
+    cur: psycopg.Cursor[Any],
+    candidate_keys: list[str],
+) -> None:
+    """Prevent a newer AI import from reactivating work a human already closed."""
+    cur.execute(
+        """
+        WITH latest_question AS (
+            SELECT DISTINCT ON (candidate_key) candidate_key, action
+            FROM exam.question_review_events
+            WHERE action NOT IN (
+                'confirm_not_group', 'confirm_group', 'reset_group_review',
+                'human_review_pdf_visual'
+            )
+            ORDER BY candidate_key, id DESC
+        )
+        SELECT c.candidate_key, COALESCE(lq.action, '')
+        FROM exam.question_candidates c
+        LEFT JOIN latest_question lq USING (candidate_key)
+        WHERE c.candidate_key = ANY(%s)
+          AND COALESCE(lq.action, '') NOT IN ('', 'unreviewed', 'reset_review')
+        ORDER BY c.candidate_key
+        """,
+        (candidate_keys,),
+    )
+    closed = [(str(key), str(action)) for key, action in cur.fetchall()]
+    if closed:
+        preview = ", ".join(f"{key}={action}" for key, action in closed[:20])
+        raise SystemExit(
+            "Refusing to import newer AI events for candidates already reviewed "
+            f"by a human ({len(closed)}): {preview}"
+        )
 
 
 def main() -> int:
@@ -74,12 +142,18 @@ def main() -> int:
     if not validation.get("ok"):
         raise SystemExit("validation report is not successful")
     rows = read_results(args.results)
-    unsupported_stages = sorted({str(row.get("stage") or "") for row in rows} - {"question", "image"})
+    stages = {str(row.get("stage") or "") for row in rows}
+    unsupported_stages = sorted(stages - {"question", "image", "answer"})
     if unsupported_stages:
         raise SystemExit(
-            "advisory SQL import currently supports question/image stages only; "
+            "advisory SQL import currently supports question/image/answer stages only; "
             f"unsupported: {', '.join(unsupported_stages)}"
         )
+    if len(stages) != 1:
+        raise SystemExit("one result file must contain exactly one stage")
+    stage = next(iter(stages)) if stages else "question"
+    task_type = "answer_audit" if stage == "answer" else "question_format_audit"
+    event_table = "exam.answer_ai_review_events" if stage == "answer" else "exam.question_ai_review_events"
     input_hash = hashlib.sha256(args.results.read_bytes()).hexdigest()
     summary = {
         "ok": True,
@@ -89,6 +163,8 @@ def main() -> int:
         "model": args.model,
         "prompt_version": args.prompt_version,
         "input_hash": input_hash,
+        "stage": stage,
+        "event_table": event_table,
     }
     if not args.apply:
         print(json.dumps(summary, ensure_ascii=False))
@@ -96,16 +172,21 @@ def main() -> int:
 
     with psycopg.connect(args.database_url) as conn:
         with conn.cursor() as cur:
+            if stage == "question":
+                assert_question_candidates_still_unreviewed(
+                    cur,
+                    [str(row["candidate_key"]) for row in rows],
+                )
             cur.execute(
                 """
                 SELECT id
                 FROM exam.model_runs
-                WHERE task_type = 'question_format_audit'
+                WHERE task_type = %s
                   AND input_hash = %s
                   AND status = 'succeeded'
                 LIMIT 1
                 """,
-                (input_hash,),
+                (task_type, input_hash),
             )
             if cur.fetchone():
                 raise SystemExit("this result file was already imported")
@@ -115,11 +196,12 @@ def main() -> int:
                     task_type, provider, model_name, prompt_version, input_hash,
                     status, request_json, response_json, started_at, finished_at
                 ) VALUES (
-                    'question_format_audit', %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
                     'succeeded', %s, %s, now(), now()
                 ) RETURNING id
                 """,
                 (
+                    task_type,
                     args.provider,
                     args.model,
                     args.prompt_version,
@@ -133,14 +215,14 @@ def main() -> int:
                 key = str(row["candidate_key"])
                 audit = audit_payload(row)
                 cur.execute(
-                    """
-                    INSERT INTO exam.question_ai_review_events (
+                    f"""
+                    INSERT INTO {event_table} (
                         candidate_id, candidate_key, model_run_id, action, reviewer,
                         provider, model_name, prompt_version, input_hash,
                         audit_status, recommended_action, audit_json, event_json, notes
                     )
                     SELECT
-                        c.id, c.candidate_key, %s, 'ai_audit', %s,
+                        c.id, c.candidate_key, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s, %s, %s
                     FROM exam.question_candidates c
@@ -148,6 +230,7 @@ def main() -> int:
                     """,
                     (
                         model_run_id,
+                        "ai_answer_audit" if stage == "answer" else "ai_audit",
                         f"ai:{args.provider}:{args.model}",
                         args.provider,
                         args.model,

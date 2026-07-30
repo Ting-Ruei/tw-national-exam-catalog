@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -31,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subject")
     parser.add_argument("--year")
     parser.add_argument("--ordinal")
+    parser.add_argument("--source-registry-key", help="Restrict a pilot to one source paper without changing its question order")
     parser.add_argument("--limit", type=int, default=0, help="0 means no limit")
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--inventory-only", action="store_true")
@@ -47,6 +49,19 @@ def json_value(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+def effective_content_hash(candidate: dict[str, Any]) -> str:
+    """Fingerprint the text the model is asked to review, not DB metadata."""
+    visible = {
+        "stem": candidate.get("stem", ""),
+        "options": candidate.get("options") or [],
+        "group_ref": candidate.get("group_ref"),
+        "group_sequence_no": candidate.get("group_sequence_no"),
+        "image_refs": candidate.get("image_refs") or [],
+    }
+    encoded = json.dumps(visible, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -80,6 +95,9 @@ def scope_sql(args: argparse.Namespace, alias: str = "c") -> tuple[str, list[str
             continue
         clauses.append(f"COALESCE({alias}.raw_candidate_json->'metadata'->>%s, '') = %s")
         values.extend([metadata_field, value])
+    if args.source_registry_key:
+        clauses.append(f"{alias}.source_registry_key = %s")
+        values.append(args.source_registry_key)
     return " AND ".join(clauses), values
 
 
@@ -265,6 +283,7 @@ def vars_for_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "subject": args.subject,
         "year": args.year,
         "ordinal": args.ordinal,
+        "source_registry_key": args.source_registry_key,
         "model": args.model,
     }
 
@@ -309,6 +328,10 @@ ORDER BY
         options = candidate.get("options") if isinstance(candidate, dict) else []
         task = {
             "candidate_key": row["candidate_key"],
+            # Keep the original paper identifier at top level so downstream
+            # dispatch can make half-paper and full-paper batches safely.
+            "source_registry_key": row["source_registry_key"],
+            "effective_content_hash": effective_content_hash(candidate),
             "stage": args.stage,
             "exam": {
                 "category": row["category"],
