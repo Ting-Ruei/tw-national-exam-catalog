@@ -145,6 +145,12 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 
 資料庫架構草案與雲端儲存 / 雲資料庫發布規劃見 `docs/database-architecture.md`，PostgreSQL schema 草案見 `schemas/database/postgresql_schema.sql`。入庫前分科排查、Review UI 與人工審核規則見 `docs/database-ingestion-preflight.md`；降低人工介入、風險分流與抽樣策略見 `docs/review-automation-strategy.md`。AI 詳解、RAG、GraphRAG、概念圖與成本控管規劃見 `docs/ai-workflow-architecture.md`；本地 RAG 知識庫資源評估見 `docs/local-rag-resource-assessment.md`。若要把另一台 MacBook 接成 MinerU 算力節點，部署與 rsync 批次回傳流程見 `docs/remote-mineru-worker.md`。
 
+考選部當年度增量掃描、題目／答案下載、MinerU、candidate merge 匯入 Review UI，以及未來 n8n / AI MAX 395 的搬移介面，見 `docs/moex-incremental-review-pipeline.md`。手動只掃描可執行：
+
+```bash
+python3 scripts/run_moex_incremental_review_pipeline.py --scan-only
+```
+
 目前可先用 `scripts/build_pdf_asset_index.py` 將已下載、已分類的 PDF manifest 整理成 CSV 索引。這個步驟只產生可審閱的索引檔，不會把資料寫入 PostgreSQL 或其他資料庫。
 
 題目 PDF 與答案 PDF 的 paired 清單可用 `scripts/build_question_answer_pairs.py` 產生；若同時有一般答案與更正答案，會以更正答案 `_MOD` 作為 primary answer，並保留 `_ANS` 欄位供追溯。
@@ -224,6 +230,18 @@ http://192.168.10.70:8765/
 http://100.96.146.93:8765/
 ```
 
+手機快速分流介面使用同一個 ReviewState、同一份 PostgreSQL 與同一個 process，但由獨立 listener 提供：
+
+```text
+http://192.168.10.70:8766/
+```
+
+`192.168.10.70:8765` 保留完整桌面 Review UI；同一台主機的 `192.168.10.70:8766` 根目錄直接提供手機介面，而且只允許手機頁、candidate read API、reload status 與 mobile review write API。兩個 port 共用同一個 ReviewState、PostgreSQL 與 process，不會啟動兩套 ReviewState 或兩個 formal-sync worker。手機版優先顯示「人工未看過＋AI 通過」；若目前尚未產生 AI 初審，首次開啟會自動退回全部人工未看題目，之後仍可在篩選器切回 AI 通過佇列。介面只提供四個決策：`要・通過` 寫入 `accept`；`不要・阻止` 寫入 `block`；`備註待看` 必須先輸入註記並寫入 `needs_review`；`跳過` 不寫任何事件。手機版不載入 PDF，也不提供人工校正欄位。既有 correction 會隨新的手機審核事件保留。
+
+`不要` 與 `備註待看` 事件會額外寫入結構化 `ai_followup`：要求後續 AI 讀來源 PDF、產生修正提案、只使用已核准規則；遇到新型態問題必須提出規則候選並取得人工核准，且 AI 不得自動通過題目。這個欄位是後續 AI worker 的可靠路由契約；手機按鈕本身不會在同步 HTTP request 內啟動模型或直接修改 parser 規則。
+
+目前人工審核權威固定為 `http://192.168.10.70:8765/`。其他機器上的 PostgreSQL／Review UI 僅供 pipeline 驗證，不得與該主庫各自產生人工審核事件。增量資料同步方式與 checkpoint 見 `docs/moex-incremental-review-pipeline.md`。
+
 查看 log：
 
 ```bash
@@ -245,6 +263,8 @@ Scheme: http
 ```
 
 如果 NPM 本身是跑在同一台 Mac 的 Docker container，`Forward Hostname / IP` 也可嘗試使用 `host.docker.internal`。實際審核紀錄寫入 PostgreSQL 的 append-only review event tables。
+
+手機版已附 PWA manifest、圖示與 service worker，可用 Safari「分享 → 加入主畫面」。service worker 只快取介面外殼，所有 `/api/*` 都維持 network-only，不會離線排隊或重送審核事件。`192.168.10.70` 以外的網路轉接不由本專案設定。
 
 Review UI 右側 PDF 檢視提供三種來源：
 

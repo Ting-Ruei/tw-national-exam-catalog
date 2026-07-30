@@ -36,12 +36,13 @@ services:
       REVIEW_UI_DEFER_FORMAL_SYNC: "${REVIEW_UI_DEFER_FORMAL_SYNC:-1}"
     ports:
       - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_PORT:-8765}:8765"
+      - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_MOBILE_PORT:-8766}:8766"
     volumes:
       - .:/workspace
     command:
       - sh
       - -c
-      - python3 -m pip install -q -r requirements/review-ui.txt && python3 scripts/serve_question_review_ui.py --host 0.0.0.0 --port 8765 --review-backend "$${REVIEW_UI_BACKEND:-sql}"
+      - python3 -m pip install -q -r requirements/review-ui.txt && python3 scripts/serve_question_review_ui.py --host 0.0.0.0 --port 8765 --mobile-port 8766 --review-backend "$${REVIEW_UI_BACKEND:-sql}"
     depends_on:
       postgres:
         condition: service_healthy

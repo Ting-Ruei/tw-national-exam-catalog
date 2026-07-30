@@ -1,0 +1,1420 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a6c4e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="隨身審題">
+  <title>隨身審題</title>
+  <link rel="manifest" href="/mobile/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/mobile/icon.png">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17231e;
+      --muted: #65746d;
+      --paper: #fffefa;
+      --canvas: #f1f4ef;
+      --line: #d8dfda;
+      --green: #0a6c4e;
+      --green-soft: #dff4e9;
+      --red: #b42318;
+      --red-soft: #fee9e7;
+      --amber: #9a5b00;
+      --amber-soft: #fff2cc;
+      --blue: #2856a8;
+      --blue-soft: #e7efff;
+      --shadow: 0 10px 28px rgba(25, 48, 37, .08);
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+    body {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      margin: 0;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { touch-action: manipulation; }
+    .topbar {
+      z-index: 20;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 5px 8px;
+      padding: max(7px, env(safe-area-inset-top)) 10px 7px;
+      border-bottom: 1px solid rgba(216, 223, 218, .92);
+      background: rgba(255, 254, 250, .97);
+      backdrop-filter: blur(18px);
+    }
+    .title-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    h1 { margin: 0; font-size: 18px; line-height: 1.2; letter-spacing: -.02em; white-space: nowrap; }
+    .connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .connection::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      content: "";
+    }
+    .connection.offline::before { background: var(--red); }
+    .header-actions { display: flex; gap: 7px; }
+    .header-button {
+      min-height: 38px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: white;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 780;
+    }
+    .header-button.overview { border-color: #b4d7c9; color: var(--green); }
+    .queue-line {
+      grid-column: 1 / -1;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    main {
+      min-height: 0;
+      width: min(100%, 760px);
+      margin: 0 auto;
+      padding: 7px 8px;
+      overflow: hidden;
+    }
+    .question-card {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border: 1px solid rgba(208, 218, 211, .94);
+      border-radius: 18px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    .card-head {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 46px;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .question-number { font-size: 16px; font-weight: 850; white-space: nowrap; }
+    .paper-meta {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-cluster { display: flex; align-items: center; gap: 5px; }
+    .batch-position { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .mini-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 21px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #edf1ee;
+      color: #415148;
+      font-size: 10px;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+    .mini-badge.accept { background: var(--green-soft); color: var(--green); }
+    .mini-badge.block, .mini-badge.blocked { background: var(--red-soft); color: var(--red); }
+    .mini-badge.needs_review, .mini-badge.warning { background: var(--amber-soft); color: var(--amber); }
+    .mini-badge.peek { background: var(--blue-soft); color: var(--blue); }
+    .review-flags {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 1px;
+    }
+    .review-flag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 27px;
+      padding: 3px 9px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.2;
+    }
+    .review-flag.group { border-color: #b9c7e8; background: var(--blue-soft); color: var(--blue); }
+    .review-flag.visual { border-color: #f0c27b; background: #fff3df; color: #9a4f00; }
+    .review-flag.note { border-color: #cfb7e9; background: #f4eaff; color: #6941a5; }
+    .review-flag.issue { border-color: #e5c46a; background: var(--amber-soft); color: var(--amber); }
+    .review-flag.mobile { border-color: #9aa8b0; background: #e9eef1; color: #34454e; }
+    .question-body {
+      min-height: 0;
+      padding: 12px 14px;
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
+    .question-content {
+      display: grid;
+      min-height: 100%;
+      align-content: safe center;
+    }
+    .stem {
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+      font-size: clamp(16px, 4.25vw, 19px);
+      font-weight: 600;
+      line-height: 1.55;
+    }
+    .stem table {
+      display: block;
+      width: 100%;
+      margin: 10px 0;
+      overflow-x: auto;
+      border-collapse: collapse;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .stem th, .stem td {
+      padding: 5px 7px;
+      border: 1px solid var(--line);
+      text-align: left;
+    }
+    .options { margin-top: 12px; }
+    .option {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 8px;
+      margin: 8px 0;
+      overflow-wrap: anywhere;
+      font-size: clamp(15px, 4vw, 18px);
+      line-height: 1.5;
+    }
+    .option-key { color: var(--green); font-weight: 850; }
+    .option.empty { color: var(--amber); }
+    .math { white-space: nowrap; font-family: "Times New Roman", Times, serif; }
+    sub, sup { line-height: 0; }
+    .overline { text-decoration: overline; text-decoration-thickness: 1px; }
+    .empty-state {
+      grid-row: 1 / -1;
+      align-self: center;
+      padding: 48px 22px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .empty-state strong { display: block; margin-bottom: 7px; color: var(--ink); font-size: 19px; }
+    .skeleton { grid-row: 1 / -1; min-height: 320px; padding: 24px 18px; }
+    .skeleton span {
+      display: block;
+      height: 18px;
+      margin: 0 0 14px;
+      border-radius: 8px;
+      background: linear-gradient(90deg, #edf1ee 25%, #f8faf8 40%, #edf1ee 65%);
+      background-size: 400% 100%;
+      animation: shimmer 1.3s infinite;
+    }
+    .skeleton span:nth-child(1) { width: 38%; }
+    .skeleton span:nth-child(2) { width: 92%; height: 24px; margin-top: 34px; }
+    .skeleton span:nth-child(3) { width: 100%; height: 24px; }
+    .skeleton span:nth-child(4) { width: 76%; height: 24px; }
+    @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+    .action-dock {
+      z-index: 18;
+      padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+      border-top: 1px solid rgba(208, 218, 211, .94);
+      background: rgba(255, 254, 250, .97);
+      backdrop-filter: blur(18px);
+    }
+    .action-inner { display: grid; gap: 7px; width: min(100%, 736px); margin: 0 auto; }
+    .decision-actions { display: grid; grid-template-columns: 1fr 1.08fr 1fr; gap: 7px; }
+    .navigation-actions { display: grid; grid-template-columns: 1fr 1.15fr 1fr; gap: 7px; }
+    .action {
+      min-height: 50px;
+      border: 0;
+      border-radius: 14px;
+      font-size: 15px;
+      font-weight: 850;
+    }
+    .navigation-actions .action { min-height: 42px; font-size: 14px; }
+    .action:disabled { opacity: .42; }
+    .action.accept { background: var(--green); color: white; }
+    .action.block { background: var(--red); color: white; }
+    .action.mobile-defer { border: 1px solid #aeb9bf; background: #e9eef1; color: #34454e; }
+    .action.mobile-defer.active { border-color: #7595c8; background: var(--blue-soft); color: var(--blue); }
+    .action.note { border: 1px solid #e1c36d; background: var(--amber-soft); color: #714800; }
+    .action.navigate { border: 1px solid var(--line); background: #f3f5f2; color: #45544c; }
+    .sheet-backdrop {
+      position: fixed;
+      z-index: 40;
+      inset: 0;
+      display: grid;
+      align-items: end;
+      background: rgba(15, 29, 22, .44);
+    }
+    .sheet-backdrop[hidden] { display: none; }
+    .sheet {
+      max-height: min(88dvh, 760px);
+      overflow: auto;
+      padding: 9px 16px calc(18px + env(safe-area-inset-bottom));
+      border-radius: 24px 24px 0 0;
+      background: var(--paper);
+      box-shadow: 0 -18px 50px rgba(15, 29, 22, .18);
+    }
+    .sheet-handle { width: 42px; height: 5px; margin: 0 auto 15px; border-radius: 999px; background: #cbd4ce; }
+    .sheet h2 { margin: 0 0 7px; font-size: 20px; }
+    .sheet-intro { margin: 0 0 13px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+    .filter-grid label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    .filter-grid .wide { grid-column: 1 / -1; }
+    .filter-grid select, .filter-grid input, .note-box {
+      width: 100%;
+      min-height: 46px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: white;
+      color: var(--ink);
+    }
+    .note-box { min-height: 128px; resize: vertical; line-height: 1.55; }
+    .sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 15px; }
+    .sheet-actions button, .cancel-note {
+      min-height: 49px;
+      border-radius: 14px;
+      font-weight: 800;
+    }
+    .secondary { border: 1px solid var(--line); background: white; color: var(--ink); }
+    .primary { border: 0; background: var(--green); color: white; }
+    .note-submit {
+      width: 100%;
+      min-height: 52px;
+      margin-top: 11px;
+      border: 0;
+      border-radius: 14px;
+      background: var(--amber);
+      color: white;
+      font-weight: 850;
+    }
+    .note-submit:disabled { opacity: .45; }
+    .cancel-note { width: 100%; margin-top: 8px; }
+    .pwa-tip { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .overview-backdrop { align-items: stretch; justify-items: end; }
+    .overview-panel {
+      width: min(88vw, 390px);
+      height: 100%;
+      overflow: auto;
+      padding: max(14px, env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
+      border-radius: 22px 0 0 22px;
+      background: var(--paper);
+      box-shadow: -18px 0 50px rgba(15, 29, 22, .18);
+    }
+    .overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .overview-head h2 { margin: 0; font-size: 20px; }
+    .close-overview {
+      min-width: 42px;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: white;
+      font-weight: 800;
+    }
+    .overview-scope { margin: 6px 0 5px; color: var(--ink); font-size: 13px; font-weight: 750; line-height: 1.4; }
+    .overview-help { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
+    .legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .legend i { width: 10px; height: 10px; border-radius: 3px; background: #edf1ee; }
+    .legend .accepted { background: var(--green-soft); }
+    .legend .blocked { background: var(--red-soft); }
+    .legend .needs-review { background: var(--amber-soft); }
+    .legend .mobile-deferred { background: #d9e0e4; }
+    .question-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 7px; }
+    .question-jump {
+      aspect-ratio: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f3f5f2;
+      color: #45544c;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .question-jump.accepted { border-color: #9fd0bd; background: var(--green-soft); color: var(--green); }
+    .question-jump.blocked { border-color: #efb5b0; background: var(--red-soft); color: var(--red); }
+    .question-jump.needs-review { border-color: #e5c46a; background: var(--amber-soft); color: var(--amber); }
+    .question-jump.mobile-deferred { border-color: #9aa8b0; background: #dfe6ea; color: #34454e; }
+    .question-jump.current { outline: 3px solid rgba(40, 86, 168, .32); outline-offset: 1px; }
+    .overview-message { padding: 28px 10px; color: var(--muted); text-align: center; line-height: 1.5; }
+    .toast {
+      position: fixed;
+      z-index: 60;
+      top: calc(70px + env(safe-area-inset-top));
+      left: 50%;
+      max-width: calc(100% - 32px);
+      padding: 9px 13px;
+      border-radius: 999px;
+      background: #17231e;
+      color: white;
+      font-size: 13px;
+      white-space: nowrap;
+      box-shadow: var(--shadow);
+      transform: translate(-50%, -16px);
+      opacity: 0;
+      pointer-events: none;
+      transition: .2s ease;
+    }
+    .toast.show { transform: translate(-50%, 0); opacity: 1; }
+    .toast.error { background: var(--red); }
+    @media (min-width: 680px) {
+      main { padding: 10px; }
+      .question-card { border-radius: 22px; }
+      .sheet { width: min(620px, 100%); margin: 0 auto; }
+    }
+    @media (max-height: 700px) {
+      .topbar { padding-top: max(5px, env(safe-area-inset-top)); padding-bottom: 5px; }
+      .queue-line { display: none; }
+      .card-head { min-height: 40px; }
+      .question-body { padding-top: 8px; padding-bottom: 8px; }
+      .action-dock { padding-top: 6px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+      .action { min-height: 44px; }
+      .navigation-actions .action { min-height: 38px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="title-line">
+      <h1>隨身審題</h1>
+      <span id="connection" class="connection">已連線</span>
+    </div>
+    <div class="header-actions">
+      <button id="openOverview" class="header-button overview" type="button" aria-haspopup="dialog">題號</button>
+      <button id="openFilters" class="header-button" type="button" aria-haspopup="dialog">篩選</button>
+    </div>
+    <div id="queueName" class="queue-line">人工未看・AI 通過</div>
+  </header>
+
+  <main>
+    <article id="questionCard" class="question-card" aria-live="polite">
+      <div class="skeleton" aria-label="讀取題目中"><span></span><span></span><span></span><span></span></div>
+    </article>
+  </main>
+
+  <div class="action-dock" aria-label="審題動作">
+    <div class="action-inner">
+      <div class="decision-actions">
+        <button id="acceptButton" class="action accept" type="button">通過</button>
+        <button id="mobileDeferButton" class="action mobile-defer" type="button">手機不看</button>
+        <button id="blockButton" class="action block" type="button">阻止</button>
+      </div>
+      <div class="navigation-actions">
+        <button id="previousButton" class="action navigate" type="button">上一題</button>
+        <button id="noteButton" class="action note" type="button">備註待看</button>
+        <button id="nextButton" class="action navigate" type="button">下一題</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="overviewSheet" class="sheet-backdrop overview-backdrop" role="dialog" aria-modal="true" aria-labelledby="overviewTitle" hidden>
+    <section class="overview-panel">
+      <div class="overview-head">
+        <div>
+          <h2 id="overviewTitle">整份試卷</h2>
+          <p id="overviewScope" class="overview-scope">讀取範圍中</p>
+        </div>
+        <button id="closeOverview" class="close-overview" type="button" aria-label="關閉題號總覽">關閉</button>
+      </div>
+      <p class="overview-help">題號顯示這份試卷的全部題目；上一題、下一題只依目前篩選的審核群移動。</p>
+      <div class="legend" aria-label="審核狀態圖例">
+        <span><i></i>未看</span>
+        <span><i class="accepted"></i>通過</span>
+        <span><i class="blocked"></i>阻止</span>
+        <span><i class="needs-review"></i>待看</span>
+        <span><i class="mobile-deferred"></i>手機不看</span>
+      </div>
+      <div id="overviewGrid" class="question-grid">
+        <div class="overview-message">打開後會載入目前試卷的全部題號。</div>
+      </div>
+    </section>
+  </div>
+
+  <div id="filterSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="filterTitle" hidden>
+    <section class="sheet">
+      <div class="sheet-handle"></div>
+      <h2 id="filterTitle">選擇審題範圍</h2>
+      <p class="sheet-intro">預設為人工未看且 AI 通過；可依考別、科目、年份與考次縮小範圍。</p>
+      <div class="filter-grid">
+        <label>人工狀態
+          <select id="reviewStatus">
+            <option value="unreviewed">未看過</option>
+            <option value="reset_review">退回未審</option>
+            <option value="needs_review">待看／保留疑問</option>
+            <option value="block">阻止入庫</option>
+            <option value="accept">已通過</option>
+            <option value="reviewed">全部已看過</option>
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label>AI 初審
+          <select id="aiReviewStatus">
+            <option value="pass">AI 通過</option>
+            <option value="needs_review">AI 有疑點</option>
+            <option value="block">AI 阻擋</option>
+            <option value="reviewed">AI 已稽核</option>
+            <option value="unreviewed">AI 未稽核</option>
+            <option value="">全部 AI 狀態</option>
+          </select>
+        </label>
+        <label>系統格式檢查
+          <select id="systemStatus">
+            <option value="">全部</option>
+            <option value="pass">系統通過</option>
+            <option value="needs_review">系統提醒</option>
+            <option value="blocked">系統阻擋</option>
+          </select>
+        </label>
+        <label>考別
+          <select id="category"><option value="">全部考別</option></select>
+        </label>
+        <label>科目
+          <select id="subject"><option value="">全部科目</option></select>
+        </label>
+        <label>年份
+          <select id="year"><option value="">全部年份</option></select>
+        </label>
+        <label>考次
+          <select id="ordinal"><option value="">全部考次</option></select>
+        </label>
+        <label class="wide">搜尋
+          <input id="search" type="search" placeholder="題號、題文或註記">
+        </label>
+      </div>
+      <div class="sheet-actions">
+        <button id="resetFilters" class="secondary" type="button">回到預設</button>
+        <button id="applyFilters" class="primary" type="button">套用篩選</button>
+      </div>
+      <p class="pwa-tip">Safari：分享 → 加入主畫面。審核動作必須連線，不會離線暫存或重送。</p>
+    </section>
+  </div>
+
+  <div id="noteSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="noteTitle" hidden>
+    <section class="sheet">
+      <div class="sheet-handle"></div>
+      <h2 id="noteTitle">留下待看備註</h2>
+      <textarea id="noteText" class="note-box" placeholder="記下錯字、格式、選項或其他待處理問題"></textarea>
+      <button id="submitNote" class="note-submit" type="button" disabled>儲存備註待看</button>
+      <button id="cancelNote" class="secondary cancel-note" type="button">取消</button>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    const DEFAULT_FILTERS = {
+      reviewStatus: 'unreviewed',
+      aiReviewStatus: 'pass',
+      systemStatus: '',
+      category: '',
+      subject: '',
+      year: '',
+      ordinal: '',
+      search: ''
+    };
+    const FILTER_IDS = Object.keys(DEFAULT_FILTERS);
+    const STORAGE_KEY = 'tw-national-exam-mobile-review-filters-v1';
+    const state = {
+      candidates: [],
+      queueKeys: new Set(),
+      index: 0,
+      overviewCandidates: [],
+      overviewScopeKey: '',
+      overviewLoading: false,
+      overviewRequestId: 0,
+      historyKeys: [],
+      historyCursor: -1,
+      total: 0,
+      filteredCount: 0,
+      busy: false,
+      loading: false,
+      filters: {...DEFAULT_FILTERS}
+    };
+
+    const card = document.getElementById('questionCard');
+    const filterSheet = document.getElementById('filterSheet');
+    const noteSheet = document.getElementById('noteSheet');
+    const overviewSheet = document.getElementById('overviewSheet');
+    const noteText = document.getElementById('noteText');
+    const acceptButton = document.getElementById('acceptButton');
+    const mobileDeferButton = document.getElementById('mobileDeferButton');
+    const blockButton = document.getElementById('blockButton');
+    const noteButton = document.getElementById('noteButton');
+    const previousButton = document.getElementById('previousButton');
+    const nextButton = document.getElementById('nextButton');
+    const decisionButtons = [acceptButton, mobileDeferButton, blockButton, noteButton];
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[char]));
+
+    const greekMap = {
+      alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ε', zeta:'ζ', eta:'η', theta:'θ',
+      iota:'ι', kappa:'κ', lambda:'λ', mu:'μ', nu:'ν', xi:'ξ', omicron:'ο', pi:'π',
+      rho:'ρ', sigma:'σ', tau:'τ', upsilon:'υ', phi:'φ', chi:'χ', psi:'ψ', omega:'ω',
+      Alpha:'Α', Beta:'Β', Gamma:'Γ', Delta:'Δ', Theta:'Θ', Lambda:'Λ', Xi:'Ξ', Pi:'Π',
+      Sigma:'Σ', Phi:'Φ', Psi:'Ψ', Omega:'Ω'
+    };
+
+    function renderMath(value) {
+      return esc(value)
+        .replace(/\\+(?:bar|overline)\s*\{([^{}]+)\}/g, '<span class="overline">$1</span>')
+        .replace(/\\+underline\s*\{([^{}]+)\}/g, '<u>$1</u>')
+        .replace(/\\+\s*pm(?![A-Za-z])/g, '±')
+        .replace(/\\+\s*equiv/g, '≡')
+        .replace(/\\rightarrow/g, '→')
+        .replace(/\\to/g, '→')
+        .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
+        .replace(/_\{([^{}]+)\}/g, '<sub>$1</sub>')
+        .replace(/\^\{([^{}]+)\}/g, '<sup>$1</sup>')
+        .replace(/_([A-Za-z0-9+-])/g, '<sub>$1</sub>')
+        .replace(/\^([A-Za-z0-9+-])/g, '<sup>$1</sup>');
+    }
+
+    function normalizeInlineScienceText(value) {
+      return String(value ?? '')
+        .replace(/核黄素/g, '核黃素')
+        .replace(/萘鹼酸/g, '菸鹼酸')
+        .replace(/脱氢酶/g, '脫氫酶')
+        .replace(/過氧化氢/g, '過氧化氫')
+        .replace(/鉷（Co）/g, '鈷（Co）')
+        .replace(/鉷/g, '鈷')
+        .replace(/麗胺基硫還原酶/g, '麩胺基硫還原酶')
+        .replace(/\\uparrow/g, '↑')
+        .replace(/\\downarrow/g, '↓')
+        .replace(/\\kappa/g, 'κ')
+        .replace(/\\lambda/g, 'λ')
+        .replace(/\{\}\s*(?=[⁰¹²³⁴⁵⁶⁷⁸⁹]|\d+\s*[A-Z][a-z]?)/g, '')
+        .replace(/\b(3|14|32|35|51|57|59|75|99|111|123|125|131)\s*(H|C|Cr|Co|Fe|Se|Tc|In|I|P|S)\b/g, (_, number, element) => `${toSuperscript(number)}${element}`)
+        .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s+(H|C|Cr|Co|Fe|Se|Tc|In|I|P|S)\b/g, '$1$2')
+        .replace(/\b(LD|ID)\\*([₀₁₂₃₄₅₆₇₈₉0-9]+)\\*/g, (_, prefix, number) => `${prefix}${toSubscript(number)}`)
+        .replace(/\b(LD|ID)\s*50\b/g, '$1₅₀')
+        .replace(/\b(CD\d+)\s*([+-])(?=\s|$|[，。,；;、）)])/g, (_, marker, sign) => `${marker}${toSuperscript(sign)}`)
+        .replace(/\bPrP(sc|c)\b/g, (_, suffix) => `PrP${String(suffix).split('').map(toSuperscript).join('')}`)
+        .replace(/\\mathrm\{([^{}]+)\}/g, '$1')
+        .replace(/\bFP([₁₂])/g, 'Fp$1')
+        .replace(/\b2₂S\b/g, '2₂s')
+        .replace(/\b10x\b/g, '10ₓ');
+    }
+
+    function toSuperscript(value) {
+      const map = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','+':'⁺','-':'⁻','s':'ˢ','c':'ᶜ','S':'ˢ','C':'ᶜ'};
+      return String(value ?? '').replace(/[0-9+\-scSC]/g, char => map[char] || char);
+    }
+
+    function toSubscript(value) {
+      const map = {'0':'₀','1':'₁','2':'₂','3':'₃','4':'₄','5':'₅','6':'₆','7':'₇','8':'₈','9':'₉','+':'₊','-':'₋'};
+      return String(value ?? '').replace(/[0-9+\-]/g, char => map[char] || char);
+    }
+
+    const unicodeSuperscriptToText = {
+      '⁰':'0','¹':'1','²':'2','³':'3','⁴':'4','⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9','⁺':'+','⁻':'-','⁼':'=','⁽':'(','⁾':')',
+      'ᵃ':'a','ᵇ':'b','ᶜ':'c','ᵈ':'d','ᵉ':'e','ᶠ':'f','ᵍ':'g','ʰ':'h','ⁱ':'i','ʲ':'j','ᵏ':'k','ˡ':'l','ᵐ':'m','ⁿ':'n','ᵒ':'o','ᵖ':'p','ʳ':'r','ˢ':'s','ᵗ':'t','ᵘ':'u','ᵛ':'v','ʷ':'w','ˣ':'x','ʸ':'y','ᶻ':'z'
+    };
+    const unicodeSubscriptToText = {
+      '₀':'0','₁':'1','₂':'2','₃':'3','₄':'4','₅':'5','₆':'6','₇':'7','₈':'8','₉':'9','₊':'+','₋':'-','₌':'=','₍':'(','₎':')',
+      'ₐ':'a','ₑ':'e','ₕ':'h','ᵢ':'i','ⱼ':'j','ₖ':'k','ₗ':'l','ₘ':'m','ₙ':'n','ₒ':'o','ₚ':'p','ᵣ':'r','ₛ':'s','ₜ':'t','ᵤ':'u','ᵥ':'v','ₓ':'x'
+    };
+
+    function canonicalizeUnicodeScripts(value) {
+      const source = String(value ?? '');
+      let output = '';
+      let scriptDepth = 0;
+      let index = 0;
+      while (index < source.length) {
+        if (source[index] === '<') {
+          const tagEnd = source.indexOf('>', index + 1);
+          if (tagEnd >= 0) {
+            const tag = source.slice(index, tagEnd + 1);
+            const lowered = tag.toLowerCase().replace(/\s/g, '');
+            if (lowered === '<sub>' || lowered === '<sup>') scriptDepth += 1;
+            else if (lowered === '</sub>' || lowered === '</sup>') scriptDepth = Math.max(0, scriptDepth - 1);
+            output += tag;
+            index = tagEnd + 1;
+            continue;
+          }
+        }
+        if (scriptDepth > 0) {
+          output += source[index++];
+          continue;
+        }
+        const mapping = unicodeSubscriptToText[source[index]] !== undefined
+          ? unicodeSubscriptToText
+          : unicodeSuperscriptToText[source[index]] !== undefined
+            ? unicodeSuperscriptToText
+            : null;
+        if (!mapping) {
+          output += source[index++];
+          continue;
+        }
+        const tag = mapping === unicodeSubscriptToText ? 'sub' : 'sup';
+        let converted = '';
+        while (index < source.length) {
+          const char = source[index];
+          if (mapping[char] !== undefined) {
+            converted += mapping[char];
+            index += 1;
+            continue;
+          }
+          if (char === '/' && converted && mapping[source[index + 1]] !== undefined) {
+            converted += char;
+            index += 1;
+            continue;
+          }
+          break;
+        }
+        output += `<${tag}>${converted}</${tag}>`;
+      }
+      return output.replace(/<\/sub><sub>/g, '').replace(/<\/sup><sup>/g, '');
+    }
+
+    function renderInlineMarkupEscaped(value) {
+      return value
+        .replace(/([A-Za-zΑ-ω]+)_\{([^{}<>]+)\}/g, '$1<sub>$2</sub>')
+        .replace(/([A-Za-zΑ-ω]+)\^\{([^{}<>]+)\}/g, '$1<sup>$2</sup>')
+        .replace(/\^\{([^{}<>]+)\}/g, '<sup>$1</sup>')
+        .replace(/([A-Za-zΑ-ω]+)_([A-Za-z0-9+\-₀-₉]+)/g, '$1<sub>$2</sub>')
+        .replace(/([A-Za-zΑ-ω]+)\^([A-Za-z0-9+\-₀-₉]+)/g, '$1<sup>$2</sup>');
+    }
+
+    function renderText(value) {
+      const raw = String(value ?? '');
+      const parts = raw.split(/(\$[^$]+\$)/g);
+      return parts.map(part => {
+        if (part.startsWith('$') && part.endsWith('$')) {
+          return `<span class="math">${renderMath(part.slice(1, -1).trim())}</span>`;
+        }
+        return renderInlineMarkupEscaped(esc(normalizeInlineScienceText(part)))
+          .replace(/&lt;(table|thead|tbody|tfoot|tr|td|th)(?:\s+[^<>]*?)?&gt;/g, '<$1>')
+          .replace(/&lt;\/(table|thead|tbody|tfoot|tr|td|th)&gt;/g, '</$1>')
+          .replace(/&lt;sub&gt;([\s\S]*?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
+          .replace(/&lt;sup&gt;([\s\S]*?)&lt;\/sup&gt;/g, '<sup>$1</sup>')
+          .replace(/&lt;u&gt;([\s\S]*?)&lt;\/u&gt;/g, '<u>$1</u>')
+          .replace(/&lt;span class=&quot;overline&quot;&gt;([\s\S]*?)&lt;\/span&gt;/g, '<span class="overline">$1</span>')
+          .replace(/([A-Za-z0-9\u4e00-\u9fff])\s+<sup>([®™])<\/sup>/g, '$1<sup>$2</sup>');
+      }).join('');
+    }
+
+    function fixedOptions(options) {
+      const byKey = new Map();
+      for (const option of Array.isArray(options) ? options : []) {
+        const key = String(option?.key || '').trim().toUpperCase();
+        if (key) byKey.set(key, {...option, key});
+      }
+      const standard = ['A', 'B', 'C', 'D'];
+      const extras = [...byKey.keys()].filter(key => !standard.includes(key)).sort();
+      return [...standard, ...extras].map(key => byKey.get(key) || {key, text: ''});
+    }
+
+    function currentCandidate() {
+      return state.candidates[state.index] || null;
+    }
+
+    function candidateScope(item) {
+      const meta = item?.metadata || {};
+      const category = meta.normalized_category_name || meta.group_name || '';
+      const subject = meta.normalized_subject_name || meta.official_subject_name || '';
+      const year = String(meta.year || '');
+      const ordinal = String(meta.exam_ordinal || '');
+      return {
+        category,
+        subject,
+        year,
+        ordinal,
+        key: [category, subject, year, ordinal].join('\u001f'),
+        label: [year ? `${year} 年` : '', ordinal ? `第 ${ordinal} 次` : '', category, subject].filter(Boolean).join('・')
+      };
+    }
+
+    function reviewAction(item) {
+      return String(item?.review?.action || '').toLowerCase();
+    }
+
+    function isMobileDeferred(item) {
+      return Boolean(item?.mobile_review?.deferred);
+    }
+
+    function isHumanUnreviewed(item) {
+      return Boolean(item?.review?.is_reset_unreviewed)
+        || !reviewAction(item)
+        || item?.review?.status === 'unreviewed';
+    }
+
+    function reviewStatusClass(item) {
+      const action = reviewAction(item);
+      if (['accept', 'unblock'].includes(action)) return 'accepted';
+      if (['block', 'blocked', 'reject', 'exclude'].includes(action)) return 'blocked';
+      if (['needs_review', 'note', 'comment'].includes(action)) return 'needs-review';
+      return 'unreviewed';
+    }
+
+    function overviewStatusClass(item) {
+      return isMobileDeferred(item) ? 'mobile-deferred' : reviewStatusClass(item);
+    }
+
+    function reviewStatusLabel(item) {
+      const status = reviewStatusClass(item);
+      if (status === 'accepted') return ['通過', 'accept'];
+      if (status === 'blocked') return ['阻止', 'block'];
+      if (status === 'needs-review') return ['待看', 'needs_review'];
+      return ['', ''];
+    }
+
+    function candidateNumberValue(item) {
+      const match = String(item?.question_number || '').match(/\d+/);
+      return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+    }
+
+    function candidateSort(a, b) {
+      return candidateNumberValue(a) - candidateNumberValue(b)
+        || Number(a?.question_number_occurrence || 1) - Number(b?.question_number_occurrence || 1)
+        || String(a?.candidate_key || '').localeCompare(String(b?.candidate_key || ''), 'zh-Hant');
+    }
+
+    function matchesCurrentReviewStatus(item) {
+      const filter = state.filters.reviewStatus;
+      const action = reviewAction(item);
+      if (!filter || filter === 'unreviewed') return isHumanUnreviewed(item);
+      if (filter === 'reset_review') return Boolean(item?.review?.is_reset_unreviewed);
+      if (filter === 'reviewed') return !isHumanUnreviewed(item);
+      if (filter === 'accept') return ['accept', 'unblock'].includes(action);
+      if (filter === 'block') return ['block', 'blocked'].includes(action);
+      if (filter === 'needs_review') return ['needs_review', 'note', 'comment'].includes(action);
+      return action === filter;
+    }
+
+    function isQueueSelectable(item) {
+      return Boolean(item)
+        && state.queueKeys.has(item.candidate_key)
+        && !isMobileDeferred(item)
+        && matchesCurrentReviewStatus(item);
+    }
+
+    function findSelectableIndex(startIndex, direction) {
+      for (
+        let index = startIndex + direction;
+        index >= 0 && index < state.candidates.length;
+        index += direction
+      ) {
+        if (isQueueSelectable(state.candidates[index])) return index;
+      }
+      return -1;
+    }
+
+    function hasSelectableCandidate() {
+      return state.candidates.some(isQueueSelectable);
+    }
+
+    function resetHistory(index) {
+      const key = state.candidates[index]?.candidate_key;
+      state.historyKeys = key ? [key] : [];
+      state.historyCursor = key ? 0 : -1;
+    }
+
+    function indexForKey(candidateKey) {
+      return state.candidates.findIndex(candidate => candidate.candidate_key === candidateKey);
+    }
+
+    function recordForwardIndex(index) {
+      const key = state.candidates[index]?.candidate_key;
+      if (!key) return false;
+      state.historyKeys = state.historyKeys.slice(0, state.historyCursor + 1);
+      if (state.historyKeys[state.historyKeys.length - 1] !== key) state.historyKeys.push(key);
+      state.historyCursor = state.historyKeys.length - 1;
+      state.index = index;
+      return true;
+    }
+
+    function itemFlagHtml(item) {
+      const flags = [];
+      const visual = item.visual_profile || {};
+      const aiStatus = String(item.ai_review?.audit_status || '');
+      const aiVisualStatus = String(item.ai_review?.visual_status || item.visual_ai_status || '');
+      const hasGroup = Boolean(
+        item.group_ref
+        || item.group_sequence_no
+        || item.shared_stem
+        || item.group_review?.action === 'confirm_group'
+      );
+      if (hasGroup) flags.push(['group', '題組']);
+      if (visual.has_visual_asset || item.image_refs?.length || item.stem_image) {
+        flags.push(['visual', '有圖']);
+      } else if (
+        item.is_visual_question
+        || visual.has_visual_dependency
+        || ['visual_required_likely', 'visual_uncertain'].includes(aiVisualStatus)
+      ) {
+        flags.push(['visual', '疑似有圖']);
+      }
+      if (item.table_markup_suppressed || visual.has_structured_table) flags.push(['visual', '表格']);
+      if (String(item.review?.notes || '').trim()) flags.push(['note', '人工註記']);
+      if ((item.issues || []).length || Number(item.review_advisory_count || 0) > 0) {
+        flags.push(['issue', '格式疑點']);
+      }
+      if (
+        ['needs_review', 'block', 'blocked'].includes(aiStatus)
+        || (item.ai_review?.findings || []).length
+      ) {
+        flags.push(['issue', 'AI 疑點']);
+      }
+      if (isMobileDeferred(item)) flags.push(['mobile', '手機不看']);
+      return flags.length
+        ? `<div class="review-flags">${flags.map(([kind, label]) =>
+            `<span class="review-flag ${kind}">${label}</span>`
+          ).join('')}</div>`
+        : '';
+    }
+
+    function renderCandidate() {
+      const item = currentCandidate();
+      updateActionAvailability();
+      if (!item) {
+        const message = state.loading
+          ? ['讀取題目中', '正在取得符合條件的題目。']
+          : ['這個範圍暫時看完了', '可打開篩選切換其他考別、科目或狀態。'];
+        card.innerHTML = `<div class="empty-state"><strong>${message[0]}</strong>${message[1]}</div>`;
+        updateQueueLine();
+        renderOverview();
+        return;
+      }
+      const scope = candidateScope(item);
+      const stem = item.stem_with_tables || item.stem || '';
+      const options = fixedOptions(item.options).map(option => {
+        const text = String(option.text ?? '').trim();
+        return `<div class="option ${text ? '' : 'empty'}">
+          <span class="option-key">(${esc(option.key)})</span>
+          <span>${text ? renderText(option.text) : '選項內容空白'}</span>
+        </div>`;
+      }).join('');
+      const [statusLabel, statusClass] = reviewStatusLabel(item);
+      const position = `<span class="batch-position">${state.index + 1} / ${state.candidates.length}</span>`;
+      card.innerHTML = `
+        <div class="card-head">
+          <div class="question-number">第 ${esc(item.question_number || '—')} 題</div>
+          <div class="paper-meta">${esc(scope.label || '未分類試卷')}</div>
+          <div class="status-cluster">
+            ${statusLabel ? `<span class="mini-badge ${statusClass}">${statusLabel}</span>` : ''}
+            ${position}
+          </div>
+          ${itemFlagHtml(item)}
+        </div>
+        <div class="question-body">
+          <div class="question-content">
+            <div class="stem">${renderText(stem)}</div>
+            <div class="options">${options}</div>
+          </div>
+        </div>`;
+      updateQueueLine();
+      renderOverview();
+      requestAnimationFrame(() => {
+        const body = card.querySelector('.question-body');
+        if (body) body.scrollTop = 0;
+      });
+    }
+
+    function updateQueueLine() {
+      const filters = state.filters;
+      const scope = candidateScope(currentCandidate());
+      const pieces = [
+        filters.reviewStatus === 'unreviewed' ? '人工未看' : document.getElementById('reviewStatus').selectedOptions[0]?.textContent,
+        filters.aiReviewStatus ? document.getElementById('aiReviewStatus').selectedOptions[0]?.textContent : '',
+        scope.label
+      ].filter(Boolean);
+      const count = `・本卷 ${state.filteredCount.toLocaleString()} 題`;
+      document.getElementById('queueName').textContent = `${pieces.join('・') || '全部題目'}${count}`;
+    }
+
+    function updateActionAvailability() {
+      const item = currentCandidate();
+      const hasCurrent = Boolean(item);
+      const decisionDisabled = state.busy || state.loading || !hasCurrent || !navigator.onLine;
+      decisionButtons.forEach(button => { button.disabled = decisionDisabled; });
+      mobileDeferButton.textContent = isMobileDeferred(item) ? '取消不看' : '手機不看';
+      mobileDeferButton.classList.toggle('active', isMobileDeferred(item));
+      const hasPrevious = state.historyCursor > 0 || findSelectableIndex(state.index, -1) >= 0;
+      previousButton.disabled = state.busy || state.loading || !state.candidates.length
+        || !hasPrevious;
+      nextButton.disabled = state.busy || state.loading || !state.candidates.length;
+      document.getElementById('openOverview').disabled = state.loading || !hasCurrent;
+    }
+
+    function setBusy(value) {
+      state.busy = value;
+      updateActionAvailability();
+    }
+
+    let toastTimer = null;
+    function showToast(message, error = false) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = `toast show${error ? ' error' : ''}`;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.className = 'toast'; }, 2000);
+    }
+
+    function saveFilters() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.filters));
+    }
+
+    function readFilterForm() {
+      return Object.fromEntries(FILTER_IDS.map(id => [id, document.getElementById(id).value]));
+    }
+
+    function writeFilterForm(filters) {
+      for (const id of FILTER_IDS) {
+        document.getElementById(id).value = filters[id] ?? DEFAULT_FILTERS[id];
+      }
+    }
+
+    function restoreFilters() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        state.filters = {...DEFAULT_FILTERS, ...saved};
+      } catch {
+        state.filters = {...DEFAULT_FILTERS};
+      }
+      writeFilterForm(state.filters);
+    }
+
+    function fillSelect(id, values, fallbackLabel) {
+      const select = document.getElementById(id);
+      const selected = state.filters[id] || '';
+      const list = [...new Set((values || []).map(String).filter(Boolean))];
+      if (selected && !list.includes(selected)) list.unshift(selected);
+      select.innerHTML = `<option value="">${fallbackLabel}</option>` + list.map(value =>
+        `<option value="${esc(value)}">${esc(value)}</option>`
+      ).join('');
+      select.value = selected;
+    }
+
+    function populateFacets(facets) {
+      fillSelect('category', facets.categories, '全部考別');
+      fillSelect('subject', facets.subjects, '全部科目');
+      fillSelect('year', facets.years, '全部年份');
+      fillSelect('ordinal', facets.ordinals, '全部考次');
+    }
+
+    function candidateQuery(overrides = {}) {
+      return new URLSearchParams({
+        q: state.filters.search,
+        status: state.filters.systemStatus,
+        reviewStatus: state.filters.reviewStatus,
+        aiReviewStatus: state.filters.aiReviewStatus,
+        category: state.filters.category,
+        subject: state.filters.subject,
+        year: state.filters.year,
+        ordinal: state.filters.ordinal,
+        limit: '200',
+        ...overrides
+      });
+    }
+
+    function paperQueueQuery(scope) {
+      return candidateQuery({
+        category: scope.category,
+        subject: scope.subject,
+        year: scope.year,
+        ordinal: scope.ordinal,
+        limit: '1000'
+      });
+    }
+
+    function overviewQuery(scope) {
+      return new URLSearchParams({
+        q: '',
+        status: '',
+        reviewStatus: '',
+        aiReviewStatus: '',
+        category: scope.category,
+        subject: scope.subject,
+        year: scope.year,
+        ordinal: scope.ordinal,
+        limit: '1000'
+      });
+    }
+
+    async function loadCandidates() {
+      if (state.loading) return;
+      state.loading = true;
+      state.index = 0;
+      state.candidates = [];
+      state.queueKeys = new Set();
+      state.overviewCandidates = [];
+      state.overviewScopeKey = '';
+      state.historyKeys = [];
+      state.historyCursor = -1;
+      state.filteredCount = 0;
+      card.innerHTML = '<div class="skeleton" aria-label="讀取題目中"><span></span><span></span><span></span><span></span></div>';
+      updateActionAvailability();
+      try {
+        const response = await fetch(`/api/candidates?${candidateQuery({limit: '200'})}`, {cache: 'no-store'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        state.total = data.total_count || 0;
+        populateFacets(data.facets || {});
+        const seed = (data.candidates || []).find(candidate => !isMobileDeferred(candidate)) || null;
+        if (seed) await loadPaper(seed);
+      } catch (error) {
+        state.candidates = [];
+        showToast(`讀取失敗：${error.message || error}`, true);
+      } finally {
+        state.loading = false;
+        renderCandidate();
+      }
+    }
+
+    async function loadPaper(seed) {
+      const scope = candidateScope(seed);
+      if (!scope.category || !scope.subject || !scope.year || !scope.ordinal) {
+        throw new Error('題目缺少完整試卷範圍');
+      }
+      const requestId = ++state.overviewRequestId;
+      state.overviewLoading = true;
+      state.overviewScopeKey = scope.key;
+      try {
+        const [queueResponse, overviewResponse] = await Promise.all([
+          fetch(`/api/candidates?${paperQueueQuery(scope)}`, {cache: 'no-store'}),
+          fetch(`/api/candidates?${overviewQuery(scope)}`, {cache: 'no-store'})
+        ]);
+        const [queueData, overviewData] = await Promise.all([
+          queueResponse.json(),
+          overviewResponse.json()
+        ]);
+        if (!queueResponse.ok) throw new Error(queueData.error || `HTTP ${queueResponse.status}`);
+        if (!overviewResponse.ok) throw new Error(overviewData.error || `HTTP ${overviewResponse.status}`);
+        if (requestId !== state.overviewRequestId) return;
+        state.candidates = (overviewData.candidates || []).sort(candidateSort);
+        state.overviewCandidates = state.candidates;
+        state.queueKeys = new Set((queueData.candidates || []).map(candidate => candidate.candidate_key));
+        state.total = state.candidates.length;
+        state.filteredCount = state.candidates.filter(isQueueSelectable).length;
+        let startIndex = state.candidates.findIndex(candidate =>
+          candidate.candidate_key === seed.candidate_key && isQueueSelectable(candidate)
+        );
+        if (startIndex < 0) startIndex = state.candidates.findIndex(isQueueSelectable);
+        if (startIndex < 0) {
+          state.candidates = [];
+          state.overviewCandidates = [];
+          state.queueKeys = new Set();
+          return;
+        }
+        state.index = startIndex;
+        resetHistory(startIndex);
+      } finally {
+        if (requestId === state.overviewRequestId) state.overviewLoading = false;
+      }
+    }
+
+    function renderOverview(errorMessage = '') {
+      const item = currentCandidate();
+      const scope = candidateScope(item);
+      document.getElementById('overviewScope').textContent = scope.label || '尚未選到試卷';
+      const grid = document.getElementById('overviewGrid');
+      if (errorMessage) {
+        grid.className = 'overview-message';
+        grid.textContent = errorMessage;
+        return;
+      }
+      if (state.overviewLoading) {
+        grid.className = 'overview-message';
+        grid.textContent = '正在載入這份試卷的全部題號…';
+        return;
+      }
+      if (!state.overviewCandidates.length) {
+        grid.className = 'overview-message';
+        grid.textContent = item ? '這份試卷目前沒有可顯示的題目。' : '尚未選到題目。';
+        return;
+      }
+      grid.className = 'question-grid';
+      grid.innerHTML = state.overviewCandidates.map(candidate => {
+        const current = candidate.candidate_key === item?.candidate_key;
+        const status = overviewStatusClass(candidate);
+        const number = candidate.question_number || '—';
+        const label = status === 'accepted'
+          ? '通過'
+          : status === 'blocked'
+            ? '阻止'
+            : status === 'needs-review'
+              ? '待看'
+              : status === 'mobile-deferred'
+                ? '手機不看'
+                : '未看';
+        return `<button class="question-jump ${status}${current ? ' current' : ''}"
+          type="button" data-candidate-key="${esc(candidate.candidate_key)}"
+          aria-label="第 ${esc(number)} 題，${label}">${esc(number)}</button>`;
+      }).join('');
+    }
+
+    function updateLocalReview(candidateKey, action) {
+      const update = item => {
+        if (item?.candidate_key !== candidateKey) return;
+        item.review = {
+          ...(item.review || {}),
+          action,
+          status: action === 'accept' ? 'accepted' : action === 'block' ? 'blocked' : 'needs_review',
+          is_reset_unreviewed: false
+        };
+      };
+      state.candidates.forEach(update);
+    }
+
+    function updateLocalMobileReview(candidateKey, deferred) {
+      for (const item of state.candidates) {
+        if (item.candidate_key !== candidateKey) continue;
+        item.mobile_review = {
+          ...(item.mobile_review || {}),
+          deferred,
+          action: deferred ? 'mobile_defer' : 'mobile_resume'
+        };
+      }
+    }
+
+    async function goToQueue(direction) {
+      if (!state.candidates.length || state.busy || state.loading) return;
+      if (direction < 0) {
+        if (state.historyCursor > 0) {
+          state.historyCursor -= 1;
+          const historyIndex = indexForKey(state.historyKeys[state.historyCursor]);
+          if (historyIndex >= 0) state.index = historyIndex;
+          renderCandidate();
+          return;
+        }
+        const previousIndex = findSelectableIndex(state.index, -1);
+        if (previousIndex < 0) {
+          showToast('已是目前審核群第一題');
+          return;
+        }
+        const currentKey = currentCandidate()?.candidate_key;
+        state.historyKeys = [state.candidates[previousIndex].candidate_key, currentKey].filter(Boolean);
+        state.historyCursor = 0;
+        state.index = previousIndex;
+        renderCandidate();
+        return;
+      }
+      if (state.historyCursor < state.historyKeys.length - 1) {
+        state.historyCursor += 1;
+        const historyIndex = indexForKey(state.historyKeys[state.historyCursor]);
+        if (historyIndex >= 0) state.index = historyIndex;
+        renderCandidate();
+        return;
+      }
+      const nextIndex = findSelectableIndex(state.index, 1);
+      if (nextIndex >= 0) {
+        recordForwardIndex(nextIndex);
+        renderCandidate();
+        return;
+      }
+      if (!hasSelectableCandidate()) {
+        showToast('載入下一份未審試卷');
+        await loadCandidates();
+        return;
+      }
+      showToast('這個起點後面沒有未審題，可從題號選擇前面的題目');
+    }
+
+    function advanceAfterDecision() {
+      if (state.historyCursor < state.historyKeys.length - 1) {
+        state.historyCursor += 1;
+        const historyIndex = indexForKey(state.historyKeys[state.historyCursor]);
+        if (historyIndex >= 0) state.index = historyIndex;
+        return true;
+      }
+      const nextIndex = findSelectableIndex(state.index, 1);
+      if (nextIndex < 0) return false;
+      recordForwardIndex(nextIndex);
+      return true;
+    }
+
+    function updateFilteredCount(wasSelectable, isSelectable) {
+      if (wasSelectable && !isSelectable) state.filteredCount = Math.max(0, state.filteredCount - 1);
+      if (!wasSelectable && isSelectable) state.filteredCount += 1;
+    }
+
+    async function submitReview(disposition, notes = '') {
+      const item = currentCandidate();
+      if (!item || state.busy || !navigator.onLine) return;
+      if (disposition === 'note' && !notes.trim()) {
+        showToast('請先輸入待看備註', true);
+        return;
+      }
+      const candidateKey = item.candidate_key;
+      const mobileOnly = ['defer', 'resume'].includes(disposition);
+      const wasSelectable = isQueueSelectable(item);
+      setBusy(true);
+      try {
+        const body = {
+          candidate_key: candidateKey,
+          disposition,
+          notes: notes.trim(),
+          reviewer: 'local'
+        };
+        if (!mobileOnly && item.review?.correction) body.correction = item.review.correction;
+        const response = await fetch('/api/mobile-review', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body)
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        if (mobileOnly) {
+          updateLocalMobileReview(candidateKey, disposition === 'defer');
+        } else {
+          const action = disposition === 'accept' ? 'accept' : disposition === 'reject' ? 'block' : 'needs_review';
+          updateLocalReview(candidateKey, action);
+        }
+        updateFilteredCount(wasSelectable, isQueueSelectable(currentCandidate()));
+        const label = disposition === 'accept'
+          ? '已通過'
+          : disposition === 'reject'
+            ? '已阻止'
+            : disposition === 'note'
+              ? '已儲存備註待看'
+              : disposition === 'defer'
+                ? '已標記手機不看'
+                : '已取消手機不看';
+        showToast(label);
+        closeSheet(noteSheet);
+        noteText.value = '';
+        document.getElementById('submitNote').disabled = true;
+        if (disposition !== 'resume') {
+          const moved = advanceAfterDecision();
+          if (!moved && !hasSelectableCandidate()) {
+            showToast('本份試卷已完成；按下一題載入下一份');
+          } else if (!moved) {
+            showToast('後面沒有未審題，可從題號選擇前面的題目');
+          }
+        }
+        renderCandidate();
+      } catch (error) {
+        showToast(`寫入失敗：${error.message || error}`, true);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function openSheet(sheet) {
+      sheet.hidden = false;
+    }
+
+    function closeSheet(sheet) {
+      sheet.hidden = true;
+    }
+
+    acceptButton.addEventListener('click', () => submitReview('accept'));
+    mobileDeferButton.addEventListener('click', () => {
+      submitReview(isMobileDeferred(currentCandidate()) ? 'resume' : 'defer');
+    });
+    blockButton.addEventListener('click', () => submitReview('reject'));
+    previousButton.addEventListener('click', () => goToQueue(-1));
+    nextButton.addEventListener('click', () => goToQueue(1));
+    noteButton.addEventListener('click', () => {
+      noteText.value = '';
+      document.getElementById('submitNote').disabled = true;
+      openSheet(noteSheet);
+      setTimeout(() => noteText.focus(), 120);
+    });
+    document.getElementById('submitNote').addEventListener('click', () => submitReview('note', noteText.value));
+    document.getElementById('cancelNote').addEventListener('click', () => closeSheet(noteSheet));
+    noteText.addEventListener('input', () => {
+      document.getElementById('submitNote').disabled = !noteText.value.trim() || state.busy;
+    });
+    document.getElementById('openFilters').addEventListener('click', () => {
+      writeFilterForm(state.filters);
+      openSheet(filterSheet);
+    });
+    document.getElementById('openOverview').addEventListener('click', () => {
+      openSheet(overviewSheet);
+      renderOverview();
+    });
+    document.getElementById('closeOverview').addEventListener('click', () => closeSheet(overviewSheet));
+    document.getElementById('overviewGrid').addEventListener('click', event => {
+      const button = event.target.closest('[data-candidate-key]');
+      if (!button) return;
+      const candidateKey = button.dataset.candidateKey;
+      const selectedIndex = indexForKey(candidateKey);
+      if (selectedIndex < 0) return;
+      state.index = selectedIndex;
+      resetHistory(selectedIndex);
+      closeSheet(overviewSheet);
+      renderCandidate();
+    });
+    document.getElementById('resetFilters').addEventListener('click', () => writeFilterForm(DEFAULT_FILTERS));
+    document.getElementById('applyFilters').addEventListener('click', async () => {
+      state.filters = readFilterForm();
+      saveFilters();
+      closeSheet(filterSheet);
+      await loadCandidates();
+    });
+    document.getElementById('category').addEventListener('change', () => {
+      document.getElementById('subject').value = '';
+      document.getElementById('year').value = '';
+      document.getElementById('ordinal').value = '';
+    });
+    for (const sheet of [filterSheet, noteSheet, overviewSheet]) {
+      sheet.addEventListener('click', event => {
+        if (event.target === sheet) closeSheet(sheet);
+      });
+    }
+
+    function updateConnection() {
+      const element = document.getElementById('connection');
+      element.textContent = navigator.onLine ? '已連線' : '離線';
+      element.classList.toggle('offline', !navigator.onLine);
+      updateActionAvailability();
+    }
+    window.addEventListener('online', updateConnection);
+    window.addEventListener('offline', updateConnection);
+
+    async function boot() {
+      restoreFilters();
+      updateConnection();
+      const shouldFallbackFromEmptyAiQueue = (
+        state.filters.reviewStatus === 'unreviewed'
+        && state.filters.aiReviewStatus === 'pass'
+        && !state.filters.category
+        && !state.filters.subject
+        && !state.filters.year
+        && !state.filters.ordinal
+        && !state.filters.search
+      );
+      await loadCandidates();
+      if (shouldFallbackFromEmptyAiQueue && state.filteredCount === 0) {
+        state.filters.aiReviewStatus = '';
+        saveFilters();
+        await loadCandidates();
+        showToast('目前尚無 AI 通過題，已顯示全部未看題目');
+      }
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/mobile/sw.js', {scope: '/mobile/'}).catch(() => {});
+      }
+    }
+    boot();
+  </script>
+</body>
+</html>

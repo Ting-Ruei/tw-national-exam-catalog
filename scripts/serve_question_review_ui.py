@@ -41,15 +41,21 @@ try:
 except ImportError:  # pragma: no cover - UI can still run without formal sync helpers
     formal_promote = None
 
+from question_group_detection import (
+    GROUP_CONTINUATION_RE,
+    GROUP_COUNT_RE,
+    GROUP_COUNT_SQL_RE,
+    GROUP_PREFIX_RANGE_RE,
+    group_count_from_text,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
+MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
-GROUP_CONTINUATION_RE = re.compile(r"^\s*[（(]?\s*(承上題|呈上題|上題|前述)\s*[）)]?[，,、：:]?", re.I)
-GROUP_PREFIX_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})\s*(?=\S)")
-GROUP_COUNT_RE = re.compile(r"回答(?:下列|以下)\s*(\d{1,2})\s*題")
 VISUAL_DEPENDENCY_RE = re.compile(
     r"(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表|心電圖|X\s*光|X光|超音波|切片圖|染色圖|鏡檢圖|尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖)",
     re.I,
@@ -61,7 +67,8 @@ RESET_REVIEW_ACTIONS = {"unreviewed", "reset_review"}
 AI_RESET_REVIEW_ACTIONS = {"unreviewed", "reset_review", "reset_ai_review"}
 GROUP_REVIEW_ACTIONS = {"confirm_not_group", "confirm_group", "reset_group_review"}
 VISUAL_REVIEW_ACTIONS = {"human_review_pdf_visual"}
-NON_QUESTION_REVIEW_ACTIONS = GROUP_REVIEW_ACTIONS | VISUAL_REVIEW_ACTIONS
+MOBILE_REVIEW_ACTIONS = {"mobile_defer", "mobile_resume"}
+NON_QUESTION_REVIEW_ACTIONS = GROUP_REVIEW_ACTIONS | VISUAL_REVIEW_ACTIONS | MOBILE_REVIEW_ACTIONS
 QUESTION_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "exclude", "unblock", "comment", "reviewed", *RESET_REVIEW_ACTIONS}
 ANSWER_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "unblock", "comment", "reviewed", *RESET_REVIEW_ACTIONS}
 QUESTION_READY_ACTIONS = {"accept", "unblock"}
@@ -316,6 +323,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
+        "--mobile-port",
+        type=int,
+        default=None,
+        help="Optional second listener whose root serves only the mobile triage UI.",
+    )
+    parser.add_argument(
         "--auto-reload-candidates",
         action="store_true",
         help="Automatically reload large candidate/issue files when they change. Disabled by default to avoid memory spikes during review.",
@@ -451,6 +464,8 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 continue
             key = event.get("candidate_key")
             if not key:
+                continue
+            if event.get("action") in MOBILE_REVIEW_ACTIONS:
                 continue
             if event.get("action") in GROUP_REVIEW_ACTIONS:
                 counts[key] = counts.get(key, 0) + 1
@@ -1095,6 +1110,83 @@ def html_page() -> bytes:
     return PAGE_HTML.encode("utf-8")
 
 
+def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
+    """Return a mobile Review UI asset without exposing arbitrary project files."""
+    route = path.rstrip("/") or "/"
+    route_map = {
+        "/mobile": ("mobile.html", "text/html; charset=utf-8", "no-store"),
+        "/mobile/manifest.webmanifest": (
+            "mobile.webmanifest",
+            "application/manifest+json; charset=utf-8",
+            "public, max-age=3600",
+        ),
+        "/mobile/sw.js": (
+            "mobile-sw.js",
+            "text/javascript; charset=utf-8",
+            "no-cache",
+        ),
+    }
+    asset = route_map.get(route)
+    if asset:
+        filename, content_type, cache_control = asset
+        try:
+            return (MOBILE_UI_ROOT / filename).read_bytes(), content_type, cache_control
+        except OSError:
+            return None
+    if route == "/mobile/icon.png":
+        try:
+            encoded = (MOBILE_UI_ROOT / "mobile-icon.png.b64").read_text(encoding="ascii")
+            icon = base64.b64decode("".join(encoded.split()), validate=True)
+            return icon, "image/png", "public, max-age=86400"
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def mobile_review_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map the phone's intentionally small decision vocabulary to review events."""
+    disposition = str(payload.get("disposition") or "").strip()
+    action_by_disposition = {
+        "accept": "accept",
+        "reject": "block",
+        "note": "needs_review",
+        "defer": "mobile_defer",
+        "resume": "mobile_resume",
+    }
+    action = action_by_disposition.get(disposition)
+    if action is None:
+        raise ValueError("disposition must be accept, reject, note, defer, or resume")
+    candidate_key = str(payload.get("candidate_key") or "").strip()
+    if not candidate_key:
+        raise ValueError("candidate_key is required")
+    notes = str(payload.get("notes") or "").strip()
+    if disposition == "note" and not notes:
+        raise ValueError("notes are required for note disposition")
+    correction = normalized_correction(payload.get("correction"))
+    ai_followup_requested = disposition in {"reject", "note"}
+    event = {
+        "candidate_key": candidate_key,
+        "action": action,
+        "notes": notes,
+        "reviewer": str(payload.get("reviewer") or "local"),
+        "source": "mobile_triage",
+        "review_surface": "mobile",
+        "mobile_disposition": disposition,
+        "mobile_only_tag": disposition in {"defer", "resume"},
+        "ai_followup": {
+            "requested": ai_followup_requested,
+            "stage": "pdf_remediation_proposal" if ai_followup_requested else "none",
+            "inspect_source_pdf": ai_followup_requested,
+            "apply_only_approved_rules": True,
+            "new_rule_requires_human_approval": True,
+            "auto_accept_allowed": False,
+        },
+    }
+    if correction:
+        event["correction"] = correction
+    return event
+
+
 class ReviewState:
     def __init__(
         self,
@@ -1639,32 +1731,25 @@ class ReviewState:
                             concat_ws('|', category, subject, year, ordinal, source_registry_key) AS session_key
                         FROM filtered
                     ),
-                    suspects AS (
+                    suspects AS MATERIALIZED (
                         SELECT *
                         FROM keyed
                         WHERE group_ref <> ''
                            OR group_action IN ('confirm_group', 'confirm_not_group', 'reset_group_review')
-                           OR stem ~ '回答(下列|以下)[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
+                           OR stem ~ '{GROUP_COUNT_SQL_RE}'
                            OR stem ~ '^[[:space:]]*[（(]?[[:space:]]*(承上題|呈上題|上題|前述)'
                            OR stem ~ '^[[:space:]]*[0-9]{{1,3}}[[:space:]]*(-|－|~|～|至|到)[[:space:]]*[0-9]{{1,3}}'
                     ),
-                    wanted AS (
-                        SELECT DISTINCT
-                            f.raw_candidate_json,
-                            f.category,
-                            f.subject,
-                            CASE WHEN f.year ~ '^[0-9]+$' THEN f.year::integer ELSE 0 END AS year_sort,
-                            CASE WHEN f.ordinal ~ '^[0-9]+$' THEN f.ordinal::integer ELSE 0 END AS ordinal_sort,
-                            f.qn,
-                            f.candidate_key
+                    wanted_keys AS (
+                        SELECT DISTINCT f.candidate_key
                         FROM keyed f
                         JOIN suspects s ON s.session_key = f.session_key
                         WHERE
                             (s.group_action IN ('confirm_group', 'confirm_not_group', 'reset_group_review') AND f.candidate_key = s.candidate_key)
                             OR (s.group_ref <> '' AND f.group_ref = s.group_ref)
                             OR (
-                                s.stem ~ '回答(下列|以下)[[:space:]]*[0-9]{{1,2}}[[:space:]]*題'
-                                AND f.qn BETWEEN s.qn AND s.qn + COALESCE(NULLIF(substring(s.stem from '回答(?:下列|以下)[[:space:]]*([0-9]{{1,2}})[[:space:]]*題'), '')::integer, 1) - 1
+                                s.stem ~ '{GROUP_COUNT_SQL_RE}'
+                                AND f.qn BETWEEN s.qn AND s.qn + 20
                             )
                             OR (
                                 s.stem ~ '^[[:space:]]*[（(]?[[:space:]]*(承上題|呈上題|上題|前述)'
@@ -1675,9 +1760,16 @@ class ReviewState:
                                 AND f.qn BETWEEN s.qn AND s.qn + 10
                             )
                     )
-                    SELECT raw_candidate_json
-                    FROM wanted
-                    ORDER BY category, subject, year_sort DESC, ordinal_sort DESC, qn, candidate_key
+                    SELECT f.raw_candidate_json
+                    FROM keyed f
+                    JOIN wanted_keys w USING (candidate_key)
+                    ORDER BY
+                        f.category,
+                        f.subject,
+                        CASE WHEN f.year ~ '^[0-9]+$' THEN f.year::integer ELSE 0 END DESC,
+                        CASE WHEN f.ordinal ~ '^[0-9]+$' THEN f.ordinal::integer ELSE 0 END DESC,
+                        f.qn,
+                        f.candidate_key
                     LIMIT %s
                     """,
                     [*values, row_limit],
@@ -1846,7 +1938,7 @@ latest_question AS (
         e.id
     FROM exam.question_review_events e
     JOIN scoped_candidates USING (candidate_key)
-    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
     ORDER BY e.candidate_key, e.id DESC
 ),
 latest_visual AS (
@@ -2203,7 +2295,7 @@ latest_question AS (
         e.id
     FROM exam.question_review_events e
     JOIN scoped_candidates USING (candidate_key)
-    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
     ORDER BY e.candidate_key, e.id DESC
 ),
 latest_answer AS (
@@ -2312,7 +2404,7 @@ filtered AS (
                         WITH latest_question AS (
                             SELECT DISTINCT ON (candidate_key) candidate_key, action, created_at, id
                             FROM exam.question_review_events
-                            WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                            WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                             ORDER BY candidate_key, id DESC
                         )
                         SELECT count(*)
@@ -2494,7 +2586,7 @@ filtered AS (
                     SELECT action, corrected_candidate_json, event_json, notes, reviewer, created_at
                     FROM exam.question_review_events
                     WHERE candidate_key = %s
-                      AND action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                      AND action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                     ORDER BY id DESC
                     LIMIT 1
                     """,
@@ -2521,6 +2613,16 @@ filtered AS (
             return self._sql_latest_question_review_event(candidate_key) or {}
         return self.latest_reviews.get(candidate_key) or {}
 
+    def ai_suggestion_apply_allowed(self, candidate_key: str) -> bool:
+        """An AI patch may only be applied after an item is genuinely unreviewed.
+
+        This is intentionally checked server-side as well as in the browser. A
+        closed human review must first receive an explicit reset_review event
+        from an approved catch report; an AI suggestion is never that approval.
+        """
+        latest = self.current_question_review(candidate_key)
+        return not latest or latest.get("action") in RESET_REVIEW_ACTIONS
+
     def _sql_question_review_maps(
         self,
         keys: list[str],
@@ -2542,6 +2644,8 @@ filtered AS (
                     (keys,),
                 )
                 for key, action, correction, event_json, notes, reviewer, created_at in cur.fetchall():
+                    if action in MOBILE_REVIEW_ACTIONS:
+                        continue
                     if action in NON_QUESTION_REVIEW_ACTIONS:
                         counts[key] = counts.get(key, 0) + 1
                         continue
@@ -2606,6 +2710,64 @@ filtered AS (
                     )
                     latest[key] = event
         return latest
+
+    def _mobile_review_maps(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        key_set = {str(key or "") for key in keys if str(key or "")}
+        if not key_set:
+            return {}
+        latest: dict[str, dict[str, Any]] = {}
+        if self.sql_review_enabled:
+            with self._sql_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (candidate_key)
+                            candidate_key,
+                            action,
+                            event_json,
+                            notes,
+                            reviewer,
+                            created_at
+                        FROM exam.question_review_events
+                        WHERE candidate_key = ANY(%s)
+                          AND action IN ('mobile_defer', 'mobile_resume')
+                        ORDER BY candidate_key, id DESC
+                        """,
+                        (list(key_set),),
+                    )
+                    for key, action, event_json, notes, reviewer, created_at in cur.fetchall():
+                        event = self._db_event_value(
+                            event_json,
+                            {
+                                "candidate_key": key,
+                                "action": action,
+                                "notes": notes,
+                                "reviewer": reviewer,
+                                "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            },
+                        )
+                        latest[str(key)] = event
+        elif self.review_log.exists():
+            with self.review_log.open(encoding="utf-8") as review_file:
+                for line in review_file:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    key = str(event.get("candidate_key") or "")
+                    if key in key_set and event.get("action") in MOBILE_REVIEW_ACTIONS:
+                        latest[key] = event
+        return {
+            key: {
+                "deferred": event.get("action") == "mobile_defer",
+                "action": event.get("action"),
+                "updated_at": event.get("created_at"),
+                "reviewer": event.get("reviewer"),
+            }
+            for key, event in latest.items()
+        }
 
     def _sql_latest_event_maps(
         self,
@@ -3448,6 +3610,7 @@ filtered AS (
         ai_superseded = human_review_supersedes_ai(latest_review, latest_ai_review)
         ai_audit = None if ai_superseded else historical_ai_audit
         ai_suggestion, ai_suggestion_changes = ai_suggested_correction(copy, ai_audit)
+        ai_suggestion_allowed = bool(ai_suggestion and (latest_review is None))
         copy["ai_review"] = {
             "status": "reviewed" if latest_ai_review else "unreviewed",
             "active": bool(latest_ai_review and not ai_superseded),
@@ -3463,8 +3626,15 @@ filtered AS (
             "summary": ai_audit.get("summary") if isinstance(ai_audit, dict) else None,
             "findings": ai_audit.get("findings") if isinstance(ai_audit, dict) else [],
             "labels": ai_audit.get("labels") if isinstance(ai_audit, dict) else [],
+            "checks": ai_audit.get("checks") if isinstance(ai_audit, dict) else {},
             "suggested_correction": ai_suggestion,
             "suggested_changes": ai_suggestion_changes,
+            "suggestion_apply_allowed": ai_suggestion_allowed,
+            "suggestion_apply_reason": (
+                "題目目前未審，可套用後進行人工複核。"
+                if ai_suggestion_allowed
+                else "此題已有人工審核。請先核准 AI 抓漏清單並建立退回未審事件，才可套用 AI 建議。"
+            ) if ai_suggestion else None,
             "provider": latest_ai_review.get("provider") if latest_ai_review else None,
             "model": latest_ai_review.get("model") if latest_ai_review else None,
             "updated_at": latest_ai_review.get("created_at") if latest_ai_review else None,
@@ -3711,15 +3881,15 @@ filtered AS (
                 if (payload.get("group_review") or {}).get("action") == "confirm_not_group":
                     continue
                 stem = str(payload.get("stem") or "")
-                count_match = GROUP_COUNT_RE.search(stem)
+                group_count = group_count_from_text(stem)
                 prefix_match = GROUP_PREFIX_RANGE_RE.search(stem)
                 start = number
                 end = 0
                 if prefix_match:
                     start = int(prefix_match.group(1))
                     end = int(prefix_match.group(2))
-                elif count_match:
-                    end = start + int(count_match.group(1)) - 1
+                elif group_count:
+                    end = start + group_count - 1
                 if not (start <= number <= end <= start + 20):
                     continue
                 group_ref = f"q{start:03d}-q{end:03d}"
@@ -4056,6 +4226,14 @@ filtered AS (
                 focus_payload = self.candidate_payload(focus_item)
                 focus_payload["focus_injected"] = True
                 payloads.insert(0, focus_payload)
+        mobile_reviews = self._mobile_review_maps(
+            [str(payload.get("candidate_key") or "") for payload in payloads]
+        )
+        for payload in payloads:
+            payload["mobile_review"] = mobile_reviews.get(
+                str(payload.get("candidate_key") or ""),
+                {"deferred": False, "action": None, "updated_at": None, "reviewer": None},
+            )
         return {
             "candidates": payloads,
             "total_count": len(self.candidates),
@@ -4084,6 +4262,7 @@ filtered AS (
         formal_question_map = self._sql_formal_question_map(keys)
         latest_reviews, review_counts, latest_reset_reviews = self._sql_question_review_maps(keys)
         latest_group_reviews = self._sql_group_review_maps(keys)
+        mobile_reviews = self._mobile_review_maps(keys)
         latest_answer_reviews, answer_review_counts, _answer_reset_reviews = self._sql_latest_event_maps(
             "exam.answer_review_events",
             keys,
@@ -4098,21 +4277,24 @@ filtered AS (
 
         payloads: list[dict[str, Any]] = []
         for item in rows:
-            payloads.append(
-                self.candidate_payload(
-                    item,
-                    issues_by_key=issues_by_key,
-                    latest_reviews=latest_reviews,
-                    review_counts=review_counts,
-                    latest_reset_reviews=latest_reset_reviews,
-                    latest_answer_reviews=latest_answer_reviews,
-                    answer_review_counts=answer_review_counts,
-                    latest_ai_reviews=latest_ai_reviews,
-                    ai_review_counts=ai_review_counts,
-                    formal_question_map=formal_question_map,
-                    latest_group_reviews=latest_group_reviews,
-                )
+            payload = self.candidate_payload(
+                item,
+                issues_by_key=issues_by_key,
+                latest_reviews=latest_reviews,
+                review_counts=review_counts,
+                latest_reset_reviews=latest_reset_reviews,
+                latest_answer_reviews=latest_answer_reviews,
+                answer_review_counts=answer_review_counts,
+                latest_ai_reviews=latest_ai_reviews,
+                ai_review_counts=ai_review_counts,
+                formal_question_map=formal_question_map,
+                latest_group_reviews=latest_group_reviews,
             )
+            payload["mobile_review"] = mobile_reviews.get(
+                str(item.get("candidate_key") or ""),
+                {"deferred": False, "action": None, "updated_at": None, "reviewer": None},
+            )
+            payloads.append(payload)
         return {
             "candidates": payloads,
             "total_count": total_count,
@@ -4304,7 +4486,7 @@ latest_question AS (
         e.id
     FROM exam.question_review_events e
     JOIN scoped_candidates USING (candidate_key)
-    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
     ORDER BY e.candidate_key, e.id DESC
 ),
 latest_answer AS (
@@ -5587,8 +5769,11 @@ filtered_sheets AS (
         self._review_log_signature = file_signature(self.review_log)
         storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
         if key:
-            self.review_counts[key] = self.review_counts.get(key, 0) + 1
-            if event.get("action") in GROUP_REVIEW_ACTIONS:
+            if event.get("action") not in MOBILE_REVIEW_ACTIONS:
+                self.review_counts[key] = self.review_counts.get(key, 0) + 1
+            if event.get("action") in MOBILE_REVIEW_ACTIONS:
+                pass
+            elif event.get("action") in GROUP_REVIEW_ACTIONS:
                 self.latest_group_reviews[key] = event
             elif event.get("action") in RESET_REVIEW_ACTIONS:
                 self.latest_reviews.pop(key, None)
@@ -5873,7 +6058,7 @@ filtered_sheets AS (
                     WITH latest AS (
                         SELECT DISTINCT ON (candidate_key) candidate_key, action
                         FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                         ORDER BY candidate_key, id DESC
                     )
                     SELECT
@@ -5906,7 +6091,7 @@ filtered_sheets AS (
                     WITH latest AS (
                         SELECT DISTINCT ON (candidate_key) candidate_key, action
                         FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                         ORDER BY candidate_key, id DESC
                     )
                     SELECT count(*)
@@ -5944,7 +6129,7 @@ filtered_sheets AS (
                     WITH latest_question AS (
                         SELECT DISTINCT ON (candidate_key) candidate_key, action
                         FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                         ORDER BY candidate_key, id DESC
                     ),
                     latest_answer AS (
@@ -6019,7 +6204,7 @@ filtered_sheets AS (
                     WITH latest AS (
                         SELECT DISTINCT ON (candidate_key) candidate_key, action
                         FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
                         ORDER BY candidate_key, id DESC
                     ),
                     latest_answer AS (
@@ -6212,6 +6397,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
 
+    def send_mobile_asset(self, path: str, *, head_only: bool = False) -> bool:
+        asset = mobile_asset_response(path)
+        if asset is None:
+            return False
+        data, content_type, cache_control = asset
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", cache_control)
+        if path.rstrip("/") == "/mobile/sw.js":
+            self.send_header("Service-Worker-Allowed", "/mobile/")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(data)
+        return True
+
     def send_json(self, payload: Any, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
@@ -6226,6 +6427,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path, head_only=True):
+            return
         if parsed.path == "/":
             data = html_page()
             self.send_response(200)
@@ -6252,6 +6455,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path):
+            return
         if parsed.path == "/":
             data = html_page()
             self.send_response(200)
@@ -6342,7 +6547,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/preferences", "/api/reload-candidates"}:
+        if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/preferences", "/api/reload-candidates"}:
             self.send_error(404, "Not found")
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -6353,6 +6558,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
             return
         self.state.refresh_event_logs()
+        if parsed.path == "/api/mobile-review":
+            try:
+                event = mobile_review_event(payload)
+                saved_event = self.state.append_review(event)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+                return
+            except SqlWriteError as exc:
+                self.send_json({"ok": False, "error": f"SQL write failed: {exc}"}, status=500)
+                return
+            self.send_json(
+                {
+                    "ok": True,
+                    "review_log": str(self.state.review_log),
+                    "event": saved_event,
+                    "ai_followup": event["ai_followup"],
+                }
+            )
+            return
         if parsed.path == "/api/reload-candidates":
             force = bool(payload.get("force"))
             status = self.state.reload_candidate_data(force=force, block=False)
@@ -6676,12 +6900,54 @@ class Handler(BaseHTTPRequestHandler):
                 payload.pop("correction", None)
             else:
                 payload["correction"] = correction
+        if payload.get("source") == "ai_suggestion" and not self.state.ai_suggestion_apply_allowed(str(payload.get("candidate_key") or "")):
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": "AI 建議不能覆寫已完成人工審核的題目；請先由核准的抓漏清單退回未審。",
+                },
+                status=409,
+            )
+            return
         try:
             saved_event = self.state.append_review(payload)
         except SqlWriteError as exc:
             self.send_json({"ok": False, "error": f"SQL write failed: {exc}"}, status=500)
             return
         self.send_json({"ok": True, "review_log": str(self.state.review_log), "event": saved_event})
+
+
+class MobileHandler(Handler):
+    """Constrained listener for the phone workflow on its own port."""
+
+    def do_HEAD(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/":
+            self.path = "/mobile/"
+            super().do_HEAD()
+            return
+        if parsed.path.startswith("/mobile"):
+            super().do_HEAD()
+            return
+        self.send_error(404, "Not found")
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/":
+            self.path = "/mobile/"
+            super().do_GET()
+            return
+        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/reload-status"}:
+            super().do_GET()
+            return
+        self.send_error(404, "Not found")
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/mobile-review":
+            super().do_POST()
+            return
+        self.send_error(404, "Not found")
 
 
 PAGE_HTML = r"""<!doctype html>
@@ -6696,6 +6962,7 @@ PAGE_HTML = r"""<!doctype html>
     body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { min-height:76px; display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); background:white; flex-wrap:wrap; }
     header strong { font-size:16px; }
+    .mobile-review-link { min-height:32px; display:inline-flex; align-items:center; padding:0 10px; border-radius:999px; background:#0b7a4b; color:white; font-size:13px; font-weight:700; text-decoration:none; }
     header input, header select { height:32px; border:1px solid var(--line); border-radius:6px; padding:0 8px; background:white; max-width:180px; }
     main { display:grid; grid-template-columns: 320px minmax(360px, 1fr) minmax(420px, 1.2fr); height:calc(100vh - 76px); }
     aside { border-right:1px solid var(--line); overflow:auto; background:white; }
@@ -6742,6 +7009,7 @@ PAGE_HTML = r"""<!doctype html>
     .issue.info { border-color:#6b9bff; }
     .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
     button.action { border:1px solid var(--line); border-radius:6px; padding:8px 10px; background:white; cursor:pointer; }
+    button.action:disabled { cursor:not-allowed; opacity:.52; }
     button.action.accept { border-color:#8bd9b1; color:var(--ok); }
     button.action.block { border-color:#f2a19b; color:var(--bad); }
     button.action.primary-accept, button.action.primary-block { min-height:46px; min-width:132px; font-size:16px; font-weight:700; color:white; border:0; }
@@ -6852,6 +7120,7 @@ PAGE_HTML = r"""<!doctype html>
 <body>
   <header>
     <strong>國考題候選審核</strong>
+    <a class="mobile-review-link" href="/mobile/">手機快審</a>
     <div class="mode-tabs">
       <button id="modeQuestion" onclick="setMode('question')">審題</button>
       <button id="modeAnswer" onclick="setMode('answer')">答案</button>
@@ -6911,7 +7180,7 @@ PAGE_HTML = r"""<!doctype html>
     </select>
     <select id="groupReviewStatus" class="group-only">
       <option value="">全部題組審核</option>
-      <option value="unreviewed" selected>題組未審核</option>
+      <option value="unreviewed">題組未審核</option>
       <option value="reviewed">題組已審核</option>
       <option value="confirmed_group">已確認題組</option>
       <option value="confirmed_not_group">已確認非題組</option>
@@ -7000,6 +7269,8 @@ const STATUS_LABELS = {
   ai_pass: 'AI 通過',
   ai_needs_review: 'AI 有疑點',
   ai_block: 'AI 阻擋',
+  ai_not_applicable: '不適用',
+  ai_unavailable: '模型不可用',
   source: '來源層',
   pre_ingestion: '解析暫存',
   human_review: '人工審核',
@@ -7724,6 +7995,13 @@ function setMode(nextMode) {
   if (mode === normalizedMode) return;
   const preferredKey = current?.candidate_key || null;
   mode = normalizedMode;
+  // A question-level subject filter can hide every group in the same exam.
+  // Group mode starts at the category/session scope; users can reselect a
+  // subject deliberately if they want to narrow the list.
+  if (mode === 'group') {
+    const subject = document.getElementById('subjectFilter');
+    if (subject) subject.value = '';
+  }
   if (mode === 'answer') currentPdfKind = 'official_pdf';
   if (mode === 'visual') {
     const visualSelect = document.getElementById('visualStatus');
@@ -8545,6 +8823,20 @@ function renderDetail() {
   const aiRawNote = aiReview.raw_audit_status && aiReview.raw_audit_status !== aiReview.audit_status
     ? `<span class="meta">raw: ${esc(aiReview.raw_audit_status)} → 顯示為 ${esc(aiReview.audit_status)}</span>`
     : '';
+  const aiCheckLabels = {
+    ocr_text: 'OCR 文字',
+    meaning: '題義',
+    visual: '圖片題',
+    group: '題組題'
+  };
+  const aiChecks = Object.entries(aiReview.checks || {}).map(([key, check]) => {
+    const status = check?.status || 'unreviewed';
+    const label = check?.label || aiCheckLabels[key] || key;
+    return `<span class="badge ${esc(status)}">${esc(label)}：${esc(aiStatusLabel(status))}</span>`;
+  }).join(' ');
+  const aiChecksPanel = aiChecks
+    ? `<p class="meta">獨立初審：${aiChecks}</p>`
+    : '';
   const aiFindings = (aiReview.findings || []).map(finding => `
     <div class="issue ${esc(finding.severity || 'info')}">
       <b>${esc(finding.severity || 'info')} / ${esc(finding.code || '')}</b>
@@ -8558,13 +8850,14 @@ function renderDetail() {
     <div class="manual-correction">
       <b>AI 幫你標出的建議校正</b>
       ${aiSuggestedChanges ? `<ul>${aiSuggestedChanges}</ul>` : '<p class="meta">AI 提供了校正內容，請人工確認後套用。</p>'}
-      <button class="action" onclick="applyAiSuggestedCorrection()">套用 AI 建議校正</button>
-      <span class="meta">套用後會保留在需人工複核狀態，不會自動通過。</span>
+      <button class="action" onclick="applyAiSuggestedCorrection()" ${aiReview.suggestion_apply_allowed ? '' : 'disabled'}>${aiReview.suggestion_apply_allowed ? '套用 AI 建議校正' : '待核准退回未審'}</button>
+      <span class="meta">${esc(aiReview.suggestion_apply_reason || '套用後會保留在需人工複核狀態，不會自動通過。')}</span>
     </div>` : '';
   const aiPanel = aiNeedsAttention ? `
     <div class="panel"><h2>AI 格式稽核</h2><div class="body">
       <p class="meta">${aiReview.status === 'reviewed' ? `上次：${esc(aiReview.provider || '')} ${esc(aiReview.model || '')} / ${esc(aiReview.audit_status || '')} ${esc(aiReview.updated_at || '')}` : '尚未稽核'}</p>
       <p>${aiBadge} ${aiRawNote}</p>
+      ${aiChecksPanel}
       ${aiReview.summary ? `<p>${esc(aiReview.summary)}</p>` : '<p class="meta">AI 稽核只檢查字形、格式、選項、圖表與 parser 結構疑點，不會修改人工審核狀態。</p>'}
       ${aiCorrectionPanel}
       ${aiFindings || '<div class="meta">目前沒有 AI 稽核疑點。</div>'}
@@ -9059,10 +9352,22 @@ function manualGroupByFilterPanel(prefix = 'globalManualGroup', options = {}) {
     </div>`;
 }
 
+function clearGroupSubjectFilter() {
+  const subject = document.getElementById('subjectFilter');
+  if (!subject || !subject.value) return;
+  subject.value = '';
+  applyFilter();
+}
+
 function emptyGroupManualPanel() {
+  const subject = filterValue('subjectFilter');
+  const subjectFilterHint = subject
+    ? `<p class="meta">目前仍套用科目篩選「${esc(subject)}」，可能會把同一考別的其他題組篩掉。<button class="secondary" onclick="clearGroupSubjectFilter()">清除科目篩選並重新顯示題組</button></p>`
+    : '';
   return `
     <div class="panel"><h2>目前沒有符合條件的題組候選</h2><div class="body">
       <p class="meta">若 PDF 明確存在題組，但系統沒有抓到，可以在這裡直接用目前篩選條件與題號範圍補登題組。</p>
+      ${subjectFilterHint}
       ${manualGroupByFilterPanel('emptyManualGroup', {
         title: '手動建立題組',
         description: '此操作只寫入題組層，不改變審題、答案核對或正式入庫狀態。請確認上方篩選已鎖定同一份試題後再送出。'
@@ -9135,6 +9440,10 @@ function applyCorrectionToCurrent(correction) {
 
 async function applyAiSuggestedCorrection() {
   if (!current || mode !== 'question') return;
+  if (!current.ai_review?.suggestion_apply_allowed) {
+    window.alert(current.ai_review?.suggestion_apply_reason || '此題須先核准退回未審，才能套用 AI 建議。');
+    return;
+  }
   const suggestion = current.ai_review?.suggested_correction;
   if (!suggestion || Object.keys(suggestion).length === 0) return;
   const existingCorrection = current.review?.correction || collectCorrection();
@@ -9150,7 +9459,7 @@ async function applyAiSuggestedCorrection() {
   }
   const currentAction = current.review?.action || current.review?.status || '';
   const action = ['block', 'exclude'].includes(currentAction) ? currentAction : 'needs_review';
-  await review(action, correction, {stayOnCurrent: true});
+  await review(action, correction, {stayOnCurrent: true, source: 'ai_suggestion'});
 }
 
 async function saveCorrection(acceptAfterSave) {
@@ -9681,6 +9990,7 @@ async function review(action, correction = null, options = {}) {
   const wasReviewed = (current.review?.status || '') === 'reviewed';
   const notes = options.notes ?? document.getElementById('notes')?.value ?? document.getElementById('manualAssetNotes')?.value ?? '';
   const body = {candidate_key: current.candidate_key, action, notes, reviewer: 'local'};
+  if (options.source) body.source = options.source;
   if (correction) {
     body.correction = correction;
   } else if (current.review?.correction) {
@@ -9814,9 +10124,26 @@ def main() -> None:
         auto_reload_candidates=args.auto_reload_candidates,
         review_backend=args.review_backend,
     )
+    if args.mobile_port == args.port:
+        raise SystemExit("--mobile-port must differ from --port")
     Handler.state = state
+    MobileHandler.state = state
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    mobile_server = None
+    mobile_thread = None
+    if args.mobile_port is not None:
+        mobile_server = ThreadingHTTPServer((args.host, args.mobile_port), MobileHandler)
+        mobile_thread = threading.Thread(
+            target=mobile_server.serve_forever,
+            name="mobile-review-ui",
+            daemon=True,
+        )
+        mobile_thread.start()
     print(f"Review UI: http://{args.host}:{args.port}/")
+    if args.mobile_port is not None:
+        print(f"Mobile Review UI: http://{args.host}:{args.mobile_port}/")
+    else:
+        print(f"Mobile Review UI: http://{args.host}:{args.port}/mobile/")
     print(f"Candidate JSONL: {candidate_path}")
     print(f"Issue CSV: {issue_path}")
     print(f"Review log: {review_log}")
@@ -9825,6 +10152,13 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
+    finally:
+        server.server_close()
+        if mobile_server is not None:
+            mobile_server.shutdown()
+            mobile_server.server_close()
+        if mobile_thread is not None:
+            mobile_thread.join(timeout=5)
 
 
 if __name__ == "__main__":
