@@ -78,8 +78,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--year-start", type=int)
     parser.add_argument("--year-end", type=int)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=0,
+        help="Per-invocation timeout. Default 0 runs without a timeout; use a positive value only when explicitly needed.",
+    )
     parser.add_argument("--force", action="store_true", help="Run even when expected markdown already exists.")
+    parser.add_argument(
+        "--batch-by-output-parent",
+        action="store_true",
+        help=(
+            "Process selected PDFs sharing an output directory in one MinerU invocation. "
+            "This avoids reloading the local VLM for every PDF and is recommended for incremental batches."
+        ),
+    )
     parser.add_argument(
         "--exclude-remote-reserved",
         action="store_true",
@@ -309,11 +322,33 @@ def run_batch(
 
     try:
         with ThreadPoolExecutor(max_workers=batch_args.workers) as executor:
-            futures = [executor.submit(run_one, batch_args.mineru_bin, task, batch_args.timeout_seconds, batch_args.force) for task in tasks]
+            if batch_args.batch_by_output_parent:
+                grouped: dict[str, list[MinerUTask]] = {}
+                for task in tasks:
+                    grouped.setdefault(task.output_parent, []).append(task)
+                input_root = run_dir / "batch_inputs"
+                futures = [
+                    executor.submit(
+                        run_group,
+                        batch_args.mineru_bin,
+                        group_tasks,
+                        batch_args.timeout_seconds,
+                        batch_args.force,
+                        input_root / f"group_{index:04d}",
+                    )
+                    for index, (_, group_tasks) in enumerate(sorted(grouped.items()), start=1)
+                ]
+            else:
+                futures = [
+                    executor.submit(run_one, batch_args.mineru_bin, task, batch_args.timeout_seconds, batch_args.force)
+                    for task in tasks
+                ]
             for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                print(json.dumps(asdict(result), ensure_ascii=False), flush=True)
+                completed = future.result()
+                completed_results = completed if isinstance(completed, list) else [completed]
+                for result in completed_results:
+                    results.append(result)
+                    print(json.dumps(asdict(result), ensure_ascii=False), flush=True)
                 write_csv(result_csv, [asdict(item) for item in results])
     finally:
         summary = summarize(tasks, results)
@@ -338,6 +373,10 @@ def path_exists(path: Path) -> bool:
         return path.exists()
     except OSError:
         return False
+
+
+def subprocess_timeout(timeout_seconds: int) -> int | None:
+    return timeout_seconds if timeout_seconds > 0 else None
 
 
 def output_dir_for_stem(output_parent: Path, stem: str) -> Path:
@@ -406,7 +445,7 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
     ]
     started = time.monotonic()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=subprocess_timeout(timeout_seconds))
         elapsed = round(time.monotonic() - started, 3)
         output_dir = output_dir_for_stem(output_parent, stem)
         md_count, image_count = count_outputs(output_dir)
@@ -439,6 +478,114 @@ def run_one(mineru_bin: Path, task: MinerUTask, timeout_seconds: int, force: boo
             expected_md=task.expected_md,
             error_tail=str(exc)[-1200:],
         )
+
+
+def run_group(
+    mineru_bin: Path,
+    tasks: list[MinerUTask],
+    timeout_seconds: int,
+    force: bool,
+    input_dir: Path,
+) -> list[MinerUResult]:
+    """Run one MinerU process for PDFs that share the same output parent."""
+    if not tasks:
+        return []
+    output_parents = {task.output_parent for task in tasks}
+    if len(output_parents) != 1:
+        raise ValueError(f"Grouped MinerU tasks must share one output parent: {sorted(output_parents)}")
+
+    results: list[MinerUResult] = []
+    pending: list[MinerUTask] = []
+    for task in tasks:
+        output_parent = Path(task.output_parent)
+        expected_md = Path(task.expected_md)
+        stem = Path(task.pdf_path).stem
+        output_dir = output_dir_for_stem(output_parent, stem)
+        if output_markdown_exists(output_parent, stem, expected_md) and not force:
+            md_count, image_count = count_outputs(output_dir)
+            results.append(
+                MinerUResult(
+                    task_id=task.task_id,
+                    status="skipped_existing",
+                    returncode=0,
+                    elapsed_seconds=0.0,
+                    md_count=md_count,
+                    image_count=image_count,
+                    pdf_path=task.pdf_path,
+                    output_parent=task.output_parent,
+                    expected_md=task.expected_md,
+                    error_tail="",
+                )
+            )
+        else:
+            pending.append(task)
+
+    if not pending:
+        return results
+
+    input_dir.mkdir(parents=True, exist_ok=True)
+    for task in pending:
+        source = Path(task.pdf_path).resolve()
+        link = input_dir / source.name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(source)
+
+    output_parent = Path(pending[0].output_parent)
+    output_parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(mineru_bin),
+        "-p",
+        str(input_dir),
+        "-o",
+        str(output_parent),
+        "-m",
+        MINERU_METHOD,
+        "-b",
+        MINERU_BACKEND,
+        "--image-analysis",
+        str(MINERU_IMAGE_ANALYSIS).lower(),
+    ]
+    started = time.monotonic()
+    returncode: int | None
+    error_tail = ""
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=subprocess_timeout(timeout_seconds))
+        returncode = completed.returncode
+        error_tail = (completed.stderr or completed.stdout)[-1200:]
+    except subprocess.TimeoutExpired as exc:
+        returncode = None
+        error_tail = str(exc)[-1200:]
+    elapsed = round(time.monotonic() - started, 3)
+
+    for task in pending:
+        task_output_parent = Path(task.output_parent)
+        expected_md = Path(task.expected_md)
+        stem = Path(task.pdf_path).stem
+        output_dir = output_dir_for_stem(task_output_parent, stem)
+        md_count, image_count = count_outputs(output_dir)
+        exists = output_markdown_exists(task_output_parent, stem, expected_md)
+        if exists:
+            status = "ok"
+        elif returncode is None:
+            status = "timeout"
+        else:
+            status = "error"
+        results.append(
+            MinerUResult(
+                task_id=task.task_id,
+                status=status,
+                returncode=returncode,
+                elapsed_seconds=elapsed,
+                md_count=md_count,
+                image_count=image_count,
+                pdf_path=task.pdf_path,
+                output_parent=task.output_parent,
+                expected_md=task.expected_md,
+                error_tail="" if exists else error_tail,
+            )
+        )
+    return results
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:

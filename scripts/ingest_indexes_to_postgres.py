@@ -85,6 +85,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mineru-limit", type=int, default=2)
     parser.add_argument("--postgres-db", default=os.environ.get("POSTGRES_DB", "tw_national_exam_dev"))
     parser.add_argument("--postgres-user", default=os.environ.get("POSTGRES_USER", "national_exam"))
+    parser.add_argument("--postgres-host", default=os.environ.get("PGHOST", ""), help="Optional remote PostgreSQL host.")
+    parser.add_argument("--postgres-port", type=int, default=int(os.environ.get("PGPORT", "5432")))
+    parser.add_argument(
+        "--artifact-source-project-root",
+        type=Path,
+        default=PROJECT_ROOT,
+        help="Local project root used to read MinerU artifacts.",
+    )
+    parser.add_argument(
+        "--artifact-destination-project-root",
+        type=Path,
+        help="Optional Review host project root stored in remote asset paths.",
+    )
     return parser.parse_args()
 
 
@@ -98,20 +111,33 @@ def latest_path(directory: Path, pattern: str, required: bool = True) -> Path | 
 
 
 def psql(args: argparse.Namespace, sql: str | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    cmd = [
-        "docker",
-        "compose",
-        "exec",
-        "-T",
-        "postgres",
-        "psql",
+    cmd = ["docker", "compose", "exec", "-T"]
+    if args.postgres_host and os.environ.get("PGPASSWORD"):
+        cmd.extend(["-e", "PGPASSWORD"])
+    cmd.append("postgres")
+    if args.postgres_host:
+        cmd.extend(
+            [
+                "sh",
+                "-lc",
+                'if [ -z "${PGPASSWORD:-}" ]; then export PGPASSWORD="$POSTGRES_PASSWORD"; fi; exec psql "$@"',
+                "psql",
+                "-h",
+                args.postgres_host,
+                "-p",
+                str(args.postgres_port),
+            ]
+        )
+    else:
+        cmd.append("psql")
+    cmd.extend([
         "-U",
         args.postgres_user,
         "-d",
         args.postgres_db,
         "-v",
         "ON_ERROR_STOP=1",
-    ]
+    ])
     if sql is not None:
         cmd.extend(["-c", sql])
     try:
@@ -174,9 +200,32 @@ def asset_row(asset_type: str, path: Path, asset_key_prefix: str) -> dict[str, o
     }
 
 
-def image_paths_for_mineru_result(row: dict[str, str]) -> list[Path]:
-    output_parent = Path(row["output_parent"])
-    stem = Path(row["pdf_path"]).stem
+def source_artifact_path(args: argparse.Namespace, value: str) -> Path:
+    path = Path(value)
+    destination_root = args.artifact_destination_project_root
+    if destination_root:
+        try:
+            relative = path.relative_to(destination_root)
+        except ValueError:
+            return path
+        return args.artifact_source_project_root / relative
+    return path
+
+
+def destination_artifact_path(args: argparse.Namespace, path: Path) -> Path:
+    destination_root = args.artifact_destination_project_root
+    if not destination_root:
+        return path
+    try:
+        relative = path.resolve().relative_to(args.artifact_source_project_root.resolve())
+    except ValueError:
+        return path
+    return destination_root / relative
+
+
+def image_paths_for_mineru_result(args: argparse.Namespace, row: dict[str, str]) -> list[Path]:
+    output_parent = source_artifact_path(args, row["output_parent"])
+    stem = source_artifact_path(args, row["pdf_path"]).stem
     output_dir = output_parent / stem
     if not output_dir.exists():
         return []
@@ -186,20 +235,29 @@ def image_paths_for_mineru_result(row: dict[str, str]) -> list[Path]:
     )
 
 
-def mineru_sample_rows(path: Path | None, limit: int) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+def mineru_sample_rows(
+    args: argparse.Namespace,
+    path: Path | None,
+    limit: int,
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     if path is None or limit <= 0:
         return [], []
-    rows = [row for row in read_rows(path, MINERU_FIELDS) if row["status"] == "ok" and Path(row["expected_md"]).exists()]
+    rows = [
+        row
+        for row in read_rows(path, MINERU_FIELDS)
+        if row["status"] in {"ok", "skipped_existing"} and source_artifact_path(args, row["expected_md"]).exists()
+    ]
     rows = rows[:limit]
 
     asset_rows: list[dict[str, object]] = []
     seen: set[str] = set()
     for row in rows:
-        md_path = Path(row["expected_md"])
+        md_path = source_artifact_path(args, row["expected_md"])
         candidates = [("markdown", md_path, "mineru-md")]
-        candidates.extend(("page_image", image, "mineru-image") for image in image_paths_for_mineru_result(row))
+        candidates.extend(("page_image", image, "mineru-image") for image in image_paths_for_mineru_result(args, row))
         for asset_type, path_item, prefix in candidates:
             record = asset_row(asset_type, path_item, prefix)
+            record["asset_path"] = str(destination_artifact_path(args, path_item))
             if record["asset_key"] in seen:
                 continue
             seen.add(str(record["asset_key"]))
@@ -292,7 +350,7 @@ VALUES ('moex', '考選部歷年試題與解答查詢系統', 'https://wwwq.moex
 ON CONFLICT (code) DO UPDATE
 SET name = EXCLUDED.name,
     base_url = EXCLUDED.base_url,
-    notes = EXCLUDED.notes;
+    notes = COALESCE(exam.source_systems.notes, EXCLUDED.notes);
 
 INSERT INTO exam.exam_sessions (source_system_id, exam_code, roc_year, exam_ordinal, exam_label, source_url)
 SELECT DISTINCT
@@ -325,7 +383,7 @@ ON CONFLICT (category_code, official_category_name) DO UPDATE
 SET normalized_category_name = EXCLUDED.normalized_category_name,
     group_name = EXCLUDED.group_name,
     is_locked27 = EXCLUDED.is_locked27,
-    notes = EXCLUDED.notes;
+    notes = COALESCE(exam.categories.notes, EXCLUDED.notes);
 
 INSERT INTO exam.subjects (category_id, subject_code, official_subject_name, normalized_subject_name, canonical_subject_name, notes)
 SELECT
@@ -343,7 +401,7 @@ WHERE s.subject_code <> '' AND s.official_subject_name <> ''
 GROUP BY c.id, s.subject_code, s.official_subject_name
 ON CONFLICT (category_id, subject_code, official_subject_name) DO UPDATE
 SET normalized_subject_name = EXCLUDED.normalized_subject_name,
-    notes = EXCLUDED.notes;
+    notes = COALESCE(exam.subjects.notes, EXCLUDED.notes);
 
 INSERT INTO exam.official_documents (
     registry_key,
@@ -487,7 +545,7 @@ INSERT INTO exam.mineru_runs (
 SELECT
     od.id,
     pdf_asset.id,
-    CASE WHEN r.status = 'ok' THEN 'succeeded' ELSE 'failed' END,
+    CASE WHEN r.status IN ('ok', 'skipped_existing') THEN 'succeeded' ELSE 'failed' END,
     'MinerU 3.1.7',
     r.output_parent,
     jsonb_build_object(
@@ -540,7 +598,7 @@ def main() -> None:
     pdf_rows = read_rows(args.pdf_index, PDF_FIELDS)
     pair_rows_source = read_rows(args.pair_index, read_rows(args.pair_index, PAIR_FIELDS)[0].keys() if False else PAIR_FIELDS)
     pair_rows = [{field: row.get(field, "") for field in PAIR_FIELDS} for row in pair_rows_source]
-    mineru_rows, mineru_assets = mineru_sample_rows(args.mineru_results, args.mineru_limit)
+    mineru_rows, mineru_assets = mineru_sample_rows(args, args.mineru_results, args.mineru_limit)
 
     create_staging(args)
     copy_table(args, "exam_staging.pdf_asset_index", pdf_rows, PDF_FIELDS)

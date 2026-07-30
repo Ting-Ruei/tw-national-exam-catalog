@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 from functools import lru_cache
 from dataclasses import dataclass
@@ -19,14 +20,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from question_group_detection import (
+    explicit_group_ref,
+    group_candidate_metrics,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 PAIR_INDEX_DIR = ASSET_ROOT / "Registry" / "paired_indexes"
 OUTPUT_ROOT = ASSET_ROOT / "30_normalized_items"
 MINERU_ROOT = ASSET_ROOT / "20_mineru_output"
 TEXT_NORMALIZATION_REGISTRY = PROJECT_ROOT / "configs" / "text_normalization_rules.json"
-PARSER_VERSION = "moex_mineru_candidate_v0.11"
+PARSER_VERSION = "moex_mineru_candidate_v0.12"
+
+AUTOMATION_BLOCKING_DOCUMENT_ISSUE_CODES = frozenset(
+    {
+        "no_questions_parsed",
+        "duplicate_question_number",
+        "question_number_gap",
+        "question_answer_number_set_mismatch",
+        "answer_number_set_unusable",
+        "fixed_exam_question_count_missing",
+        "fixed_exam_question_count_out_of_range",
+    }
+)
 
 OPTION_RE = re.compile(r"(?m)^\s*(?:[（(]([A-E])[\)）]|([A-E])[\.\、．·]|([A-E])-(?=[a-z]))\s*")
 INLINE_OPTION_RE = re.compile(
@@ -39,16 +57,24 @@ INLINE_OPTION_RE = re.compile(
 )
 # A question number may be written as `33.` or legacy `33 題幹`, but
 # ultrasound/text-image OCR often starts lines with decimals such as `1.7 3.4`.
-# Do not treat decimal values as question starts.
-QUESTION_START_RE_MODERN = re.compile(r"(?m)^(\d{1,3})(?:[\.．](?!\d)|、)\s*(\S.*)$")
-QUESTION_START_RE_LEGACY = re.compile(r"(?m)^(\d{1,3})(?:[\.．](?!\d)\s*|、\s*|\s+)(\S.*)$")
+# Keep excluding ordinary decimals while accepting the common MOEX collision
+# `44.45 歲...`, which means question 44 about a 45-year-old patient.
+AGE_AFTER_QUESTION_NUMBER_RE = (
+    r"(?=\d{1,3}\s*(?:歲|日齡|週齡|周齡|月齡|years?\s+old|year-old))"
+)
+QUESTION_START_RE_MODERN = re.compile(
+    rf"(?mi)^(\d{{1,3}})(?:[\.．](?:(?!\d)|{AGE_AFTER_QUESTION_NUMBER_RE})|、)\s*(\S.*)$"
+)
+QUESTION_START_RE_LEGACY = re.compile(
+    rf"(?mi)^(\d{{1,3}})(?:[\.．](?:(?!\d)|{AGE_AFTER_QUESTION_NUMBER_RE})\s*|、\s*|\s+)(\S.*)$"
+)
+QUESTION_START_RE_NUMERIC_STEM = re.compile(
+    r"(?mi)^(\d{1,3})[\.．]\s*(\d\S?.*)$"
+)
 IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HTML_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.I)
 DETAILS_BLOCK_RE = re.compile(r"<details\b.*?</details>", re.S | re.I)
 STANDALONE_IMAGE_RE = re.compile(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$")
-GROUP_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:至|到|~|～|-|－)\s*(\d{1,3})\s*題")
-GROUP_PREFIX_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-|－|~|～|至|到)\s*(\d{1,3})\s*(?=\S)")
-GROUP_COUNT_RE = re.compile(r"回答(?:下列|以下)\s*(\d{1,2})\s*題")
 IMAGE_HINT_RE = re.compile(r"(下列圖|如圖|如附圖|附圖|圖示|圖中|圖片|照片|影像如下|X光片|x光片|切片圖|表中|下表|附表|如下表)")
 EXAM_HEADER_HINT_RE = re.compile(r"(代號|類科名稱|科目名稱|考試時間|座號|本試題|禁止使用電子計算器|單一選擇題)")
 SUSPICIOUS_RE = re.compile(r"(�|□|▯|_{3,}|\.{6,}|。{3,})")
@@ -224,6 +250,22 @@ class Issue:
     severity: str
     message: str
     issue_json: dict[str, Any]
+
+
+def issue_code_counts(issues: list[Issue]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for issue in issues:
+        counts[issue.issue_code] = counts.get(issue.issue_code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def automation_blocking_issue_counts(issues: list[Issue]) -> dict[str, int]:
+    counts = issue_code_counts(issues)
+    return {
+        code: counts[code]
+        for code in sorted(AUTOMATION_BLOCKING_DOCUMENT_ISSUE_CODES)
+        if counts.get(code)
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -861,9 +903,22 @@ def is_exam_header_block(
     return header_hits >= 5 and option_count > 20
 
 
+def structural_option_markers(body: str) -> list[re.Match[str]]:
+    """Return option markers without biomedical/prose tokens such as `B-cell`."""
+    markers = list(INLINE_OPTION_RE.finditer(body))
+    if markers:
+        return [
+            marker
+            for marker in markers
+            if not option_marker_is_hyphen_word(marker)
+            and not option_marker_is_inline_list_item(marker)
+        ]
+    return list(OPTION_RE.finditer(body))
+
+
 def split_merged_unnumbered_questions(number: str, body: str) -> list[tuple[str, str]]:
     """Split blocks where MinerU omitted the next question number but kept a second A-D option set."""
-    markers = list(INLINE_OPTION_RE.finditer(body)) or list(OPTION_RE.finditer(body))
+    markers = structural_option_markers(body)
     labels = [option_marker_label(marker) for marker in markers]
     if len(labels) < 8 or labels[:4] != ["A", "B", "C", "D"] or labels[4:8] != ["A", "B", "C", "D"]:
         return [(number, body)]
@@ -872,22 +927,68 @@ def split_merged_unnumbered_questions(number: str, body: str) -> list[tuple[str,
     except ValueError:
         return [(number, body)]
 
-    between = body[markers[3].end() : option_marker_start(markers[4])]
-    line_matches = list(re.finditer(r"(?m)\S.*$", between))
-    if len(line_matches) < 2:
+    between_start = markers[3].end()
+    between = body[between_start : option_marker_start(markers[4])]
+    line_matches = list(re.finditer(r"(?m)^\s*(\S.*)$", between))
+    question_lines = [
+        match
+        for match in line_matches
+        if re.search(r"[？?]\s*$", match.group(1).strip())
+        or re.search(
+            r"(?:下列|有關|關於|何者|何種|何項|哪一|為何|即為|相當於|多少).*[：:]?\s*$",
+            match.group(1).strip(),
+        )
+    ]
+    table_matches = list(re.finditer(r"(?i)<table\b", between))
+    image_matches = list(STANDALONE_IMAGE_RE.finditer(between))
+    if question_lines:
+        second_stem_start = question_lines[-1].start()
+    elif table_matches:
+        second_stem_start = table_matches[-1].start()
+    elif image_matches:
+        second_stem_start = image_matches[-1].start()
+    else:
         return [(number, body)]
-    second_stem = line_matches[-1]
-    second_stem_text = second_stem.group(0).strip()
-    if not re.search(r"[？?]\s*$", second_stem_text):
+    if not between[:second_stem_start].strip():
         return [(number, body)]
 
-    split_at = markers[3].end() + second_stem.start()
+    split_at = between_start + second_stem_start
     return [(number, body[:split_at]), (next_number, body[split_at:])]
+
+
+def split_merged_stem_only_question(number: str, body: str) -> list[tuple[str, str]]:
+    """Recover an unnumbered image/table question even when its A-D are one image."""
+    markers = structural_option_markers(body)
+    labels = [option_marker_label(marker) for marker in markers]
+    if labels != ["A", "B", "C", "D"]:
+        return [(number, body)]
+    try:
+        next_number = str(int(number) + 1)
+    except ValueError:
+        return [(number, body)]
+    tail_start = markers[3].end()
+    tail = body[tail_start:]
+    stem_matches = list(
+        re.finditer(
+            r"(?m)^\s*((?:下列|有關|關於|何者|何種|何項|哪一|為何)\S.*)$",
+            tail,
+        )
+    )
+    for stem_match in stem_matches:
+        before = tail[: stem_match.start()]
+        after = tail[stem_match.start() :]
+        if not before.strip():
+            continue
+        if not (IMAGE_REF_RE.search(after) or re.search(r"(?i)<table\b", after)):
+            continue
+        split_at = tail_start + stem_match.start()
+        return [(number, body[:split_at]), (next_number, body[split_at:])]
+    return [(number, body)]
 
 
 def split_merged_inline_numbered_question(number: str, body: str) -> list[tuple[str, str]]:
     """Split blocks where the next question number is glued to the previous option text."""
-    markers = list(INLINE_OPTION_RE.finditer(body)) or list(OPTION_RE.finditer(body))
+    markers = structural_option_markers(body)
     labels = [option_marker_label(marker) for marker in markers]
     if len(labels) < 4 or labels[:4] != ["A", "B", "C", "D"]:
         return [(number, body)]
@@ -913,7 +1014,16 @@ def split_merged_inline_numbered_question(number: str, body: str) -> list[tuple[
 def split_merged_questions(number: str, body: str) -> list[tuple[str, str]]:
     parts: list[tuple[str, str]] = []
     for split_number, split_body in split_merged_inline_numbered_question(number, body):
-        parts.extend(split_merged_unnumbered_questions(split_number, split_body))
+        for unnumbered_number, unnumbered_body in split_merged_unnumbered_questions(
+            split_number,
+            split_body,
+        ):
+            parts.extend(
+                split_merged_stem_only_question(
+                    unnumbered_number,
+                    unnumbered_body,
+                )
+            )
     return parts
 
 
@@ -969,6 +1079,7 @@ def parse_questions(
             match
             for match in pattern.finditer(markdown)
             if normalize_question_number(match.group(1)) != "0"
+            and 1 <= int(normalize_question_number(match.group(1)) or "0") <= 200
             and not is_spurious_legacy_numeric_start(match, year)
             and not is_spurious_legacy_markup_start(match, year)
             and (
@@ -1013,7 +1124,77 @@ def parse_questions(
                 )
         return questions, header_count
 
-    primary_starts = starts_for(question_start_re_for_year(year))
+    def recover_numeric_stem_starts(
+        starts: list[re.Match[str]],
+    ) -> list[re.Match[str]]:
+        """Recover `N.<numeric stem>` only when it closes a numbering gap."""
+        recognized = {
+            int(normalize_question_number(match.group(1)) or "0")
+            for match in starts
+        }
+        candidates: dict[int, re.Match[str]] = {}
+        for match in QUESTION_START_RE_NUMERIC_STEM.finditer(markdown):
+            number = int(normalize_question_number(match.group(1)) or "0")
+            if 1 <= number <= 200 and number not in recognized:
+                candidates.setdefault(number, match)
+        recovered: list[re.Match[str]] = []
+        candidate_numbers = sorted(candidates)
+        index = 0
+        while index < len(candidate_numbers):
+            run = [candidate_numbers[index]]
+            index += 1
+            while (
+                index < len(candidate_numbers)
+                and candidate_numbers[index] == run[-1] + 1
+            ):
+                run.append(candidate_numbers[index])
+                index += 1
+            left_anchor = run[0] - 1 in recognized
+            right_anchor = run[-1] + 1 in recognized
+            boundary_run = (
+                run[0] == 1
+                and right_anchor
+            ) or (
+                left_anchor
+                and recognized
+                and run[-1] > max(recognized)
+            )
+            if (left_anchor and right_anchor) or boundary_run:
+                recovered.extend(candidates[number] for number in run)
+                recognized.update(run)
+        return sorted([*starts, *recovered], key=lambda match: match.start())
+
+    def filter_nonmonotonic_starts(
+        starts: list[re.Match[str]],
+    ) -> list[re.Match[str]]:
+        """Keep exam numbering monotonic while leaving detected headers harmless."""
+        filtered: list[re.Match[str]] = []
+        highest_real_number = 0
+        for index, start in enumerate(starts):
+            number = int(normalize_question_number(start.group(1)) or "0")
+            body_start = start.start(2)
+            body_end = starts[index + 1].start() if index + 1 < len(starts) else len(markdown)
+            body = markdown[body_start:body_end]
+            if is_exam_header_block(
+                body,
+                number=str(number),
+                year=year,
+                category=category,
+                subject=subject,
+            ):
+                filtered.append(start)
+                continue
+            if number <= highest_real_number:
+                continue
+            filtered.append(start)
+            highest_real_number = number
+        return filtered
+
+    primary_starts = filter_nonmonotonic_starts(
+        recover_numeric_stem_starts(
+            starts_for(question_start_re_for_year(year))
+        )
+    )
     questions, header_count = parse_from_starts(primary_starts)
 
     # Some post-106 MinerU outputs still use the historical bare-number shape
@@ -1102,36 +1283,50 @@ def parse_answers(markdown: str) -> dict[str, dict[str, Any]]:
     return answers
 
 
+def parse_answer_question_numbers(markdown: str) -> set[int]:
+    """Return every numeric question number explicitly listed by an answer table.
+
+    This intentionally reads the question-number rows independently from answer
+    values.  A blank/voided answer cell must not make the corresponding official
+    question number disappear from the document-level alignment check.
+    """
+    numbers: set[int] = set()
+    for table in re.findall(r"<table.*?>(.*?)</table>", markdown, flags=re.S | re.I):
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", table, flags=re.S | re.I)
+        for row in rows:
+            cells = table_cells(row)
+            if not cells or cells[0] not in {"題號", "題序"}:
+                continue
+            for cell in cells[1:]:
+                normalized = normalize_question_number(cell)
+                if normalized is not None:
+                    numbers.add(int(normalized))
+    return numbers
+
+
+def answer_number_set_is_authoritative(
+    answer_numbers: set[int],
+    candidate_numbers: set[int],
+) -> tuple[bool, str]:
+    """Reject partial/corrupted answer extracts before comparing number sets."""
+    if not answer_numbers:
+        return False, "no_answer_question_numbers"
+    highest = max(answer_numbers)
+    if highest <= 0 or min(answer_numbers) != 1:
+        return False, "answer_numbers_do_not_start_at_one"
+    expected = set(range(1, highest + 1))
+    density = len(answer_numbers) / len(expected)
+    if density < 0.9:
+        return False, "answer_number_set_is_not_dense"
+    extras = candidate_numbers - answer_numbers
+    allowed_extras = max(5, int(len(answer_numbers) * 0.1))
+    if len(extras) > allowed_extras:
+        return False, "answer_extract_looks_partial"
+    return True, "authoritative"
+
+
 def infer_group_ref(stem: str, number: str) -> str | None:
-    for start, end in GROUP_RANGE_RE.findall(stem):
-        try:
-            n = int(number)
-            a = int(start)
-            b = int(end)
-        except ValueError:
-            continue
-        if a <= n <= b:
-            return f"q{a:03d}-q{b:03d}"
-    prefix = GROUP_PREFIX_RANGE_RE.search(stem)
-    if prefix:
-        try:
-            n = int(number)
-            a = int(prefix.group(1))
-            b = int(prefix.group(2))
-        except ValueError:
-            return None
-        if a <= n <= b:
-            return f"q{a:03d}-q{b:03d}"
-    count = GROUP_COUNT_RE.search(stem)
-    if count:
-        try:
-            a = int(number)
-            b = a + int(count.group(1)) - 1
-        except ValueError:
-            return None
-        if b >= a:
-            return f"q{a:03d}-q{b:03d}"
-    return None
+    return explicit_group_ref(stem, number)
 
 
 def propagate_group_refs(parsed_questions: list[dict[str, Any]]) -> None:
@@ -1291,7 +1486,11 @@ def expected_question_numbers_for_document(candidates: list[dict[str, Any]]) -> 
     return set()
 
 
-def document_issues(candidates: list[dict[str, Any]], source_registry_key: str) -> list[Issue]:
+def document_issues(
+    candidates: list[dict[str, Any]],
+    source_registry_key: str,
+    answer_numbers: set[int] | None = None,
+) -> list[Issue]:
     issues: list[Issue] = []
     numbers: list[int] = []
     by_number: dict[int, list[str]] = {}
@@ -1313,6 +1512,54 @@ def document_issues(candidates: list[dict[str, Any]], source_registry_key: str) 
     if missing:
         key = candidates[0]["candidate_key"]
         add_issue(issues, key, source_registry_key, "", "question_number_gap", "warning", "題號不連續，可能有缺題或 parser 未切到。", {"missing_numbers": missing[:50]})
+    if answer_numbers is not None:
+        candidate_number_set = set(numbers)
+        authoritative, reason = answer_number_set_is_authoritative(
+            answer_numbers,
+            candidate_number_set,
+        )
+        key = candidates[0]["candidate_key"]
+        if not authoritative:
+            add_issue(
+                issues,
+                key,
+                source_registry_key,
+                "",
+                "answer_number_set_unusable",
+                "blocked",
+                "官方答案 Markdown 的題號集合不完整或不可信，無法自動確認題本是否缺題／多題。",
+                {
+                    "reason": reason,
+                    "candidate_count": len(numbers),
+                    "candidate_distinct_count": len(candidate_number_set),
+                    "answer_number_count": len(answer_numbers),
+                    "answer_numbers": sorted(answer_numbers)[:200],
+                },
+            )
+        else:
+            missing_from_candidates = sorted(answer_numbers - candidate_number_set)
+            absent_from_answer_key = sorted(candidate_number_set - answer_numbers)
+            duplicate_numbers = sorted(
+                number for number, keys in by_number.items() if len(keys) > 1
+            )
+            if missing_from_candidates or absent_from_answer_key or duplicate_numbers:
+                add_issue(
+                    issues,
+                    key,
+                    source_registry_key,
+                    "",
+                    "question_answer_number_set_mismatch",
+                    "blocked",
+                    "同一份題本的候選題號與官方答案題號不一致，可能有吞題、重題或誤把頁首切成題目。",
+                    {
+                        "candidate_count": len(numbers),
+                        "candidate_distinct_count": len(candidate_number_set),
+                        "answer_number_count": len(answer_numbers),
+                        "missing_candidate_numbers": missing_from_candidates[:200],
+                        "candidate_numbers_absent_from_answer_key": absent_from_answer_key[:200],
+                        "duplicate_candidate_numbers": duplicate_numbers[:200],
+                    },
+                )
     fixed_expected = expected_question_numbers_for_document(candidates)
     if fixed_expected:
         key = candidates[0]["candidate_key"]
@@ -1452,7 +1699,8 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
         issues.extend(own_issues)
     if not candidates:
         issues.append(Issue("", source_registry_key, "", "no_questions_parsed", "blocked", "題目 markdown 未解析出任何題目。", {"markdown": str(q_md)}))
-    doc_issues = document_issues(candidates, source_registry_key)
+    answer_numbers = parse_answer_question_numbers(a_text)
+    doc_issues = document_issues(candidates, source_registry_key, answer_numbers)
     issues.extend(doc_issues)
     issues_by_key: dict[str, list[Issue]] = {}
     for issue in issues:
@@ -1465,6 +1713,9 @@ def build_candidates_for_pair(row: dict[str, str]) -> tuple[list[dict[str, Any]]
     meta["status"] = "ok"
     meta["candidate_count"] = len(candidates)
     meta["issue_count"] = len(issues)
+    meta["issue_code_counts"] = issue_code_counts(issues)
+    meta["automation_blocking_issue_counts"] = automation_blocking_issue_counts(issues)
+    meta["group_candidate_summary"] = group_candidate_metrics(candidates)
     return candidates, issues, meta
 
 
@@ -1533,10 +1784,15 @@ def main() -> None:
         "paired_documents_seen": len(rows),
         "candidate_count": len(all_candidates),
         "issue_count": len(all_issues),
+        "issue_code_counts": issue_code_counts(all_issues),
+        "automation_blocking_issue_counts": automation_blocking_issue_counts(
+            all_issues
+        ),
         "quality_status_counts": {
             status: sum(1 for item in all_candidates if item.get("quality_status") == status)
             for status in ("pass", "needs_review", "blocked")
         },
+        "group_candidate_summary": group_candidate_metrics(all_candidates),
         "document_status_counts": {
             status: sum(1 for item in document_summaries if item.get("status") == status)
             for status in sorted({item.get("status") for item in document_summaries})
