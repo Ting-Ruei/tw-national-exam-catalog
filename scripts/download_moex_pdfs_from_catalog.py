@@ -367,7 +367,12 @@ def run(args: argparse.Namespace) -> int:
                     }
                 )
                 count += 1
-                if not args.dry_run and args.sleep:
+                # A full-category manifest refresh intentionally revisits many
+                # historical rows so downstream indexes keep their complete
+                # lineage.  Throttle only real network downloads; sleeping for
+                # local `exists` rows makes an incremental refresh needlessly
+                # take several minutes.
+                if not args.dry_run and args.sleep and status == "downloaded":
                     time.sleep(args.sleep)
 
     print(f"catalog rows: {len(rows)}")
