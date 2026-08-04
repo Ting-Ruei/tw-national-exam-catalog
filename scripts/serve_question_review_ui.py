@@ -66,15 +66,40 @@ DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidat
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
+STRUCTURED_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
 VISUAL_DEPENDENCY_RE = re.compile(
     r"(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表|心電圖|X\s*光|X光|超音波|切片圖|染色圖|鏡檢圖|尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖)",
     re.I,
 )
 VISUAL_DEPENDENCY_SQL_RE = r"(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表|心電圖|X\s*光|X光|超音波|切片圖|染色圖|鏡檢圖|尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖)"
-TABLE_DEPENDENCY_SQL_RE = r"(表中|下表|附表|如下表|table)"
+# This must stay synchronized with TABLE_DEPENDENCY_RE below.  The old
+# substring rule also matched ordinary pharmacy prose such as "tablets".
+TABLE_DEPENDENCY_RE = re.compile(
+    r"(表中|下表|附表|如下表|(?<![A-Za-z0-9_])table(?![A-Za-z0-9_]))",
+    re.I,
+)
+TABLE_DEPENDENCY_SQL_RE = r"(表中|下表|附表|如下表|(^|[^[:alnum:]_])table([^[:alnum:]_]|$))"
+LATIN_BINOMIAL_RE = re.compile(r"\b[A-Z][a-z]{3,}\s+[a-z][a-z-]{2,}\b")
+ABBREVIATED_BINOMIAL_RE = re.compile(r"\b[A-Z]\.\s+[a-z][a-z-]{2,}\b")
+CAPSULE_COMPOUND_RE = re.compile(
+    r"(?:荧膜|荚膜|莢膜|萸膜).{0,12}(?:組織|漿菌|孢漿菌|胞漿菌|肥漿菌)"
+    r"|Histoplasma\s+capsulatum",
+    re.IGNORECASE,
+)
+CAPSULE_EXACT_REPLACEMENTS = {
+    # These are exact two-character OCR/簡體 glyph repairs, not a semantic
+    # rewrite of the organism name that follows.  Keeping the replacement at
+    # this boundary lets Review UI offer a safe partial one-click correction
+    # for variants such as ``荧膜組織漿菌`` while leaving the remaining wording
+    # visible for PDF review.
+    "荧膜": "莢膜",
+    "荚膜": "莢膜",
+}
 ANSWER_ISSUE_CODES = {"missing_answer", "missing_answer_markdown", "unexpected_answer_value"}
 RESET_REVIEW_ACTIONS = {"unreviewed", "reset_review"}
 AI_RESET_REVIEW_ACTIONS = {"unreviewed", "reset_review", "reset_ai_review"}
+AI_FEEDBACK_RATINGS = {"up", "down"}
+AI_FEEDBACK_SCOPES = {"question", "group", "visual", "answer"}
 GROUP_REVIEW_ACTIONS = {"confirm_not_group", "confirm_group", "reset_group_review"}
 VISUAL_REVIEW_ACTIONS = {"human_review_pdf_visual"}
 MOBILE_REVIEW_ACTIONS = {"mobile_defer", "mobile_resume"}
@@ -130,6 +155,97 @@ class SqlWriteError(RuntimeError):
     """Raised when SQL-first review persistence cannot be confirmed."""
 
 
+def ai_review_reference(event: dict[str, Any] | None) -> str:
+    """Return a stable reference to the exact AI audit being rated.
+
+    SQL rows expose their numeric event id.  JSONL-only/test backends do not,
+    so they use a content hash over the immutable audit envelope instead.
+    The reference prevents a late click from rating a newer model run.
+    """
+    if not isinstance(event, dict):
+        return ""
+    event_id = event.get("event_id")
+    if event_id not in (None, ""):
+        return f"sql:{event_id}"
+    identity = {
+        key: event.get(key)
+        for key in (
+            "candidate_key",
+            "created_at",
+            "input_hash",
+            "provider",
+            "model",
+            "model_name",
+            "prompt_version",
+            "audit",
+        )
+    }
+    if not any(value not in (None, "", {}, []) for value in identity.values()):
+        return ""
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+def load_ai_feedback_events(
+    path: Path,
+    *,
+    reviewer: str = "local",
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Load the latest feedback per candidate/scope/reviewer from JSONL."""
+    latest: dict[str, dict[str, dict[str, Any]]] = {}
+    if not path.exists():
+        return latest
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("action") != "ai_feedback":
+                continue
+            if reviewer and str(event.get("reviewer") or "local") != reviewer:
+                continue
+            key = str(event.get("candidate_key") or "")
+            scope = str(event.get("audit_scope") or "")
+            if not key or scope not in AI_FEEDBACK_SCOPES:
+                continue
+            latest.setdefault(key, {})[scope] = event
+    return latest
+
+
+def load_ai_learning_events(
+    path: Path,
+    *,
+    reviewer: str = "local",
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Load the latest human-selected training example per candidate/scope."""
+    latest: dict[str, dict[str, dict[str, Any]]] = {}
+    if not path.exists():
+        return latest
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("action") != "ai_learning":
+                continue
+            if reviewer and str(event.get("reviewer") or "local") != reviewer:
+                continue
+            key = str(event.get("candidate_key") or "")
+            scope = str(event.get("audit_scope") or "")
+            if not key or scope not in AI_FEEDBACK_SCOPES:
+                continue
+            latest.setdefault(key, {})[scope] = event
+    return latest
+
+
 def category_matches_filter(category: str, category_filter: str) -> bool:
     normalized_category = normalize_category_name(category)
     if category_filter in CATEGORY_GROUP_FILTERS:
@@ -183,6 +299,7 @@ SQL_ANSWER_CATEGORY_EXPR = (
 
 AI_ANSWER_DEFER_LABELS = {"answer_pair_suspect", "needs_human_review", "pass_likely"}
 AI_OCR_TEXT_REPLACEMENTS = [
+    *CAPSULE_EXACT_REPLACEMENTS.items(),
     ("麸胺", "麩胺"),
     ("麃胺", "麩胺"),
     ("麗胺酸（Glutamic acid）", "麩胺酸（Glutamic acid）"),
@@ -255,6 +372,12 @@ def int_or_zero(value: Any) -> int:
         return 0
 
 
+def has_structured_table_evidence(text: str) -> bool:
+    """Identify actual table cues without treating an English word fragment as a table."""
+
+    return bool(STRUCTURED_TABLE_OPEN_RE.search(text) or TABLE_DEPENDENCY_RE.search(text))
+
+
 def candidate_visual_profile(candidate: dict[str, Any]) -> dict[str, Any]:
     visual_review_status = str(candidate.get("visual_review") or "").strip()
     no_visual_required = visual_review_status == "no_visual_required"
@@ -274,11 +397,14 @@ def candidate_visual_profile(candidate: dict[str, Any]) -> dict[str, Any]:
     existing_refs.extend(ref for ref in option_images if ref and ref.get("exists") is not False)
     text = "\n".join(
         [
-            str(candidate.get("stem") or ""),
+            # The display layer hides table markup. Retain it for classification
+            # so a genuine table cannot disappear before image review.
+            str(candidate.get("stem_with_tables") or candidate.get("stem") or ""),
             str((candidate.get("metadata") or {}).get("raw_block") or ""),
         ]
     )
     has_visual_dependency = bool(VISUAL_DEPENDENCY_RE.search(text)) and not no_visual_required
+    has_structured_table = has_structured_table_evidence(text)
     roles = sorted(
         {
             str(ref.get("asset_role") or ref.get("role") or "image")
@@ -297,6 +423,7 @@ def candidate_visual_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "has_visual_asset": bool(existing_refs),
         "visual_asset_count": len(existing_refs),
         "has_visual_dependency": has_visual_dependency,
+        "has_structured_table": has_structured_table,
         "needs_visual_asset_review": has_visual_dependency and not existing_refs,
         "visual_asset_roles": roles,
         "has_manual_asset": has_manual_asset,
@@ -544,6 +671,12 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 continue
             if event.get("action") in RESET_REVIEW_ACTIONS:
                 counts[key] = counts.get(key, 0) + 1
+                # Reset only reopens the human decision.  A previously saved
+                # text/image/manual-asset correction remains the effective
+                # candidate layer and must not fall back to MinerU raw.
+                previous = latest.get(key) or latest_reset.get(key)
+                if not event.get("correction") and previous and previous.get("correction"):
+                    event["correction"] = previous["correction"]
                 latest.pop(key, None)
                 latest_reset[key] = event
                 continue
@@ -959,14 +1092,17 @@ def normalized_correction(value: Any) -> dict[str, Any]:
                 continue
             image = option.get("image")
             normalized_image = normalized_asset_ref(image) if isinstance(image, dict) else None
-            options.append(
-                {
-                    "key": label[:1],
-                    "text": "" if option.get("text") is None else str(option.get("text")),
-                    "image": normalized_image,
-                    "markup": option.get("markup"),
-                }
-            )
+            normalized_option = {
+                "key": label[:1],
+                "text": "" if option.get("text") is None else str(option.get("text")),
+            }
+            # A text-only AI patch must not erase an existing option image or
+            # markup simply because the compact audit packet omitted it.
+            if normalized_image:
+                normalized_option["image"] = normalized_image
+            if "markup" in option and option.get("markup") is not None:
+                normalized_option["markup"] = option.get("markup")
+            options.append(normalized_option)
         correction["options"] = options
     return correction
 
@@ -1084,6 +1220,66 @@ def ai_audit_is_answer_deferred_only(audit: dict[str, Any]) -> bool:
     return not non_answer_findings
 
 
+def split_ai_audit_scopes(
+    candidate: dict[str, Any],
+    audit: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Separate group-ownership findings from the question audit surface.
+
+    The AI event table is shared for operational simplicity, but the Review UI
+    has distinct ownership: text/notation belongs to 題目, while continuation
+    markers and ranges belong to 題組.  Older LUNA rows stored a group finding
+    in ``field=stem`` with ``recommended_action=review_group``.  Keep that
+    event for history, expose it as ``group_ai_review``, and make the question
+    surface see a pass when the event contains no question-owned finding.
+    """
+    if not isinstance(audit, dict):
+        return audit, None
+    findings = [item for item in audit.get("findings") or [] if isinstance(item, dict)]
+    labels = {str(value) for value in audit.get("labels") or []}
+    group_findings: list[dict[str, Any]] = []
+    question_findings: list[dict[str, Any]] = []
+    stem = str(candidate.get("stem") or "")
+    marker_present = bool(GROUP_CONTINUATION_RE.search(stem))
+    for finding in findings:
+        family = str(finding.get("issue_family") or finding.get("code") or "")
+        route = str(finding.get("route") or "")
+        field = str(finding.get("field") or finding.get("location") or "")
+        observed = str(finding.get("observed") or finding.get("before") or "")
+        is_group = (
+            family == "group_dependency"
+            or route == "group"
+            or (marker_present and bool(re.search(r"承上題|呈上題|上題|前述", observed)))
+        )
+        (group_findings if is_group else question_findings).append(finding)
+    group_only_label = "group_dependency" in labels and not question_findings
+    if not group_findings and not group_only_label:
+        return audit, None
+
+    group_audit = dict(audit)
+    group_audit["audit_scope"] = "group"
+    group_audit["status"] = "needs_review" if group_findings else audit.get("status") or "needs_review"
+    group_audit["recommended_action"] = "review_group"
+    group_audit["findings"] = group_findings
+    group_audit["labels"] = sorted(labels | {"group_dependency"})
+    group_audit.pop("suggested_correction", None)
+    group_audit.pop("suggested_changes", None)
+
+    question_audit = dict(audit)
+    question_audit["audit_scope"] = "question"
+    question_audit["findings"] = question_findings
+    question_audit["labels"] = sorted(labels - {"group_dependency"})
+    if not question_findings:
+        question_audit["status"] = "pass"
+        question_audit["recommended_action"] = "no_action"
+        question_audit["summary"] = "題組延續線索已移交題組審核；題目文字層沒有待處理疑點。"
+        question_audit["reason"] = question_audit["summary"]
+        question_audit.pop("suggested_correction", None)
+        question_audit.pop("suggested_changes", None)
+        question_audit.pop("uncorrected_findings", None)
+    return question_audit, group_audit
+
+
 def effective_ai_audit_status(audit: dict[str, Any] | None, suggested_correction: dict[str, Any] | None = None) -> str | None:
     if not isinstance(audit, dict):
         return None
@@ -1122,8 +1318,82 @@ def human_review_supersedes_ai(
     return human_at is not None and ai_at is not None and human_at >= ai_at
 
 
+def ai_patch_safety_reason(
+    candidate: dict[str, Any],
+    audit: dict[str, Any] | None,
+) -> str | None:
+    """Prevent historical advisory rows from exposing unsafe one-click patches.
+
+    This gate protects old events written before the current sparse-result
+    guardrails.  It is intentionally stricter than the model status: valid
+    scientific abbreviations and translated organism names are source-owned
+    until a deterministic rule or official-PDF mismatch is attached.
+    """
+    if not isinstance(audit, dict):
+        return None
+    content_values = [str(candidate.get("stem") or "")]
+    content_values.extend(
+        str(option.get("text") or "")
+        for option in candidate.get("options") or []
+        if isinstance(option, dict)
+    )
+    fields = "\n".join(content_values)
+    findings = [item for item in audit.get("findings") or [] if isinstance(item, dict)]
+    for finding in findings:
+        route = str(finding.get("route") or "")
+        rule_id = str(finding.get("rule_id") or "").strip()
+        if route == "deterministic" and rule_id:
+            continue
+        field = str(finding.get("field") or finding.get("location") or "")
+        before = str(finding.get("before") or finding.get("observed") or "")
+        after = str(finding.get("after") or finding.get("suggested") or "")
+        if field == "stem":
+            field_value = str(candidate.get("stem") or "")
+        elif field.startswith("option_"):
+            option_key = field[-1].upper()
+            field_value = next(
+                (
+                    str(option.get("text") or "")
+                    for option in candidate.get("options") or []
+                    if isinstance(option, dict)
+                    and str(option.get("key") or "").upper() == option_key
+                ),
+                "",
+            )
+        else:
+            field_value = fields
+        local = "\n".join(
+            [
+                field_value,
+                before,
+                after,
+            ]
+        )
+        verified_capsule_exact = any(
+            source in field_value
+            and (
+                after in {"莢膜", target}
+                or target in after
+                or target in json.dumps(audit.get("suggested_correction") or {}, ensure_ascii=False)
+            )
+            for source, target in CAPSULE_EXACT_REPLACEMENTS.items()
+        )
+        if CAPSULE_COMPOUND_RE.search(local) and not verified_capsule_exact:
+            return (
+                "「莢膜」出現在 Histoplasma capsulatum/組織漿菌完整詞組中；"
+                "只有 active exact rule 已確認的完整詞組可一鍵修正；其他變體仍需核對官方 PDF。"
+            )
+        if not verified_capsule_exact and (
+            ABBREVIATED_BINOMIAL_RE.search(local) or LATIN_BINOMIAL_RE.search(local)
+        ):
+            return "欄位含完整或縮寫拉丁學名；沒有官方 PDF/active exact rule，暫不提供一鍵修正。"
+    return None
+
+
 def ai_suggested_correction(candidate: dict[str, Any], audit: dict[str, Any] | None) -> tuple[dict[str, Any] | None, list[str]]:
     if not isinstance(audit, dict):
+        return None, []
+    if ai_patch_safety_reason(candidate, audit):
         return None, []
     if isinstance(audit.get("suggested_correction"), dict):
         normalized = normalized_correction(audit["suggested_correction"])
@@ -1324,12 +1594,17 @@ class ReviewState:
         self.review_log.parent.mkdir(parents=True, exist_ok=True)
         self.answer_review_log = self.review_log.parent / "answer_review_events.jsonl"
         self.ai_review_log = self.review_log.parent / "question_ai_review_events.jsonl"
+        self.ai_feedback_log = self.review_log.parent / "question_ai_feedback_events.jsonl"
+        self.ai_learning_log = self.review_log.parent / "question_ai_learning_events.jsonl"
         self.preference_path = self.review_log.parent / "review_ui_preferences.json"
         if self.sql_review_enabled:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = {}, {}, {}
             self.latest_group_reviews = {}
             self.latest_answer_reviews, self.answer_review_counts, self.latest_answer_reset_reviews = {}, {}, {}
             self.latest_ai_reviews, self.ai_review_counts = {}, {}
+            self.latest_ai_feedbacks = {}
+            self.latest_ai_learnings = {}
+            self._ensure_ai_feedback_schema()
         else:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = load_review_events(review_log)
             self.latest_group_reviews = load_group_review_events(review_log)
@@ -1338,11 +1613,15 @@ class ReviewState:
                 self.ai_review_log,
                 reset_actions=AI_RESET_REVIEW_ACTIONS,
             )
+            self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
+            self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         self._ai_review_log_signature = file_signature(self.ai_review_log)
+        self._ai_feedback_log_signature = file_signature(self.ai_feedback_log)
+        self._ai_learning_log_signature = file_signature(self.ai_learning_log)
         if self.defer_formal_sync:
             try:
                 self._ensure_formal_sync_queue_schema()
@@ -1479,6 +1758,16 @@ class ReviewState:
             )
             self._ai_review_log_signature = ai_signature
 
+        ai_feedback_signature = file_signature(self.ai_feedback_log)
+        if ai_feedback_signature != self._ai_feedback_log_signature:
+            self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
+            self._ai_feedback_log_signature = ai_feedback_signature
+
+        ai_learning_signature = file_signature(self.ai_learning_log)
+        if ai_learning_signature != self._ai_learning_log_signature:
+            self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
+            self._ai_learning_log_signature = ai_learning_signature
+
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
             raise RuntimeError("SQL review backend is not available.")
@@ -1514,6 +1803,53 @@ class ReviewState:
                     conn.rollback()
                 except Exception:
                     self._discard_sql_connection()
+
+    def _ensure_ai_feedback_schema(self) -> None:
+        """Create the feedback stream on an existing review database."""
+        if not self.sql_review_enabled:
+            return
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS exam.question_ai_feedback_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+                        candidate_key TEXT NOT NULL,
+                        ai_review_event_id BIGINT REFERENCES exam.question_ai_review_events(id) ON DELETE SET NULL,
+                        ai_review_ref TEXT NOT NULL,
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        rating TEXT NOT NULL CHECK (rating IN ('up', 'down')),
+                        reviewer TEXT,
+                        reason TEXT,
+                        feedback_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_question_ai_feedback_candidate
+                        ON exam.question_ai_feedback_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_ai_feedback_rating
+                        ON exam.question_ai_feedback_events (rating, created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS exam.question_ai_learning_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+                        candidate_key TEXT NOT NULL,
+                        ai_review_event_id BIGINT REFERENCES exam.question_ai_review_events(id) ON DELETE SET NULL,
+                        ai_review_ref TEXT NOT NULL,
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        reviewer TEXT,
+                        reason TEXT,
+                        learning_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_question_ai_learning_candidate
+                        ON exam.question_ai_learning_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_ai_learning_created
+                        ON exam.question_ai_learning_events (created_at DESC);
+
+                    """
+                )
+            conn.commit()
 
     def _ensure_formal_sync_queue_schema(self) -> None:
         with self._sql_connect() as conn:
@@ -2032,6 +2368,18 @@ latest_question AS (
     WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
     ORDER BY e.candidate_key, e.id DESC
 ),
+latest_question_correction AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.corrected_candidate_json,
+        e.created_at,
+        e.id
+    FROM exam.question_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.corrected_candidate_json IS NOT NULL
+      AND e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'mobile_defer', 'mobile_resume')
+    ORDER BY e.candidate_key, e.id DESC
+),
 latest_visual AS (
     SELECT DISTINCT ON (e.candidate_key)
         e.candidate_key,
@@ -2075,6 +2423,23 @@ latest_question_ai AS (
         OR COALESCE(e.audit_json, '{{}}'::jsonb) ? 'visual_status'
         OR COALESCE(e.audit_json->>'stage', '') = 'image'
     )
+      AND NOT (
+        COALESCE(e.recommended_action, '') = 'review_group'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+                CASE
+                    WHEN jsonb_typeof(COALESCE(e.audit_json->'findings', '[]'::jsonb)) = 'array'
+                        THEN COALESCE(e.audit_json->'findings', '[]'::jsonb)
+                    ELSE '[]'::jsonb
+                END
+            ) AS group_finding(value)
+            WHERE NOT (
+                COALESCE(group_finding.value->>'issue_family', group_finding.value->>'code', '') = 'group_dependency'
+                OR COALESCE(group_finding.value->>'route', '') = 'group'
+            )
+        )
+      )
     ORDER BY e.candidate_key, e.id DESC
 ),
 latest_visual_ai AS (
@@ -2108,9 +2473,11 @@ base AS (
         c.candidate_key,
         c.question_number,
         c.stem_text,
-        c.raw_candidate_json || jsonb_strip_nulls(jsonb_build_object(
+        c.raw_candidate_json
+        || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb)
+        || jsonb_strip_nulls(jsonb_build_object(
             'visual_review',
-            NULLIF(COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', ''), ''),
+            NULLIF(COALESCE(lv.corrected_candidate_json->>'visual_review', lqc.corrected_candidate_json->>'visual_review', ''), ''),
             'visual_ai_status',
             NULLIF(COALESCE(
                 lvai.audit_json->>'visual_status',
@@ -2153,7 +2520,7 @@ base AS (
             ELSE 'pass'
         END AS question_quality_status,
         lq.action AS review_action,
-        lq.corrected_candidate_json,
+        lqc.corrected_candidate_json,
         lq.event_json AS review_event_json,
         lq.notes AS review_notes,
         la.action AS answer_review_action,
@@ -2163,27 +2530,27 @@ base AS (
         lai.model_name AS ai_model_name,
         lai.audit_json AS ai_audit_json,
         (
-            COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', '') = 'no_visual_required'
+            COALESCE(lv.corrected_candidate_json->>'visual_review', lqc.corrected_candidate_json->>'visual_review', '') = 'no_visual_required'
         ) AS no_visual_required,
-        COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', '') AS visual_review_status,
+        COALESCE(lv.corrected_candidate_json->>'visual_review', lqc.corrected_candidate_json->>'visual_review', '') AS visual_review_status,
         (
             CASE
-                WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'image_refs') = 'array'
-                    THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'image_refs')
+                WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'image_refs') = 'array'
+                    THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'image_refs')
                 ELSE 0
             END > 0
             OR CASE
-                WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs') = 'array'
-                    THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs')
+                WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs') = 'array'
+                    THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs')
                 ELSE 0
             END > 0
-            OR jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'stem_image') = 'object'
+            OR jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'stem_image') = 'object'
             OR EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements(
                     CASE
-                        WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
-                            THEN (c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options'
+                        WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
+                            THEN (c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'options'
                         ELSE '[]'::jsonb
                     END
                 ) AS option_row(value)
@@ -2196,25 +2563,25 @@ base AS (
                 c.stem_text,
                 c.raw_candidate_json->>'stem',
                 c.raw_candidate_json->'metadata'->>'raw_block',
-                lq.corrected_candidate_json->>'stem'
+                lqc.corrected_candidate_json->>'stem'
             ) ~* '{VISUAL_DEPENDENCY_SQL_RE}'
         ) AS has_visual_dependency,
         (
-            position('<table' in lower(concat_ws(' ', c.raw_candidate_json->>'stem', lq.corrected_candidate_json->>'stem'))) > 0
+            position('<table' in lower(concat_ws(' ', c.raw_candidate_json->>'stem', lqc.corrected_candidate_json->>'stem'))) > 0
             OR concat_ws(
                 ' ',
                 c.stem_text,
                 c.raw_candidate_json->>'stem',
                 c.raw_candidate_json->'metadata'->>'raw_block',
-                lq.corrected_candidate_json->>'stem'
+                lqc.corrected_candidate_json->>'stem'
             ) ~* '{TABLE_DEPENDENCY_SQL_RE}'
         ) AS has_structured_table,
         EXISTS (
             SELECT 1
             FROM jsonb_array_elements(
                 CASE
-                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'image_refs') = 'array'
-                        THEN (c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'image_refs'
+                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'image_refs') = 'array'
+                        THEN (c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'image_refs'
                     ELSE '[]'::jsonb
                 END
             ) AS ref_row(value)
@@ -2226,8 +2593,8 @@ base AS (
             SELECT 1
             FROM jsonb_array_elements(
                 CASE
-                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs') = 'array'
-                        THEN (c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs'
+                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs') = 'array'
+                        THEN (c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'answer_image_refs'
                     ELSE '[]'::jsonb
                 END
             ) AS answer_ref_row(value)
@@ -2238,8 +2605,8 @@ base AS (
             SELECT 1
             FROM jsonb_array_elements(
                 CASE
-                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
-                        THEN (c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options'
+                    WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
+                        THEN (c.raw_candidate_json || COALESCE(lqc.corrected_candidate_json, '{{}}'::jsonb))->'options'
                     ELSE '[]'::jsonb
                 END
             ) AS option_manual_row(value)
@@ -2297,6 +2664,7 @@ base AS (
     LEFT JOIN exam.questions fq ON fq.question_key = c.candidate_key
     LEFT JOIN issue_flags i ON i.candidate_key = c.candidate_key
     LEFT JOIN latest_question lq ON lq.candidate_key = c.candidate_key
+    LEFT JOIN latest_question_correction lqc ON lqc.candidate_key = c.candidate_key
     LEFT JOIN latest_visual lv ON lv.candidate_key = c.candidate_key
     LEFT JOIN latest_answer la ON la.candidate_key = c.candidate_key
     LEFT JOIN latest_question_ai lai ON lai.candidate_key = c.candidate_key
@@ -2761,11 +3129,14 @@ filtered AS (
                     # A parser repair may carry a correction so the UI can show
                     # the repaired text while still requiring a new human pass.
                     if event.get("action") in RESET_REVIEW_ACTIONS:
+                        previous = latest.get(key) or latest_reset.get(key)
+                        if not event.get("correction") and previous and previous.get("correction"):
+                            event["correction"] = previous["correction"]
                         latest.pop(key, None)
                         latest_reset[key] = event
                         continue
                     previous = latest.get(key) or latest_reset.get(key)
-                    if "correction" not in event and previous and previous.get("correction"):
+                    if not event.get("correction") and previous and previous.get("correction"):
                         event["correction"] = previous["correction"]
                     latest[key] = event
                     latest_reset.pop(key, None)
@@ -2882,7 +3253,7 @@ filtered AS (
             raise ValueError(table)
         if ai:
             sql = """
-                SELECT candidate_key, action, audit_json, event_json, notes, reviewer, provider, model_name, prompt_version, input_hash, created_at
+                SELECT candidate_key, action, audit_json, event_json, notes, reviewer, provider, model_name, prompt_version, input_hash, created_at, id
                 FROM exam.question_ai_review_events
                 WHERE candidate_key = ANY(%s)
                   AND NOT (
@@ -2905,7 +3276,7 @@ filtered AS (
                 cur.execute(sql, (keys,))
                 for row in cur.fetchall():
                     if ai:
-                        key, action, audit_json, event_json, notes, reviewer, provider, model_name, prompt_version, input_hash, created_at = row
+                        key, action, audit_json, event_json, notes, reviewer, provider, model_name, prompt_version, input_hash, created_at, event_id = row
                         fallback = {
                             "candidate_key": key,
                             "action": action,
@@ -2916,6 +3287,7 @@ filtered AS (
                             "model": model_name,
                             "prompt_version": prompt_version,
                             "input_hash": input_hash,
+                            "event_id": int(event_id),
                             "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
                         }
                     else:
@@ -2939,6 +3311,129 @@ filtered AS (
                     latest[key] = event
                     latest_reset.pop(key, None)
         return latest, counts, latest_reset
+
+    def _sql_ai_feedback_maps(
+        self,
+        keys: list[str],
+        *,
+        reviewer: str = "local",
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        """Return the latest append-only rating for each audit scope."""
+        latest: dict[str, dict[str, dict[str, Any]]] = {}
+        if not keys:
+            return latest
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (candidate_key, audit_scope)
+                        candidate_key,
+                        audit_scope,
+                        rating,
+                        reviewer,
+                        reason,
+                        ai_review_ref,
+                        ai_review_event_id,
+                        feedback_json,
+                        created_at,
+                        id
+                    FROM exam.question_ai_feedback_events
+                    WHERE candidate_key = ANY(%s)
+                      AND COALESCE(reviewer, 'local') = %s
+                    ORDER BY candidate_key, audit_scope, id DESC
+                    """,
+                    (keys, reviewer or "local"),
+                )
+                for row in cur.fetchall():
+                    (
+                        key,
+                        scope,
+                        rating,
+                        event_reviewer,
+                        reason,
+                        ai_review_ref,
+                        ai_review_event_id,
+                        feedback_json,
+                        created_at,
+                        feedback_id,
+                    ) = row
+                    event = self._db_event_value(
+                        feedback_json,
+                        {
+                            "action": "ai_feedback",
+                            "candidate_key": key,
+                            "audit_scope": scope,
+                            "rating": rating,
+                            "reviewer": event_reviewer or "local",
+                            "reason": reason or "",
+                            "ai_review_ref": ai_review_ref,
+                            "ai_review_event_id": ai_review_event_id,
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "feedback_event_id": int(feedback_id),
+                        },
+                    )
+                    latest.setdefault(str(key), {})[str(scope)] = event
+        return latest
+
+    def _sql_ai_learning_maps(
+        self,
+        keys: list[str],
+        *,
+        reviewer: str = "local",
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        """Return the latest human-selected training example per audit scope."""
+        latest: dict[str, dict[str, dict[str, Any]]] = {}
+        if not keys:
+            return latest
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (candidate_key, audit_scope)
+                        candidate_key,
+                        audit_scope,
+                        reviewer,
+                        reason,
+                        ai_review_ref,
+                        ai_review_event_id,
+                        learning_json,
+                        created_at,
+                        id
+                    FROM exam.question_ai_learning_events
+                    WHERE candidate_key = ANY(%s)
+                      AND COALESCE(reviewer, 'local') = %s
+                    ORDER BY candidate_key, audit_scope, id DESC
+                    """,
+                    (keys, reviewer or "local"),
+                )
+                for row in cur.fetchall():
+                    (
+                        key,
+                        scope,
+                        event_reviewer,
+                        reason,
+                        ai_review_ref,
+                        ai_review_event_id,
+                        learning_json,
+                        created_at,
+                        learning_id,
+                    ) = row
+                    event = self._db_event_value(
+                        learning_json,
+                        {
+                            "action": "ai_learning",
+                            "candidate_key": key,
+                            "audit_scope": scope,
+                            "reviewer": event_reviewer or "local",
+                            "reason": reason or "",
+                            "ai_review_ref": ai_review_ref,
+                            "ai_review_event_id": ai_review_event_id,
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "learning_event_id": int(learning_id),
+                        },
+                    )
+                    latest.setdefault(str(key), {})[str(scope)] = event
+        return latest
 
     def batch_accept_questions(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "") -> dict[str, Any]:
         saved: list[dict[str, Any]] = []
@@ -3492,6 +3987,7 @@ filtered AS (
         correction = dict(existing_correction)
         placement = str(placement or "stem").strip()
         target_option = str(target_option or "").strip().upper()[:1]
+        table_markup_removed = False
         if placement == "option":
             if target_option not in {"A", "B", "C", "D", "E"}:
                 raise ValueError("option placement requires target_option A-E.")
@@ -3532,6 +4028,18 @@ filtered AS (
         else:
             if placement == "table":
                 asset_ref["asset_role"] = "table_manual_screenshot"
+                # A human table screenshot is the display authority. Remove only
+                # rendered table markup from the human correction, never from the
+                # raw candidate, so provenance remains intact.
+                source_stem = str(
+                    existing_correction.get("stem")
+                    or candidate.get("stem_with_tables")
+                    or candidate.get("stem")
+                    or ""
+                )
+                clean_stem, table_markup_removed = strip_structured_tables(source_stem)
+                if table_markup_removed:
+                    correction["stem"] = clean_stem
             elif placement == "group":
                 asset_ref["asset_role"] = "group_shared_asset"
             else:
@@ -3553,11 +4061,21 @@ filtered AS (
                 existing_refs.append(asset_ref)
             correction["image_refs"] = existing_refs
         correction["visual_review"] = "visual_asset_ok"
+        table_replacement_note = (
+            "表格人工截圖已取代題幹的結構化表格文字；原始 parser candidate 保留供追溯。"
+            if table_markup_removed
+            else ""
+        )
+        default_note = (
+            "人工貼上修正圖片並取代既有圖片；圖片審核視為已確認，題目是否通過仍依審題狀態。"
+            if replace_existing
+            else f"人工貼上修正圖片至{placement}；圖片審核視為已確認，題目是否通過仍依審題狀態。"
+        )
         event = {
             "candidate_key": candidate_key,
             "action": "correct",
             "reviewer": reviewer or "local",
-            "notes": notes or ("人工貼上修正圖片並取代既有圖片；圖片審核視為已確認，題目是否通過仍依審題狀態。" if replace_existing else f"人工貼上修正圖片至{placement}；圖片審核視為已確認，題目是否通過仍依審題狀態。"),
+            "notes": "\n".join(part for part in (notes or default_note, table_replacement_note) if part),
             "correction": correction,
             "manual_asset": asset_ref,
             "correction_action": "replace_manual_asset" if replace_existing else "add_manual_asset",
@@ -3579,6 +4097,8 @@ filtered AS (
         ai_review_counts: dict[str, int] | None = None,
         formal_question_map: dict[str, dict[str, Any]] | None = None,
         latest_group_reviews: dict[str, dict[str, Any]] | None = None,
+        latest_ai_feedbacks: dict[str, dict[str, dict[str, Any]]] | None = None,
+        latest_ai_learnings: dict[str, dict[str, dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         key = item["candidate_key"]
         issues_by_key = self.issues if issues_by_key is None else issues_by_key
@@ -3591,6 +4111,8 @@ filtered AS (
         ai_review_counts = self.ai_review_counts if ai_review_counts is None else ai_review_counts
         formal_question_map = {} if formal_question_map is None else formal_question_map
         latest_group_reviews = self.latest_group_reviews if latest_group_reviews is None else latest_group_reviews
+        latest_ai_feedbacks = self.latest_ai_feedbacks if latest_ai_feedbacks is None else latest_ai_feedbacks
+        latest_ai_learnings = getattr(self, "latest_ai_learnings", {}) if latest_ai_learnings is None else latest_ai_learnings
         copy = dict(item)
         metadata = copy.get("metadata") or {}
         issues = issues_by_key.get(key, [])
@@ -3623,6 +4145,8 @@ filtered AS (
             }
             for field in ("stem", "answer", "group_ref", "group_sequence_no", "image_refs", "stem_image", "answer_image_refs", "visual_review"):
                 if field in correction:
+                    if field == "group_ref" and not str(correction.get(field) or "").strip():
+                        continue
                     copy[field] = correction[field]
             if "options" in correction:
                 copy["options"] = correction["options"]
@@ -3643,7 +4167,9 @@ filtered AS (
         ]
         copy["visual_profile"] = candidate_visual_profile(copy)
         copy["is_visual_question"] = bool(
-            copy["visual_profile"]["has_visual_asset"] or copy["visual_profile"]["has_visual_dependency"]
+            copy["visual_profile"]["has_visual_asset"]
+            or copy["visual_profile"]["has_visual_dependency"]
+            or copy["visual_profile"]["has_structured_table"]
         )
         group_review = latest_group_reviews.get(key)
         if group_review and group_review.get("action") == "confirm_group":
@@ -3704,9 +4230,44 @@ filtered AS (
         latest_ai_review = latest_ai_reviews.get(key)
         historical_ai_audit = latest_ai_review.get("audit") if latest_ai_review else None
         ai_superseded = human_review_supersedes_ai(latest_review, latest_ai_review)
-        ai_audit = None if ai_superseded else historical_ai_audit
+        ai_audit, group_ai_audit = (
+            (None, None)
+            if ai_superseded
+            else split_ai_audit_scopes(copy, historical_ai_audit)
+        )
+        ai_patch_reason = ai_patch_safety_reason(copy, ai_audit)
         ai_suggestion, ai_suggestion_changes = ai_suggested_correction(copy, ai_audit)
-        ai_suggestion_allowed = bool(ai_suggestion and (latest_review is None))
+        ai_event_ref = ai_review_reference(latest_ai_review)
+        feedback_by_scope = latest_ai_feedbacks.get(key) or {}
+        question_feedback = feedback_by_scope.get("question")
+        if question_feedback and question_feedback.get("ai_review_ref") != ai_event_ref:
+            question_feedback = None
+        group_feedback = feedback_by_scope.get("group")
+        if group_feedback and group_feedback.get("ai_review_ref") != ai_event_ref:
+            group_feedback = None
+        learning_by_scope = latest_ai_learnings.get(key) or {}
+        question_learning = learning_by_scope.get("question")
+        if question_learning and question_learning.get("ai_review_ref") != ai_event_ref:
+            question_learning = None
+        group_learning = learning_by_scope.get("group")
+        if group_learning and group_learning.get("ai_review_ref") != ai_event_ref:
+            group_learning = None
+        if isinstance(group_ai_audit, dict):
+            group_ai_audit = {
+                **group_ai_audit,
+                "event_ref": ai_event_ref,
+                "feedback": group_feedback,
+                "learning": group_learning,
+            }
+        copy["group_ai_review"] = group_ai_audit
+        copy["ai_patch_suppressed_reason"] = ai_patch_reason
+        ai_suggestion_allowed = bool(
+            ai_suggestion
+            and (
+                latest_review is None
+                or latest_review.get("action") in RESET_REVIEW_ACTIONS
+            )
+        )
         copy["ai_review"] = {
             "status": "reviewed" if latest_ai_review else "unreviewed",
             "active": bool(latest_ai_review and not ai_superseded),
@@ -3725,7 +4286,10 @@ filtered AS (
             "checks": ai_audit.get("checks") if isinstance(ai_audit, dict) else {},
             "suggested_correction": ai_suggestion,
             "suggested_changes": ai_suggestion_changes,
+            "correction_coverage": ai_audit.get("correction_coverage") if isinstance(ai_audit, dict) else None,
+            "uncorrected_findings": ai_audit.get("uncorrected_findings") if isinstance(ai_audit, dict) else [],
             "suggestion_apply_allowed": ai_suggestion_allowed,
+            "patch_suppressed_reason": ai_patch_reason,
             "suggestion_apply_reason": (
                 "題目目前未審，可套用後進行人工複核。"
                 if ai_suggestion_allowed
@@ -3736,6 +4300,9 @@ filtered AS (
             "updated_at": latest_ai_review.get("created_at") if latest_ai_review else None,
             "superseded_at": latest_review.get("created_at") if ai_superseded and latest_review else None,
             "event_count": ai_review_counts.get(key, 0),
+            "event_ref": ai_event_ref,
+            "feedback": question_feedback,
+            "learning": question_learning,
         }
         copy["source_files"] = {
             "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
@@ -4108,6 +4675,7 @@ filtered AS (
                     "review": item.get("review") or {},
                     "group_review": item.get("group_review") or {},
                     "ai_review": item.get("ai_review") or {},
+                    "group_ai_review": item.get("group_ai_review") or {},
                     "visual_profile": item.get("visual_profile") or {},
                     "is_visual_question": bool(item.get("is_visual_question")),
                     "reasons": reasons,
@@ -4239,6 +4807,12 @@ filtered AS (
             subject = metadata.get("normalized_subject_name") or ""
             latest_ai_review = self.latest_ai_reviews.get(key)
             latest_ai_audit = latest_ai_review.get("audit") if latest_ai_review else None
+            latest_ai_audit, _group_ai_audit = split_ai_audit_scopes(item, latest_ai_audit)
+            group_only_ai = bool(
+                _group_ai_audit
+                and isinstance(latest_ai_audit, dict)
+                and not latest_ai_audit.get("findings")
+            )
             ai_suggestion, _ai_suggestion_changes = ai_suggested_correction(item, latest_ai_audit)
             ai_audit_status = effective_ai_audit_status(latest_ai_audit, ai_suggestion) or ""
             if review_status == "not_accept":
@@ -4263,15 +4837,15 @@ filtered AS (
                 continue
             if ai_review_status:
                 if ai_review_status == "unreviewed":
-                    ai_match = not latest_ai_review
+                    ai_match = not latest_ai_review or group_only_ai
                 elif ai_review_status == "reviewed":
-                    ai_match = bool(latest_ai_review)
+                    ai_match = bool(latest_ai_review) and not group_only_ai
                 elif ai_review_status == "suggested_correction":
                     ai_match = bool(ai_suggestion)
                 elif ai_review_status == "needs_review":
                     ai_match = ai_audit_status in {"needs_review", "block", "blocked"}
                 else:
-                    ai_match = ai_audit_status == ai_review_status
+                    ai_match = ai_audit_status == ai_review_status and not group_only_ai
                 if not ai_match:
                     continue
             if not review_match:
@@ -4373,6 +4947,14 @@ filtered AS (
             reset_actions=AI_RESET_REVIEW_ACTIONS,
             ai=True,
         )
+        latest_ai_feedbacks = self._sql_ai_feedback_maps(
+            keys,
+            reviewer=params.get("reviewer") or "local",
+        )
+        latest_ai_learnings = self._sql_ai_learning_maps(
+            keys,
+            reviewer=params.get("reviewer") or "local",
+        )
 
         payloads: list[dict[str, Any]] = []
         for item in rows:
@@ -4388,6 +4970,8 @@ filtered AS (
                 ai_review_counts=ai_review_counts,
                 formal_question_map=formal_question_map,
                 latest_group_reviews=latest_group_reviews,
+                latest_ai_feedbacks=latest_ai_feedbacks,
+                latest_ai_learnings=latest_ai_learnings,
             )
             payload["mobile_review"] = mobile_reviews.get(
                 str(item.get("candidate_key") or ""),
@@ -5444,6 +6028,106 @@ filtered_sheets AS (
         self._sql_facets_cache.clear()
         return {"ok": True, "sql_primary": True, "table": "exam.question_ai_review_events", "event_id": event_id}
 
+    def _insert_sql_ai_feedback_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self.sql_review_enabled:
+            return {"ok": True, "sql_primary": False, "table": "exam.question_ai_feedback_events"}
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_ai_feedback_events (
+                        candidate_id,
+                        candidate_key,
+                        ai_review_event_id,
+                        ai_review_ref,
+                        audit_scope,
+                        rating,
+                        reviewer,
+                        reason,
+                        feedback_json,
+                        created_at
+                    )
+                    SELECT id, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                    FROM exam.question_candidates
+                    WHERE candidate_key = %s
+                    RETURNING id
+                    """,
+                    (
+                        event.get("candidate_key"),
+                        event.get("ai_review_event_id"),
+                        event.get("ai_review_ref"),
+                        event.get("audit_scope"),
+                        event.get("rating"),
+                        event.get("reviewer") or "local",
+                        event.get("reason") or "",
+                        Jsonb(event),
+                        event.get("created_at"),
+                        event.get("candidate_key"),
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
+                event_id = int(row[0])
+            conn.commit()
+        return {
+            "ok": True,
+            "sql_primary": True,
+            "table": "exam.question_ai_feedback_events",
+            "event_id": event_id,
+        }
+
+    def _insert_sql_ai_learning_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self.sql_review_enabled:
+            return {"ok": True, "sql_primary": False, "table": "exam.question_ai_learning_events"}
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_ai_learning_events (
+                        candidate_id,
+                        candidate_key,
+                        ai_review_event_id,
+                        ai_review_ref,
+                        audit_scope,
+                        reviewer,
+                        reason,
+                        learning_json,
+                        created_at
+                    )
+                    SELECT id, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                    FROM exam.question_candidates
+                    WHERE candidate_key = %s
+                    RETURNING id
+                    """,
+                    (
+                        event.get("candidate_key"),
+                        event.get("ai_review_event_id"),
+                        event.get("ai_review_ref"),
+                        event.get("audit_scope"),
+                        event.get("reviewer") or "local",
+                        event.get("reason") or "",
+                        Jsonb(event),
+                        event.get("created_at"),
+                        event.get("candidate_key"),
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
+                event_id = int(row[0])
+            conn.commit()
+        return {
+            "ok": True,
+            "sql_primary": True,
+            "table": "exam.question_ai_learning_events",
+            "event_id": event_id,
+        }
+
     def _ensure_formal_sync_schema(self, conn: Any) -> None:
         if self._formal_sync_schema_ready:
             return
@@ -6056,6 +6740,184 @@ filtered_sheets AS (
             else:
                 self.latest_ai_reviews[key] = event
         return {**event, "storage": storage}
+
+    def _ai_learning_candidate_snapshot(
+        self,
+        candidate_key: str,
+        candidate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Capture the effective text shown to the reviewer for future training export."""
+        if not isinstance(candidate, dict):
+            return {}
+        metadata = candidate.get("metadata") or {}
+        snapshot: dict[str, Any] = {
+            "candidate_key": candidate_key,
+            "question_number": candidate.get("question_number"),
+            "metadata": {
+                key: metadata.get(key)
+                for key in (
+                    "normalized_category_name",
+                    "normalized_subject_name",
+                    "year",
+                    "exam_ordinal",
+                    "question_pdf_relative",
+                    "question_markdown_relative",
+                )
+                if metadata.get(key) not in (None, "")
+            },
+            "stem": candidate.get("stem"),
+            "options": candidate.get("options") or [],
+            "answer": candidate.get("answer"),
+            "group_ref": candidate.get("group_ref"),
+            "group_sequence_no": candidate.get("group_sequence_no"),
+        }
+        correction = normalized_correction(self.current_question_review(candidate_key).get("correction"))
+        if correction:
+            snapshot["parser_original"] = {
+                "stem": candidate.get("stem"),
+                "options": candidate.get("options") or [],
+                "answer": candidate.get("answer"),
+                "group_ref": candidate.get("group_ref"),
+                "group_sequence_no": candidate.get("group_sequence_no"),
+            }
+            for field in ("stem", "answer", "group_ref", "group_sequence_no"):
+                if field in correction:
+                    snapshot[field] = correction[field]
+            if "options" in correction:
+                snapshot["options"] = correction["options"]
+        return snapshot
+
+    def append_ai_learning(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append a human-selected training example bound to one exact AI audit."""
+        candidate_key = str(payload.get("candidate_key") or "").strip()
+        audit_scope = str(payload.get("audit_scope") or "question").strip()
+        reviewer = str(payload.get("reviewer") or "local").strip() or "local"
+        reason = str(payload.get("reason") or "").strip()[:2000]
+        if not candidate_key:
+            raise ValueError("candidate_key is required")
+        if audit_scope not in AI_FEEDBACK_SCOPES:
+            raise ValueError("audit_scope must be question, group, visual, or answer")
+
+        if self.sql_review_enabled:
+            latest_map, _counts, _resets = self._sql_latest_event_maps(
+                "exam.question_ai_review_events",
+                [candidate_key],
+                reset_actions=AI_RESET_REVIEW_ACTIONS,
+                ai=True,
+            )
+            latest_ai_review = latest_map.get(candidate_key)
+            candidate = self._candidate_by_key_sql(candidate_key)
+        else:
+            latest_ai_review = self.latest_ai_reviews.get(candidate_key)
+            candidate = self.candidate_by_key.get(candidate_key)
+        if not latest_ai_review:
+            raise ValueError("No active AI audit is available to add to AI learning")
+
+        current_ref = ai_review_reference(latest_ai_review)
+        requested_ref = str(payload.get("ai_review_ref") or "").strip()
+        if not current_ref or requested_ref != current_ref:
+            raise ValueError("AI audit has changed; reload the question before adding it to AI learning")
+        audit = latest_ai_review.get("audit") if isinstance(latest_ai_review.get("audit"), dict) else {}
+        event = {
+            "action": "ai_learning",
+            "candidate_key": candidate_key,
+            "audit_scope": audit_scope,
+            "reviewer": reviewer,
+            "reason": reason,
+            "selected": True,
+            "learning_kind": "human_training_material",
+            "ai_review_ref": current_ref,
+            "ai_review_event_id": latest_ai_review.get("event_id"),
+            "ai_context": {
+                "provider": latest_ai_review.get("provider") or audit.get("provider"),
+                "model": latest_ai_review.get("model") or audit.get("model"),
+                "prompt_version": latest_ai_review.get("prompt_version"),
+                "input_hash": latest_ai_review.get("input_hash"),
+                "audit_status": audit.get("status"),
+                "summary": audit.get("summary"),
+                "labels": audit.get("labels") or [],
+                "findings": audit.get("findings") or [],
+                "suggested_changes": audit.get("suggested_changes") or [],
+                "suggested_correction": audit.get("suggested_correction"),
+                "patch_suppressed_reason": audit.get("patch_suppressed_reason"),
+            },
+            "candidate_snapshot": self._ai_learning_candidate_snapshot(candidate_key, candidate),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        sql_storage = self._insert_sql_ai_learning_event(event)
+        jsonl_storage = self._legacy_jsonl_storage(self.ai_learning_log, event)
+        self._ai_learning_log_signature = file_signature(self.ai_learning_log)
+        self.latest_ai_learnings.setdefault(candidate_key, {})[audit_scope] = event
+        return {
+            **event,
+            "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage},
+        }
+
+    def append_ai_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append a human rating tied to the exact currently displayed audit."""
+        candidate_key = str(payload.get("candidate_key") or "").strip()
+        rating = str(payload.get("rating") or "").strip()
+        audit_scope = str(payload.get("audit_scope") or "question").strip()
+        reviewer = str(payload.get("reviewer") or "local").strip() or "local"
+        reason = str(payload.get("reason") or "").strip()[:2000]
+        if not candidate_key:
+            raise ValueError("candidate_key is required")
+        if rating not in AI_FEEDBACK_RATINGS:
+            raise ValueError("rating must be up or down")
+        if audit_scope not in AI_FEEDBACK_SCOPES:
+            raise ValueError("audit_scope must be question, group, visual, or answer")
+
+        if self.sql_review_enabled:
+            latest_map, _counts, _resets = self._sql_latest_event_maps(
+                "exam.question_ai_review_events",
+                [candidate_key],
+                reset_actions=AI_RESET_REVIEW_ACTIONS,
+                ai=True,
+            )
+            latest_ai_review = latest_map.get(candidate_key)
+        else:
+            latest_ai_review = self.latest_ai_reviews.get(candidate_key)
+        if not latest_ai_review:
+            raise ValueError("No active AI audit is available to rate")
+
+        current_ref = ai_review_reference(latest_ai_review)
+        requested_ref = str(payload.get("ai_review_ref") or "").strip()
+        if not current_ref or requested_ref != current_ref:
+            raise ValueError("AI audit has changed; reload the question before rating")
+        audit = latest_ai_review.get("audit") if isinstance(latest_ai_review.get("audit"), dict) else {}
+        ai_context = {
+            "provider": latest_ai_review.get("provider") or audit.get("provider"),
+            "model": latest_ai_review.get("model") or audit.get("model"),
+            "prompt_version": latest_ai_review.get("prompt_version"),
+            "input_hash": latest_ai_review.get("input_hash"),
+            "audit_status": audit.get("status"),
+            "summary": audit.get("summary"),
+            "labels": audit.get("labels") or [],
+            "findings": audit.get("findings") or [],
+            "suggested_changes": audit.get("suggested_changes") or [],
+            "suggested_correction": audit.get("suggested_correction"),
+            "patch_suppressed_reason": audit.get("patch_suppressed_reason"),
+        }
+        event = {
+            "action": "ai_feedback",
+            "candidate_key": candidate_key,
+            "audit_scope": audit_scope,
+            "rating": rating,
+            "reviewer": reviewer,
+            "reason": reason,
+            "ai_review_ref": current_ref,
+            "ai_review_event_id": latest_ai_review.get("event_id"),
+            "ai_context": ai_context,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        sql_storage = self._insert_sql_ai_feedback_event(event)
+        jsonl_storage = self._legacy_jsonl_storage(self.ai_feedback_log, event)
+        self._ai_feedback_log_signature = file_signature(self.ai_feedback_log)
+        self.latest_ai_feedbacks.setdefault(candidate_key, {})[audit_scope] = event
+        return {
+            **event,
+            "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage},
+        }
 
     def reset_ai_review(self, candidate_key: str, reviewer: str = "local", notes: str = "") -> dict[str, Any]:
         if self.sql_review_enabled:
@@ -6756,7 +7618,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/preferences", "/api/reload-candidates"}:
+        if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/ai-feedback", "/api/ai-learning", "/api/preferences", "/api/reload-candidates"}:
             self.send_error(404, "Not found")
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -6982,6 +7844,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "ai_review_log": str(self.state.ai_review_log), "event": event})
             return
+        if parsed.path == "/api/ai-feedback":
+            try:
+                event = self.state.append_ai_feedback(payload)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=409)
+                return
+            except SqlWriteError as exc:
+                self.send_json({"ok": False, "error": f"SQL write failed: {exc}"}, status=500)
+                return
+            self.send_json({"ok": True, "ai_feedback_log": str(self.state.ai_feedback_log), "event": event})
+            return
+        if parsed.path == "/api/ai-learning":
+            try:
+                event = self.state.append_ai_learning(payload)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=409)
+                return
+            except SqlWriteError as exc:
+                self.send_json({"ok": False, "error": f"SQL write failed: {exc}"}, status=500)
+                return
+            self.send_json({"ok": True, "ai_learning_log": str(self.state.ai_learning_log), "event": event})
+            return
         if parsed.path == "/api/answer-review":
             action = payload.get("action")
             if action not in ANSWER_REVIEW_ACTIONS:
@@ -7192,6 +8076,17 @@ PAGE_HTML = r"""<!doctype html>
     .badge.ai { background:#ecfdf3; color:#027a48; border:1px solid #abefc6; }
     .badge.ai-warning { background:#fff1cf; color:var(--warn); border:1px solid #f2c94c; }
     .ai-list-note { margin-top:4px; color:#9a5b00; }
+    .ai-feedback { display:grid; gap:8px; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+    .ai-feedback-inline { display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    button.ai-feedback-button { min-width:48px; font-size:19px; line-height:1; }
+    button.ai-feedback-button.active-up { border-color:#0b7a4b; background:#dff7ea; }
+    button.ai-feedback-button.active-down { border-color:#b42318; background:#fee4e2; }
+    button.ai-feedback-button.active-learn { border-color:#6941c6; background:#f3e8ff; color:#6941c6; }
+    button.ai-feedback-button.ai-feedback-learning { min-width:104px; font-size:13px; }
+    .ai-feedback input { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px; background:white; }
+    .ai-feedback-reason-inline { flex:0 0 100%; display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; align-items:center; }
+    .ai-feedback-reason-inline label { color:var(--muted); font-size:12px; white-space:nowrap; }
+    .ai-feedback-reason-inline input { width:100%; min-width:0; border:1px solid var(--line); border-radius:6px; padding:8px; background:white; }
     .badge.reviewed { background:#dbeafe; color:var(--blue); }
     .badge.unreviewed { background:#edf0f5; color:#475467; }
     .badge.reset_review { background:#fff1cf; color:#9a5b00; border:1px solid #f2c94c; }
@@ -7245,7 +8140,10 @@ PAGE_HTML = r"""<!doctype html>
     .preview-entry { display:grid; gap:4px; }
     .preview-box { border:1px dashed #b8c1d1; border-radius:6px; background:white; padding:8px; min-height:38px; white-space:pre-wrap; line-height:1.55; }
     .preview-box.empty { color:var(--muted); }
-    .quick-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fbfcff; margin:10px 0; }
+    .quick-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fbfcff; margin:10px 0; }
+    .quick-actions button.action.primary-accept, .quick-actions button.action.primary-block { min-width:92px; }
+    .quick-actions button.ai-feedback-button { width:32px; min-width:32px; padding-left:4px; padding-right:4px; }
+    .quick-actions button.ai-feedback-button.ai-feedback-learning { width:auto; min-width:104px; padding-left:8px; padding-right:8px; }
     iframe { width:100%; height:calc(100vh - 162px); border:1px solid var(--line); border-radius:8px; background:white; }
     .viewer-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
     .viewer-toolbar button { border:1px solid var(--line); border-radius:6px; padding:7px 9px; background:white; cursor:pointer; }
@@ -7746,6 +8644,15 @@ async function markNoVisualRequired() {
 }
 
 async function markVisualAssetOk() {
+  const hasStructuredTableMarkup = Boolean(current?.table_markup_suppressed);
+  const hasStoredAsset = Boolean(current?.visual_profile?.has_visual_asset);
+  if (hasStructuredTableMarkup && !hasStoredAsset) {
+    const saved = document.getElementById('saved') || document.getElementById('manualAssetStatus');
+    if (saved) {
+      saved.textContent = '此題含結構化表格。請先由官方 PDF 擷取表格，選「表格」貼上並儲存；系統會以截圖取代題幹的表格文字。';
+    }
+    return;
+  }
   await saveVisualReviewStatus('visual_asset_ok', '圖片審核：人工確認目前圖片或表格資產正確。');
 }
 
@@ -7819,20 +8726,27 @@ function recomputeCurrentVisualState() {
     ...(current.stem_image ? [current.stem_image] : []),
     ...((current.options || []).map(option => option?.image).filter(Boolean))
   ].filter(ref => ref && ref.exists !== false);
-  const text = `${current.stem || ''}\n${current.metadata?.raw_block || ''}`;
+  const text = `${current.stem_with_tables || current.stem || ''}\n${current.metadata?.raw_block || ''}`;
   const hasVisualDependency = current.visual_review !== 'no_visual_required' && /(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表|心電圖|X\s*光|X光|超音波|切片圖|染色圖|鏡檢圖|尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖)/i.test(text);
+  const hasStructuredTable = /<table\b/i.test(text)
+    || /(?:表中|下表|附表|如下表|(?:^|[^A-Za-z0-9_])table(?:$|[^A-Za-z0-9_]))/i.test(text);
   current.visual_profile = {
     ...(current.visual_profile || {}),
     has_visual_asset: refs.length > 0,
     visual_asset_count: refs.length,
     has_visual_dependency: hasVisualDependency,
+    has_structured_table: hasStructuredTable,
     needs_visual_asset_review: hasVisualDependency && refs.length === 0,
     has_manual_asset: JSON.stringify(refs).includes('manual'),
     no_visual_required: current.visual_review === 'no_visual_required',
     visual_review_status: current.visual_review || '',
     visual_reviewed: ['no_visual_required', 'visual_asset_ok', 'visual_asset_problem'].includes(current.visual_review || '')
   };
-  current.is_visual_question = Boolean(current.visual_profile.has_visual_asset || current.visual_profile.has_visual_dependency);
+  current.is_visual_question = Boolean(
+    current.visual_profile.has_visual_asset
+    || current.visual_profile.has_visual_dependency
+    || current.visual_profile.has_structured_table
+  );
 }
 
 async function removeImageRef(path) {
@@ -7884,6 +8798,7 @@ const greekMap = {
   alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ε', zeta:'ζ', eta:'η', theta:'θ',
   iota:'ι', kappa:'κ', lambda:'λ', mu:'μ', nu:'ν', xi:'ξ', omicron:'ο', pi:'π',
   rho:'ρ', sigma:'σ', tau:'τ', upsilon:'υ', phi:'φ', chi:'χ', psi:'ψ', omega:'ω',
+  varepsilon:'ε', varphi:'φ', varpi:'ϖ', varsigma:'ς', vartheta:'ϑ', varkappa:'ϰ',
   Alpha:'Α', Beta:'Β', Gamma:'Γ', Delta:'Δ', Theta:'Θ', Lambda:'Λ', Xi:'Ξ', Pi:'Π',
   Sigma:'Σ', Phi:'Φ', Psi:'Ψ', Omega:'Ω'
 };
@@ -8024,42 +8939,101 @@ function wrapCorrectionSelection(tag) {
 }
 
 function normalizeCorrectionNotation(value) {
-  return String(value ?? '')
+  // This is deliberately a display-only normalizer for the human correction
+  // fields.  It accepts explicit markup (`_{...}`, `^{...}`) without guessing
+  // from ordinary English words, and keeps unknown LaTeX commands visible.
+  let normalized = String(value ?? '');
+  const escapedUnderscore = '\uE000';
+  normalized = normalized
+    .replace(/\\_/g, escapedUnderscore)
+    .replace(/\$([^$]+)\$/g, '$1')
     .replace(/\\+\s*%/g, '%')
-    .replace(/\^\s*\{\s*\\+\s*circ\s*\}\s*C/gi, '°C')
-    .replace(/\\+\s*circ\s*C/gi, '°C')
+    .replace(/\^\s*\{\s*\\+\s*circ\s*\}\s*(?:\\mathrm\{C\}|C)/gi, '°C')
+    .replace(/\\+\s*circ\s*(?:\\mathrm\{C\}|C)/gi, '°C')
     .replace(/(\d)\s*\\+\s*circ\b/gi, '$1°')
-    .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
-    .replace(/\^\{\\+\s*circ\}\s*C/g, '°C')
-    .replace(/\^\{o\}\s*C/g, '°C')
-    .replace(/\^\{0\}\s*C/g, '°C')
+    .replace(/\^\{\s*o\s*\}\s*C/gi, '°C')
+    .replace(/\^\{\s*0\s*\}\s*C/gi, '°C')
     .replace(/℃/g, '°C')
     .replace(/°\s+C/g, '°C')
+    .replace(/\\(?:rightarrow|to)\b/g, '→')
+    .replace(/\\(?:leftrightarrow|longleftrightarrow)\b/g, '↔')
+    .replace(/\\(?:uparrow|up)\b/g, '↑')
+    .replace(/\\(?:downarrow|down)\b/g, '↓')
+    .replace(/\\(?:times|ast)\b/g, '×')
+    .replace(/\\cdot\b/g, '·')
+    .replace(/\\pm\b/g, '±')
+    .replace(/\\mp\b/g, '∓')
+    .replace(/\\div\b/g, '÷')
+    .replace(/\\(?:geq|ge)\b/g, '≥')
+    .replace(/\\(?:leq|le)\b/g, '≤')
+    .replace(/\\neq\b/g, '≠')
+    .replace(/\\equiv\b/g, '≡')
+    .replace(/\\approx\b/g, '≈')
+    .replace(/\\propto\b/g, '∝')
+    .replace(/\\notin\b/g, '∉')
+    .replace(/\\in\b/g, '∈')
+    .replace(/\\subseteq\b/g, '⊆')
+    .replace(/\\supseteq\b/g, '⊇')
+    .replace(/\\subset\b/g, '⊂')
+    .replace(/\\supset\b/g, '⊃')
+    .replace(/\\partial\b/g, '∂')
+    .replace(/\\nabla\b/g, '∇')
+    .replace(/\\(log|ln|exp)(?![A-Za-z])/g, '$1')
+    .replace(/\\(?:degree|circ)\b/g, '°')
+    .replace(/\\(?:ldots|cdots|dots)\b/g, '…')
+    .replace(/\\therefore\b/g, '∴')
+    .replace(/\\because\b/g, '∵')
+    .replace(/\\sim\b/g, '～')
+    .replace(/\\triangle\b/g, '△')
+    .replace(/\\infty\b/g, '∞')
+    .replace(/\\left\b|\\right\b/g, '')
+    .replace(/\\(?:mathrm|mathbf|mathit|text)\s*\{([^{}]*)\}/g, '$1')
+    .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
+    // Explicit standalone LaTeX groups are still meaningful even when the
+    // base token is not in the formula whitelist.  Trim layout spaces so
+    // `_{ 3 }` and `^{ - }` become clean HTML markup.
+    .replace(/_\s*\{\s*([^{}<>]*?)\s*\}/g, (_, body) => `<sub>${body.trim()}</sub>`)
+    .replace(/\^\s*\{\s*([^{}<>]*?)\s*\}/g, (_, body) => `<sup>${body.trim()}</sup>`)
+    .replace(/([A-Za-zΑ-ω0-9)])\s*_([A-Za-z0-9+\-])/g, '$1<sub>$2</sub>')
+    .replace(/([A-Za-zΑ-ω0-9)])\s*\^([A-Za-z0-9+\-])/g, '$1<sup>$2</sup>')
     .replace(/([Α-ωA-Za-z])\s*([₀₁₂₃₄₅₆₇₈₉])\b/g, '$1$2')
     .replace(/([αβγδκλμθφω])\s+([0-9]+)\b/g, '$1<sub>$2</sub>')
     // Convert only an independent formula token.  Do not match the PO in
     // `hypo`/`hypothyroidism` or any other Latin word.
-    .replace(/(^|[^A-Za-z0-9])(HCO|PCO|PO|CO|O)([0-9]+)([+\-])?(?=\s|$|[，。,；;、）)\]])/g, (_, lead, prefix, number, charge) => `${lead}${prefix}<sub>${number}</sub>${charge ? `<sup>${charge}</sup>` : ''}`)
-    .replace(/\b(O|CO|COO|HCO|PCO|PO|H|NADP|NAD|FAD|IgG|IgM|IgA|CD|T|B)_\{([^{}<>]+)\}/g, '$1<sub>$2</sub>')
-    .replace(/\b(O|CO|COO|HCO|PCO|PO|H|NADP|NAD|FAD|IgG|IgM|IgA|CD|T|B)\^([+\-0-9]+)\b/g, '$1<sup>$2</sup>');
+    .replace(/(^|[^A-Za-z0-9])(HCO|PCO|PO|CO|O)([0-9]+)([+\-])?(?=\s|$|[，。,；;、）)\]}>]|[\u4e00-\u9fff])/g, (_, lead, prefix, number, charge) => `${lead}${prefix}<sub>${number}</sub>${charge ? `<sup>${charge}</sup>` : ''}`)
+    .replace(/([A-Za-z0-9])\s*([₀₁₂₃₄₅₆₇₈₉₊₋]+)/g, '$1<sub>$2</sub>')
+    .replace(new RegExp(escapedUnderscore, 'g'), '_');
+  return normalized;
 }
 
 function normalizeActiveCorrectionField() {
   const field = activeCorrectionField();
-  if (!field) return;
+  const status = document.getElementById('normalizationStatus');
+  if (!field) {
+    if (status) status.textContent = '請先選擇題幹、選項、答案或題組欄位';
+    return;
+  }
+  rememberCorrectionField(field);
   const start = field.selectionStart ?? 0;
   const end = field.selectionEnd ?? start;
   const value = String(field.value || '');
+  let replacement = value;
   if (end > start) {
-    const replacement = normalizeCorrectionNotation(value.slice(start, end));
+    replacement = normalizeCorrectionNotation(value.slice(start, end));
     field.value = value.slice(0, start) + replacement + value.slice(end);
     field.focus();
     if (field.setSelectionRange) field.setSelectionRange(start, start + replacement.length);
   } else {
-    field.value = normalizeCorrectionNotation(value);
+    replacement = normalizeCorrectionNotation(value);
+    field.value = replacement;
     field.focus();
   }
   field.dispatchEvent(new Event('input', {bubbles: true}));
+  if (status) {
+    status.textContent = replacement !== (end > start ? value.slice(start, end) : value)
+      ? '已正規化目前欄位'
+      : '目前欄位沒有可正規化格式';
+  }
 }
 
 function updateCorrectionPreview() {
@@ -9010,7 +9984,7 @@ function renderDetail() {
     <div class="issue warning">
       <b>題幹表格已隱藏</b><br>
       結構化表格文字不作為審核主畫面內容，請以附圖或右側 PDF 為準。
-      ${visualTableRefs.length ? '' : '<br><span class="meta">目前尚未補上表格截圖，建議先補圖再通過。</span>'}
+      ${visualTableRefs.length ? '' : '<br><span class="meta">請從官方 PDF 擷取表格，選「表格」貼上後儲存；系統會把截圖作為顯示資產，並從人工校正版題幹移除表格文字。</span>'}
     </div>` : '';
   const reset = reviewState.reset || {};
   const repairStatus = current.repair_status || {};
@@ -9073,19 +10047,43 @@ function renderDetail() {
     </div>
   `).join('');
   const aiSuggestedChanges = (aiReview.suggested_changes || []).map(change => `<li>${esc(change)}</li>`).join('');
+  const aiCorrectionCoverageNote = aiReview.correction_coverage === 'partial'
+    ? '<p class="meta">這是可安全套用的部分文字校正；其餘疑點仍需人工或 PDF 確認。</p>'
+    : '';
+  const aiApplyButtonLabel = aiReview.suggestion_apply_allowed
+    ? '採用 AI 建議修改'
+    : (String(aiReview.suggestion_apply_reason || '').startsWith('已套用') ? '已套用，待人工複核' : '待核准退回未審');
   const aiCorrectionPanel = aiReview.suggested_correction ? `
     <div class="manual-correction">
       <b>AI 幫你標出的建議校正</b>
       ${aiSuggestedChanges ? `<ul>${aiSuggestedChanges}</ul>` : '<p class="meta">AI 提供了校正內容，請人工確認後套用。</p>'}
-      <button class="action" onclick="applyAiSuggestedCorrection()" ${aiReview.suggestion_apply_allowed ? '' : 'disabled'}>${aiReview.suggestion_apply_allowed ? '套用 AI 建議校正' : '待核准退回未審'}</button>
+      ${aiCorrectionCoverageNote}
+      <button class="action" onclick="applyAiSuggestedCorrection()" ${aiReview.suggestion_apply_allowed ? '' : 'disabled'}>${aiApplyButtonLabel}</button>
       <span class="meta">${esc(aiReview.suggestion_apply_reason || '套用後會保留在需人工複核狀態，不會自動通過。')}</span>
     </div>` : '';
-  const aiPanel = aiNeedsAttention ? `
+  const aiSuppressedPatchNote = aiReview.patch_suppressed_reason ? `
+    <div class="issue info"><b>已關閉一鍵校正</b><br>${esc(aiReview.patch_suppressed_reason)}<br>
+      <span class="meta">這不是把疑點刪除；請在官方 PDF/題組權責頁完成核對後再決定。</span></div>` : '';
+  const aiFeedback = aiReview.feedback || {};
+  const aiFeedbackButtons = aiReview.event_ref ? `
+    <span class="ai-feedback-inline" aria-label="評分這次 AI 稽核">
+      <button class="action ai-feedback-button ${aiFeedback.rating === 'up' ? 'active-up' : ''}" onclick="submitAiFeedback('question', 'up')" title="讚">👍</button>
+      <button class="action ai-feedback-button ${aiFeedback.rating === 'down' ? 'active-down' : ''}" onclick="submitAiFeedback('question', 'down')" title="倒讚">👎</button>
+      <button class="action ai-feedback-button ai-feedback-learning ${aiReview.learning ? 'active-learn' : ''}" onclick="submitAiLearning('question')" title="加入 AI 學習">${aiReview.learning ? '已加入 AI 學習' : '加入 AI 學習'}</button>
+    </span>` : '';
+  const aiFeedbackReasonField = aiReview.event_ref ? `
+    <div class="ai-feedback-reason-inline">
+      <label for="aiFeedbackReason">AI 評分問題</label>
+      <input id="aiFeedbackReason" value="${esc(aiFeedback.reason || aiReview.learning?.reason || '')}" placeholder="可選：輸入 AI 稽核問題、倒讚原因、規則改進線索或訓練說明">
+      <span id="aiFeedbackSaved" class="meta">${aiFeedback.rating ? `已記錄${aiFeedback.rating === 'up' ? '讚' : '倒讚'}` : ''}${aiReview.learning ? `${aiFeedback.rating ? '；' : ''}已加入 AI 學習` : ''}</span>
+    </div>` : '';
+  const aiPanel = aiReview.status === 'reviewed' ? `
     <div class="panel"><h2>AI 格式稽核</h2><div class="body">
       <p class="meta">${aiReview.status === 'reviewed' ? `上次：${esc(aiReview.provider || '')} ${esc(aiReview.model || '')} / ${esc(aiReview.audit_status || '')} ${esc(aiReview.updated_at || '')}` : '尚未稽核'}</p>
       <p>${aiBadge} ${aiRawNote}</p>
       ${aiChecksPanel}
       ${aiReview.summary ? `<p>${esc(aiReview.summary)}</p>` : '<p class="meta">AI 稽核只檢查字形、格式、選項、圖表與 parser 結構疑點，不會修改人工審核狀態。</p>'}
+      ${aiSuppressedPatchNote}
       ${aiCorrectionPanel}
       ${aiFindings || '<div class="meta">目前沒有 AI 稽核疑點。</div>'}
     </div></div>` : '';
@@ -9127,7 +10125,7 @@ function renderDetail() {
   const visualReviewPanel = isVisualMode ? `
     <div class="issue info">
       <b>圖片/表格審核</b><br>
-      <span class="meta">只做三種人工判斷：有圖正確、圖片錯要改、沒有圖。AI 或 parser 只負責把可疑題目送進來，不代表審核結論。</span>
+      <span class="meta">只做三種人工判斷：有圖正確、圖片錯要改、沒有圖。結構化表格請先以官方 PDF 擷圖並選「表格」儲存，系統才會標為有圖；AI 或 parser 只負責導流，不代表審核結論。</span>
       ${visualSources ? `<div class="meta visual-source-line">候選來源：${visualSources}</div>` : ''}
       <div class="toolbar">
         <button class="action primary-accept" onclick="markVisualAssetOk()">有圖正確</button>
@@ -9140,7 +10138,7 @@ function renderDetail() {
       <p class="meta">${images ? '目前圖片已直接顯示在上方題目預覽；解除綁定也在各圖片旁操作。' : '目前未偵測到圖片引用，可在下方補上正確圖片。'}</p>
       <div class="manual-asset-controls">
         <p class="meta">${isVisualMode
-          ? '圖片審核頁只判斷圖片或表格資產是否正確；若需要補圖，也可以在這裡貼上並綁定位置。'
+          ? '圖片審核頁只判斷圖片或表格資產是否正確；表格請用官方 PDF 擷圖並選「表格」貼上，儲存後會自動移除人工校正版題幹中的結構化表格文字。'
           : '審題時若發現題幹、選項或題組共用圖片缺漏/裁切錯誤，可在這裡貼上正確截圖並綁定到對應位置。圖片對錯仍可到「圖片」頁集中審核。'}</p>
         <div id="manualAssetPasteZone" class="paste-zone" tabindex="0" onpaste="handleManualAssetPaste(event)">
           <b>貼上人工修正圖片</b>
@@ -9171,7 +10169,7 @@ function renderDetail() {
       </div>
     </div></div>`;
   const symbolToolsPanel = `
-    <details class="panel question-correction-panel"><summary>符號模板</summary><div class="body">
+    <details class="panel question-correction-panel" open><summary>符號模板</summary><div class="body">
       <div class="symbol-toolbar" aria-label="常用符號模板">
         <span class="tool-group-label">希臘</span>
         ${['α','β','γ','δ','ε','κ','λ','μ','θ','φ','ω','Δ','Σ'].map(symbol => `<button type="button" title="插入 ${symbol}" onclick="insertIntoCorrectionField('${symbol}')">${symbol}</button>`).join('')}
@@ -9191,6 +10189,7 @@ function renderDetail() {
         <button type="button" title="PCO2" onclick="insertIntoCorrectionField('PCO\\u003csub\\u003e2\\u003c/sub\\u003e')">PCO<sub>2</sub></button>
         <button type="button" title="alpha 1" onclick="insertIntoCorrectionField('α\\u003csub\\u003e1\\u003c/sub\\u003e')">α<sub>1</sub></button>
         <button type="button" title="套用安全正規化到目前欄位或選取文字" onclick="normalizeActiveCorrectionField()">正規化</button>
+        <span id="normalizationStatus" class="meta" role="status" aria-live="polite"></span>
       </div>
       <p class="meta">先把游標放在題幹、A–D 選項、答案或題組欄位，再按符號；會插入原欄位的游標位置，不改變審核狀態。</p>
     </div></details>`;
@@ -9199,7 +10198,8 @@ function renderDetail() {
         <button class="action primary-accept" onclick="review('accept')">通過</button>
         <button class="action primary-block" onclick="review('block')">阻擋入庫</button>
         <button class="action" onclick="review('exclude')">非題目</button>
-        <button class="action batch-accept" onclick="batchAcceptVisiblePass()">批次通過本頁 pass</button>
+        ${aiFeedbackButtons}
+        ${aiFeedbackReasonField}
         <span class="meta">快速瀏覽可直接按；需要修正時用下方人工校正。</span>
       </div>`;
   const manualReviewPanel = isVisualMode ? '' : `
@@ -9406,9 +10406,9 @@ function renderGroupDetail() {
       : row.group_review?.action === 'confirm_not_group'
         ? ' <span class="badge not_group">確認非題組</span>'
         : '';
-    const aiStatus = row.ai_review?.audit_status || '';
+    const aiStatus = row.group_ai_review?.audit_status || '';
     const aiStatusBadge = aiStatus && aiStatus !== 'pass'
-      ? ` <span class="badge ai-warning">AI ${esc(aiStatus)}</span>`
+      ? ` <span class="badge ai-warning">AI 題組 ${esc(aiStatus)}</span>`
       : '';
     const visualReviewStatus = row.visual_profile?.visual_review_status || row.visual_review || '';
     const visualBadge = row.is_visual_question && !['visual_asset_ok', 'no_visual_required'].includes(visualReviewStatus)
@@ -9660,9 +10660,80 @@ function applyCorrectionToCurrent(correction) {
     }
   }
   if (Array.isArray(correction.options)) {
-    current.options = correction.options.map(option => ({...option}));
+    const existing = new Map((current.options || []).map(option => [String(option.key || '').toUpperCase(), {...option}]));
+    current.options = correction.options.map(option => {
+      const key = String(option.key || '').toUpperCase();
+      return {...(existing.get(key) || {}), ...option, key};
+    });
   }
   recomputeCurrentVisualState();
+}
+
+async function submitAiFeedback(auditScope, rating) {
+  if (!current || mode !== 'question') return;
+  const aiReview = current.ai_review || {};
+  const status = document.getElementById('aiFeedbackSaved');
+  if (!aiReview.event_ref) {
+    if (status) status.textContent = '這筆 AI 稽核沒有可追蹤版本，請重新整理。';
+    return;
+  }
+  if (status) status.textContent = '記錄中...';
+  const response = await fetch('/api/ai-feedback', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      candidate_key: current.candidate_key,
+      audit_scope: auditScope,
+      rating,
+      reviewer,
+      reason: document.getElementById('aiFeedbackReason')?.value || '',
+      ai_review_ref: aiReview.event_ref
+    })
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    if (status) status.textContent = `評分失敗：${data.error}`;
+    return;
+  }
+  current.ai_review.feedback = data.event;
+  const index = filtered.findIndex(item => item.candidate_key === current.candidate_key);
+  if (index >= 0) filtered[index] = current;
+  renderDetail();
+}
+
+async function submitAiLearning(auditScope) {
+  if (!current || mode !== 'question') return;
+  const aiReview = current.ai_review || {};
+  const status = document.getElementById('aiFeedbackSaved');
+  if (!aiReview.event_ref) {
+    if (status) status.textContent = '這筆 AI 稽核沒有可追蹤版本，請重新整理。';
+    return;
+  }
+  if (aiReview.learning && aiReview.learning.ai_review_ref === aiReview.event_ref) {
+    if (status) status.textContent = '已加入 AI 學習';
+    return;
+  }
+  if (status) status.textContent = '加入 AI 學習中...';
+  const response = await fetch('/api/ai-learning', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      candidate_key: current.candidate_key,
+      audit_scope: auditScope,
+      reviewer,
+      reason: document.getElementById('aiFeedbackReason')?.value || '',
+      ai_review_ref: aiReview.event_ref
+    })
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    if (status) status.textContent = `加入 AI 學習失敗：${data.error}`;
+    return;
+  }
+  current.ai_review.learning = data.event;
+  const index = filtered.findIndex(item => item.candidate_key === current.candidate_key);
+  if (index >= 0) filtered[index] = current;
+  renderDetail();
 }
 
 async function applyAiSuggestedCorrection() {
@@ -10254,6 +11325,10 @@ async function review(action, correction = null, options = {}) {
       correction: savedCorrection,
       event_count: (current.review?.event_count || 0) + 1
     };
+    if (options.source === 'ai_suggestion' && current.ai_review) {
+      current.ai_review.suggestion_apply_allowed = false;
+      current.ai_review.suggestion_apply_reason = '已套用 AI 建議；請人工複核後再通過。';
+    }
     const savedTarget = document.getElementById('saved') || document.getElementById('manualAssetStatus');
     if (savedTarget) savedTarget.textContent = `已寫入：${savedAction}${storageLabel(data.event?.storage) ? `；${storageLabel(data.event.storage)}` : ''}`;
     if (stayOnCurrent) {

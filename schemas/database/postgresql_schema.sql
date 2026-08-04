@@ -277,6 +277,47 @@ CREATE TABLE IF NOT EXISTS exam.question_ai_review_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Human feedback on a specific AI audit is a separate append-only stream.
+-- It must not become a new AI audit row or alter human question decisions.
+CREATE TABLE IF NOT EXISTS exam.question_ai_feedback_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    ai_review_event_id BIGINT REFERENCES exam.question_ai_review_events(id) ON DELETE SET NULL,
+    ai_review_ref TEXT NOT NULL,
+    audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+    rating TEXT NOT NULL CHECK (rating IN ('up', 'down')),
+    reviewer TEXT,
+    reason TEXT,
+    feedback_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_ai_feedback_candidate
+    ON exam.question_ai_feedback_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_ai_feedback_rating
+    ON exam.question_ai_feedback_events (rating, created_at DESC);
+
+-- Human-selected training examples are independent from thumbs up/down. A
+-- question may be both well-rated and explicitly selected as learning data.
+CREATE TABLE IF NOT EXISTS exam.question_ai_learning_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    ai_review_event_id BIGINT REFERENCES exam.question_ai_review_events(id) ON DELETE SET NULL,
+    ai_review_ref TEXT NOT NULL,
+    audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+    reviewer TEXT,
+    reason TEXT,
+    learning_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_ai_learning_candidate
+    ON exam.question_ai_learning_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_ai_learning_created
+    ON exam.question_ai_learning_events (created_at DESC);
+
 -- Curriculum classification is an auxiliary, versioned knowledge layer.
 -- It never replaces or mutates formal question/answer content.
 CREATE TABLE IF NOT EXISTS exam.curriculum_taxonomies (

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ WEAK_VISUAL_SQL_RE = (
     r"(心電圖|X\\s*光|X光|超音波|影像|照片|切片圖|染色圖|鏡檢圖|"
     r"尿沉渣圖|電泳圖|曲線圖|流程圖|家系圖|圖示|圖片|箭頭)"
 )
+TABLE_DEPENDENCY_SQL_RE = r"(表中|下表|附表|如下表|(^|[^[:alnum:]_])table([^[:alnum:]_]|$))"
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,7 +51,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=0, help="0 means export all matching rows.")
     parser.add_argument("--chunk-size", type=int, default=0, help="Split tasks into chunked JSONL files. 0 writes one file.")
+    parser.add_argument(
+        "--split-by-category",
+        action="store_true",
+        help="Write independent category subdirectories from one database query so progress can be resumed per exam category.",
+    )
     parser.add_argument("--include-reviewed", action="store_true", help="Include candidates already manually visual-reviewed.")
+    parser.add_argument(
+        "--all-unreviewed",
+        action="store_true",
+        help="Audit every question-review-unreviewed candidate, not only candidates preselected by visual cues.",
+    )
     parser.add_argument("--include-manual-assets", action="store_true", help="Include candidates that already have manual visual assets.")
     parser.add_argument("--force", action="store_true", help="Include candidates that already have visual AI advisory labels.")
     parser.add_argument(
@@ -106,6 +118,8 @@ def build_sql(args: argparse.Namespace) -> str:
         clauses.append("NOT has_visual_ai_advisory")
     if args.ai_visual_status:
         clauses.append(f"latest_visual_ai_status = {sql_literal(args.ai_visual_status)}")
+    if args.all_unreviewed:
+        clauses.append("COALESCE(human_review_action, '') IN ('', 'unreviewed', 'reset_review')")
     if args.category:
         clauses.append(f"category = {sql_literal(args.category)}")
     if args.subject:
@@ -115,14 +129,18 @@ def build_sql(args: argparse.Namespace) -> str:
     if args.ordinal:
         clauses.append(f"ordinal = {sql_literal(args.ordinal)}")
 
-    source_clause = {
-        "all": "(has_visual_asset OR has_structured_table OR has_strong_visual_cue OR has_weak_visual_cue)",
-        "existing_asset": "has_visual_asset",
-        "structured_table": "has_structured_table",
-        "strong_text_cue": "has_strong_visual_cue",
-        "weak_text_cue": "has_weak_visual_cue",
-        "missing_asset": "(has_strong_visual_cue OR has_weak_visual_cue) AND NOT has_visual_asset AND NOT has_structured_table",
-    }[args.source]
+    source_clause = (
+        "true"
+        if args.all_unreviewed
+        else {
+            "all": "(has_visual_asset OR has_structured_table OR has_strong_visual_cue OR has_weak_visual_cue)",
+            "existing_asset": "has_visual_asset",
+            "structured_table": "has_structured_table",
+            "strong_text_cue": "has_strong_visual_cue",
+            "weak_text_cue": "has_weak_visual_cue",
+            "missing_asset": "(has_strong_visual_cue OR has_weak_visual_cue) AND NOT has_visual_asset AND NOT has_structured_table",
+        }[args.source]
+    )
     clauses.append(source_clause)
     where = " AND ".join(clauses) if clauses else "true"
     limit = f"LIMIT {int(args.limit)}" if args.limit and args.limit > 0 else ""
@@ -238,7 +256,7 @@ base AS (
                 c.raw_candidate_json->>'stem',
                 c.raw_candidate_json->'metadata'->>'raw_block',
                 lq.corrected_candidate_json->>'stem'
-            ) ~* '(表中|下表|附表|如下表|table)'
+            ) ~* '{TABLE_DEPENDENCY_SQL_RE}'
         ) AS has_structured_table,
         concat_ws(
             ' ',
@@ -286,6 +304,9 @@ filtered AS (
 )
 SELECT jsonb_build_object(
     'candidate_key', candidate_key,
+    -- jsonb text is canonical in PostgreSQL; this detects parser or human
+    -- corrections made while a long advisory run is still in progress.
+    'source_fingerprint', md5(effective_json::text),
     'category', category,
     'subject', subject,
     'year', year,
@@ -346,13 +367,50 @@ def write_chunks(selected: list[dict[str, Any]], run_dir: Path, timestamp: str, 
     return [task_path], [result_path]
 
 
+def category_path_segment(category: str) -> str:
+    value = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff()（）_-]+", "_", category).strip("_")
+    return value or "uncategorized"
+
+
+def write_category_chunks(
+    selected: list[dict[str, Any]],
+    run_dir: Path,
+    timestamp: str,
+    chunk_size: int,
+    *,
+    split_by_category: bool,
+) -> tuple[list[Path], list[Path], dict[str, int]]:
+    if not split_by_category:
+        tasks, results = write_chunks(selected, run_dir, timestamp, chunk_size)
+        return tasks, results, {"all": len(selected)}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        category = str(item.get("category") or "").strip() or "未分類"
+        grouped.setdefault(category, []).append(item)
+    task_paths: list[Path] = []
+    result_paths: list[Path] = []
+    for category, rows in grouped.items():
+        category_dir = run_dir / f"category__{category_path_segment(category)}"
+        category_dir.mkdir()
+        tasks, results = write_chunks(rows, category_dir, timestamp, chunk_size)
+        task_paths.extend(tasks)
+        result_paths.extend(results)
+    return task_paths, result_paths, {category: len(rows) for category, rows in grouped.items()}
+
+
 def main() -> None:
     args = parse_args()
     selected = psql_json_lines(build_sql(args), args)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = args.output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
-    task_paths, result_paths = write_chunks(selected, run_dir, timestamp, args.chunk_size)
+    task_paths, result_paths, category_counts = write_category_chunks(
+        selected,
+        run_dir,
+        timestamp,
+        args.chunk_size,
+        split_by_category=args.split_by_category,
+    )
 
     prompt_path = run_dir / "VISUAL_AI_AUDIT_PROMPT.md"
     prompt_path.write_text(
@@ -371,12 +429,14 @@ def main() -> None:
                 "",
                 "判斷原則：",
                 "- 已有 MinerU 圖片或表格資產者，通常標 `visual_required_likely` 或 `visual_uncertain`，因為人工要確認裁切是否正確。",
+                "- `<table>...</table>` 或明確指向表格的題目，應標 `visual_required_likely`：正式審核會以官方 PDF 表格截圖為顯示資產，並移除人工校正版題幹中的表格文字，避免雙重表格與亂碼。",
+                "- `tablet`、`tablets`、`stable`、`metastable`、`tabletting`、`tablespoon` 等只是英文單字，絕不是表格線索；不得因含有 `table` 字串而標為需要圖片。",
                 "- `如下`、`如圖`、`下圖`、`圖中`、`承上圖`、`箭頭所指`、`表中`、`下表` 等明確指向視覺物者，標 `visual_required_likely`。",
                 "- 單純出現 `心電圖`、`X光`、`超音波`、`影像`、`箭頭形`、`圖示法`、`圖示說明`、`概念圖示` 等概念詞，但沒有指向圖像，標 `visual_not_required_likely`。",
                 "- `承上題圖示`、`承上題的圖示`、`承上題，...圖示`、`承上圖所示` 代表依賴前題或題組圖片，標 `visual_required_likely`。",
                 "- 分不清是否 PDF 另有圖時標 `visual_uncertain`，不要硬判。",
                 "",
-                f"任務檔：`{task_paths[0]}`" if len(task_paths) == 1 else f"任務切片資料夾：`{run_dir / 'chunks'}`",
+                f"任務檔：`{task_paths[0]}`" if len(task_paths) == 1 else f"任務切片根目錄：`{run_dir}`",
                 f"預期輸出：`{result_paths[0]}`" if len(result_paths) == 1 else "每個 part 輸出同名 `visual_ai_audit_results__...__partXXXX.jsonl`。",
             ]
         )
@@ -398,11 +458,14 @@ def main() -> None:
             "source": args.source,
             "limit": args.limit,
             "chunk_size": args.chunk_size,
+            "split_by_category": args.split_by_category,
             "include_reviewed": args.include_reviewed,
+            "all_unreviewed": args.all_unreviewed,
             "include_manual_assets": args.include_manual_assets,
             "ai_visual_status": args.ai_visual_status,
             "force": args.force,
         },
+        "category_counts": category_counts,
     }
     summary_path = run_dir / f"visual_ai_audit_summary__{timestamp}.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

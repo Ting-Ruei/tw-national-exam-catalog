@@ -24,6 +24,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROMPT_VERSION = "visual_asset_semantic_audit_v0.2"
 VALID_VISUAL_STATUSES = {"visual_required_likely", "visual_not_required_likely", "visual_uncertain"}
+UNREVIEWED_QUESTION_ACTIONS = {"", "unreviewed", "reset_review"}
+TERMINAL_VISUAL_STATUSES = {"no_visual_required", "visual_asset_ok", "visual_asset_problem"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provider", default="codex")
     parser.add_argument("--model", default="codex-gpt5")
     parser.add_argument("--notes", default="AI 圖片語意稽核 advisory；不自動改變人工 visual_review。")
+    parser.add_argument(
+        "--allow-legacy-source",
+        action="store_true",
+        help="Allow result records without source_fingerprint. Disabled by default because they cannot be freshness-checked.",
+    )
     parser.add_argument("--postgres-db", default=os.environ.get("POSTGRES_DB", "tw_national_exam_dev"))
     parser.add_argument("--postgres-user", default=os.environ.get("POSTGRES_USER", "national_exam"))
     parser.add_argument("--dry-run", action="store_true")
@@ -115,6 +122,7 @@ def audit_from_record(record: dict[str, Any], provider: str, model: str) -> dict
         "findings": findings,
         "visual_reason": reason,
         "visual_evidence": evidence,
+        "source_fingerprint": str(record.get("source_fingerprint") or "").strip().lower(),
     }
 
 
@@ -138,6 +146,13 @@ def read_records(paths: list[Path], args: argparse.Namespace) -> tuple[list[dict
                 if not candidate_key:
                     skipped.append({"file": str(path), "line": str(line_number), "reason": "missing_candidate_key"})
                     continue
+                source_fingerprint = str(record.get("source_fingerprint") or "").strip().lower()
+                if source_fingerprint and (len(source_fingerprint) != 32 or any(char not in "0123456789abcdef" for char in source_fingerprint)):
+                    skipped.append({"file": str(path), "line": str(line_number), "reason": "invalid_source_fingerprint"})
+                    continue
+                if not source_fingerprint and not args.allow_legacy_source:
+                    skipped.append({"file": str(path), "line": str(line_number), "reason": "missing_source_fingerprint"})
+                    continue
                 audit = audit_from_record(record, args.provider, args.model)
                 input_hash = hashlib.sha256(json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
                 event = {
@@ -159,6 +174,7 @@ def read_records(paths: list[Path], args: argparse.Namespace) -> tuple[list[dict
                         "model": audit["model"],
                         "prompt_version": PROMPT_VERSION,
                         "input_hash": input_hash,
+                        "source_fingerprint": source_fingerprint,
                         "notes": args.notes,
                         "source_result_jsonl": str(path),
                         "audit": audit,
@@ -169,6 +185,97 @@ def read_records(paths: list[Path], args: argparse.Namespace) -> tuple[list[dict
                 }
                 rows.append(event)
     return rows, skipped
+
+
+def current_candidate_state(candidate_keys: list[str], args: argparse.Namespace) -> dict[str, dict[str, str]]:
+    """Read the current effective content and review state before AI import.
+
+    Long-running model jobs are expected to overlap human review.  A result is
+    therefore importable only while it still refers to the same effective
+    candidate and the candidate remains unreviewed.
+    """
+
+    unique_keys = sorted({key for key in candidate_keys if key})
+    if not unique_keys:
+        return {}
+    literals = ", ".join("'" + key.replace("'", "''") + "'" for key in unique_keys)
+    sql = f"""
+WITH latest_question AS (
+    SELECT DISTINCT ON (candidate_key)
+        candidate_key, action, corrected_candidate_json, id
+    FROM exam.question_review_events
+    WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
+    ORDER BY candidate_key, id DESC
+),
+latest_visual AS (
+    SELECT DISTINCT ON (candidate_key)
+        candidate_key, corrected_candidate_json, id
+    FROM exam.question_review_events
+    WHERE corrected_candidate_json ? 'visual_review'
+    ORDER BY candidate_key, id DESC
+)
+SELECT jsonb_build_object(
+    'candidate_key', c.candidate_key,
+    'source_fingerprint', md5((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))::text),
+    'question_action', COALESCE(lq.action, ''),
+    'visual_review_status', COALESCE(lv.corrected_candidate_json->>'visual_review', lq.corrected_candidate_json->>'visual_review', '')
+)::text
+FROM exam.question_candidates c
+LEFT JOIN latest_question lq ON lq.candidate_key = c.candidate_key
+LEFT JOIN latest_visual lv ON lv.candidate_key = c.candidate_key
+WHERE c.candidate_key IN ({literals});
+"""
+    cmd = [
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        args.postgres_user,
+        "-d",
+        args.postgres_db,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-At",
+        "-c",
+        sql,
+    ]
+    completed = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, check=True, capture_output=True)
+    state: dict[str, dict[str, str]] = {}
+    for line in completed.stdout.splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        key = str(row.get("candidate_key") or "").strip()
+        if key:
+            state[key] = {field: str(row.get(field) or "") for field in ("source_fingerprint", "question_action", "visual_review_status")}
+    return state
+
+
+def filter_current_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    current = current_candidate_state([str(row["candidate_key"]) for row in rows], args)
+    fresh: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for row in rows:
+        key = str(row["candidate_key"])
+        state = current.get(key)
+        if not state:
+            skipped.append({"candidate_key": key, "reason": "candidate_not_found"})
+            continue
+        expected = str((row.get("audit_json") or {}).get("source_fingerprint") or "").lower()
+        if expected and state["source_fingerprint"].lower() != expected:
+            skipped.append({"candidate_key": key, "reason": "source_changed"})
+            continue
+        if state["question_action"] not in UNREVIEWED_QUESTION_ACTIONS:
+            skipped.append({"candidate_key": key, "reason": "question_already_reviewed"})
+            continue
+        if state["visual_review_status"] in TERMINAL_VISUAL_STATUSES:
+            skipped.append({"candidate_key": key, "reason": "visual_already_reviewed"})
+            continue
+        fresh.append(row)
+    return fresh, skipped
 
 
 def csv_payload(rows: list[dict[str, Any]]) -> str:
@@ -288,6 +395,8 @@ def main() -> None:
     if not result_paths:
         raise SystemExit("No result JSONL files found.")
     rows, skipped = read_records(result_paths, args)
+    rows, freshness_skipped = filter_current_rows(rows, args)
+    skipped.extend(freshness_skipped)
     imported = 0 if args.dry_run else import_rows(rows, args)
     print(
         json.dumps(
