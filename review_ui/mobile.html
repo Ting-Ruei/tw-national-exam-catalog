@@ -1002,12 +1002,23 @@
       writeFilterForm(state.filters);
     }
 
+    const CATEGORY_GROUP_OPTIONS = [
+      ['__chinese_medicine_track__', '中醫師制度群組'],
+      ['__physician_track__', '醫師制度群組'],
+      ['__dentist_track__', '牙醫師制度群組'],
+      ['__pharmacist_track__', '藥師制度群組']
+    ];
+
     function fillSelect(id, values, fallbackLabel) {
       const select = document.getElementById(id);
       const selected = state.filters[id] || '';
       const list = [...new Set((values || []).map(String).filter(Boolean))];
-      if (selected && !list.includes(selected)) list.unshift(selected);
-      select.innerHTML = `<option value="">${fallbackLabel}</option>` + list.map(value =>
+      const specialValues = new Set(CATEGORY_GROUP_OPTIONS.map(([value]) => value));
+      if (selected && !list.includes(selected) && !(id === 'category' && specialValues.has(selected))) list.unshift(selected);
+      const special = id === 'category'
+        ? CATEGORY_GROUP_OPTIONS.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join('')
+        : '';
+      select.innerHTML = `<option value="">${fallbackLabel}</option>` + special + list.map(value =>
         `<option value="${esc(value)}">${esc(value)}</option>`
       ).join('');
       select.value = selected;

@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -41,13 +42,22 @@ try:
 except ImportError:  # pragma: no cover - UI can still run without formal sync helpers
     formal_promote = None
 
-from question_group_detection import (
-    GROUP_CONTINUATION_RE,
-    GROUP_COUNT_RE,
-    GROUP_COUNT_SQL_RE,
-    GROUP_PREFIX_RANGE_RE,
-    group_count_from_text,
-)
+try:
+    from question_group_detection import (
+        GROUP_CONTINUATION_RE,
+        GROUP_COUNT_RE,
+        GROUP_COUNT_SQL_RE,
+        GROUP_PREFIX_RANGE_RE,
+        group_count_from_text,
+    )
+except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
+    from scripts.question_group_detection import (
+        GROUP_CONTINUATION_RE,
+        GROUP_COUNT_RE,
+        GROUP_COUNT_SQL_RE,
+        GROUP_PREFIX_RANGE_RE,
+        group_count_from_text,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +85,23 @@ QUESTION_READY_ACTIONS = {"accept", "unblock"}
 ANSWER_READY_ACTIONS = {"accept", "unblock"}
 HUMAN_SUPERSEDES_AI_ACTIONS = {"accept", "unblock", "block", "needs_review", "exclude", "reviewed", "correct"}
 PHARMACIST_TRACK_FILTER = "__pharmacist_track__"
-PHARMACIST_TRACK_CATEGORIES = ("藥師", "藥師(一)", "藥師(二)")
+# These are UI-only filters.  The official category name remains unchanged in
+# candidate metadata and in the review/audit records; selecting a制度群組 only
+# broadens the read scope to historical names that belong to the same exam
+# system.
+CATEGORY_GROUP_FILTERS = {
+    "__chinese_medicine_track__": ("中醫師", "中醫師(一)", "中醫師(二)"),
+    "__physician_track__": ("醫師", "醫師(一)", "醫師(二)", "醫師(ㄧ)"),
+    "__dentist_track__": ("牙醫師", "牙醫師(一)", "牙醫師(二)"),
+    PHARMACIST_TRACK_FILTER: ("藥師", "藥師(一)", "藥師(二)"),
+}
+CATEGORY_GROUP_LABELS = {
+    "__chinese_medicine_track__": "中醫師制度群組",
+    "__physician_track__": "醫師制度群組",
+    "__dentist_track__": "牙醫師制度群組",
+    PHARMACIST_TRACK_FILTER: "藥師制度群組",
+}
+PHARMACIST_TRACK_CATEGORIES = CATEGORY_GROUP_FILTERS[PHARMACIST_TRACK_FILTER]
 DEFAULT_AI_MODEL = os.environ.get("OPENAI_REVIEW_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4.1-mini"
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
 AI_REVIEW_PROMPT_VERSION = "question_format_audit_v0.1"
@@ -105,9 +131,55 @@ class SqlWriteError(RuntimeError):
 
 
 def category_matches_filter(category: str, category_filter: str) -> bool:
-    if category_filter == PHARMACIST_TRACK_FILTER:
-        return category in PHARMACIST_TRACK_CATEGORIES
-    return category == category_filter
+    normalized_category = normalize_category_name(category)
+    if category_filter in CATEGORY_GROUP_FILTERS:
+        return normalized_category in CATEGORY_GROUP_NORMALIZED_FILTERS[category_filter]
+    return normalized_category == normalize_category_name(category_filter)
+
+
+def normalize_category_name(value: Any) -> str:
+    """Normalize category spelling for ReviewUI matching only.
+
+    Official/raw names are deliberately not rewritten.  This matcher only
+    removes harmless spacing and bracket-shape differences so old JSONL rows,
+    SQL rows, and catalog-derived rows share one filter behavior.
+    """
+    text = str(value or "")
+    text = text.replace("（", "(").replace("）", ")")
+    return re.sub(r"\s+", "", text)
+
+
+CATEGORY_GROUP_NORMALIZED_FILTERS = {
+    key: frozenset(normalize_category_name(value) for value in values)
+    for key, values in CATEGORY_GROUP_FILTERS.items()
+}
+
+
+def category_filter_values(category_filter: str) -> tuple[str, ...]:
+    """Return SQL-safe aliases for a direct or制度群組 category filter."""
+    values = CATEGORY_GROUP_FILTERS.get(category_filter, (category_filter,))
+    expanded: set[str] = set()
+    for value in values:
+        raw = str(value or "")
+        normalized = normalize_category_name(raw)
+        expanded.update(
+            {
+                raw,
+                normalized,
+                normalized.replace("(", "（").replace(")", "）"),
+            }
+        )
+    return tuple(sorted(value for value in expanded if value))
+
+
+SQL_CANDIDATE_CATEGORY_EXPR = (
+    "COALESCE(NULLIF(raw_candidate_json->'metadata'->>'normalized_category_name', ''), "
+    "NULLIF(raw_candidate_json->'metadata'->>'group_name', ''), '')"
+)
+SQL_ANSWER_CATEGORY_EXPR = (
+    "COALESCE(NULLIF(c.raw_candidate_json->'metadata'->>'normalized_category_name', ''), "
+    "NULLIF(c.raw_candidate_json->'metadata'->>'group_name', ''), '')"
+)
 
 AI_ANSWER_DEFER_LABELS = {"answer_pair_suspect", "needs_human_review", "pass_likely"}
 AI_OCR_TEXT_REPLACEMENTS = [
@@ -355,7 +427,7 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in f:
             if line.strip():
                 rows.append(json.loads(line))
-                return rows
+    return rows
 
 
 def load_issues(path: Path | None) -> dict[str, list[dict[str, Any]]]:
@@ -842,6 +914,11 @@ def normalized_correction(value: Any) -> dict[str, Any]:
     correction: dict[str, Any] = {}
     for key in ("stem", "answer", "group_ref", "visual_review"):
         if key in value:
+            # Empty group/visual fields are omitted from text-only correction
+            # events.  Clearing a group is a group-review action, not a side
+            # effect of accepting a typo correction.
+            if key in {"group_ref", "visual_review"} and not str(value.get(key) or "").strip():
+                continue
             correction[key] = "" if value[key] is None else str(value[key])
     if "group_sequence_no" in value:
         try:
@@ -1216,6 +1293,16 @@ class ReviewState:
         self.defer_formal_sync = self.sql_review_enabled and os.environ.get("REVIEW_UI_DEFER_FORMAL_SYNC", "1").lower() not in {"0", "false", "no"}
         self._sql_local = threading.local()
         self._sql_facets_cache: dict[str, dict[str, list[str]]] = {}
+        self._pipeline_cache_lock = threading.Lock()
+        self._pipeline_cache: dict[str, Any] | None = None
+        self._pipeline_refreshing = False
+        try:
+            self._pipeline_cache_ttl_seconds = max(
+                5.0,
+                float(os.environ.get("REVIEW_UI_PIPELINE_CACHE_SECONDS", "30")),
+            )
+        except ValueError:
+            self._pipeline_cache_ttl_seconds = 30.0
         self._formal_sync_schema_ready = False
         self._formal_sync_wake = threading.Event()
         self._formal_sync_status_lock = threading.Lock()
@@ -1265,6 +1352,8 @@ class ReviewState:
             else:
                 threading.Thread(target=self._formal_sync_worker_loop, name="formal-sync", daemon=True).start()
                 self._formal_sync_wake.set()
+        if self.sql_review_enabled:
+            self._start_pipeline_cache_refresh()
 
     def candidate_data_status(self) -> dict[str, Any]:
         current_candidate_signature = file_signature(self.candidate_path)
@@ -1575,7 +1664,7 @@ class ReviewState:
         else:
             clauses.append("COALESCE(review_status, '') <> 'excluded'")
         filters = {
-            "category": ("raw_candidate_json->'metadata'->>'normalized_category_name'", params.get("category") or ""),
+            "category": (SQL_CANDIDATE_CATEGORY_EXPR, params.get("category") or ""),
             "subject": ("raw_candidate_json->'metadata'->>'normalized_subject_name'", params.get("subject") or ""),
             "year": ("raw_candidate_json->'metadata'->>'year'", params.get("year") or ""),
             "ordinal": ("raw_candidate_json->'metadata'->>'exam_ordinal'", params.get("ordinal") or ""),
@@ -1583,9 +1672,9 @@ class ReviewState:
         for key, (expr, value) in filters.items():
             if key == ignore or not value:
                 continue
-            if key == "category" and value == PHARMACIST_TRACK_FILTER:
-                clauses.append(f"COALESCE({expr}, '') = ANY(%s)")
-                values.append(list(PHARMACIST_TRACK_CATEGORIES))
+            if key == "category":
+                clauses.append(f"{expr} = ANY(%s)")
+                values.append(list(category_filter_values(value)))
                 continue
             clauses.append(f"COALESCE({expr}, '') = %s")
             values.append(value)
@@ -1596,7 +1685,7 @@ class ReviewState:
         cache_key = json.dumps(
             {
                 key: params.get(key) or ""
-                for key in ("category", "subject", "year", "ordinal")
+                for key in ("category", "subject", "year", "ordinal", "reviewStatus")
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1604,7 +1693,7 @@ class ReviewState:
         if cache_key in self._sql_facets_cache:
             return self._sql_facets_cache[cache_key]
         facet_defs = {
-            "categories": ("category", "raw_candidate_json->'metadata'->>'normalized_category_name'"),
+            "categories": ("category", SQL_CANDIDATE_CATEGORY_EXPR),
             "subjects": ("subject", "raw_candidate_json->'metadata'->>'normalized_subject_name'"),
             "years": ("year", "raw_candidate_json->'metadata'->>'year'"),
             "ordinals": ("ordinal", "raw_candidate_json->'metadata'->>'exam_ordinal'"),
@@ -1632,6 +1721,8 @@ class ReviewState:
                         result[output_key] = rows
         except Exception:
             return self.facets(params)
+        if len(self._sql_facets_cache) >= 64:
+            self._sql_facets_cache.pop(next(iter(self._sql_facets_cache)))
         self._sql_facets_cache[cache_key] = result
         return result
 
@@ -2401,17 +2492,22 @@ filtered AS (
                 if scoped:
                     cur.execute(
                         f"""
-                        WITH latest_question AS (
-                            SELECT DISTINCT ON (candidate_key) candidate_key, action, created_at, id
-                            FROM exam.question_review_events
-                            WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
-                            ORDER BY candidate_key, id DESC
+                        WITH scoped_candidates AS MATERIALIZED (
+                            SELECT candidate_key
+                            FROM exam.question_candidates
+                            {where}
+                        ),
+                        latest_question AS (
+                            SELECT DISTINCT ON (e.candidate_key) e.candidate_key, e.action, e.created_at, e.id
+                            FROM exam.question_review_events e
+                            JOIN scoped_candidates sc ON sc.candidate_key = e.candidate_key
+                            WHERE e.action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
+                            ORDER BY e.candidate_key, e.id DESC
                         )
                         SELECT count(*)
-                        FROM exam.question_candidates c
+                        FROM scoped_candidates c
                         JOIN latest_question lq ON lq.candidate_key = c.candidate_key
-                        {where}
-                          AND lq.action NOT IN ('unreviewed', 'reset_review')
+                        WHERE lq.action NOT IN ('unreviewed', 'reset_review')
                         """,
                         values,
                     )
@@ -4100,7 +4196,10 @@ filtered AS (
         for key, (value, expected) in checks.items():
             if key == ignore or not expected:
                 continue
-            if value != expected:
+            if key == "category":
+                if not category_matches_filter(value, expected):
+                    return False
+            elif value != expected:
                 return False
         return True
 
@@ -4435,16 +4534,20 @@ filtered AS (
         clauses = ["COALESCE(c.review_status, '') <> 'excluded'"]
         values: list[Any] = []
         filters = {
-            "category": ("COALESCE(c.raw_candidate_json->'metadata'->>'normalized_category_name', c.raw_candidate_json->'metadata'->>'group_name', '')", params.get("category") or ""),
+            "category": (SQL_ANSWER_CATEGORY_EXPR, params.get("category") or ""),
             "subject": ("c.raw_candidate_json->'metadata'->>'normalized_subject_name'", params.get("subject") or ""),
             "year": ("c.raw_candidate_json->'metadata'->>'year'", params.get("year") or ""),
             "ordinal": ("c.raw_candidate_json->'metadata'->>'exam_ordinal'", params.get("ordinal") or ""),
         }
-        for expr, value in filters.values():
+        for key, (expr, value) in filters.items():
             if not value:
                 continue
-            clauses.append(f"COALESCE({expr}, '') = %s")
-            values.append(value)
+            if key == "category":
+                clauses.append(f"{expr} = ANY(%s)")
+                values.append(list(category_filter_values(value)))
+            else:
+                clauses.append(f"COALESCE({expr}, '') = %s")
+                values.append(value)
         return clauses, values
 
     def _sql_answer_sheet_cte(self, params: dict[str, str]) -> tuple[str, list[Any]]:
@@ -4766,7 +4869,24 @@ filtered_sheets AS (
         inferred_candidate_keys: set[str] = set()
         suspect_count = 0
         payloads: list[dict[str, Any]] = []
+        category_filter = params.get("category") or ""
+        subject_filter = params.get("subject") or ""
+        year_filter = params.get("year") or ""
+        ordinal_filter = params.get("ordinal") or ""
         for item in rows:
+            metadata = item.get("metadata") or {}
+            category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
+            subject = str(metadata.get("normalized_subject_name") or "")
+            year = str(metadata.get("year") or "")
+            ordinal = str(metadata.get("exam_ordinal") or "")
+            if category_filter and not category_matches_filter(category, category_filter):
+                continue
+            if subject_filter and subject != subject_filter:
+                continue
+            if year_filter and year != year_filter:
+                continue
+            if ordinal_filter and ordinal != ordinal_filter:
+                continue
             payload = self.candidate_payload(
                 item,
                 issues_by_key=issues_by_key,
@@ -6016,6 +6136,59 @@ filtered_sheets AS (
             return {key: str((latest_reviews.get(key) or {}).get("action") or "") for key in keys}
         return {key: str((self.latest_reviews.get(key) or {}).get("action") or "") for key in keys}
 
+    def _compute_pipeline_cache(self) -> dict[str, Any]:
+        payload = self._sql_pipeline_payload()
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        with self._pipeline_cache_lock:
+            self._pipeline_cache = {
+                "payload": payload,
+                "updated_at": updated_at,
+                "updated_monotonic": time.monotonic(),
+                "error": None,
+            }
+            self._pipeline_refreshing = False
+        return self._pipeline_cached_response(payload, updated_at, 0.0, False, None)
+
+    def _refresh_pipeline_cache_background(self) -> None:
+        try:
+            self._compute_pipeline_cache()
+        except Exception as exc:
+            with self._pipeline_cache_lock:
+                self._pipeline_refreshing = False
+                if self._pipeline_cache is not None:
+                    self._pipeline_cache["error"] = str(exc)
+
+    def _start_pipeline_cache_refresh(self) -> None:
+        with self._pipeline_cache_lock:
+            if self._pipeline_refreshing:
+                return
+            self._pipeline_refreshing = True
+        threading.Thread(
+            target=self._refresh_pipeline_cache_background,
+            name="pipeline-stats-refresh",
+            daemon=True,
+        ).start()
+
+    def _pipeline_cached_response(
+        self,
+        payload: dict[str, Any],
+        updated_at: str,
+        age_seconds: float,
+        stale: bool,
+        error: str | None,
+    ) -> dict[str, Any]:
+        response = dict(payload)
+        response.update(
+            {
+                "statistics_updated_at": updated_at,
+                "statistics_age_seconds": round(max(age_seconds, 0.0), 1),
+                "statistics_stale": stale,
+            }
+        )
+        if error:
+            response["statistics_refresh_error"] = error
+        return response
+
     def _sql_pipeline_payload(self) -> dict[str, Any]:
         counts = {
             "official_documents": 0,
@@ -6040,200 +6213,228 @@ filtered_sheets AS (
         }
         with self._sql_connect() as conn:
             with conn.cursor() as cur:
-                for table_name, key in [
-                    ("exam.official_documents", "official_documents"),
-                    ("exam.question_candidates", "question_candidates"),
-                    ("exam.question_parse_issues", "question_parse_issues"),
-                ]:
-                    try:
-                        if table_name == "exam.question_candidates":
-                            cur.execute("SELECT count(*) FROM exam.question_candidates WHERE COALESCE(review_status, '') <> 'excluded'")
-                        else:
-                            cur.execute(f"SELECT count(*) FROM {table_name}")
-                        counts[key] = int(cur.fetchone()[0] or 0)
-                    except Exception:
-                        conn.rollback()
                 cur.execute(
                     """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
-                        ORDER BY candidate_key, id DESC
-                    )
-                    SELECT
-                        count(*),
-                        count(*) FILTER (WHERE action IN ('accept', 'unblock')),
-                        count(*) FILTER (WHERE action = 'needs_review'),
-                        count(*) FILTER (WHERE action = 'block')
-                    FROM latest l
-                    JOIN exam.question_candidates c ON c.candidate_key = l.candidate_key
-                    WHERE COALESCE(c.review_status, '') <> 'excluded'
-                    """
-                )
-                row = cur.fetchone()
-                if row:
-                    counts["question_reviewed"] = int(row[0] or 0)
-                    counts["question_accepted"] = int(row[1] or 0)
-                    counts["question_needs_review"] = int(row[2] or 0)
-                    counts["question_blocked"] = int(row[3] or 0)
-                cur.execute(
-                    """
-                    SELECT count(*)
-                    FROM exam.question_candidates
-                    WHERE NULLIF(raw_candidate_json->>'answer', '') IS NOT NULL
-                      AND COALESCE(review_status, '') <> 'excluded'
-                    """
-                )
-                counts["answer_ready"] = int(cur.fetchone()[0] or 0)
-                cur.execute(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
-                        ORDER BY candidate_key, id DESC
-                    )
-                    SELECT count(*)
-                    FROM exam.question_candidates c
-                    JOIN latest l ON l.candidate_key = c.candidate_key
-                    WHERE l.action IN ('accept', 'unblock')
-                      AND COALESCE(c.review_status, '') <> 'excluded'
-                      AND NULLIF(c.raw_candidate_json->>'answer', '') IS NOT NULL
-                    """
-                )
-                counts["question_accepted_answer_pending"] = int(cur.fetchone()[0] or 0)
-                cur.execute(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.answer_review_events
-                        ORDER BY candidate_key, id DESC
-                    )
-                    SELECT
-                        count(*),
-                        count(*) FILTER (WHERE action IN ('accept', 'unblock')),
-                        count(*) FILTER (WHERE action = 'block')
-                    FROM latest l
-                    JOIN exam.question_candidates c ON c.candidate_key = l.candidate_key
-                    WHERE COALESCE(c.review_status, '') <> 'excluded'
-                    """
-                )
-                row = cur.fetchone()
-                if row:
-                    counts["answer_reviewed"] = int(row[0] or 0)
-                    counts["answer_accepted"] = int(row[1] or 0)
-                    counts["answer_blocked"] = int(row[2] or 0)
-                cur.execute(
-                    """
-                    WITH latest_question AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
-                        ORDER BY candidate_key, id DESC
+                    WITH active_candidates AS MATERIALIZED (
+                        SELECT candidate_key, raw_candidate_json
+                        FROM exam.question_candidates
+                        WHERE COALESCE(review_status, '') <> 'excluded'
                     ),
-                    latest_answer AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.answer_review_events
-                        ORDER BY candidate_key, id DESC
+                    latest_question AS MATERIALIZED (
+                        SELECT DISTINCT ON (e.candidate_key)
+                            e.candidate_key,
+                            e.action
+                        FROM exam.question_review_events e
+                        WHERE e.action NOT IN (
+                            'confirm_not_group', 'confirm_group', 'reset_group_review',
+                            'human_review_pdf_visual', 'mobile_defer', 'mobile_resume'
+                        )
+                        ORDER BY e.candidate_key, e.id DESC
                     ),
-                    ready AS (
-                        SELECT c.candidate_key
-                        FROM exam.question_candidates c
-                        JOIN latest_question q ON q.candidate_key = c.candidate_key
-                        JOIN latest_answer a ON a.candidate_key = c.candidate_key
+                    latest_answer AS MATERIALIZED (
+                        SELECT DISTINCT ON (e.candidate_key)
+                            e.candidate_key,
+                            e.action
+                        FROM exam.answer_review_events e
+                        ORDER BY e.candidate_key, e.id DESC
+                    ),
+                    latest_ai AS MATERIALIZED (
+                        SELECT DISTINCT ON (e.candidate_key)
+                            e.candidate_key,
+                            e.audit_status
+                        FROM exam.question_ai_review_events e
+                        ORDER BY e.candidate_key, e.id DESC
+                    ),
+                    question_states AS MATERIALIZED (
+                        SELECT c.candidate_key, c.raw_candidate_json, l.action
+                        FROM active_candidates c
+                        JOIN latest_question l USING (candidate_key)
+                    ),
+                    answer_states AS MATERIALIZED (
+                        SELECT c.candidate_key, l.action
+                        FROM active_candidates c
+                        JOIN latest_answer l USING (candidate_key)
+                    ),
+                    ai_states AS MATERIALIZED (
+                        SELECT c.candidate_key, l.audit_status
+                        FROM active_candidates c
+                        JOIN latest_ai l USING (candidate_key)
+                    ),
+                    ready AS MATERIALIZED (
+                        SELECT q.candidate_key
+                        FROM question_states q
+                        JOIN answer_states a USING (candidate_key)
                         WHERE q.action IN ('accept', 'unblock')
                           AND a.action IN ('accept', 'unblock')
-                          AND COALESCE(c.review_status, '') <> 'excluded'
-                    )
-                    SELECT
-                        count(*),
-                        count(*) FILTER (
-                            WHERE fq.question_key IS NULL
-                               OR fq.review_status <> 'accepted'
-                               OR NOT EXISTS (
-                                   SELECT 1
-                                   FROM exam.answers fa
-                                   WHERE fa.question_id = fq.id
-                               )
-                        )
-                    FROM ready r
-                    LEFT JOIN exam.questions fq ON fq.question_key = r.candidate_key
-                    """
-                )
-                row = cur.fetchone()
-                if row:
-                    counts["ready_for_formal"] = int(row[0] or 0)
-                    counts["formal_pending_promotion"] = int(row[1] or 0)
-                cur.execute(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, audit_status
-                        FROM exam.question_ai_review_events
-                        ORDER BY candidate_key, id DESC
-                    )
-                    SELECT
-                        count(*),
-                        count(*) FILTER (WHERE audit_status = 'needs_review'),
-                        count(*) FILTER (WHERE audit_status IN ('block', 'blocked'))
-                    FROM latest l
-                    JOIN exam.question_candidates c ON c.candidate_key = l.candidate_key
-                    WHERE COALESCE(c.review_status, '') <> 'excluded'
-                    """
-                )
-                row = cur.fetchone()
-                if row:
-                    counts["ai_reviewed"] = int(row[0] or 0)
-                    counts["ai_needs_review"] = int(row[1] or 0)
-                    counts["ai_blocked"] = int(row[2] or 0)
-                cur.execute(
-                    """
-                    SELECT count(*)
-                    FROM exam.questions q
-                    WHERE q.review_status = 'accepted'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM exam.answers a
-                          WHERE a.question_id = q.id
-                      )
-                    """
-                )
-                counts["formal_questions"] = int(cur.fetchone()[0] or 0)
-                cur.execute(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.question_review_events
-                        WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual', 'mobile_defer', 'mobile_resume')
-                        ORDER BY candidate_key, id DESC
                     ),
-                    latest_answer AS (
-                        SELECT DISTINCT ON (candidate_key) candidate_key, action
-                        FROM exam.answer_review_events
-                        ORDER BY candidate_key, id DESC
+                    ready_formal AS MATERIALIZED (
+                        SELECT
+                            r.candidate_key,
+                            fq.id,
+                            fq.review_status,
+                            EXISTS (
+                                SELECT 1
+                                FROM exam.answers fa
+                                WHERE fa.question_id = fq.id
+                            ) AS has_answers
+                        FROM ready r
+                        LEFT JOIN exam.questions fq ON fq.question_key = r.candidate_key
+                    ),
+                    formal_states AS MATERIALIZED (
+                        SELECT
+                            q.question_key,
+                            EXISTS (
+                                SELECT 1
+                                FROM exam.answers fa
+                                WHERE fa.question_id = q.id
+                            ) AS has_answers,
+                            lq.action AS question_action,
+                            la.action AS answer_action
+                        FROM exam.questions q
+                        LEFT JOIN latest_question lq ON lq.candidate_key = q.question_key
+                        LEFT JOIN latest_answer la ON la.candidate_key = q.question_key
+                        WHERE q.review_status = 'accepted'
+                    ),
+                    source_stats AS (
+                        SELECT
+                            (SELECT count(*) FROM exam.official_documents) AS official_documents,
+                            (SELECT count(*) FROM exam.question_parse_issues) AS question_parse_issues
+                    ),
+                    candidate_stats AS (
+                        SELECT
+                            count(*) AS question_candidates,
+                            count(*) FILTER (
+                                WHERE NULLIF(raw_candidate_json->>'answer', '') IS NOT NULL
+                            ) AS answer_ready
+                        FROM active_candidates
+                    ),
+                    question_stats AS (
+                        SELECT
+                            count(*) AS question_reviewed,
+                            count(*) FILTER (WHERE action IN ('accept', 'unblock')) AS question_accepted,
+                            count(*) FILTER (WHERE action = 'needs_review') AS question_needs_review,
+                            count(*) FILTER (WHERE action = 'block') AS question_blocked,
+                            count(*) FILTER (
+                                WHERE action IN ('accept', 'unblock')
+                                  AND NULLIF(raw_candidate_json->>'answer', '') IS NOT NULL
+                            ) AS question_accepted_answer_pending
+                        FROM question_states
+                    ),
+                    answer_stats AS (
+                        SELECT
+                            count(*) AS answer_reviewed,
+                            count(*) FILTER (WHERE action IN ('accept', 'unblock')) AS answer_accepted,
+                            count(*) FILTER (WHERE action = 'block') AS answer_blocked
+                        FROM answer_states
+                    ),
+                    ready_stats AS (
+                        SELECT
+                            count(*) AS ready_for_formal,
+                            count(*) FILTER (
+                                WHERE id IS NULL
+                                   OR review_status <> 'accepted'
+                                   OR NOT has_answers
+                            ) AS formal_pending_promotion
+                        FROM ready_formal
+                    ),
+                    ai_stats AS (
+                        SELECT
+                            count(*) AS ai_reviewed,
+                            count(*) FILTER (WHERE audit_status = 'needs_review') AS ai_needs_review,
+                            count(*) FILTER (WHERE audit_status IN ('block', 'blocked')) AS ai_blocked
+                        FROM ai_states
+                    ),
+                    formal_stats AS (
+                        SELECT
+                            count(*) FILTER (WHERE has_answers) AS formal_questions,
+                            count(*) FILTER (
+                                WHERE has_answers
+                                  AND NOT (
+                                      COALESCE(question_action, '') IN ('accept', 'unblock')
+                                      AND COALESCE(answer_action, '') IN ('accept', 'unblock')
+                                  )
+                            ) AS formal_review_drift
+                        FROM formal_states
                     )
-                    SELECT count(*)
-                    FROM exam.questions q
-                    LEFT JOIN latest l ON l.candidate_key = q.question_key
-                    LEFT JOIN latest_answer a ON a.candidate_key = q.question_key
-                    WHERE q.review_status = 'accepted'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM exam.answers fa
-                          WHERE fa.question_id = q.id
-                      )
-                      AND NOT (
-                        COALESCE(l.action, '') IN ('accept', 'unblock')
-                        AND COALESCE(a.action, '') IN ('accept', 'unblock')
-                      )
+                    SELECT
+                        source_stats.official_documents,
+                        candidate_stats.question_candidates,
+                        source_stats.question_parse_issues,
+                        question_stats.question_reviewed,
+                        question_stats.question_accepted,
+                        question_stats.question_needs_review,
+                        question_stats.question_blocked,
+                        answer_stats.answer_reviewed,
+                        answer_stats.answer_accepted,
+                        answer_stats.answer_blocked,
+                        candidate_stats.answer_ready,
+                        question_stats.question_accepted_answer_pending,
+                        ready_stats.ready_for_formal,
+                        ready_stats.formal_pending_promotion,
+                        ai_stats.ai_reviewed,
+                        ai_stats.ai_needs_review,
+                        ai_stats.ai_blocked,
+                        formal_stats.formal_questions,
+                        formal_stats.formal_review_drift
+                    FROM source_stats
+                    CROSS JOIN candidate_stats
+                    CROSS JOIN question_stats
+                    CROSS JOIN answer_stats
+                    CROSS JOIN ready_stats
+                    CROSS JOIN ai_stats
+                    CROSS JOIN formal_stats
                     """
                 )
-                counts["formal_review_drift"] = int(cur.fetchone()[0] or 0)
+                row = cur.fetchone()
+                if row:
+                    stat_keys = (
+                        "official_documents",
+                        "question_candidates",
+                        "question_parse_issues",
+                        "question_reviewed",
+                        "question_accepted",
+                        "question_needs_review",
+                        "question_blocked",
+                        "answer_reviewed",
+                        "answer_accepted",
+                        "answer_blocked",
+                        "answer_ready",
+                        "question_accepted_answer_pending",
+                        "ready_for_formal",
+                        "formal_pending_promotion",
+                        "ai_reviewed",
+                        "ai_needs_review",
+                        "ai_blocked",
+                        "formal_questions",
+                        "formal_review_drift",
+                    )
+                    counts.update({key: int(value or 0) for key, value in zip(stat_keys, row)})
         return self._pipeline_payload_from_counts(counts)
 
     def pipeline_payload(self) -> dict[str, Any]:
         if self.sql_review_enabled:
-            return self._sql_pipeline_payload()
+            now = time.monotonic()
+            refresh_needed = False
+            with self._pipeline_cache_lock:
+                cached = dict(self._pipeline_cache) if self._pipeline_cache else None
+                if cached:
+                    age_seconds = now - float(cached.get("updated_monotonic") or now)
+                    stale = age_seconds >= self._pipeline_cache_ttl_seconds
+                    refresh_needed = stale
+                    response = self._pipeline_cached_response(
+                        cached["payload"],
+                        str(cached.get("updated_at") or ""),
+                        age_seconds,
+                        stale,
+                        cached.get("error"),
+                    )
+                else:
+                    response = None
+            if response is not None:
+                if refresh_needed:
+                    self._start_pipeline_cache_refresh()
+                return response
+            return self._compute_pipeline_cache()
         reviewed = []
         accepted = []
         blocked = []
@@ -6295,7 +6496,15 @@ filtered_sheets AS (
             "ai_needs_review": len(ai_needs_review),
             "ai_blocked": len(ai_blocked),
         }
-        return self._pipeline_payload_from_counts(counts)
+        payload = self._pipeline_payload_from_counts(counts)
+        payload.update(
+            {
+                "statistics_updated_at": datetime.now().isoformat(timespec="seconds"),
+                "statistics_age_seconds": 0.0,
+                "statistics_stale": False,
+            }
+        )
+        return payload
 
     def _pipeline_payload_from_counts(self, counts: dict[str, int]) -> dict[str, Any]:
         return {
@@ -7902,7 +8111,12 @@ function populateSelect(id, values, numeric = false) {
   const select = document.getElementById(id);
   const currentValue = select.value;
   const specialOptions = id === 'categoryFilter'
-    ? '<option value="__pharmacist_track__">藥師制度群組</option>'
+    ? [
+        ['__chinese_medicine_track__', '中醫師制度群組'],
+        ['__physician_track__', '醫師制度群組'],
+        ['__dentist_track__', '牙醫師制度群組'],
+        ['__pharmacist_track__', '藥師制度群組']
+      ].map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join('')
     : '';
   select.innerHTML = '<option value="">全部</option>' + specialOptions + uniqueSorted(values, numeric).map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
   if ([...select.options].some(option => option.value === currentValue)) select.value = currentValue;
@@ -8023,8 +8237,17 @@ function startVisualReview() {
 }
 
 async function showPipeline() {
-  const res = await fetch('/api/pipeline');
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('/api/pipeline');
+    data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+  } catch (error) {
+    current = null;
+    renderList();
+    document.getElementById('detail').innerHTML = `<div class="panel"><h2>資料庫入庫層級</h2><div class="body"><p class="error">統計讀取失敗：${esc(error.message || error)}</p><button class="action" onclick="showPipeline()">重試</button></div></div>`;
+    return;
+  }
   current = null;
   renderList();
   document.getElementById('pdf').src = '';
@@ -8043,9 +8266,13 @@ async function showPipeline() {
     </div>
   `).join('');
   const storage = data.storage || {};
+  const statisticsUpdatedAt = data.statistics_updated_at || '未提供';
+  const statisticsAge = Number(data.statistics_age_seconds || 0);
+  const statisticsState = data.statistics_stale ? '（背景更新中）' : '';
   document.getElementById('detail').innerHTML = `
     <div class="panel"><h2>資料庫入庫層級</h2><div class="body">
       <p><span class="badge ${storage.sql_primary ? 'accept' : 'needs_review'}">${storage.sql_primary ? 'SQL primary' : 'JSONL primary'}</span> <span class="meta">JSONL 狀態：${esc(storage.jsonl_status || '')}</span></p>
+      <p class="meta">統計更新：<code>${esc(statisticsUpdatedAt)}</code>（約 ${esc(statisticsAge)} 秒前）${statisticsState}；頁面載入：${esc(new Date().toLocaleTimeString('zh-TW'))}</p>
       <p class="meta">Candidate source snapshot: <code>${esc(data.candidate_source_jsonl || data.candidate_jsonl || '')}</code></p>
       <p class="meta">Issue source snapshot: <code>${esc(data.issue_source_csv || data.issue_csv || '')}</code></p>
       <p class="meta">Legacy review backup: <code>${esc(data.legacy_review_log || data.review_log || '')}</code></p>
