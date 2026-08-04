@@ -162,9 +162,20 @@ def apply_review_correction(candidate: dict[str, Any], correction: dict[str, Any
         "question_type",
     ):
         if field in correction:
+            # A text-only correction payload commonly carries an empty
+            # group_ref.  An empty value means "not supplied", not "ungroup
+            # this question"; ungrouping is a separate group-review action.
+            # Preserve the formal group link unless an explicit non-empty
+            # group_ref is supplied.
+            if field == "group_ref" and not str(correction.get(field) or "").strip():
+                continue
             effective[field] = correction[field]
     if "image_refs" in correction:
-        effective["image_refs"] = correction.get("image_refs") or []
+        # Likewise, an empty image list in a text correction must not erase
+        # existing reviewed assets.  Asset removal uses its dedicated review
+        # flow and must be explicit.
+        if correction.get("image_refs"):
+            effective["image_refs"] = correction["image_refs"]
     return effective
 
 

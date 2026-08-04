@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -51,8 +52,9 @@ def sql_literal(value: str) -> str:
 
 
 def psql_json_lines(args: argparse.Namespace, sql: str) -> list[dict[str, Any]]:
+    docker = os.environ.get("DOCKER_BIN") or shutil.which("docker") or "/usr/local/bin/docker"
     cmd = [
-        "docker",
+        docker,
         "compose",
         "exec",
         "-T",

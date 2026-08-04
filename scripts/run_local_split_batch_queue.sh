@@ -21,7 +21,8 @@ LOCAL_FAILED_ROOT="$BATCH_ROOT/local_failed"
 ASSIGNED_ROOT="$BATCH_ROOT/assigned"
 QUEUE_LOG="${QUEUE_LOG:-$BATCH_ROOT/local_queue__$(date '+%Y%m%d-%H%M%S').log}"
 WORKERS="${WORKERS:-2}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
+# 0 means no per-PDF MinerU timeout. Long OCR jobs should be allowed to finish.
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-0}"
 MINERU_BIN="${MINERU_BIN:-$HOME/AI workspace/OCR_model/MinerU/venv_mineru/bin/mineru}"
 
 mkdir -p "$OUTGOING_ROOT" "$LOCAL_RUNNING_ROOT" "$LOCAL_DONE_ROOT" "$LOCAL_PARTIAL_ROOT" "$LOCAL_FAILED_ROOT" "$ASSIGNED_ROOT"

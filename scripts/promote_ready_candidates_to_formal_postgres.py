@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 from io import StringIO
 from pathlib import Path
@@ -76,8 +77,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def psql(args: argparse.Namespace, sql: str | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    docker = os.environ.get("DOCKER_BIN") or shutil.which("docker") or "/usr/local/bin/docker"
     cmd = [
-        "docker",
+        docker,
         "compose",
         "exec",
         "-T",

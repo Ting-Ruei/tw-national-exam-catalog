@@ -1,46 +1,72 @@
 # 專案移機交接狀態
 
-更新時間：2026-07-18 21:07:18（Asia/Taipei）
+更新時間：2026-07-20 11:30:46（Asia/Taipei）
 
 ## 目前角色
 
-- 本機的 MinerU 背景佇列已暫停，不會自動恢復。
-- 本機後續定位為考題伺服器與相關服務部署主機。
-- 大批量 PDF/MinerU 處理預計整批移植到另一台電腦後再繼續。
-- 暫停時未刪除、移動或清理任何正式 PDF 與既有 MinerU 輸出。
+- 20,000 份非醫學 MinerU 歷史佇列已於 2026-07-20 17:24:29 從 `part515` 恢復執行。
+- 目前固定 `WORKERS=1`、`TIMEOUT_SECONDS=0`，讓工作一路跑到 queue 清空；不得另開第二個 worker／queue。
+- 本機目前執行 MinerU queue 與醫學增量 worker；人工審核權威為 `http://192.168.10.70:8765/`。
+- Active queue PID/PGID 為 `31901`，PID 檔為 `Registry/mineru_remote_batches/local_queue__active.pid`。
+- 執行 log：`Registry/mineru_remote_batches/local_queue__20260720-172429.log`。
+- 暫停時未刪除、移動或清理任何正式 PDF、batch directory 或既有 MinerU 輸出。
 
-## 暫停點
+最新機器可讀 running checkpoint：
+
+`國考題資料夾_非醫學剩餘全集/Registry/reports/mineru_queue_resume__20260720-172429/status.json`
+
+恢復驗證：首批正確選到 `part515`，既有 13 份 Markdown 全部回報 `skipped_existing`；其後前 2 份新工作已成功完成，queue 正持續往下處理。
+
+## 恢復起點（取代 2026-07-18 checkpoint）
 
 - 任務：`20260717-20000-verified`，共 20,000 份、800 批，每批 25 份。
-- 已完成批次：116。
-- 部分完成批次：10。
-- 待處理批次：674。
-- 下一個續跑批次：`part674`；停機前該批次已完成 3 份，重啟時會依實際 Markdown 跳過。
-- 正式任務實際完成：3,109 份。
-- 正式任務尚未完成：16,891 份，其中 16,847 份仍在佇列、44 份位於 partial 批次。
+- 實際完成：6,831 份。
+- 尚未完成：13,169 份。
+- 批次狀態：`local_done=209`、`local_partial=76`、`local_running=1`、`outgoing=514`。
+- 下一個續跑批次：`part515`，保留在 `local_running`。
+- `part515` 已完成 13 份、尚未完成 12 份；續跑時會依實際 Markdown 自動跳過已完成檔案。
+- 已停止 process group `40821`，並驗證 queue PID 不再執行。
+- stale PID 已封存為 `Registry/mineru_remote_batches/local_queue__paused__20260720-113041.pid`。
+
+最新機器可讀 checkpoint：
+
+`國考題資料夾_非醫學剩餘全集/Registry/reports/mineru_queue_pause__20260720-113041/checkpoint.json`
+
+批次摘要與 `part515` 逐檔完成／未完成清單位於同一報告目錄。
 
 ## 全量清冊
 
-- 官方 PDF：96,922 份，缺失 0 份。
-- MinerU 完成：37,438 份。
-- 目前佇列中且未完成：16,847 份。
-- 未排入目前佇列：42,637 份。
-- 資料根目錄：約 38 GB；PDF 約 13 GB；MinerU 輸出約 24 GB。
+最新實際 filesystem inventory：
 
-權威交接報告：
+- 官方 PDF：96,922 份。
+- MinerU 完成：41,158 份。
+- 正式任務 `outgoing` 佇列：12,850 份。
+- 暫停中的 `part515` 未完成：12 份（inventory 因 batch directory 保留在 `local_running`，顯示為 `running`，但目前沒有執行程序）。
+- 未排入目前正式任務：42,902 份。
+- PDF 缺失：0 份。
 
-`國考題資料夾_非醫學剩餘全集/Registry/reports/migration_handoff__20260718-210718/README.md`
+逐檔清冊：
 
-機器可讀 checkpoint：
+`國考題資料夾_非醫學剩餘全集/Registry/reports/mineru_completion_inventory__20260720-113041/mineru_completion_inventory.csv`
 
-`國考題資料夾_非醫學剩餘全集/Registry/reports/migration_handoff__20260718-210718/checkpoint.json`
+## 中斷後續跑方式
 
-完成狀態逐檔清冊：
+目前 queue 正在執行，不要重複下列命令。只有在 PID `31901` 已確認不存在且需要中斷復原時，才使用目的地主機的路徑重新啟動；`run_local_split_batch_queue.sh` 會優先選擇 `local_running`：
 
-`國考題資料夾_非醫學剩餘全集/Registry/reports/mineru_completion_inventory__20260718-210718/mineru_completion_inventory.csv`
+```bash
+ASSET_ROOT='/new/path/國考題資料夾_非醫學剩餘全集' \
+MINERU_BIN='/new/path/to/mineru' \
+WORKERS=1 \
+TIMEOUT_SECONDS=0 \
+python3 scripts/start_local_split_batch_queue.py
+```
+
+`TIMEOUT_SECONDS=0` 表示不對單份 MinerU 工作設定時限；啟動後讓該批一路完成，再進行後續工作。
+
+啟動後第一批必須是 `mineru_remote_batch_20260717-20000-verified_part515`，且應先跳過已有 Markdown 的 13 份，再處理其餘 12 份。
 
 ## 重要限制
 
-舊日誌和部分 manifest 仍包含 `/Users/tim/tw-national-exam-catalog` 絕對路徑。新電腦若不使用相同路徑，必須設定新的 `ASSET_ROOT` 與 `MINERU_BIN`。佇列會從 `relative_asset_path` 重建 runtime PDF 路徑，不應直接沿用舊的 `asset_path`。
+舊日誌和部分 manifest 仍包含舊機器絕對路徑。AI MAX 395 必須設定新的 `ASSET_ROOT` 與 `MINERU_BIN`；queue 會從 `relative_asset_path` 重建 runtime PDF 路徑，不應直接沿用舊的 `asset_path`。
 
-在新電腦完成搬移與數量驗證前，不要在本機重新啟動 `start_local_split_batch_queue.py`。
+2026-07-18 的 `migration_handoff__20260718-210718` 僅保留為歷史紀錄；其 `part674` 暫停點已過期，不能再作為續跑依據。

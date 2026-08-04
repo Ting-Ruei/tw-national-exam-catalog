@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -33,8 +34,9 @@ def sql_literal(value: str) -> str:
 
 
 def psql(args: argparse.Namespace, sql: str) -> subprocess.CompletedProcess[str]:
+    docker = os.environ.get("DOCKER_BIN") or shutil.which("docker") or "/usr/local/bin/docker"
     cmd = [
-        "docker",
+        docker,
         "compose",
         "exec",
         "-T",

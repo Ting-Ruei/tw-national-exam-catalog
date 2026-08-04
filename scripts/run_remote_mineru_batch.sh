@@ -17,7 +17,8 @@ WORKER_ROOT="${WORKER_ROOT:-$WORKSPACE_ROOT/national_exam_mineru_worker}"
 MINERU_BIN="${MINERU_BIN:-$WORKSPACE_ROOT/OCR_model/MinerU/venv_mineru/bin/mineru}"
 REMOTE_ASSET_ROOT="${REMOTE_ASSET_ROOT:-$WORKER_ROOT/repo/國考題資料夾}"
 WORKERS="${WORKERS:-2}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
+# 0 means no per-PDF MinerU timeout. Long OCR jobs should be allowed to finish.
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-0}"
 SCOPE="${SCOPE:-}"
 
 BATCH_ARG="$1"

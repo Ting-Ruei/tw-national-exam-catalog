@@ -113,6 +113,48 @@
       "confidence": "high",
       "status": "active",
       "note": "選項末尾核對官方 PDF；只修正目前確認的選項文字，不延伸替換藁本。"
+    },
+    {
+      "id": "medical-ocr-histoplasma-capsule-traditional",
+      "kind": "phrase",
+      "source": "荧膜組織胞漿菌",
+      "target": "莢膜組織胞漿菌",
+      "scope": {},
+      "confidence": "high",
+      "status": "superseded",
+      "superseded_by": "global-ocr-capsule-traditional-glyph",
+      "note": "歷史完整詞組規則；已由只改正荧膜字形、且不改寫後續菌名的精確規則取代。"
+    },
+    {
+      "id": "medical-ocr-histoplasma-capsule-simplified",
+      "kind": "phrase",
+      "source": "荚膜組織胞漿菌",
+      "target": "莢膜組織胞漿菌",
+      "scope": {},
+      "confidence": "high",
+      "status": "superseded",
+      "superseded_by": "global-ocr-capsule-simplified-glyph",
+      "note": "歷史完整詞組規則；已由只改正荚膜字形、且不改寫後續菌名的精確規則取代。"
+    },
+    {
+      "id": "global-ocr-capsule-traditional-glyph",
+      "kind": "phrase",
+      "source": "荧膜",
+      "target": "莢膜",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "已確認的 OCR 字形錯誤。只精確修正荧膜為莢膜，不連帶改寫後續菌名或其他文字；因此可對組織漿菌、莢膜多醣及 capsule 等上下文提供安全的一鍵部分校正。"
+    },
+    {
+      "id": "global-ocr-capsule-simplified-glyph",
+      "kind": "phrase",
+      "source": "荚膜",
+      "target": "莢膜",
+      "scope": {},
+      "confidence": "high",
+      "status": "active",
+      "note": "繁體題庫中的簡體字形修正。只精確修正荚膜為莢膜，不改寫後續專名。"
     }
   ]
 }

@@ -22,7 +22,10 @@ bash scripts/postgres_apply_schema.sh
 
 ## Review UI
 
-- Local URL: `http://127.0.0.1:8765/`
+- The current authoritative maintenance and human-review server is the Mac Studio at `http://192.168.10.70:8765/`; its repository root is `/Users/tim/tw-national-exam-catalog`.
+- Other computers, including Tim's MacBook Pro, are remote-maintenance or local validation clients only. Their `http://127.0.0.1:8765/` containers are not production.
+- For deployment, restart, production database, or live UI work, first verify the target is the Mac Studio (`192.168.10.70`) and validate the result against that URL. Do not treat a localhost success as production success.
+- Keep using the Mac Studio as the authoritative server until the user explicitly announces a server migration.
 - Question review writes to `question_review_events.jsonl`.
 - Answer review writes to `answer_review_events.jsonl`.
 - AI format audit writes to `question_ai_review_events.jsonl` and must remain advisory until a human accepts the question.
