@@ -1,0 +1,38 @@
+{
+  "schema_version": "national_exam_group_patterns_v1",
+  "strong_routes": [
+    {
+      "id": "explicit-question-range",
+      "patterns": [
+        "第 N 至 M 題",
+        "N-M",
+        "回答下列 N 題"
+      ],
+      "route": "group",
+      "auto_confirm": false
+    },
+    {
+      "id": "continuation-marker",
+      "patterns": [
+        "承上題",
+        "呈上題",
+        "請依序回答下列"
+      ],
+      "route": "group",
+      "requires_neighbors": true,
+      "auto_confirm": false
+    }
+  ],
+  "weak_cues": [
+    "下列資料",
+    "以下資料",
+    "依據下列資料"
+  ],
+  "policy": {
+    "weak_cue_alone_is_group": false,
+    "model_may_propose_range": true,
+    "model_may_confirm_group": false,
+    "continuation_markers_are_group_only": true,
+    "continuation_marker_field": "group_ref"
+  }
+}

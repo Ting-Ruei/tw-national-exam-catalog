@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tw-national-exam-catalog/contracts/pdf-reference.schema.json",
+  "title": "Official PDF second-reference manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "normalization_version",
+    "source_pdf_sha256",
+    "page_count",
+    "processed_page_count",
+    "extractors",
+    "policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "national_exam_pdf_reference_manifest_v1"},
+    "normalization_version": {"type": "string", "minLength": 1},
+    "source_pdf": {"type": "string", "minLength": 1},
+    "source_pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_pdf_bytes": {"type": "integer", "minimum": 1},
+    "page_count": {"type": "integer", "minimum": 0},
+    "processed_page_count": {"type": "integer", "minimum": 0},
+    "extractors": {"type": "object", "minProperties": 1},
+    "engine_errors": {"type": "object"},
+    "manual_source_review_pages": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "mineru_remains_primary",
+        "pdf_reference_is_second_source",
+        "no_candidate_or_review_event_writes",
+        "consensus_requires_two_extractor_families",
+        "disagreement_requires_manual_pdf_review",
+        "visual_fallback_is_not_ocr"
+      ],
+      "properties": {
+        "mineru_remains_primary": {"const": true},
+        "pdf_reference_is_second_source": {"const": true},
+        "no_candidate_or_review_event_writes": {"const": true},
+        "consensus_requires_two_extractor_families": {"const": true},
+        "disagreement_requires_manual_pdf_review": {"const": true},
+        "visual_fallback_is_not_ocr": {"const": true}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

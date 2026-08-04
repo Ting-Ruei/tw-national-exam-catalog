@@ -1,0 +1,56 @@
+{
+  "schema_version": "national_exam_accepted_reaudit_v1",
+  "description": "Evidence-gated retrospective audit for questions already closed by a human.",
+  "scope": {
+    "human_actions": ["accept", "unblock"],
+    "categories": ["醫事檢驗師", "藥師", "藥師(一)", "藥師(二)"],
+    "source": "sql_first_frozen_task_snapshot",
+    "ocr_source": "mineru_extracted_text_only"
+  },
+  "eligibility": {
+    "non_pass_advisory_required": true,
+    "minimum_confidence": 0.8,
+    "current_text_or_structure_evidence_required": true,
+    "content_hash_recheck_required": true,
+    "human_action_recheck_required": true,
+    "model_may_reset_directly": false,
+    "requires_user_approval_ref": true
+  },
+  "routes": {
+    "ocr_character": "active_rule_or_human_text",
+    "semantic_ocr": "human_pdf_unless_source_verified",
+    "group_dependency": "human_group_or_pdf",
+    "visual_dependency": "human_pdf_or_vision",
+    "option_structure": "parser_repair",
+    "boundary_merge": "parser_or_human_boundary",
+    "notation_markup": "human_text_unless_exact_active_rule"
+  },
+  "reset_event": {
+    "action": "reset_review",
+    "append_only": true,
+    "preserve_fields": [
+      "previous_action",
+      "previous_notes",
+      "previous_reviewer",
+      "previous_reviewed_at",
+      "previous_correction"
+    ],
+    "required_evidence_fields": [
+      "approval_ref",
+      "ai_catch_report_hash",
+      "ai_report_type",
+      "ai_model",
+      "ai_prompt_version",
+      "ai_issue_families",
+      "ai_evidence"
+    ]
+  },
+  "negative_controls": [
+    "A plausible wording preference such as 那/哪 is not enough to reset an accepted question.",
+    "A generic image asset or image_refs flag is not proof of a missing/wrong image.",
+    "A source_unverified or human_pdf finding may be displayed, but its correction_applicable flag must be false.",
+    "A valid-looking Latin scientific name is not a reset reason without exact local source evidence; model memory is never enough.",
+    "An English semantic anchor such as hydrogen bond(s) overrides generic glyph conversion and must be explained before reset.",
+    "A full options patch contains only key and text; parser display metadata never enters a correction payload."
+  ]
+}

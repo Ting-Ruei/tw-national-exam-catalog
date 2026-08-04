@@ -1,0 +1,74 @@
+{
+  "schema_version": "national_exam_semantic_anchor_rules_v1",
+  "description": "Discovery anchors are not active replacement rules. They may route an item to PDF review or propose a scoped rule.",
+  "anchors": [
+    {
+      "id": "amino-acid-valine-zh-anchor",
+      "lane": "semantic_transcription",
+      "anchor": "valine",
+      "suspect_terms": [
+        "纍胺酸"
+      ],
+      "candidate_target": "纈胺酸",
+      "status": "shadow",
+      "route": "human_pdf",
+      "auto_materialize": false
+    },
+    {
+      "id": "pseudomonas-aeruginosa-spelling-anchor",
+      "lane": "semantic_transcription",
+      "anchor": "aeruginosa",
+      "suspect_terms": [
+        "Pseudomonus"
+      ],
+      "candidate_target": "Pseudomonas",
+      "status": "shadow",
+      "route": "human_pdf",
+      "auto_materialize": false
+    },
+    {
+      "id": "chemical-kcl-one-l-anchor",
+      "lane": "semantic_transcription",
+      "anchor": "chemical_formula",
+      "suspect_terms": [
+        "KC1"
+      ],
+      "candidate_target": "KCl",
+      "status": "shadow",
+      "route": "human_pdf",
+      "auto_materialize": false
+    },
+    {
+      "id": "hydrogen-bond-argon-glyph-conflict",
+      "lane": "semantic_transcription",
+      "anchor": "hydrogen bond",
+      "suspect_terms": [
+        "氩鍵",
+        "氬鍵",
+        "氩鍵結",
+        "氬鍵結"
+      ],
+      "candidate_target": "氫鍵",
+      "status": "shadow",
+      "route": "human_pdf",
+      "auto_materialize": false,
+      "reason": "英文 hydrogen bond(s) 是語意錨點；不可將氩單純簡繁轉成氬，需核對官方 PDF。"
+    },
+    {
+      "id": "histoplasma-capsule-ambiguous-variant-guard",
+      "lane": "semantic_transcription",
+      "anchor": "Histoplasma capsulatum",
+      "suspect_terms": [
+        "萸膜組織",
+        "荧膜組織肥漿菌",
+        "莢膜組織肥漿菌",
+        "莢膜組織孢漿菌"
+      ],
+      "candidate_target": "莢膜組織胞漿菌",
+      "status": "shadow",
+      "route": "human_pdf",
+      "auto_materialize": false,
+      "reason": "荧膜／荚膜字形本身已由 active exact rule 修成莢膜，並可產生一鍵部分校正；肥漿菌／孢漿菌等其餘專名變體仍需官方 PDF 核對，不得隨字形 patch 一併改寫。"
+    }
+  ]
+}

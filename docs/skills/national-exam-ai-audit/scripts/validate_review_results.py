@@ -39,6 +39,7 @@ CORRECTION_COVERAGE_VALUES = {"complete", "partial", "none"}
 CORRECTION_FIRST_PROMPT_VERSIONS = {
     "llmshare_five_model_text_audit_v2",
     "codex_gpt56_luna_question_audit_v3",
+    "national_exam_sparse_audit_v4",
 }
 
 
@@ -94,7 +95,13 @@ def correction_text_values(correction: Any) -> list[str]:
     return values
 
 
-def validate_v2_correction_contract(result: dict[str, Any], status: str, correction: Any) -> list[str]:
+def validate_v2_correction_contract(
+    result: dict[str, Any],
+    status: str,
+    correction: Any,
+    *,
+    strict_global_ocr: bool = True,
+) -> list[str]:
     errors: list[str] = []
     findings = result.get("findings")
     coverage = result.get("correction_coverage")
@@ -155,6 +162,8 @@ def validate_v2_correction_contract(result: dict[str, Any], status: str, correct
             elif suggested not in patch_text:
                 uncovered.append(index)
             if (
+                strict_global_ocr
+                and
                 family in {"ocr_character", "semantic_ocr"}
                 and isinstance(observed, str)
                 and observed.strip()
@@ -177,6 +186,48 @@ def validate_v2_correction_contract(result: dict[str, Any], status: str, correct
         errors.append("partial_coverage_requires_partial_patch")
     if coverage == "none" and correction is not None:
         errors.append("none_coverage_requires_null_patch")
+    return errors
+
+
+def validate_v4_correction_contract(
+    result: dict[str, Any],
+    correction: Any,
+    task: dict[str, Any],
+) -> list[str]:
+    """Validate sparse-v4 patches at the declared field, not globally.
+
+    A repeated OCR token can legitimately remain in a different option that
+    was not reported; global substring rejection made safe one-option patches
+    look incomplete.  The v4 contract still requires the observed token to be
+    removed from the exact field named by that finding.
+    """
+    errors: list[str] = []
+    if not isinstance(correction, dict):
+        return errors
+    for index, finding in enumerate(result.get("findings") or [], start=1):
+        if not isinstance(finding, dict) or not finding.get("correction_applicable"):
+            continue
+        family = str(finding.get("issue_family") or "")
+        observed = str(finding.get("observed") or "")
+        if family not in {"ocr_character", "semantic_ocr"} or not observed:
+            continue
+        location = str(finding.get("location") or "")
+        if location == "stem":
+            patched = str(correction.get("stem") or "")
+        elif location.startswith("option_"):
+            key = location[-1].upper()
+            patched = next(
+                (
+                    str(option.get("text") or "")
+                    for option in correction.get("options") or []
+                    if isinstance(option, dict) and str(option.get("key") or "").upper() == key
+                ),
+                "",
+            )
+        else:
+            patched = ""
+        if observed in patched:
+            errors.append(f"finding_{index}_original_ocr_text_remains_in_declared_field")
     return errors
 
 
@@ -320,10 +371,25 @@ def main() -> int:
             if stage != "question":
                 row_errors.append("correction_first_contract_only_supports_question_stage")
             else:
-                row_errors.extend(validate_v2_correction_contract(result, status, correction))
+                row_errors.extend(
+                    validate_v2_correction_contract(
+                        result,
+                        status,
+                        correction,
+                        strict_global_ocr=prompt_version != "national_exam_sparse_audit_v4",
+                    )
+                )
                 if prompt_version == "codex_gpt56_luna_question_audit_v3":
                     row_errors.extend(
                         validate_luna_v3_correction_contract(
+                            result,
+                            correction,
+                            task_by_key.get(key) or {},
+                        )
+                    )
+                elif prompt_version == "national_exam_sparse_audit_v4":
+                    row_errors.extend(
+                        validate_v4_correction_contract(
                             result,
                             correction,
                             task_by_key.get(key) or {},

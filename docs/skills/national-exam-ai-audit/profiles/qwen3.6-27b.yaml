@@ -1,0 +1,22 @@
+{
+  "schema_version": "national_exam_model_profile_v1",
+  "model": "qwen3.6:27b-mlx",
+  "adapter": "ollama",
+  "certification": "shadow",
+  "allowed_lanes": [
+    "ocr_text",
+    "semantic_transcription"
+  ],
+  "vision_mode": "none",
+  "default_batch_size": 40,
+  "max_batch_size": 40,
+  "output_mode": "sparse_batch_json",
+  "thinking": false,
+  "role": "recall_discovery",
+  "may_propose_rules": true,
+  "may_materialize_without_active_rule": false,
+  "known_limits": [
+    "Replacement accuracy is not sufficient for direct correction.",
+    "Do not assign group or visual content work."
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tw-national-exam-catalog/contracts/rule-proposal.schema.json",
+  "title": "National exam audit rule proposal",
+  "type": "object",
+  "required": [
+    "rule_id",
+    "rule_type",
+    "lane",
+    "status",
+    "source",
+    "target",
+    "scope",
+    "evidence",
+    "positive_examples",
+    "negative_examples",
+    "proposed_by"
+  ],
+  "properties": {
+    "rule_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,80}$"
+    },
+    "rule_type": {
+      "enum": [
+        "exact_replacement",
+        "contextual_anchor",
+        "parser_route",
+        "group_route",
+        "visual_route",
+        "negative_control"
+      ]
+    },
+    "lane": {
+      "enum": [
+        "ocr_text",
+        "semantic_transcription",
+        "group",
+        "visual"
+      ]
+    },
+    "status": {
+      "enum": [
+        "observed",
+        "proposed",
+        "shadow",
+        "verified",
+        "active",
+        "retired",
+        "revoked"
+      ]
+    },
+    "source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "required_context": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "reference"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "official_pdf",
+              "mineru_alignment",
+              "human_review",
+              "gold_regression",
+              "model_observation"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "positive_examples": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "negative_examples": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "proposed_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "rule_type": {
+            "const": "exact_replacement"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage", choices=("question", "image", "group", "answer"), default="question")
     parser.add_argument(
         "--policy",
-        choices=("all", "risk", "unreviewed", "human_open", "accepted_drift"),
+        choices=("all", "risk", "unreviewed", "human_open", "accepted_drift", "accepted_reaudit"),
         default="risk",
     )
     parser.add_argument("--category")
@@ -113,6 +113,14 @@ WITH latest_question AS (
     WHERE action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'human_review_pdf_visual')
     ORDER BY candidate_key, id DESC
 ),
+latest_content_correction AS (
+    SELECT DISTINCT ON (candidate_key)
+        candidate_key, corrected_candidate_json, created_at, id
+    FROM exam.question_review_events
+    WHERE corrected_candidate_json IS NOT NULL
+      AND action NOT IN ('confirm_not_group', 'confirm_group', 'reset_group_review', 'mobile_defer', 'mobile_resume')
+    ORDER BY candidate_key, id DESC
+),
 latest_visual AS (
     SELECT DISTINCT ON (candidate_key)
         candidate_key, corrected_candidate_json, created_at, id
@@ -156,7 +164,10 @@ base AS (
                 THEN (c.raw_candidate_json->>'question_number_occurrence')::integer
             ELSE 1
         END AS question_number_occurrence,
-        c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb) AS candidate,
+        -- Human-corrected content is independent from the latest review-state
+        -- event. A reset_review reopens the decision but never revives raw
+        -- MinerU text/images over a saved correction.
+        c.raw_candidate_json || COALESCE(lcc.corrected_candidate_json, '{{}}'::jsonb) AS candidate,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_category_name', c.raw_candidate_json->'metadata'->>'group_name', '') AS category,
         COALESCE(c.raw_candidate_json->'metadata'->>'normalized_subject_name', '') AS subject,
         COALESCE(c.raw_candidate_json->'metadata'->>'year', '') AS year,
@@ -197,12 +208,13 @@ base AS (
             END > 8
         ) AS exam_header_false_question,
         CASE
-            WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
-                THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lq.corrected_candidate_json, '{{}}'::jsonb))->'options')
+            WHEN jsonb_typeof((c.raw_candidate_json || COALESCE(lcc.corrected_candidate_json, '{{}}'::jsonb))->'options') = 'array'
+                THEN jsonb_array_length((c.raw_candidate_json || COALESCE(lcc.corrected_candidate_json, '{{}}'::jsonb))->'options')
             ELSE 0
         END AS option_count
     FROM exam.question_candidates c
     LEFT JOIN latest_question lq USING (candidate_key)
+    LEFT JOIN latest_content_correction lcc USING (candidate_key)
     LEFT JOIN latest_visual lv USING (candidate_key)
     LEFT JOIN latest_answer la USING (candidate_key)
     LEFT JOIN latest_ai lai USING (candidate_key)
@@ -230,10 +242,16 @@ def policy_clause(args: argparse.Namespace) -> str:
         "unreviewed": "COALESCE(human_action, '') IN ('', 'unreviewed', 'reset_review')",
         "human_open": "human_action IN ('block', 'needs_review')",
         "accepted_drift": f"(human_action IN ('accept', 'unblock') AND (exam_header_false_question OR hard_issue OR {active_ai_risk}))",
+        # A catch-up lane for the explicit request to re-run the current audit
+        # rules over already human-accepted material.  It intentionally does
+        # not infer risk from old AI events: the downstream LUNA/deterministic
+        # audit must inspect every accepted candidate, while the original
+        # human event remains immutable and advisory output remains separate.
+        "accepted_reaudit": "human_action IN ('accept', 'unblock')",
     }
     stage = {
         "question": "true",
-        "image": "(visual_review = '' AND (COALESCE(candidate->'image_refs', '[]'::jsonb) <> '[]'::jsonb OR COALESCE(candidate->>'stem', '') ~ '(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表)'))",
+        "image": "(visual_review = '' AND (COALESCE(candidate->'image_refs', '[]'::jsonb) <> '[]'::jsonb OR jsonb_typeof(candidate->'stem_image') = 'object' OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(candidate->'options') = 'array' THEN candidate->'options' ELSE '[]'::jsonb END) AS option_row(value) WHERE jsonb_typeof(option_row.value->'image') = 'object') OR COALESCE(candidate->>'stem', '') ~ '(下圖|附圖|圖中|圖示|如圖|圖片|影像|照片|箭頭|表中|下表|附表)'))",
         "group": "(COALESCE(candidate->>'group_ref', '') <> '' OR COALESCE(candidate->>'stem', '') ~ '(回答(下列|以下).{0,8}題|承上題|呈上題|上題|前述)')",
         "answer": "human_action IN ('accept', 'unblock')",
     }

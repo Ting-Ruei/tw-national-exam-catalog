@@ -1,0 +1,30 @@
+{
+  "schema_version": "national_exam_visual_cues_v1",
+  "strong_routes": [
+    "如下圖",
+    "如圖所示",
+    "根據所附影像",
+    "根據所附二張 MRI 影像",
+    "依下表"
+  ],
+  "context_only_cues": [
+    "胸部 X 光片顯示無異常",
+    "X 光攝影法",
+    "心電圖的一般敘述",
+    "影像學檢查顯示"
+  ],
+  "false_table_tokens": [
+    "tablet",
+    "tablets",
+    "stable",
+    "metastable",
+    "tabletting",
+    "tablespoon"
+  ],
+  "policy": {
+    "text_model_may_route": true,
+    "text_model_may_judge_pixels": false,
+    "vision_model_requires_actual_pixels": true,
+    "model_may_write_human_visual_state": false
+  }
+}

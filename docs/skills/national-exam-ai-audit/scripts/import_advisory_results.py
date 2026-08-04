@@ -23,6 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-version", default="codex_gpt56_luna_question_audit_v3")
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument("--apply", action="store_true", help="Without this flag the command is a dry run")
+    parser.add_argument(
+        "--skip-reviewed",
+        action="store_true",
+        help="When applying, skip candidates already closed by a human and import only the still-unreviewed subset.",
+    )
     return parser.parse_args()
 
 
@@ -131,6 +136,35 @@ def assert_question_candidates_still_unreviewed(
         )
 
 
+def unreviewed_candidate_keys(
+    cur: psycopg.Cursor[Any],
+    candidate_keys: list[str],
+) -> set[str]:
+    """Return keys whose latest human question event is still open."""
+    if not candidate_keys:
+        return set()
+    cur.execute(
+        """
+        WITH latest_question AS (
+            SELECT DISTINCT ON (candidate_key) candidate_key, action
+            FROM exam.question_review_events
+            WHERE action NOT IN (
+                'confirm_not_group', 'confirm_group', 'reset_group_review',
+                'human_review_pdf_visual', 'mobile_defer', 'mobile_resume'
+            )
+            ORDER BY candidate_key, id DESC
+        )
+        SELECT c.candidate_key
+        FROM exam.question_candidates c
+        LEFT JOIN latest_question lq USING (candidate_key)
+        WHERE c.candidate_key = ANY(%s)
+          AND COALESCE(lq.action, '') IN ('', 'unreviewed', 'reset_review')
+        """,
+        (candidate_keys,),
+    )
+    return {str(row[0]) for row in cur.fetchall()}
+
+
 def main() -> int:
     args = parse_args()
     if not args.database_url:
@@ -165,18 +199,37 @@ def main() -> int:
         "input_hash": input_hash,
         "stage": stage,
         "event_table": event_table,
+        "skip_reviewed": bool(args.skip_reviewed),
     }
-    if not args.apply:
+    if not args.apply and not args.skip_reviewed:
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
+
+    if not args.apply and args.skip_reviewed:
+        if stage == "question":
+            with psycopg.connect(args.database_url) as conn:
+                with conn.cursor() as cur:
+                    input_keys = [str(row["candidate_key"]) for row in rows]
+                    eligible_keys = unreviewed_candidate_keys(cur, input_keys)
+            summary["skipped_human_review_count"] = len(rows) - len(eligible_keys)
+            summary["eligible_result_count"] = len(eligible_keys)
+            summary["result_count"] = len(eligible_keys)
         print(json.dumps(summary, ensure_ascii=False))
         return 0
 
     with psycopg.connect(args.database_url) as conn:
         with conn.cursor() as cur:
             if stage == "question":
-                assert_question_candidates_still_unreviewed(
-                    cur,
-                    [str(row["candidate_key"]) for row in rows],
-                )
+                input_keys = [str(row["candidate_key"]) for row in rows]
+                if args.skip_reviewed:
+                    eligible_keys = unreviewed_candidate_keys(cur, input_keys)
+                    skipped_human_review_count = len(input_keys) - len(eligible_keys)
+                    rows = [row for row in rows if str(row["candidate_key"]) in eligible_keys]
+                    summary["skipped_human_review_count"] = skipped_human_review_count
+                    summary["eligible_result_count"] = len(rows)
+                    summary["result_count"] = len(rows)
+                else:
+                    assert_question_candidates_still_unreviewed(cur, input_keys)
             cur.execute(
                 """
                 SELECT id

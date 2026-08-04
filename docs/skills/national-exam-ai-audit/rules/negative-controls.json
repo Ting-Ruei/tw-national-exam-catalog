@@ -1,0 +1,90 @@
+{
+  "schema_version": "national_exam_negative_controls_v1",
+  "description": "Known traps that must prevent automatic correction or false routing.",
+  "controls": [
+    {
+      "id": "preserve-official-chengxian",
+      "candidate_key": "moex:109100:301:22:1:question:q026",
+      "observed": "呈獻",
+      "rejected_target": "呈現",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "官方 PDF 反覆使用「呈獻」表示 antigen presentation。"
+    },
+    {
+      "id": "preserve-official-cysteine-variant",
+      "candidate_key": "moex:104090:301:55:1:question:q049",
+      "observed": "半胱氨酸",
+      "rejected_target": "半胱胺酸",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "官方 PDF 清楚印為「半胱氨酸（L-cysteine）」。"
+    },
+    {
+      "id": "preserve-official-cdpa-1",
+      "candidate_key": "moex:115090:308:0501:1:question:q072",
+      "observed": "CDPA-1",
+      "rejected_target": "CPDA-1",
+      "source_class": "source_original_suspected_typo",
+      "route": "human_pdf",
+      "reason": "官方題本原字串即為 CDPA-1；模型共識不能改寫來源。"
+    },
+    {
+      "id": "preserve-official-na-phrasing",
+      "observed": "那一個",
+      "rejected_target": "哪一個",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "官方題文可合法使用「那一個／那些」，不得以風格偏好改寫。"
+    },
+    {
+      "id": "canonical-semantic-html-is-valid",
+      "observed": "<sub>",
+      "rejected_target": "Unicode subscript rewrite",
+      "source_class": "candidate_mismatch",
+      "route": "none",
+      "reason": "受限語意 HTML 已是 canonical display，不應重複改寫。"
+    },
+    {
+      "id": "xray-context-does-not-imply-asset",
+      "observed": "胸部 X 光片顯示無異常",
+      "rejected_target": "visual_dependency",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "病例文字敘述不一定依賴實際影像。"
+    },
+    {
+      "id": "hydrogen-bond-anchor-rejects-argon-glyph",
+      "observed": "氩鍵",
+      "rejected_target": "氬鍵",
+      "anchor": "hydrogen bond(s)",
+      "source_class": "source_unverified",
+      "route": "human_pdf",
+      "reason": "英文 anchor 指向氫鍵；氬是 argon，不能以一般簡繁字形轉換取代語意判斷。"
+    },
+    {
+      "id": "scientific-name-needs-source-evidence",
+      "observed_pattern": "Latin genus/species",
+      "rejected_target": "model-memory-spelling",
+      "source_class": "source_unverified",
+      "route": "human_pdf",
+      "reason": "有效學名可能不熟悉；沒有官方 PDF、局部字元差異或 active exact rule 時不得改寫。"
+    },
+    {
+      "id": "preserve-valid-abbreviated-binomial",
+      "observed_pattern": "B. cereus / C. difficile / S. aureus / P. aeruginosa",
+      "rejected_target": "展開屬名或刪除句點",
+      "source_class": "source_unverified",
+      "route": "none",
+      "reason": "大寫字母加句點再接小寫種小名是合法學名縮寫；沒有官方來源差異不得改寫。"
+    },
+    {
+      "id": "continuation-marker-is-group-only",
+      "observed_pattern": "承上題 / 呈上題 / 上題 / 前述",
+      "rejected_target": "題目文字校正或刪除",
+      "source_class": "source_unverified",
+      "route": "group",
+      "reason": "這些是題組延續線索；移交題組頁核對鄰題與 group_ref，不在題目審核改字。"
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tw-national-exam-catalog/contracts/sparse-result.schema.json",
+  "title": "National exam sparse audit batch result",
+  "type": "object",
+  "required": [
+    "batch_id",
+    "checked_count",
+    "issues",
+    "model",
+    "prompt_version"
+  ],
+  "properties": {
+    "batch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "checked_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prompt_version": {
+      "const": "national_exam_sparse_audit_v4"
+    }
+  },
+  "$defs": {
+    "issue": {
+      "type": "object",
+      "required": [
+        "candidate_key",
+        "field",
+        "before",
+        "after",
+        "issue_family",
+        "source_class",
+        "route",
+        "confidence",
+        "note"
+      ],
+      "properties": {
+        "candidate_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field": {
+          "type": "string",
+          "pattern": "^(stem|options|option_[A-Z]|group_ref|image_refs)$"
+        },
+        "before": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issue_family": {
+          "enum": [
+            "non_question_header",
+            "boundary_merge",
+            "boundary_missing",
+            "empty_stem",
+            "option_structure",
+            "ocr_character",
+            "notation_markup",
+            "semantic_disfluency",
+            "semantic_ocr",
+            "visual_dependency",
+            "group_dependency"
+          ]
+        },
+        "source_class": {
+          "enum": [
+            "candidate_mismatch",
+            "mineru_ocr_mismatch",
+            "parser_error",
+            "source_original",
+            "source_original_suspected_typo",
+            "source_unverified"
+          ]
+        },
+        "route": {
+          "enum": [
+            "none",
+            "deterministic",
+            "propose_rule",
+            "human_text",
+            "human_pdf",
+            "parser",
+            "group",
+            "visual"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Observable reason: what text differs, which local anchor/source evidence supports it, and why it is not merely a valid term or official wording variant."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "route": {
+                "const": "deterministic"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule_id"
+            ],
+            "properties": {
+              "before": {
+                "type": "string",
+                "minLength": 1
+              },
+              "after": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rule_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

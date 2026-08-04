@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tw-national-exam-catalog/contracts/task.schema.json",
+  "title": "National exam sparse audit task",
+  "type": "object",
+  "required": [
+    "candidate_key",
+    "stage",
+    "content",
+    "exam",
+    "source_fingerprint"
+  ],
+  "properties": {
+    "candidate_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "enum": [
+        "question",
+        "group",
+        "image",
+        "answer"
+      ]
+    },
+    "lane": {
+      "enum": [
+        "ocr_text",
+        "semantic_transcription",
+        "group",
+        "visual"
+      ]
+    },
+    "content": {
+      "type": "object",
+      "required": [
+        "stem",
+        "options"
+      ],
+      "properties": {
+        "stem": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "key",
+              "text"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "pattern": "^[A-Z]$"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "group_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_refs": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": true
+    },
+    "exam": {
+      "type": "object",
+      "required": [
+        "category",
+        "subject",
+        "year",
+        "question_number"
+      ],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "year": {
+          "type": "string"
+        },
+        "question_number": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "neighbors": {
+      "type": "object"
+    },
+    "signals": {
+      "type": "object"
+    },
+    "sources": {
+      "type": "object"
+    },
+    "source_fingerprint": {
+      "type": "string",
+      "minLength": 8
+    }
+  },
+  "additionalProperties": true
+}

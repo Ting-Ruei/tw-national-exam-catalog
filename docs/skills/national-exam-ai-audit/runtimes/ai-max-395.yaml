@@ -1,0 +1,26 @@
+{
+  "schema_version": "national_exam_inference_runtime_v1",
+  "runtime_id": "ai-max-395",
+  "role": "inference_worker",
+  "transport": "ollama",
+  "base_url_env": "OLLAMA_BASE_URL",
+  "default_base_url": "http://127.0.0.1:11434",
+  "initial_concurrency": 1,
+  "request_timeout_seconds": 300,
+  "resume": true,
+  "capture_raw_response": true,
+  "capture_token_usage": true,
+  "initial_profiles": [
+    "profiles/ai-max-qwen3.6-27b.yaml"
+  ],
+  "database_write_access": false,
+  "review_event_write_access": false,
+  "requires_local_pixels_for_visual_judgment": true,
+  "artifact_roots": {
+    "inbox": "/srv/national-exam-audit/inbox",
+    "running": "/srv/national-exam-audit/running",
+    "completed": "/srv/national-exam-audit/completed",
+    "failed": "/srv/national-exam-audit/failed",
+    "assets": "/srv/national-exam-audit/assets"
+  }
+}

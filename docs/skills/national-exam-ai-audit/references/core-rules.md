@@ -68,7 +68,11 @@ Use `notation_markup` for meaning-bearing format damage:
 - raw LaTeX/HTML that the shared renderer cannot display;
 - Celsius lost or left as broken markup. Canonical display should preserve `°C`/`℃` meaning.
 
-Do not flag harmless spacing or ordinary Latin names.
+Do not flag harmless spacing or ordinary Latin names. A bacterial/fungal/parasitic
+Latin binomial is not an OCR error merely because the model prefers another
+spelling. Require an exact local character difference plus official-PDF/source
+evidence (or an active exact rule); otherwise route `human_pdf`, explain why the
+name may be valid, and do not offer a one-click patch.
 
 Percentage escape safeguard:
 
@@ -88,6 +92,10 @@ Use `visual_dependency` only to route a question whose text clearly depends on a
 
 Use `group_dependency` only to route likely shared context. Group review owns the final range, order, type, and shared stem.
 
+Continuation markers (`承上題`、`呈上題`、`上題`、`前述`) are valid source wording and
+belong exclusively to the group layer (`field=group_ref`, `route=group`). The question
+text lane must not propose deleting, replacing, or manually correcting the marker.
+
 Phrases such as `下列資料`, `以下資料`, or `依據下列資料` alone are not enough to declare a group. Stronger evidence includes an explicit range/count, `承上題`/`呈上題`, shared stem, or neighbor dependence.
 
 ## Answer Boundary
@@ -99,3 +107,7 @@ Missing, multi-valued, ANS/MOD, or malformed answers do not lower question-stage
 Return `pass` when this stage has a readable stem, expected option structure, no visible OCR/notation damage, no boundary defect, and no unresolved route dependency.
 
 Keep reason and evidence short. Cite observable fields, not medical assumptions.
+Every non-pass finding must include a concrete explanation: observed text,
+supporting bilingual/grammar/source anchor, and why the proposed replacement is
+not simply a valid professional term. `hydrogen bond(s)` is a semantic anchor
+for `氫鍵`; it must block a generic `氩` → `氬` conversion.

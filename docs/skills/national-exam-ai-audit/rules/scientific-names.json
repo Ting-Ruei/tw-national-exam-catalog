@@ -1,0 +1,39 @@
+{
+  "schema_version": "national_exam_scientific_name_policy_v1",
+  "description": "Scientific-name guardrails for bacterial, fungal, parasitic, and other Latin binomials.",
+  "policy": {
+    "require_exact_local_evidence": true,
+    "require_reason": true,
+    "default_route": "human_pdf",
+    "auto_materialize": false,
+    "one_click_requires": [
+      "active_exact_rule",
+      "or_official_pdf_source_mismatch"
+    ],
+    "forbidden_basis": [
+      "model_memory",
+      "preferred_taxonomy",
+      "unfamiliar_name",
+      "answer-choice-scientific-plausibility"
+    ],
+    "valid_abbreviated_binomial_pattern": "\\b[A-Z]\\.\\s+[a-z][a-z-]{2,}\\b",
+    "valid_abbreviated_binomial_examples": [
+      "B. cereus",
+      "C. difficile",
+      "S. aureus",
+      "P. aeruginosa",
+      "E. coli"
+    ],
+    "abbreviation_policy": "單一大寫字母加句點再接小寫種小名是合法屬名縮寫；除非官方來源明確不一致，不得展開、刪句點或當作 OCR 錯字。"
+  },
+  "examples": {
+    "valid-looking_names": [
+      "Staphylococcus aureus",
+      "Streptococcus pneumoniae",
+      "Pseudomonas aeruginosa",
+      "Escherichia coli",
+      "Bacillus cereus"
+    ],
+    "required_reason_shape": "指出實際缺漏/置換/順序差異，並說明是 candidate、MinerU 或官方 PDF 的哪一層證據。"
+  }
+}

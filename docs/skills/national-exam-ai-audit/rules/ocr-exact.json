@@ -1,0 +1,15 @@
+{
+  "schema_version": "national_exam_ocr_rule_index_v1",
+  "canonical_registry": "configs/text_normalization_rules.json",
+  "description": "Do not duplicate active exact OCR rules inside the Skill. Load the repository registry and select only active rules whose scope matches the task.",
+  "materialization_policy": {
+    "allowed_statuses": [
+      "active"
+    ],
+    "required_kind": "phrase",
+    "match_mode": "exact_unique",
+    "require_source_target_match": true,
+    "preserve_human_state": true,
+    "reset_review_only_when_visible_reviewed_content_changed": true
+  }
+}

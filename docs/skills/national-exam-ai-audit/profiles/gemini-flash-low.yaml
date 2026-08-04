@@ -1,0 +1,24 @@
+{
+  "schema_version": "national_exam_model_profile_v1",
+  "model": "gemini-3.6-flash-low",
+  "adapter": "antigravity",
+  "certification": "experimental",
+  "allowed_lanes": [
+    "ocr_text",
+    "semantic_transcription",
+    "group",
+    "visual"
+  ],
+  "vision_mode": "requires_pixel_transport_verification",
+  "default_batch_size": 24,
+  "max_batch_size": 24,
+  "output_mode": "sparse_batch_json",
+  "thinking": "low",
+  "role": "shadow_auditor",
+  "may_propose_rules": true,
+  "may_materialize_without_active_rule": false,
+  "known_limits": [
+    "Verbose per-question output exceeded the run token budget.",
+    "Partial option patches and invalid findings previously required retries."
+  ]
+}
