@@ -39,6 +39,34 @@
       "auto_materialize": false
     },
     {
+      "id": "chemical-kcl-capital-i-anchor",
+      "lane": "semantic_transcription",
+      "anchor": "potassium chloride / KCl",
+      "suspect_terms": [
+        "KCI"
+      ],
+      "candidate_target": "KCl",
+      "status": "observed",
+      "route": "human_pdf",
+      "auto_materialize": false,
+      "reason": "藥學人工審核已確認一例，但大寫 I 與小寫 l 的修正仍須局部來源或化學式語境；不可全域改所有 KCI。"
+    },
+    {
+      "id": "class-one-letter-case-anchor",
+      "lane": "semantic_transcription",
+      "anchor": "antiarrhythmic class I",
+      "suspect_terms": [
+        "class la",
+        "class lb",
+        "class lc"
+      ],
+      "candidate_target": "class Ia / class Ib / class Ic",
+      "status": "observed",
+      "route": "human_pdf",
+      "auto_materialize": false,
+      "reason": "藥學人工審核顯示羅馬數字 I 被 OCR 成小寫 l；只在完整 class + 分類語境提出修正。"
+    },
+    {
       "id": "hydrogen-bond-argon-glyph-conflict",
       "lane": "semantic_transcription",
       "anchor": "hydrogen bond",

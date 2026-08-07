@@ -1,0 +1,175 @@
+{
+  "schema_version": "national_exam_three_source_balanced_spec_v2",
+  "description": "醫事檢驗師與藥學各十二題的隔離平衡集；文字 lane 各四題，視覺 lane 各八題。藥學視覺題皆含多張化學結構圖。",
+  "advisory_only": true,
+  "cases": [
+    {
+      "id": "medtech_text_histoplasma_clean",
+      "candidate_key": "moex:102030:109:0503:1:question:q068",
+      "lane": "text",
+      "stratum": "medtech_text_clean_scientific_name",
+      "expected": ["source_wording_clean", "no_false_repair"]
+    },
+    {
+      "id": "medtech_text_bacillus_abbreviation_clean",
+      "candidate_key": "moex:101030:104:0303:1:question:q011",
+      "lane": "text",
+      "stratum": "medtech_text_clean_abbreviation",
+      "expected": ["B_dot_genus_abbreviation_clean", "no_false_alert"]
+    },
+    {
+      "id": "medtech_text_legacy_pua_q14",
+      "candidate_key": "moex:100140:104:0303:1:question:q014",
+      "lane": "text",
+      "stratum": "medtech_text_pdf_unresolved_glyph",
+      "expected": ["pdf_private_use_glyph", "candidate_text_semantically_readable", "escalate_not_guess"]
+    },
+    {
+      "id": "medtech_text_stacked_layer_113_1_q1",
+      "candidate_key": "moex:113020:308:22:1:question:q001",
+      "lane": "text",
+      "stratum": "medtech_text_stacked_pdf_layer",
+      "expected": ["pdf_stacked_text_layer", "mineru_candidate_not_overwritten_by_repetition"]
+    },
+    {
+      "id": "pharmacy_text_kci_missed",
+      "candidate_key": "moex:106020:307:55:1:question:q031",
+      "lane": "text",
+      "stratum": "pharmacy_text_ocr_letter_confusion",
+      "expected": ["KCI_to_KCl_in_A_and_C", "source_typo_15鐘內_requires_semantic_caution"]
+    },
+    {
+      "id": "pharmacy_text_human_correction_control",
+      "candidate_key": "moex:106020:306:55:1:question:q031",
+      "lane": "text",
+      "stratum": "pharmacy_text_human_override_negative_control",
+      "expected": ["keep_human_15分鐘內", "do_not_restore_pdf_15鐘內"]
+    },
+    {
+      "id": "pharmacy_text_hydrogen_bond_anchor",
+      "candidate_key": "moex:101030:103:0202:1:question:q019",
+      "lane": "text",
+      "stratum": "pharmacy_text_semantic_anchor",
+      "expected": ["hydrogen_bond_means_氫鍵", "no_氬鍵_false_repair"]
+    },
+    {
+      "id": "pharmacy_text_胜肽_negative_control",
+      "candidate_key": "moex:115020:305:0402:1:question:q029",
+      "lane": "text",
+      "stratum": "pharmacy_text_source_variant_control",
+      "expected": ["source_wording_胜肽", "no_simplified_false_repair"]
+    },
+    {
+      "id": "medtech_visual_105_1_5",
+      "candidate_key": "moex:105020:308:66:1:question:q005",
+      "lane": "visual",
+      "stratum": "medtech_visual_manual_four_option",
+      "expected": ["manual_A_D_match_official", "old_mineru_combined_binding_problem"]
+    },
+    {
+      "id": "medtech_visual_105_1_35_cross_page",
+      "candidate_key": "moex:105020:308:66:1:question:q035",
+      "lane": "visual",
+      "stratum": "medtech_visual_cross_page_four_option",
+      "expected": ["question_spans_two_pages", "manual_A_D_match_official", "old_mineru_combined_binding_problem"]
+    },
+    {
+      "id": "medtech_visual_103_1_8_incomplete_old",
+      "candidate_key": "moex:103020:311:66:1:question:q008",
+      "lane": "visual",
+      "stratum": "medtech_visual_old_asset_incomplete",
+      "expected": ["manual_A_D_match_official", "old_mineru_missing_D"]
+    },
+    {
+      "id": "medtech_visual_102_2_7",
+      "candidate_key": "moex:102100:311:66:1:question:q007",
+      "lane": "visual",
+      "stratum": "medtech_visual_manual_four_option",
+      "expected": ["manual_A_D_match_official", "old_mineru_combined_binding_problem"]
+    },
+    {
+      "id": "medtech_visual_112_1_34_formula",
+      "candidate_key": "moex:112020:308:11:1:question:q034",
+      "lane": "visual",
+      "stratum": "medtech_visual_formula_control",
+      "expected": ["current_formula_asset_matches_official", "no_false_mismatch"]
+    },
+    {
+      "id": "medtech_visual_group_105_2_40",
+      "candidate_key": "moex:105100:308:33:1:question:q040",
+      "lane": "visual",
+      "stratum": "medtech_visual_group_cross_page",
+      "expected": ["group_owner", "manual_stem_asset_matches_official"]
+    },
+    {
+      "id": "medtech_visual_101_1_30_two_images",
+      "candidate_key": "moex:101030:104:0301:1:question:q030",
+      "lane": "visual",
+      "stratum": "medtech_visual_two_image_manual_control",
+      "expected": ["left_and_right_images_complete", "manual_asset_control"]
+    },
+    {
+      "id": "medtech_visual_104_1_35_multi_cell",
+      "candidate_key": "moex:104020:311:22:1:question:q035",
+      "lane": "visual",
+      "stratum": "medtech_visual_multi_option_manual_control",
+      "expected": ["all_option_images_complete", "manual_asset_control"]
+    },
+    {
+      "id": "pharmacy_visual_meconic_manual_accept",
+      "candidate_key": "moex:104020:310:22:1:question:q080",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_manual_accept",
+      "expected": ["four_chemical_structure_options", "manual_C_D_assets_preserved", "accepted_control"]
+    },
+    {
+      "id": "pharmacy_visual_metabolite_manual_accept",
+      "candidate_key": "moex:106020:307:11:1:question:q041",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_full_manual_accept",
+      "expected": ["stem_structure_and_four_options_complete", "accepted_control"]
+    },
+    {
+      "id": "pharmacy_visual_tramadol_accept",
+      "candidate_key": "moex:102020:310:11:1:question:q050",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_parser_accept",
+      "expected": ["four_chemical_structure_options", "accepted_control"]
+    },
+    {
+      "id": "pharmacy_visual_propylthiouracil_accept",
+      "candidate_key": "moex:107020:307:11:1:question:q074",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_parser_accept",
+      "expected": ["four_chemical_structure_options", "accepted_control"]
+    },
+    {
+      "id": "pharmacy_visual_enalapril_block",
+      "candidate_key": "moex:101030:103:0201:1:question:q044",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_blocked",
+      "expected": ["four_chemical_structure_options", "locate_visual_or_binding_problem"]
+    },
+    {
+      "id": "pharmacy_visual_celecoxib_block",
+      "candidate_key": "moex:104020:310:11:1:question:q070",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_blocked",
+      "expected": ["four_chemical_structure_options", "locate_visual_or_binding_problem"]
+    },
+    {
+      "id": "pharmacy_visual_triflusal_block",
+      "candidate_key": "moex:105020:307:11:1:question:q056",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_blocked",
+      "expected": ["four_chemical_structure_options", "locate_visual_or_binding_problem"]
+    },
+    {
+      "id": "pharmacy_visual_methylphenidate_block",
+      "candidate_key": "moex:105100:307:11:1:question:q068",
+      "lane": "visual",
+      "stratum": "pharmacy_structure_numbered_blocked",
+      "expected": ["four_numbered_chemical_structures", "locate_visual_or_binding_problem"]
+    }
+  ]
+}

@@ -85,6 +85,22 @@
       "source_class": "source_unverified",
       "route": "group",
       "reason": "這些是題組延續線索；移交題組頁核對鄰題與 group_ref，不在題目審核改字。"
+    },
+    {
+      "id": "preserve-pharmacy-shengtai-source-wording",
+      "observed": "胜肽",
+      "rejected_target": "僅因字形偏好改成肽／腖或其他詞",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "藥學人工倒讚明確標記「胜肽是對的」；沒有官方 PDF 差異不得視為簡體或 OCR 錯字。"
+    },
+    {
+      "id": "stereochemical-locant-is-baseline",
+      "observed_pattern": "3S / 3R / 2E / 2Z",
+      "rejected_target": "將前置數字自動轉為上標",
+      "source_class": "source_original",
+      "route": "none",
+      "reason": "立體化學定位數字與字母必須維持同一基線；上標正規化只能處理來源明示的 ^{...} 或 Unicode 上標。"
     }
   ]
 }

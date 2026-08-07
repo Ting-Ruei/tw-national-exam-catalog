@@ -1,0 +1,96 @@
+{
+  "schema_version": "national_exam_three_source_pilot_spec_v1",
+  "description": "醫事檢驗師與藥師的三證據 shadow pilot；只保存識別鍵與預期問題類型，不保存題文、PDF 或圖片。",
+  "cases": [
+    {
+      "id": "pharmacy_kci_missed_accept",
+      "candidate_key": "moex:106020:307:55:1:question:q031",
+      "lane": "text",
+      "expected": ["official_pdf_text_mismatch", "KCI_to_KCl", "15鐘內_to_15分鐘內"]
+    },
+    {
+      "id": "pharmacy_kcl_human_corrected_control",
+      "candidate_key": "moex:106020:306:55:1:question:q031",
+      "lane": "text",
+      "expected": ["effective_content_matches_official_pdf", "no_new_repair"]
+    },
+    {
+      "id": "pharmacy_hydrogen_bond_anchor",
+      "candidate_key": "moex:101030:103:0202:1:question:q019",
+      "lane": "text",
+      "expected": ["hydrogen_bond_means_氫鍵", "no_氬鍵_false_repair"]
+    },
+    {
+      "id": "pharmacy_胜肽_negative_control",
+      "candidate_key": "moex:115020:305:0402:1:question:q029",
+      "lane": "text",
+      "expected": ["source_wording_胜肽", "no_簡體_false_repair"]
+    },
+    {
+      "id": "pharmacy_3s_baseline_visual",
+      "candidate_key": "moex:107020:307:11:1:question:q070",
+      "lane": "visual_text",
+      "expected": ["3S_is_baseline_text", "visual_dependency"]
+    },
+    {
+      "id": "medtech_histoplasma_clean",
+      "candidate_key": "moex:102030:109:0503:1:question:q068",
+      "lane": "text",
+      "expected": ["莢膜組織胞漿菌_is_source_wording", "scientific_name_clean"]
+    },
+    {
+      "id": "medtech_bacillus_abbreviation_clean",
+      "candidate_key": "moex:101030:104:0303:1:question:q011",
+      "lane": "text",
+      "expected": ["B_dot_genus_abbreviation_clean", "no_spelling_false_alert"]
+    },
+    {
+      "id": "medtech_group_route",
+      "candidate_key": "moex:109100:308:44:1:question:q078",
+      "lane": "group",
+      "expected": ["承上題_routes_to_group", "no_question_text_repair"]
+    },
+    {
+      "id": "medtech_visual_105_1_5",
+      "candidate_key": "moex:105020:308:66:1:question:q005",
+      "lane": "visual",
+      "expected": ["manual_A_D_assets_match_official_pdf", "old_mineru_asset_wrong"]
+    },
+    {
+      "id": "medtech_visual_105_1_35",
+      "candidate_key": "moex:105020:308:66:1:question:q035",
+      "lane": "visual",
+      "expected": ["manual_A_D_assets_match_official_pdf", "old_mineru_asset_wrong"]
+    },
+    {
+      "id": "medtech_visual_103_1_8",
+      "candidate_key": "moex:103020:311:66:1:question:q008",
+      "lane": "visual",
+      "expected": ["manual_A_D_assets_match_official_pdf", "old_mineru_assets_wrong"]
+    },
+    {
+      "id": "medtech_visual_102_2_7",
+      "candidate_key": "moex:102100:311:66:1:question:q007",
+      "lane": "visual",
+      "expected": ["manual_A_D_assets_match_official_pdf", "old_mineru_asset_wrong"]
+    },
+    {
+      "id": "medtech_visual_112_1_34",
+      "candidate_key": "moex:112020:308:11:1:question:q034",
+      "lane": "visual_text",
+      "expected": ["manual_option_D_matches_official_pdf", "formula_text_requires_visual"]
+    },
+    {
+      "id": "medtech_group_visual_manual_asset",
+      "candidate_key": "moex:105100:308:33:1:question:q040",
+      "lane": "group_visual",
+      "expected": ["承上題_routes_to_group", "manual_stem_asset_matches_official_pdf"]
+    },
+    {
+      "id": "pharmacy_group_route",
+      "candidate_key": "moex:106100:307:44:1:question:q069",
+      "lane": "group",
+      "expected": ["承上題_routes_to_group", "no_question_text_repair"]
+    }
+  ]
+}

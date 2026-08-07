@@ -43,6 +43,23 @@ registered marks as semantic superscript markup. For existing blocked or
 needs-review candidates, append a same-state repair event with the original
 human note; do not silently convert them to accepted.
 
+### Pharmacy feedback: anchors, coverage, and negative examples (2026-08-04)
+
+Recent accepted corrections and explicit AI feedback show four recurring
+patterns:
+
+- Prefer bilingual/domain anchors over visual glyph similarity. Examples include
+  `hydrogen bond → 氫鍵`, `ceric sulfate → 硫酸鈰`, `topoisomerase → 拓撲異構酶`,
+  and `KCI → KCl`. A simple character conversion must not override the anchor.
+- After one defect is found, scan the stem and every option for the same rule.
+  Feedback such as `B/C/D 沒改` and `多個選項沒抓到` means a partial patch is
+  incomplete, not successful.
+- Preserve domain-valid counterexamples. `胜肽` can be correct source wording;
+  a stereochemical locant such as `3S` is baseline text, not a superscript.
+- Human acceptance of an AI suggestion is evidence for observation and
+  regression examples, not automatic permission to activate a global rule.
+  Promote only after source checks and counterexample tests.
+
 ## AI Event Lessons
 
 ### Question AI and visual AI were mixed
@@ -62,6 +79,15 @@ Timestamp order alone is insufficient if AI audited raw parser text after a huma
 Mixed full-/half-width parentheses around an English term can be normalized by parser rules. Do not send an already accepted, otherwise correct question back to humans solely for this cosmetic issue.
 
 Meaning-bearing OCR replacements such as `麸 -> 麩` or `氢 -> 氫` require a corrected candidate and quick human recheck.
+
+### A known rule existed only in a legacy repair script
+
+`顴葉 -> 顳葉` once existed in a subject-specific JSONL repair script, but that
+script scanned only active block/needs-review rows. Later SQL-accepted questions
+therefore bypassed it and entered the formal layer. Confirmed rules must live in
+the central scoped normalization registry, with exact phrase boundaries and a
+regression test. Explanation-stage `source_*_suspect` findings must flow back to
+SQL advisory AI events instead of remaining only in explanation run logs.
 
 ## Parse Issue Lessons
 
