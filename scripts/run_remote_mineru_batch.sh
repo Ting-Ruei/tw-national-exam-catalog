@@ -12,7 +12,7 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-/Users/tim/AI_workspace}"
+WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-$HOME/AI_workspace}"
 WORKER_ROOT="${WORKER_ROOT:-$WORKSPACE_ROOT/national_exam_mineru_worker}"
 MINERU_BIN="${MINERU_BIN:-$WORKSPACE_ROOT/OCR_model/MinerU/venv_mineru/bin/mineru}"
 REMOTE_ASSET_ROOT="${REMOTE_ASSET_ROOT:-$WORKER_ROOT/repo/國考題資料夾}"

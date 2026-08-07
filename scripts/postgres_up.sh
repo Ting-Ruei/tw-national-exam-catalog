@@ -16,7 +16,7 @@ POSTGRES_USER="${POSTGRES_USER:-national_exam}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18}"
 
 if [[ "${POSTGRES_PREPULL_IMAGE:-1}" == "1" ]]; then
-  DOCKER_PULL_CONFIG="${DOCKER_PULL_CONFIG:-/private/tmp/tw-national-exam-catalog-docker-config}"
+  DOCKER_PULL_CONFIG="${DOCKER_PULL_CONFIG:-${TMPDIR:-/tmp}/tw-national-exam-catalog-docker-config}"
   mkdir -p "$DOCKER_PULL_CONFIG"
   if [[ ! -f "$DOCKER_PULL_CONFIG/config.json" ]]; then
     printf '{}\n' > "$DOCKER_PULL_CONFIG/config.json"

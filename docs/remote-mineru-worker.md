@@ -1,5 +1,10 @@
 # 遠端 MinerU 算力節點部署與批次回傳流程
 
+> 本文件大部分 `/Users/tim/...` 指令是既有 macOS worker 範例。現行腳本已支援
+> `AI_WORKSPACE_ROOT`、`WORKER_ROOT`、`REPO_ROOT`、`REMOTE_WORKER_ROOT` 與
+> `MINERU_BIN`；Ryzen/Linux 部署不要照抄 Mac 絕對路徑，請先完成
+> `docs/ryzen-ai-max-395-migration-runbook.md` 的環境與 MinerU 驗收。
+
 本文記錄如何用另一台 MacBook 作為 MinerU 算力節點。目標是讓主控端負責任務切分、去重與入庫前索引；遠端算力機只負責接收任務批次、使用自己本機已同步好的官方 PDF、執行 MinerU、回傳輸出結果。
 
 目前已驗證可同步的 MinerU 環境版本、freeze 清單與安裝順序，另見：

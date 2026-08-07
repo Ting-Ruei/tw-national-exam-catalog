@@ -86,6 +86,11 @@ examples/
 
 ## 本機工作資料夾
 
+未來搬到 Ryzen AI Max 395 的主機盤點、Git／PostgreSQL／資產權威來源、SHA-256
+傳輸驗證、MinerU/ROCm 相容性、cutover 與 rollback，統一依
+[`docs/ryzen-ai-max-395-migration-runbook.md`](docs/ryzen-ai-max-395-migration-runbook.md) 執行。
+`MIGRATION_HANDOFF.md` 只保存 2026-07-20 的歷史 queue checkpoint。
+
 PDF 下載、MinerU 輸出、人工檢查佇列、入庫前候選資料等大型或中間產物，預設放在：
 
 ```text
@@ -217,13 +222,14 @@ docker compose up -d review-ui
 http://127.0.0.1:8765/
 ```
 
-Review UI 預設會綁定到本機所有網卡：
+Review UI 的 Compose port 預設只綁定本機：
 
 ```text
-0.0.0.0:8765
+127.0.0.1:8765
 ```
 
-因此同一區網或 Tailscale 內的其他電腦可用這台主機的 IP 連線，例如：
+需要讓同一區網或 Tailscale 內的其他電腦連線時，請在 `.env` 將
+`REVIEW_UI_BIND` 明確設為該主機的固定 LAN／VPN IP，再用該 IP 連線，例如：
 
 ```text
 http://192.168.10.70:8765/

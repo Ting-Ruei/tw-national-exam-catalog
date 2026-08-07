@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-/Users/tim/AI_workspace}"
+WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-$HOME/AI_workspace}"
 WORKER_ROOT="${WORKER_ROOT:-$WORKSPACE_ROOT/national_exam_mineru_worker}"
 REPO_ROOT="${REPO_ROOT:-$WORKER_ROOT/repo}"
 QUEUE_LOG="${QUEUE_LOG:-$WORKER_ROOT/logs/remote_queue__$(date '+%Y%m%d-%H%M%S').log}"

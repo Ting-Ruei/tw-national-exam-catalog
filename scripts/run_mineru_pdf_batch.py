@@ -28,7 +28,12 @@ PDF_INDEX_DIR = REGISTRY_ROOT / "pdf_indexes"
 PAIR_INDEX_DIR = REGISTRY_ROOT / "paired_indexes"
 RUN_LOG_DIR = REGISTRY_ROOT / "mineru_runs"
 REMOTE_BATCH_ROOT = REGISTRY_ROOT / "mineru_remote_batches"
-DEFAULT_MINERU_BIN = Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru"
+DEFAULT_MINERU_BIN = Path(
+    os.environ.get(
+        "MINERU_BIN",
+        Path.home() / "AI workspace" / "OCR_model" / "MinerU" / "venv_mineru" / "bin" / "mineru",
+    )
+).expanduser()
 MINERU_METHOD = os.environ.get("MINERU_METHOD", "ocr")
 MINERU_BACKEND = os.environ.get("MINERU_BACKEND", "vlm-engine")
 MINERU_IMAGE_ANALYSIS = os.environ.get("MINERU_IMAGE_ANALYSIS", "false").lower() in {"1", "true", "yes", "on"}

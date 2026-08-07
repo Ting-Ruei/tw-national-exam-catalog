@@ -16,7 +16,7 @@ fi
 REMOTE_HOST="$1"
 REMOTE_USER="${REMOTE_USER:-tim}"
 REMOTE_LABEL="${REMOTE_LABEL:-${REMOTE_HOST//./-}}"
-REMOTE_WORKER_ROOT="${REMOTE_WORKER_ROOT:-/Users/tim/AI_workspace/national_exam_mineru_worker}"
+REMOTE_WORKER_ROOT="${REMOTE_WORKER_ROOT:-AI_workspace/national_exam_mineru_worker}"
 BATCH_LIMIT="${BATCH_LIMIT:-0}"
 RSYNC_BIN="${RSYNC_BIN:-}"
 

@@ -1,5 +1,10 @@
 # MinerU 環境同步紀錄
 
+> 架構警告（2026-08-07）：本文件的 freeze 是 Apple Silicon／macOS／Python 3.14
+> 基線，且包含 MLX 套件，只適合同架構 Mac 追溯。Ryzen AI Max 395 不得直接安裝整份
+> freeze；Linux/ROCm 重建、golden PDF 回歸與 fallback 規則請依
+> `docs/ryzen-ai-max-395-migration-runbook.md`。
+
 本文記錄目前主控端已驗證可用的 MinerU 執行環境，供另一台 MacBook 直接同步。
 
 ## 目前已驗證版本

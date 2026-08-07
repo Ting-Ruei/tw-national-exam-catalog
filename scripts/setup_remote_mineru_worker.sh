@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-/Users/tim/AI_workspace}"
+WORKSPACE_ROOT="${AI_WORKSPACE_ROOT:-$HOME/AI_workspace}"
 WORKER_ROOT="${WORKER_ROOT:-$WORKSPACE_ROOT/national_exam_mineru_worker}"
 REPO_URL="${REPO_URL:-https://github.com/Ting-Ruei/tw-national-exam-catalog.git}"
 REPO_DIR="${REPO_DIR:-$WORKER_ROOT/repo}"

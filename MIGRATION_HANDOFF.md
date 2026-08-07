@@ -1,5 +1,10 @@
 # 專案移機交接狀態
 
+> 歷史狀態警告（2026-08-07）：本文件保存 2026-07-20 的非醫學 MinerU queue
+> checkpoint，不是 Ryzen AI Max 395 的現行搬遷手冊。PID、批次數與「目前正在執行」
+> 等敘述都必須在切換前重新產生，不能直接採信。完整主機、Git、PostgreSQL、資產、
+> 驗收與回退流程請以 `docs/ryzen-ai-max-395-migration-runbook.md` 為準。
+
 更新時間：2026-07-20 11:30:46（Asia/Taipei）
 
 ## 目前角色

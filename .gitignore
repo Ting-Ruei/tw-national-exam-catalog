@@ -16,3 +16,4 @@ __pycache__/
 .env
 .env.devspace
 tmp/
+migration_snapshots/

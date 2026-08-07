@@ -4,7 +4,7 @@ services:
     container_name: tw-national-exam-postgres
     restart: unless-stopped
     ports:
-      - "${POSTGRES_PORT:-54329}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-54329}:5432"
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-tw_national_exam_dev}"
       POSTGRES_USER: "${POSTGRES_USER:-national_exam}"
@@ -26,7 +26,7 @@ services:
     working_dir: /workspace
     environment:
       PYTHONUNBUFFERED: "1"
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-national_exam}:${POSTGRES_PASSWORD:-national_exam_dev_password}@postgres:5432/${POSTGRES_DB:-tw_national_exam_dev}"
+      DATABASE_URL: "${REVIEW_UI_DATABASE_URL:-postgresql://${POSTGRES_USER:-national_exam}:${POSTGRES_PASSWORD:-national_exam_dev_password}@postgres:5432/${POSTGRES_DB:-tw_national_exam_dev}}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4.1-mini}"
       OPENAI_REVIEW_MODEL: "${OPENAI_REVIEW_MODEL:-gpt-4.1-mini}"
@@ -34,11 +34,13 @@ services:
       REVIEW_UI_BACKEND: "${REVIEW_UI_BACKEND:-sql}"
       REVIEW_UI_WRITE_LEGACY_JSONL: "${REVIEW_UI_WRITE_LEGACY_JSONL:-0}"
       REVIEW_UI_DEFER_FORMAL_SYNC: "${REVIEW_UI_DEFER_FORMAL_SYNC:-1}"
+      ASSET_ROOT: "${ASSET_CONTAINER_ROOT:-/workspace/國考題資料夾}"
     ports:
-      - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_PORT:-8765}:8765"
-      - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_MOBILE_PORT:-8766}:8766"
+      - "${REVIEW_UI_BIND:-127.0.0.1}:${REVIEW_UI_PORT:-8765}:8765"
+      - "${REVIEW_UI_BIND:-127.0.0.1}:${REVIEW_UI_MOBILE_PORT:-8766}:8766"
     volumes:
       - .:/workspace
+      - "${ASSET_ROOT:-./國考題資料夾}:${ASSET_CONTAINER_ROOT:-/workspace/國考題資料夾}"
     command:
       - sh
       - -c
