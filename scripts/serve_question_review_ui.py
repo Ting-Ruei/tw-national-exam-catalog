@@ -61,7 +61,7 @@ except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
@@ -574,15 +574,18 @@ def load_issues(path: Path | None) -> dict[str, list[dict[str, Any]]]:
 
 
 def project_path(value: str) -> Path:
-    path = Path(value)
+    path = Path(value).expanduser()
+    parts = path.parts
+    if "國考題資料夾" in parts:
+        index = parts.index("國考題資料夾")
+        return ASSET_ROOT.joinpath(*parts[index + 1 :])
     if path.is_absolute():
-        parts = path.parts
         if "tw-national-exam-catalog" in parts:
             index = parts.index("tw-national-exam-catalog")
             return PROJECT_ROOT.joinpath(*parts[index + 1 :])
         return path
     if value.startswith("國考題資料夾/"):
-        return PROJECT_ROOT / value
+        return ASSET_ROOT / value.removeprefix("國考題資料夾/")
     return ASSET_ROOT / value
 
 
@@ -2191,6 +2194,7 @@ class ReviewState:
                     FROM keyed f
                     JOIN wanted_keys w USING (candidate_key)
                     ORDER BY
+                        CASE WHEN f.group_action IN ('', 'reset_group_review') THEN 0 ELSE 1 END,
                         f.category,
                         f.subject,
                         CASE WHEN f.year ~ '^[0-9]+$' THEN f.year::integer ELSE 0 END DESC,
@@ -2275,9 +2279,23 @@ class ReviewState:
         elif ai_review_status:
             clauses.append("ai_effective_status = %s")
             values.append(ai_review_status)
-        if visual_status not in {"", "visual", "visual_asset_pending", "visual_suspect", "visual_ok", "no_visual", "visual_problem"}:
+        if visual_status not in {"", "visual", "visual_all", "visual_asset_pending", "visual_suspect", "visual_ok", "no_visual", "visual_problem"}:
             visual_status = "visual_asset_pending"
-        if visual_status == "visual":
+        if visual_status == "visual_all":
+            clauses.append(
+                """
+                COALESCE(review_action, '') <> 'exclude'
+                AND (
+                    has_visual_asset
+                    OR has_structured_table
+                    OR has_manual_asset
+                    OR has_visual_dependency
+                    OR visual_review_status IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem')
+                    OR visual_ai_status IN ('visual_required_likely', 'visual_uncertain')
+                )
+                """
+            )
+        elif visual_status == "visual":
             clauses.append(
                 """
                 COALESCE(review_action, '') <> 'exclude'
@@ -2334,6 +2352,7 @@ class ReviewState:
                     candidate_key,
                     question_number,
                     stem_text,
+                    raw_candidate_json::text,
                     category,
                     subject,
                     review_action,
@@ -2767,6 +2786,35 @@ latest_answer AS (
     JOIN scoped_candidates USING (candidate_key)
     ORDER BY e.candidate_key, e.id DESC
 ),
+latest_question_ai AS (
+    SELECT DISTINCT ON (e.candidate_key)
+        e.candidate_key,
+        e.audit_status,
+        e.recommended_action,
+        e.audit_json,
+        e.created_at,
+        e.id
+    FROM exam.question_ai_review_events e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE NOT (
+        COALESCE(e.prompt_version, '') LIKE 'visual_%%'
+        OR COALESCE(e.model_name, '') LIKE '%%visual%%'
+        OR COALESCE(e.audit_json, '{{}}'::jsonb) ? 'visual_status'
+        OR COALESCE(e.audit_json->>'stage', '') = 'image'
+    )
+      AND COALESCE(e.recommended_action, '') <> 'review_group'
+    ORDER BY e.candidate_key, e.id DESC
+),
+issue_flags AS (
+    SELECT
+        e.candidate_key,
+        bool_or(e.severity IN ('blocked', 'error', 'warning')) AS has_question_issue
+    FROM exam.question_parse_issues e
+    JOIN scoped_candidates USING (candidate_key)
+    WHERE e.resolved_at IS NULL
+      AND e.issue_code NOT IN ('missing_answer', 'missing_answer_markdown', 'unexpected_answer_value')
+    GROUP BY e.candidate_key
+),
 base AS (
     SELECT
         c.candidate_key,
@@ -2795,6 +2843,20 @@ base AS (
         lq.event_json AS review_event_json,
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
+        (
+            COALESCE(i.has_question_issue, false)
+            OR (
+                NOT COALESCE(lq.created_at >= lai.created_at, false)
+                AND (
+                    lai.audit_status IN ('needs_review', 'block', 'blocked')
+                    OR COALESCE(lai.recommended_action, '') NOT IN ('', 'no_action')
+                    OR (
+                        jsonb_typeof(COALESCE(lai.audit_json->'findings', '[]'::jsonb)) = 'array'
+                        AND jsonb_array_length(COALESCE(lai.audit_json->'findings', '[]'::jsonb)) > 0
+                    )
+                )
+            )
+        ) AS has_active_attention,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'year', '') ~ '^[0-9]+$'
             THEN (c.raw_candidate_json->'metadata'->>'year')::integer ELSE 0 END AS year_sort,
         CASE WHEN COALESCE(c.raw_candidate_json->'metadata'->>'exam_ordinal', '') ~ '^[0-9]+$'
@@ -2804,6 +2866,8 @@ base AS (
     LEFT JOIN exam.questions fq ON fq.question_key = c.candidate_key
     LEFT JOIN latest_question lq ON lq.candidate_key = c.candidate_key
     LEFT JOIN latest_answer la ON la.candidate_key = c.candidate_key
+    LEFT JOIN latest_question_ai lai ON lai.candidate_key = c.candidate_key
+    LEFT JOIN issue_flags i ON i.candidate_key = c.candidate_key
 ),
 filtered AS (
     SELECT *
@@ -2887,12 +2951,25 @@ filtered AS (
         params: dict[str, str],
         limit: int,
     ) -> tuple[list[dict[str, Any]], int, int, int]:
-        if self._sql_can_use_light_candidate_query(params) and not (params.get("reviewStatus") or ""):
-            return self._sql_plain_candidate_rows_and_counts(params, limit)
-        if self._sql_can_use_light_candidate_query(params):
+        use_light_query = self._sql_can_use_light_candidate_query(params)
+        if use_light_query:
             cte, values = self._sql_light_candidate_filter_parts(params)
         else:
             cte, values = self._sql_candidate_filter_parts(params)
+        stage_priority = (
+            "CASE WHEN visual_review_status IN ('no_visual_required', 'visual_asset_ok', 'visual_asset_problem') "
+            "OR has_manual_asset THEN 1 ELSE 0 END"
+            if (params.get("visualStatus") or "")
+            else "CASE WHEN is_reviewed THEN 1 ELSE 0 END"
+        )
+        attention_priority = (
+            "CASE WHEN has_active_attention OR review_action IN ('block', 'needs_review', 'reset_review', 'unreviewed') "
+            "THEN 0 ELSE 1 END"
+            if use_light_query
+            else "CASE WHEN question_quality_status IN ('blocked', 'needs_review') "
+            "OR ai_effective_status IN ('needs_review', 'block', 'blocked') "
+            "OR review_action IN ('block', 'needs_review', 'reset_review', 'unreviewed') THEN 0 ELSE 1 END"
+        )
         with self._sql_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2903,7 +2980,10 @@ filtered AS (
                         count(*) OVER () AS filtered_count,
                         count(*) FILTER (WHERE is_reviewed) OVER () AS reviewed_count
                     FROM filtered
-                    ORDER BY category, subject, year_sort DESC, ordinal_sort DESC, question_sort, candidate_key
+                    ORDER BY
+                        {stage_priority},
+                        {attention_priority},
+                        category, subject, year_sort DESC, ordinal_sort DESC, question_sort, candidate_key
                     LIMIT %s
                     """,
                     [*values, limit],
@@ -4669,6 +4749,7 @@ filtered AS (
                     "question_number": item.get("question_number"),
                     "question_number_occurrence": item.get("question_number_occurrence"),
                     "stem": item.get("stem"),
+                    "options": item.get("options") or [],
                     "group_ref": item.get("group_ref") or "",
                     "inferred_group_ref": item.get("inferred_group_ref") or "",
                     "inferred_group_kind": item.get("inferred_group_kind") or "",
@@ -4867,6 +4948,8 @@ filtered AS (
                         item.get("candidate_key"),
                         item.get("question_number"),
                         item.get("stem"),
+                        json.dumps(item.get("options") or [], ensure_ascii=False),
+                        json.dumps((latest_review or {}).get("correction") or {}, ensure_ascii=False),
                         category,
                         subject,
                         review.get("action"),
@@ -5045,6 +5128,7 @@ filtered AS (
                         row.get("candidate_key"),
                         row.get("question_number"),
                         row.get("stem"),
+                        json.dumps(row.get("options") or [], ensure_ascii=False),
                         row.get("answer"),
                         answer_review.get("action"),
                         answer_review.get("notes"),
@@ -5096,6 +5180,10 @@ filtered AS (
         filtered_count = sum(int(sheet.get("question_count") or 0) for sheet in sheets)
         sheets.sort(
             key=lambda sheet: (
+                0
+                if int(sheet.get("reviewed_count") or 0) < int(sheet.get("reviewable_question_count") or sheet.get("question_count") or 0)
+                else 1,
+                0 if (sheet.get("answer_gate_status") or "pass") != "pass" else 1,
                 str((sheet.get("metadata") or {}).get("normalized_category_name") or ""),
                 str((sheet.get("metadata") or {}).get("normalized_subject_name") or ""),
                 int_or_zero((sheet.get("metadata") or {}).get("year")),
@@ -5223,6 +5311,9 @@ eligible AS (
                 c.stem_text,
                 c.raw_candidate_json->>'stem',
                 c.raw_candidate_json->>'answer',
+                c.raw_candidate_json::text,
+                lq.corrected_candidate_json::text,
+                la.corrected_answer_json::text,
                 COALESCE(c.raw_candidate_json->'metadata'->>'normalized_category_name', c.raw_candidate_json->'metadata'->>'group_name', ''),
                 COALESCE(c.raw_candidate_json->'metadata'->>'normalized_subject_name', ''),
                 c.raw_candidate_json->'metadata'->>'year',
@@ -5286,7 +5377,10 @@ filtered_sheets AS (
                     , selected_sheets AS (
                         SELECT *
                         FROM filtered_sheets
-                        ORDER BY category, subject, year_sort DESC, ordinal_sort DESC, answer_role, sheet_key
+                        ORDER BY
+                            CASE WHEN reviewed_count < question_count THEN 0 ELSE 1 END,
+                            CASE WHEN blocked_count > 0 OR needs_review_count > 0 THEN 0 ELSE 1 END,
+                            category, subject, year_sort DESC, ordinal_sort DESC, answer_role, sheet_key
                         LIMIT %s
                     ),
                     counts AS (
@@ -5373,6 +5467,10 @@ filtered_sheets AS (
         ]
         sheets.sort(
             key=lambda sheet: (
+                0
+                if int(sheet.get("reviewed_count") or 0) < int(sheet.get("reviewable_question_count") or sheet.get("question_count") or 0)
+                else 1,
+                0 if (sheet.get("answer_gate_status") or "pass") != "pass" else 1,
                 str((sheet.get("metadata") or {}).get("normalized_category_name") or ""),
                 str((sheet.get("metadata") or {}).get("normalized_subject_name") or ""),
                 int_or_zero((sheet.get("metadata") or {}).get("year")),
@@ -5574,18 +5672,22 @@ filtered_sheets AS (
                         (sheet.get("metadata") or {}).get("year"),
                         (sheet.get("metadata") or {}).get("exam_ordinal"),
                         json.dumps(sheet.get("reason_counts") or {}, ensure_ascii=False),
-                        *[
-                            " ".join(
-                                str(row.get(field) or "")
-                                for field in ("candidate_key", "question_number", "stem", "group_ref")
-                            )
-                            for row in sheet.get("rows") or []
-                        ],
+                            *[
+                                " ".join(
+                                    str(row.get(field) or "")
+                                    for field in ("candidate_key", "question_number", "stem", "group_ref")
+                                )
+                                + " "
+                                + json.dumps(row.get("options") or [], ensure_ascii=False)
+                                for row in sheet.get("rows") or []
+                            ],
                     ]
                 ).lower()
             ]
         sheets.sort(
             key=lambda sheet: (
+                0 if str(sheet.get("group_review_status") or "unreviewed") == "unreviewed" else 1,
+                0 if str(sheet.get("gate_status") or "") in {"unbound_suspect", "inferred_continuation"} else 1,
                 str((sheet.get("metadata") or {}).get("normalized_category_name") or ""),
                 str((sheet.get("metadata") or {}).get("normalized_subject_name") or ""),
                 -int_or_zero((sheet.get("metadata") or {}).get("year")),
@@ -8133,6 +8235,7 @@ PAGE_HTML = r"""<!doctype html>
     .symbol-toolbar button { border:1px solid var(--line); border-radius:6px; min-width:34px; min-height:30px; padding:5px 8px; background:white; cursor:pointer; font-weight:700; }
     .symbol-toolbar button:hover { border-color:var(--blue); background:#eef4ff; color:var(--blue); }
     .symbol-toolbar .tool-group-label { color:var(--muted); font-size:12px; margin-right:2px; }
+    .overline { text-decoration: overline; text-decoration-thickness: 1px; }
     .correction-preview { border:1px solid #bfd0ff; border-radius:8px; background:#fbfcff; margin-bottom:10px; }
     .correction-preview summary { cursor:pointer; padding:9px 10px; color:#0f2f5f; font-weight:700; }
     .correction-preview[open] summary { border-bottom:1px solid #dbe5ff; }
@@ -8221,6 +8324,7 @@ PAGE_HTML = r"""<!doctype html>
     .group-table th { position:sticky; top:0; background:#fbfcff; z-index:1; }
     .group-table .stem-cell { max-width:520px; color:#344054; line-height:1.45; }
     .group-warning { border-left:4px solid #f79009; background:#fff8e6; padding:8px 10px; color:#7a4a00; }
+    .badge.workflow { background:#eef4ff; color:#174ea6; border-color:#b9cdf8; }
     code { word-break:break-all; }
   </style>
 </head>
@@ -8234,7 +8338,7 @@ PAGE_HTML = r"""<!doctype html>
       <button id="modeGroup" onclick="setMode('group')">題組</button>
       <button id="modeVisual" onclick="setMode('visual')">圖片</button>
     </div>
-    <input id="search" placeholder="搜尋類科、科目、題號、疑點">
+    <input id="search" placeholder="全域搜尋題幹、選項、註記（跨狀態）" title="輸入文字時會暫時跨越人工、AI、答案、題組或圖片狀態篩選；類科、科目、年份與考次仍保留。">
     <select id="status" class="question-only">
       <option value="">全部狀態</option>
       <option value="blocked">系統阻擋</option>
@@ -8299,6 +8403,7 @@ PAGE_HTML = r"""<!doctype html>
     <span id="count" class="meta"></span>
     <span id="progress" class="meta"></span>
     <button class="nav question-only batch-accept" onclick="batchAcceptVisiblePass()">批次通過本頁 pass</button>
+    <button class="nav" onclick="refreshQueue()" title="重新套用目前條件，將未看與異常項目排到前面">刷新並重排</button>
     <button class="nav" onclick="showPipeline()">資料庫層級</button>
     <span id="dataStatus" class="meta"></span>
     <span id="batchStatus" class="meta"></span>
@@ -8339,11 +8444,12 @@ let candidateDataStatus = null;
 let refillTimer = null;
 let modeRefreshTimer = null;
 let searchFilterTimer = null;
+let queueDirtySinceRefresh = false;
 const modeDataCache = new Map();
 const modeSnapshots = new Map();
 const MODE_CACHE_MAX_AGE_MS = 120000;
 const VISUAL_DEFAULT_FILTER = 'visual_asset_pending';
-const VISUAL_FILTER_VALUES = new Set(['', 'visual', 'visual_asset_pending', 'visual_suspect', 'visual_ok', 'visual_problem', 'no_visual']);
+const VISUAL_FILTER_VALUES = new Set(['', 'visual', 'visual_all', 'visual_asset_pending', 'visual_suspect', 'visual_ok', 'visual_problem', 'no_visual']);
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
 const jsArg = (s) => JSON.stringify(String(s ?? '')).replace(/</g, '\\u003c');
@@ -8419,6 +8525,42 @@ function humanListLabel(review) {
     unreviewed: '未看'
   };
   return labels[action] || '未看';
+}
+
+function workflowStageLabel(item, itemMode = mode) {
+  if (itemMode === 'group') {
+    return String(item?.group_review_status || 'unreviewed') === 'unreviewed' ? '題組待人工' : '題組已判定';
+  }
+  if (itemMode === 'visual') {
+    const status = item?.visual_profile?.visual_review_status || item?.visual_review || '';
+    if (status === 'visual_asset_problem') return '圖片待修';
+    if (['visual_asset_ok', 'no_visual_required'].includes(status) || item?.visual_profile?.has_manual_asset) return '圖片已判定';
+    return '圖片待人工';
+  }
+  if (itemMode === 'answer') {
+    const total = Number(item?.reviewable_question_count ?? item?.question_count ?? 0);
+    const reviewed = Number(item?.reviewed_count ?? 0);
+    if ((item?.answer_gate_status || 'pass') !== 'pass') return '答案有異常';
+    return total > 0 && reviewed >= total ? '答案已看' : '答案待人工';
+  }
+  const review = item?.review || {};
+  const action = String(review.action || '');
+  if (action === 'exclude') return '已排除';
+  if (review.is_reset_unreviewed || review.status !== 'reviewed' || ['unreviewed', 'reset_review', ''].includes(action)) return '題目待人工';
+  if (['block', 'needs_review', 'correct', 'comment'].includes(action)) return '題目待處理';
+  const formal = item?.formal || {};
+  if (formal.review_drift) return '正式庫待撤回';
+  if (formal.in_formal || formal.usable) return '正式可用';
+  if (formal.pending_promotion) return '待同步正式庫';
+  const answerAction = String(item?.answer_review?.action || '');
+  if (['accept', 'unblock'].includes(answerAction)) return '題答已通過';
+  return '答案待人工';
+}
+
+function markQueueDirty() {
+  queueDirtySinceRefresh = true;
+  const status = document.getElementById('dataStatus');
+  if (status) status.textContent = '本輪已更新；刷新後重排';
 }
 
 function visualAiStatus(item) {
@@ -8613,15 +8755,11 @@ function itemMatchesVisualFilter(item) {
 }
 
 function advanceAfterVisualReview(reviewedKey, reviewedIndex) {
-  const stillVisible = itemMatchesVisualFilter(current) && itemMatchesCurrentReviewFilter(current);
-  if (stillVisible && reviewedIndex >= 0) {
+  if (reviewedIndex >= 0) {
     filtered[reviewedIndex] = current;
     candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
-  } else if (reviewedIndex >= 0) {
-    filtered.splice(reviewedIndex, 1);
-    candidates = candidates.filter(item => item.candidate_key !== reviewedKey);
-    if (filteredCount > 0) filteredCount -= 1;
   }
+  markQueueDirty();
   chooseNextLocal(reviewedKey, Math.max(reviewedIndex, 0));
 }
 
@@ -8804,6 +8942,8 @@ const greekMap = {
 };
 function renderMath(value) {
   return esc(value)
+    .replace(/\\+(?:bar|overline)\s*\{([^{}]+)\}/g, '<span class="overline">$1</span>')
+    .replace(/\\+underline\s*\{([^{}]+)\}/g, '<u>$1</u>')
     .replace(/\\rightarrow/g, '→')
     .replace(/\\to/g, '→')
     .replace(/\\([A-Za-z]+)/g, (match, name) => greekMap[name] || match)
@@ -8870,6 +9010,8 @@ function renderText(value) {
       .replace(/&lt;\/(table|thead|tbody|tfoot|tr|td|th)&gt;/g, '</$1>')
       .replace(/&lt;sub&gt;([\s\S]*?)&lt;\/sub&gt;/g, '<sub>$1</sub>')
       .replace(/&lt;sup&gt;([\s\S]*?)&lt;\/sup&gt;/g, '<sup>$1</sup>')
+      .replace(/&lt;u&gt;([\s\S]*?)&lt;\/u&gt;/g, '<u>$1</u>')
+      .replace(/&lt;span class=&quot;overline&quot;&gt;([\s\S]*?)&lt;\/span&gt;/g, '<span class="overline">$1</span>')
       .replace(/([A-Za-z0-9\u4e00-\u9fff])\s+<sup>([®™])<\/sup>/g, '$1<sup>$2</sup>');
   }).join('');
 }
@@ -8920,22 +9062,34 @@ function insertIntoCorrectionField(text) {
   field.dispatchEvent(new Event('input', {bubbles: true}));
 }
 
-function wrapCorrectionSelection(tag) {
+function wrapCorrectionSelectionMarkup(openTag, closeTag) {
   const field = activeCorrectionField();
   if (!field) return;
   const start = field.selectionStart ?? 0;
   const end = field.selectionEnd ?? start;
   const value = String(field.value || '');
   const selected = value.slice(start, end);
-  const replacement = `<${tag}>${selected}</${tag}>`;
+  const replacement = `${openTag}${selected}${closeTag}`;
   field.value = value.slice(0, start) + replacement + value.slice(end);
   field.focus();
   if (field.setSelectionRange) {
-    const innerStart = start + tag.length + 2;
+    const innerStart = start + openTag.length;
     field.setSelectionRange(innerStart, innerStart + selected.length);
   }
   rememberCorrectionField(field);
   field.dispatchEvent(new Event('input', {bubbles: true}));
+}
+
+function wrapCorrectionSelection(tag) {
+  if (tag === 'overline') {
+    wrapCorrectionSelectionMarkup('<span class="overline">', '</span>');
+    return;
+  }
+  if (tag === 'underline') {
+    wrapCorrectionSelectionMarkup('<u>', '</u>');
+    return;
+  }
+  wrapCorrectionSelectionMarkup(`<${tag}>`, `</${tag}>`);
 }
 
 function normalizeCorrectionNotation(value) {
@@ -8947,6 +9101,8 @@ function normalizeCorrectionNotation(value) {
   normalized = normalized
     .replace(/\\_/g, escapedUnderscore)
     .replace(/\$([^$]+)\$/g, '$1')
+    .replace(/\\+(?:bar|overline)\s*\{\s*([^{}<>]*?)\s*\}/g, (_, body) => `<span class="overline">${body.trim()}</span>`)
+    .replace(/\\+underline\s*\{\s*([^{}<>]*?)\s*\}/g, (_, body) => `<u>${body.trim()}</u>`)
     .replace(/\\+\s*%/g, '%')
     .replace(/\^\s*\{\s*\\+\s*circ\s*\}\s*(?:\\mathrm\{C\}|C)/gi, '°C')
     .replace(/\\+\s*circ\s*(?:\\mathrm\{C\}|C)/gi, '°C')
@@ -9196,18 +9352,14 @@ function setMode(nextMode) {
     if (visualSelect && !visualSelect.value) visualSelect.value = VISUAL_DEFAULT_FILTER;
   }
   updateModeControls();
-  const showedSnapshot = renderModeSnapshotIfAvailable(preferredKey);
-  if (showedSnapshot) scheduleModeBackgroundRefresh(preferredKey);
-  else applyFilter(preferredKey, null, null, {useCache: true, showLoading: true, focusKey: preferredKey});
+  applyFilter(preferredKey, null, null, {useCache: true, showLoading: true});
 }
 
 function startVisualReview() {
   mode = 'visual';
   document.getElementById('visualStatus').value = VISUAL_DEFAULT_FILTER;
   updateModeControls();
-  const showedSnapshot = renderModeSnapshotIfAvailable();
-  if (showedSnapshot) scheduleModeBackgroundRefresh();
-  else applyFilter(null, null, null, {useCache: true, showLoading: true});
+  applyFilter(null, null, null, {useCache: true, showLoading: true});
 }
 
 async function showPipeline() {
@@ -9257,15 +9409,17 @@ async function showPipeline() {
 function queryParams(options = {}) {
   const params = new URLSearchParams();
   const questionReviewStatus = filterValue('reviewStatus');
-  params.set('q', filterValue('search').trim());
-  params.set('status', mode === 'question' ? filterValue('status') : '');
-  params.set('reviewStatus', mode === 'question' ? questionReviewStatus : '');
+  const query = filterValue('search').trim();
+  const globalSearch = Boolean(query);
+  params.set('q', query);
+  params.set('status', mode === 'question' && !globalSearch ? filterValue('status') : '');
+  params.set('reviewStatus', mode === 'question' && !globalSearch ? questionReviewStatus : '');
   // A parser repair must remain discoverable even when the reviewer normally
   // works through an AI-only queue.
-  params.set('aiReviewStatus', mode === 'question' && questionReviewStatus !== 'repair_pending' ? filterValue('aiReviewStatus') : '');
-  params.set('visualStatus', mode === 'visual' ? (filterValue('visualStatus') || VISUAL_DEFAULT_FILTER) : '');
-  params.set('answerReviewStatus', mode === 'answer' ? filterValue('answerReviewStatus') : '');
-  params.set('groupReviewStatus', mode === 'group' ? filterValue('groupReviewStatus') : '');
+  params.set('aiReviewStatus', mode === 'question' && !globalSearch && questionReviewStatus !== 'repair_pending' ? filterValue('aiReviewStatus') : '');
+  params.set('visualStatus', mode === 'visual' ? (globalSearch ? 'visual_all' : (filterValue('visualStatus') || VISUAL_DEFAULT_FILTER)) : '');
+  params.set('answerReviewStatus', mode === 'answer' && !globalSearch ? filterValue('answerReviewStatus') : '');
+  params.set('groupReviewStatus', mode === 'group' && !globalSearch ? filterValue('groupReviewStatus') : '');
   params.set('category', filterValue('categoryFilter'));
   params.set('subject', filterValue('subjectFilter'));
   params.set('year', filterValue('yearFilter'));
@@ -9345,6 +9499,7 @@ function applyCandidateData(data, preferredKey = null, preferredIndex = null, sk
   sheetCount = data.sheet_count ?? candidates.length;
   reviewedCount = data.reviewed_count ?? 0;
   candidateDataStatus = data.candidate_data || null;
+  queueDirtySinceRefresh = false;
   updateCandidateDataStatus();
   if (data.facets) populateFiltersFromFacets(data.facets);
   chooseCurrent(preferredKey, preferredIndex, skipKey);
@@ -9365,7 +9520,7 @@ async function fetchCandidates(preferredKey = null, preferredIndex = null, skipK
   updateModeControls();
   const useCache = options.useCache !== false;
   const showLoading = options.showLoading !== false;
-  const params = queryParams({focusKey: options.focusKey || preferredKey || ''});
+  const params = queryParams({focusKey: options.focusKey || ''});
   const endpoint = endpointForCurrentMode();
   const requestKey = requestKeyForCurrentMode(endpoint, params);
   const cached = useCache ? modeDataCache.get(requestKey) : null;
@@ -9373,8 +9528,11 @@ async function fetchCandidates(preferredKey = null, preferredIndex = null, skipK
     applyCandidateData(cached.data, preferredKey, preferredIndex, skipKey);
     return;
   }
-  const staleModeCache = useCache ? latestModeCache() : null;
-  if (staleModeCache && options.allowStaleModeCache !== false) {
+  // A cache from another query in the same mode can belong to a different
+  // status channel.  It is opt-in only; normal filter/search changes must not
+  // flash or retain the wrong list while the exact query loads.
+  const staleModeCache = useCache && options.allowStaleModeCache === true ? latestModeCache() : null;
+  if (staleModeCache) {
     applyCandidateData(staleModeCache.data, preferredKey, preferredIndex, skipKey);
     const status = document.getElementById('dataStatus');
     if (status) status.textContent = '背景更新中';
@@ -9403,6 +9561,12 @@ async function fetchCandidates(preferredKey = null, preferredIndex = null, skipK
       fetchAbortController = null;
     }
   }
+}
+
+async function refreshQueue() {
+  const preferredKey = current?.candidate_key || null;
+  clearCandidateCache();
+  await fetchCandidates(preferredKey, null, null, {useCache: false, showLoading: true});
 }
 
 function updateCandidateDataStatus() {
@@ -9501,21 +9665,22 @@ function updateProgressCountsAfterLocalReview(wasReviewed, stillVisible) {
 }
 
 function updateCountLabels() {
+  const searchScope = filterValue('search').trim() ? '；搜尋跨狀態' : '';
   if (mode === 'answer') {
-    document.getElementById('count').textContent = `顯示 ${filtered.length} 張答案表 / 符合 ${filteredCount} 題 / 可核答案 ${totalCount} 題`;
+    document.getElementById('count').textContent = `顯示 ${filtered.length} 張答案表 / 符合 ${filteredCount} 題 / 可核答案 ${totalCount} 題${searchScope}`;
     document.getElementById('progress').textContent = `答案已看 ${reviewedCount} 題，未看 ${Math.max(totalCount - reviewedCount, 0)} 題`;
   } else if (mode === 'group') {
-    document.getElementById('count').textContent = `顯示 ${filtered.length} 組 / 疑似題組 ${filteredCount} 組 / 題目 ${totalCount}`;
+    document.getElementById('count').textContent = `顯示 ${filtered.length} 組 / 疑似題組 ${filteredCount} 組 / 題目 ${totalCount}${searchScope}`;
     const groupStatus = filterValue('groupReviewStatus');
     document.getElementById('progress').textContent = groupStatus
       ? `題組篩選：${document.getElementById('groupReviewStatus')?.selectedOptions?.[0]?.textContent || groupStatus}`
       : `題組層先做結構檢查，正式通過仍回到審題與答案核對`;
   } else if (mode === 'visual') {
-    document.getElementById('count').textContent = `顯示 ${filtered.length} / 圖片條件 ${filteredCount} / 全部 ${totalCount}`;
+    document.getElementById('count').textContent = `顯示 ${filtered.length} / 圖片條件 ${filteredCount} / 全部 ${totalCount}${searchScope}`;
     const visualStatus = filterValue('visualStatus') || 'visual';
     document.getElementById('progress').textContent = `圖片篩選：${document.getElementById('visualStatus')?.selectedOptions?.[0]?.textContent || visualStatus}`;
   } else {
-    document.getElementById('count').textContent = `顯示 ${filtered.length} / 符合 ${filteredCount} / 全部 ${totalCount}`;
+    document.getElementById('count').textContent = `顯示 ${filtered.length} / 符合 ${filteredCount} / 全部 ${totalCount}${searchScope}`;
     document.getElementById('progress').textContent = `已看 ${reviewedCount}，未看 ${Math.max(filteredCount - reviewedCount, 0)}`;
   }
 }
@@ -9534,6 +9699,7 @@ function chooseNextLocal(reviewedKey, reviewedIndex) {
 
 function scheduleCandidateRefill() {
   if (!['question', 'visual'].includes(mode)) return;
+  if (queueDirtySinceRefresh) return;
   if (refillTimer) clearTimeout(refillTimer);
   if (filtered.length > 35 || filteredCount <= filtered.length) return;
   const preferredKey = current?.candidate_key || null;
@@ -9601,7 +9767,7 @@ function renderList() {
               : '疑似未綁';
       const reasons = Object.entries(item.reason_counts || {}).map(([key, value]) => `${key} ${value} 題`).join('、');
       return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-        <div>${groupReviewBadge} <span class="badge ${esc(status)}">${esc(groupKind)}</span> ${esc(item.group_label || '題組候選')}</div>
+        <div>${groupReviewBadge} <span class="badge ${esc(status)}">${esc(groupKind)}</span> <span class="badge workflow">${esc(workflowStageLabel(item, 'group'))}</span> ${esc(item.group_label || '題組候選')}</div>
         <div class="meta">${esc(meta.normalized_category_name || meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
         <div class="meta">${esc(item.question_count || 0)} 題；${esc(reasons || '題組線索')}</div>
       </button>`;
@@ -9612,7 +9778,7 @@ function renderList() {
       const reviewLabel = review.is_reset_unreviewed ? '退回未審' : statusLabel(reviewBadge);
       const role = item.answer_role_label || 'unknown';
       return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-        <div><span class="badge ${esc(item.answer_gate_status || 'pass')}">${esc(statusLabel(item.answer_gate_status || 'pass'))}</span> <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> ${esc(role)} 答案表</div>
+        <div><span class="badge ${esc(item.answer_gate_status || 'pass')}">${esc(statusLabel(item.answer_gate_status || 'pass'))}</span> <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> <span class="badge workflow">${esc(workflowStageLabel(item, 'answer'))}</span> ${esc(role)} 答案表</div>
         <div class="meta">${esc(meta.normalized_category_name || meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
         <div class="meta">${esc(item.reviewed_count || 0)} / ${esc(item.question_count || 0)} 題已核對，${esc(item.answer_issue_count || 0)} 個答案疑點</div>
       </button>`;
@@ -9649,7 +9815,7 @@ function renderList() {
             : '';
     if (mode === 'visual') {
       return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-        <div>${focusBadge} ${visualBadge || '<span class="badge visual">待處理</span>'} 第 ${esc(item.question_number)} 題</div>
+        <div>${focusBadge} ${visualBadge || '<span class="badge visual">待處理</span>'} <span class="badge workflow">${esc(workflowStageLabel(item, 'visual'))}</span> 第 ${esc(item.question_number)} 題</div>
         <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
         ${visualSources ? `<div class="meta">資產：${visualSources}</div>` : '<div class="meta">目前沒有圖片資產</div>'}
       </button>`;
@@ -9661,7 +9827,7 @@ function renderList() {
       || (item.is_visual_question && visualStatus !== 'no_visual_required')
     ) ? '・圖片' : '';
     return `<button class="list-item ${current && current.candidate_key === item.candidate_key ? 'active' : ''}" data-key="${esc(item.candidate_key)}" onclick="selectCandidate('${esc(item.candidate_key)}')">
-      <div>${focusBadge} ${statusBadge} ${aiBadge} <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> 第 ${esc(item.question_number)} 題${visualMarker}</div>
+      <div>${focusBadge} ${statusBadge} ${aiBadge} <span class="badge ${esc(reviewBadge)}">${esc(reviewLabel)}</span> <span class="badge workflow">${esc(workflowStageLabel(item, 'question'))}</span> 第 ${esc(item.question_number)} 題${visualMarker}</div>
       <div class="meta">${esc(meta.group_name)} ${esc(meta.year)}-${esc(meta.exam_ordinal)} ${esc(meta.normalized_subject_name)}</div>
       <div class="meta">${mode === 'answer' ? esc(item.answer_issue_count || 0) + ' 個答案疑點' : esc(item.question_issue_count ?? item.issue_count ?? 0) + ' 個題目疑點'}</div>
       ${formalBadge ? `<div class="meta">${formalBadge}</div>` : ''}
@@ -10176,6 +10342,8 @@ function renderDetail() {
         <span class="tool-group-label">格式</span>
         <button type="button" title="插入空下標模板，游標會放在標籤內" onclick="wrapCorrectionSelection('sub')">x<sub>□</sub></button>
         <button type="button" title="插入空上標模板，游標會放在標籤內" onclick="wrapCorrectionSelection('sup')">x<sup>□</sup></button>
+        <button type="button" title="插入空上橫槓模板，游標會放在標籤內" onclick="wrapCorrectionSelection('overline')"><span class="overline">x</span> 上橫槓</button>
+        <button type="button" title="插入空下橫槓模板，游標會放在標籤內" onclick="wrapCorrectionSelection('underline')"><u>x</u> 下橫槓</button>
         <button type="button" title="攝氏溫度" onclick="insertIntoCorrectionField('°C')">°C</button>
         <button type="button" title="正負號" onclick="insertIntoCorrectionField('±')">±</button>
         <button type="button" title="乘號" onclick="insertIntoCorrectionField('×')">×</button>
@@ -10872,25 +11040,9 @@ function applyGroupReviewEventsToCurrent(status, events) {
 
 async function advanceAfterGroupReview(reviewedKey, confirmedStatus, events = []) {
   const reviewedIndex = filtered.findIndex(item => item.candidate_key === reviewedKey);
-  const stillMatches = currentGroupMatchesFilter(confirmedStatus);
   applyGroupReviewEventsToCurrent(confirmedStatus, events);
-  if (!stillMatches) {
-    const oldLength = filtered.length;
-    filtered = filtered.filter(item => item.candidate_key !== reviewedKey);
-    candidates = candidates.filter(item => item.candidate_key !== reviewedKey);
-    if (filtered.length < oldLength) {
-      filteredCount = Math.max(filteredCount - 1, 0);
-      sheetCount = Math.max(sheetCount - 1, 0);
-    }
-    const nextIndex = Math.min(Math.max(reviewedIndex, 0), filtered.length - 1);
-    current = filtered[nextIndex] || null;
-    updateCountLabels();
-    renderList();
-    renderDetail();
-    savePreferencesSoon();
-    scheduleModeBackgroundRefresh(current?.candidate_key || null);
-    return;
-  }
+  candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
+  markQueueDirty();
   const next = filtered.find((item, index) => index > reviewedIndex && item.candidate_key !== reviewedKey)
     || filtered.find((item, index) => index < reviewedIndex && item.candidate_key !== reviewedKey)
     || current;
@@ -10899,7 +11051,6 @@ async function advanceAfterGroupReview(reviewedKey, confirmedStatus, events = []
   renderList();
   renderDetail();
   savePreferencesSoon();
-  scheduleModeBackgroundRefresh(current?.candidate_key || null);
 }
 
 async function confirmCurrentSheetGroup() {
@@ -11217,21 +11368,12 @@ async function answerSheetReviewAction(action, aiRequested = false) {
       current.reviewed_count = current.reviewable_question_count || current.question_count || current.reviewed_count || 0;
       current.accepted_count = ['accept', 'unblock'].includes(reviewedAction) ? current.reviewed_count : current.accepted_count;
     }
-    const answerStatus = filterValue('answerReviewStatus');
-    const shouldLeaveCurrent =
-      (answerStatus === 'unreviewed' && ['accept', 'unblock', 'block', 'needs_review', 'reviewed', 'comment'].includes(reviewedAction))
-      || (answerStatus === 'not_accept' && ['accept', 'unblock'].includes(reviewedAction))
-      || (answerStatus === 'accept' && !['accept', 'unblock'].includes(reviewedAction))
-      || (answerStatus === 'block' && reviewedAction !== 'block')
-      || (answerStatus === 'needs_review' && reviewedAction !== 'needs_review');
-    if (shouldLeaveCurrent && currentIndex >= 0) {
-      filtered.splice(currentIndex, 1);
-      candidates = filtered;
-      chooseCurrent(null, Math.min(currentIndex, Math.max(filtered.length - 1, 0)), reviewedKey);
-    } else {
-      renderList();
-      renderDetail();
+    if (currentIndex >= 0) {
+      filtered[currentIndex] = current;
+      candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
     }
+    markQueueDirty();
+    chooseNextLocal(reviewedKey, Math.max(currentIndex, 0));
     const saved = document.getElementById('saved');
     if (saved) saved.textContent = `已寫入 ${data.saved_count || entries.length} 題${storageText ? `：${storageText}` : ''}`;
   } else {
@@ -11272,7 +11414,12 @@ async function answerReviewAction(action) {
       event_count: (current.answer_review?.event_count || 0) + 1
     };
     const storageText = storageLabel(data.event?.storage);
-    await fetchCandidates(null, currentIndex >= 0 ? currentIndex : null, reviewedKey);
+    if (currentIndex >= 0) {
+      filtered[currentIndex] = current;
+      candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
+    }
+    markQueueDirty();
+    chooseNextLocal(reviewedKey, Math.max(currentIndex, 0));
     const saved = document.getElementById('saved');
     if (saved && storageText) saved.textContent = `已寫入：${storageText}`;
   } else {
@@ -11313,6 +11460,7 @@ async function review(action, correction = null, options = {}) {
         filtered[currentIndex] = current;
         candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
       }
+      markQueueDirty();
       savePreferencesSoon();
       return data;
     }
@@ -11335,8 +11483,9 @@ async function review(action, correction = null, options = {}) {
       if (!wasReviewed) reviewedCount += 1;
       if (currentIndex >= 0) {
         filtered[currentIndex] = current;
-        candidates[currentIndex] = current;
+        candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
       }
+      markQueueDirty();
       updateCountLabels();
       renderList();
       renderDetail();
@@ -11350,15 +11499,12 @@ async function review(action, correction = null, options = {}) {
       savePreferencesSoon();
       return data;
     }
-    const stillVisible = itemMatchesCurrentReviewFilter(current);
-    updateProgressCountsAfterLocalReview(wasReviewed, stillVisible);
-    if (stillVisible && currentIndex >= 0) {
+    if (!wasReviewed) reviewedCount += 1;
+    if (currentIndex >= 0) {
       filtered[currentIndex] = current;
-      candidates[currentIndex] = current;
-    } else if (currentIndex >= 0) {
-      filtered.splice(currentIndex, 1);
-      candidates = candidates.filter(item => item.candidate_key !== reviewedKey);
+      candidates = candidates.map(item => item.candidate_key === reviewedKey ? current : item);
     }
+    markQueueDirty();
     chooseNextLocal(reviewedKey, Math.max(currentIndex, 0));
     return data;
   } else {

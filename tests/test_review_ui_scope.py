@@ -172,6 +172,53 @@ class ReviewUiScopeTests(unittest.TestCase):
         self.assertIn("submitAiLearning('question')", page)
         self.assertIn("加入 AI 學習", page)
         self.assertIn("active-learn", page)
+        self.assertIn("插入空上橫槓模板", page)
+        self.assertIn("插入空下橫槓模板", page)
+        self.assertIn("上橫槓</button>", page)
+        self.assertIn("下橫槓</button>", page)
+        self.assertIn("wrapCorrectionSelection('overline')", page)
+        self.assertIn("wrapCorrectionSelection('underline')", page)
+
+    def test_review_page_uses_global_search_and_stable_session_queue(self):
+        page = self.ui.PAGE_HTML
+        self.assertIn("全域搜尋題幹、選項、註記（跨狀態）", page)
+        self.assertIn("globalSearch ? 'visual_all'", page)
+        self.assertIn("mode === 'answer' && !globalSearch", page)
+        self.assertIn("mode === 'group' && !globalSearch", page)
+        self.assertIn("刷新並重排", page)
+        self.assertIn("本輪已更新；刷新後重排", page)
+        self.assertIn("options.allowStaleModeCache === true", page)
+        self.assertIn("workflowStageLabel(item, 'question')", page)
+        self.assertIn("workflowStageLabel(item, 'answer')", page)
+        self.assertIn("workflowStageLabel(item, 'group')", page)
+        self.assertIn("workflowStageLabel(item, 'visual')", page)
+
+        visual_advance = page[page.index("function advanceAfterVisualReview"):page.index("async function saveVisualReviewStatus")]
+        group_advance = page[page.index("async function advanceAfterGroupReview"):page.index("async function confirmCurrentSheetGroup")]
+        answer_batch_tail = page[page.index("async function answerSheetReviewAction"):page.index("async function answerReviewAction")]
+        review_action = page[page.index("async function review(action"):page.index("document.getElementById('search')")]
+        self.assertNotIn(".splice(", visual_advance)
+        self.assertNotIn(".splice(", group_advance)
+        self.assertNotIn(".splice(", answer_batch_tail)
+        self.assertNotIn(".splice(", review_action)
+        self.assertNotIn("scheduleModeBackgroundRefresh", group_advance)
+        self.assertNotIn("await fetchCandidates", review_action)
+
+    def test_sql_queue_searches_effective_options_and_prioritizes_open_attention(self):
+        state = object.__new__(self.ui.ReviewState)
+        heavy_cte, _ = state._sql_candidate_filter_parts({"q": "缓"})
+        light_cte, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "unreviewed"})
+        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+
+        self.assertIn("raw_candidate_json::text", heavy_cte)
+        self.assertIn("latest_question_ai AS", light_cte)
+        self.assertIn("issue_flags AS", light_cte)
+        self.assertIn("has_active_attention", light_cte)
+        self.assertIn("CASE WHEN is_reviewed THEN 1 ELSE 0 END", source)
+        self.assertIn("CASE WHEN reviewed_count < question_count THEN 0 ELSE 1 END", source)
+        self.assertIn("CASE WHEN f.group_action IN ('', 'reset_group_review') THEN 0 ELSE 1 END", source)
+        self.assertIn("lq.corrected_candidate_json::text", source)
+        self.assertIn("la.corrected_answer_json::text", source)
 
     def test_correction_notation_normalizer_handles_groups_symbols_and_word_boundaries(self):
         page_script = self.ui.PAGE_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
@@ -185,6 +232,7 @@ const inputs = [
   '\\alpha _{1}',
   '\\rightarrow \\times \\pm \\uparrow \\downarrow \\propto \\div',
   '\\mathrm{CO}_{2}',
+  '\\bar{x} \\overline{y} \\underline{z}',
   '\\log_{10}',
   'hypothyroidism PO2 PO',
   'A\\_B',
@@ -207,6 +255,7 @@ process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
                 "α <sub>1</sub>",
                 "→ × ± ↑ ↓ ∝ ÷",
                 "CO<sub>2</sub>",
+                '<span class="overline">x</span> <span class="overline">y</span> <u>z</u>',
                 "log<sub>10</sub>",
                 "hypothyroidism PO<sub>2</sub> PO",
                 "A_B",

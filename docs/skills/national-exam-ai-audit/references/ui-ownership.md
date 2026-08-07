@@ -27,3 +27,6 @@ Review UI 的分頁不是同一個審核佇列的不同顯示，而是不同資�
 2. 對應 lane prompt 的禁止越權條款。
 3. `serve_question_review_ui.py` 的 scope projection。
 4. 題目、題組、圖片、答案四個模式各一個回歸測試。
+
+跨介面共用的搜尋、排序、刷新、工作階段與流程標籤另由
+`review-ui-global-behavior.md` 統一定義；各介面不得自行覆寫成不同語意。

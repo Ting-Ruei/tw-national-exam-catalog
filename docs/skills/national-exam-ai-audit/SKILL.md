@@ -99,6 +99,9 @@ Build faithful, review-ready candidates while spending model tokens only on resi
   return paths. It defines the eight logical layers and their precedence.
 - Read `references/ui-ownership.md` before changing Review UI routing, labels, or
   audit fields; it is the interface-level ownership contract.
+- Read `references/review-ui-global-behavior.md` before changing Review UI
+  search, sorting, refresh, cache, navigation, list progress, or cross-mode
+  behavior; it is the shared interaction contract for all four modes.
 - Read `references/pdf-second-source.md` when an official PDF must be used as the
   second reference source. Run `scripts/build_pdf_reference_source.py` into a
   non-Git `tmp/`/registry artifact directory; it is read-only and never replaces
