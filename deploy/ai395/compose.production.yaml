@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18}"
+    container_name: tw-exam-production-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-54329}:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is required}"
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    labels:
+      ai395.environment: production
+      ai395.project: tw-national-exam-catalog
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+  review-ui:
+    image: "${REVIEW_UI_IMAGE:?REVIEW_UI_IMAGE is required}"
+    container_name: tw-exam-production-review-ui
+    restart: unless-stopped
+    init: true
+    user: "${CATALOG_RUNTIME_UID:-1000}:${CATALOG_RUNTIME_GID:-971}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    working_dir: /workspace
+    command:
+      - scripts/serve_question_review_ui.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --mobile-port
+      - "8766"
+      - --review-backend
+      - sql
+    environment:
+      ASSET_ROOT: /assets
+      DATABASE_URL: "${REVIEW_UI_DATABASE_URL:?REVIEW_UI_DATABASE_URL is required}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4.1-mini}"
+      OPENAI_REVIEW_MODEL: "${OPENAI_REVIEW_MODEL:-gpt-4.1-mini}"
+      OPENAI_REVIEW_TIMEOUT: "${OPENAI_REVIEW_TIMEOUT:-45}"
+      REVIEW_UI_BACKEND: sql
+      REVIEW_UI_WRITE_LEGACY_JSONL: "0"
+      REVIEW_UI_DEFER_FORMAL_SYNC: "1"
+      REVIEW_UI_ALLOW_PROJECT_FILES: "0"
+      REVIEW_UI_BASIC_AUTH_USERNAME: "${REVIEW_UI_BASIC_AUTH_USERNAME:?REVIEW_UI_BASIC_AUTH_USERNAME is required}"
+      REVIEW_UI_BASIC_AUTH_PASSWORD: "${REVIEW_UI_BASIC_AUTH_PASSWORD:?REVIEW_UI_BASIC_AUTH_PASSWORD is required}"
+      REVIEW_UI_READ_ONLY: "${REVIEW_UI_READ_ONLY:-1}"
+      REVIEW_UI_MAX_REQUEST_BYTES: "${REVIEW_UI_MAX_REQUEST_BYTES:-16777216}"
+      REVIEW_UI_REQUEST_TIMEOUT_SECONDS: "${REVIEW_UI_REQUEST_TIMEOUT_SECONDS:-60}"
+      REVIEW_UI_POST_RATE_LIMIT_PER_MINUTE: "${REVIEW_UI_POST_RATE_LIMIT_PER_MINUTE:-120}"
+    ports:
+      - "${REVIEW_UI_BIND:?REVIEW_UI_BIND is required}:${REVIEW_UI_PORT:-8765}:8765"
+      - "${REVIEW_UI_BIND:?REVIEW_UI_BIND is required}:${REVIEW_UI_MOBILE_PORT:-8766}:8766"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1',8765),3); s.close()"
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      ai395.environment: production
+      ai395.project: tw-national-exam-catalog
+    volumes:
+      - "${CATALOG_RELEASE_ROOT:?CATALOG_RELEASE_ROOT is required}:/workspace:ro"
+      - "${CATALOG_ASSET_ROOT:?CATALOG_ASSET_ROOT is required}:/assets:ro"
+      - "${CATALOG_MANUAL_ASSET_ROOT:?CATALOG_MANUAL_ASSET_ROOT is required}:/assets/40_manual_assets:rw"
+
+volumes:
+  postgres_data:
+    name: tw-exam-production-postgres-data

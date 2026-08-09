@@ -14,6 +14,7 @@ import base64
 import csv
 import gc
 import hashlib
+import hmac
 import html
 import json
 import mimetypes
@@ -597,7 +598,9 @@ def safe_file_path(value: str) -> Path | None:
         resolved = path.resolve()
     except FileNotFoundError:
         return None
-    allowed_roots = [PROJECT_ROOT.resolve(), ASSET_ROOT.resolve()]
+    allowed_roots = [ASSET_ROOT.resolve()]
+    if os.environ.get("REVIEW_UI_ALLOW_PROJECT_FILES", "0").lower() in {"1", "true", "yes"}:
+        allowed_roots.append(PROJECT_ROOT.resolve())
     if any(resolved == root or root in resolved.parents for root in allowed_roots):
         return resolved
     return None
@@ -7566,9 +7569,69 @@ filtered_sheets AS (
 
 class Handler(BaseHTTPRequestHandler):
     state: ReviewState
+    _post_rate_lock = threading.Lock()
+    _post_rate_events: dict[str, list[float]] = {}
+
+    def setup(self) -> None:
+        super().setup()
+        raw = os.environ.get("REVIEW_UI_REQUEST_TIMEOUT_SECONDS", "60")
+        try:
+            timeout = max(1.0, float(raw))
+        except ValueError:
+            timeout = 60.0
+        self.connection.settimeout(timeout)
 
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
+
+    def require_authorization(self) -> bool:
+        username = os.environ.get("REVIEW_UI_BASIC_AUTH_USERNAME", "")
+        password = os.environ.get("REVIEW_UI_BASIC_AUTH_PASSWORD", "")
+        if not username and not password:
+            return False
+        if not username or not password:
+            self.send_error(500, "Review UI authentication is misconfigured")
+            return True
+        expected = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        actual = self.headers.get("Authorization", "")
+        if hmac.compare_digest(actual, expected):
+            return False
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="National Exam Review", charset="UTF-8"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
+    @staticmethod
+    def writes_are_blocked() -> bool:
+        return os.environ.get("REVIEW_UI_READ_ONLY", "0").lower() in {"1", "true", "yes"}
+
+    @staticmethod
+    def max_request_bytes() -> int:
+        raw = os.environ.get("REVIEW_UI_MAX_REQUEST_BYTES", str(16 * 1024 * 1024))
+        try:
+            value = int(raw)
+        except ValueError:
+            return 16 * 1024 * 1024
+        return max(1, value)
+
+    def post_rate_limited(self) -> bool:
+        raw = os.environ.get("REVIEW_UI_POST_RATE_LIMIT_PER_MINUTE", "120")
+        try:
+            limit = max(1, int(raw))
+        except ValueError:
+            limit = 120
+        client_ip = str(self.client_address[0])
+        now = time.monotonic()
+        with self._post_rate_lock:
+            recent = [value for value in self._post_rate_events.get(client_ip, []) if now - value < 60]
+            if len(recent) >= limit:
+                self._post_rate_events[client_ip] = recent
+                return True
+            recent.append(now)
+            self._post_rate_events[client_ip] = recent
+        return False
 
     def send_mobile_asset(self, path: str, *, head_only: bool = False) -> bool:
         asset = mobile_asset_response(path)
@@ -7599,6 +7662,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def do_HEAD(self) -> None:
+        if self.require_authorization():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path, head_only=True):
             return
@@ -7627,6 +7692,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def do_GET(self) -> None:
+        if self.require_authorization():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path):
             return
@@ -7719,11 +7786,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_POST(self) -> None:
+        if self.require_authorization():
+            return
+        if self.post_rate_limited():
+            self.send_json({"ok": False, "error": "Too many write requests"}, status=429)
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/ai-feedback", "/api/ai-learning", "/api/preferences", "/api/reload-candidates"}:
             self.send_error(404, "Not found")
             return
-        length = int(self.headers.get("Content-Length", "0"))
+        if self.writes_are_blocked():
+            self.send_json({"ok": False, "error": "Review UI is in read-only cutover mode"}, status=503)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json({"ok": False, "error": "Invalid Content-Length"}, status=400)
+            return
+        if length < 0 or length > self.max_request_bytes():
+            self.send_json({"ok": False, "error": "Request body is too large"}, status=413)
+            return
         raw = self.rfile.read(length).decode("utf-8")
         try:
             payload = json.loads(raw)

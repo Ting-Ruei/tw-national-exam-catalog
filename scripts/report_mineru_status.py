@@ -16,14 +16,30 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = PROJECT_ROOT / "國考題資料夾"
+ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 RUN_ROOT = ASSET_ROOT / "Registry" / "mineru_runs"
 BACKGROUND_LOG_ROOT = RUN_ROOT / "background_logs"
 STATUS_ROOT = RUN_ROOT / "status_snapshots"
 
 
+def configure_asset_root(asset_root: Path) -> None:
+    """Point all status reads and writes at one explicit asset root."""
+
+    global ASSET_ROOT, RUN_ROOT, BACKGROUND_LOG_ROOT, STATUS_ROOT
+    ASSET_ROOT = asset_root.expanduser().resolve()
+    RUN_ROOT = ASSET_ROOT / "Registry" / "mineru_runs"
+    BACKGROUND_LOG_ROOT = RUN_ROOT / "background_logs"
+    STATUS_ROOT = RUN_ROOT / "status_snapshots"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Report status for the latest MinerU batch run.")
+    parser.add_argument(
+        "--asset-root",
+        type=Path,
+        default=ASSET_ROOT,
+        help="Asset root whose Registry/mineru_runs tree should be inspected.",
+    )
     parser.add_argument("--write-snapshot", action="store_true", help="Write a timestamped JSON snapshot.")
     parser.add_argument("--write-latest", action="store_true", help="Write latest JSON and text status files.")
     return parser.parse_args()
@@ -263,22 +279,29 @@ def format_text(report: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_outputs(report: dict[str, object]) -> None:
+def write_outputs(report: dict[str, object], *, write_snapshot: bool, write_latest: bool) -> None:
     STATUS_ROOT.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     latest_json = STATUS_ROOT / "mineru_status__latest.json"
     latest_txt = STATUS_ROOT / "mineru_status__latest.txt"
     snapshot_json = STATUS_ROOT / f"mineru_status__{stamp}.json"
-    latest_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    latest_txt.write_text(format_text(report), encoding="utf-8")
-    snapshot_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if write_latest:
+        latest_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        latest_txt.write_text(format_text(report), encoding="utf-8")
+    if write_snapshot:
+        snapshot_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> None:
     args = parse_args()
+    configure_asset_root(args.asset_root)
     report = build_report()
     if args.write_snapshot or args.write_latest:
-        write_outputs(report)
+        write_outputs(
+            report,
+            write_snapshot=args.write_snapshot,
+            write_latest=args.write_latest,
+        )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
