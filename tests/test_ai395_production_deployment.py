@@ -11,7 +11,8 @@ class Ai395ProductionDeploymentTests(unittest.TestCase):
     def test_production_compose_has_no_runtime_dependency_install(self) -> None:
         compose = (ROOT / "deploy" / "ai395" / "compose.production.yaml").read_text(encoding="utf-8")
         self.assertNotIn("pip install", compose)
-        self.assertIn("REVIEW_UI_BASIC_AUTH_PASSWORD", compose)
+        self.assertIn("${REVIEW_UI_BASIC_AUTH_USERNAME:-}", compose)
+        self.assertIn("${REVIEW_UI_BASIC_AUTH_PASSWORD:-}", compose)
         self.assertIn("REVIEW_UI_READ_ONLY", compose)
         self.assertIn("REVIEW_UI_ALLOW_PROJECT_FILES", compose)
         self.assertIn("127.0.0.1:${POSTGRES_PORT", compose)

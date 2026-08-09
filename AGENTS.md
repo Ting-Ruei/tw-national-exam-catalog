@@ -22,7 +22,7 @@ bash scripts/ai395_catalog_runtime.sh tunnel
 
 ## Review UI
 
-- Since the 2026-08-09 cutover, AI395 (`ssh ai395`, LAN `192.168.10.90`) is the sole production Review UI and PostgreSQL writer. Desktop is `http://192.168.10.90:8765/`; mobile is `http://192.168.10.90:8766/mobile/`; both require Basic Auth.
+- Since the 2026-08-09 cutover, AI395 (`ssh ai395`, LAN `192.168.10.90`) is the sole production Review UI and PostgreSQL writer. Desktop is `http://192.168.10.90:8765/`; mobile is `http://192.168.10.90:8766/mobile/`. Per the owner's post-cutover decision, both use trusted-LAN access without application login; keep them bound only to the fixed LAN address.
 - The immutable production release is `/srv/ai395/releases/tw-national-exam-catalog/e89c60fd7502a0fce1c47c7b9577a211888504a9`; the clean mutable operator checkout is `/home/tim/src/tw-national-exam-catalog`. Production control is `/srv/ai395/stacks/tw-national-exam-catalog/production/ai395_catalog_production.sh`.
 - PostgreSQL is published only on AI395 loopback `127.0.0.1:54329`; use an SSH tunnel for remote DB maintenance. The older AI395 restore drill remains isolated on `8875/8876/54330` and is not a writer.
 - The Mac Studio `192.168.10.70` Review UI is stopped. Its PostgreSQL, assets, Compose volume, and freeze snapshot remain intact as rollback evidence through at least 2026-09-08; do not restart its Review UI while AI395 accepts writes.

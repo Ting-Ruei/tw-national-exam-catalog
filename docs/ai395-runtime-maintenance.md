@@ -7,7 +7,8 @@
 - AI395 是預設部署、驗證與除錯目標；SSH alias 為 `ai395`，Tailscale IP 為
   `100.65.112.73`，operator checkout 為 `/home/tim/src/tw-national-exam-catalog`。
 - AI395 production stack 是唯一 writer：desktop `192.168.10.90:8765`、mobile
-  `192.168.10.90:8766/mobile/`、PostgreSQL `127.0.0.1:54329`。UI 需要 Basic Auth，DB 不發布到 LAN。
+  `192.168.10.90:8766/mobile/`、PostgreSQL `127.0.0.1:54329`。依 owner 決定，UI 採固定
+  LAN trusted access、不需應用程式登入；DB 不發布到 LAN。
 - 隔離 restore drill 的容器已停止、volume 仍保留；若另行啟動，仍只可使用
   `127.0.0.1:8875/8876/54330` 並不得接收 production 審核事件。
 - Mac Studio Review UI 已停止；其 PostgreSQL、資產、Compose volume 與 freeze snapshot
@@ -35,7 +36,7 @@ bash scripts/ai395_catalog_runtime.sh verify
 bash scripts/ai395_catalog_runtime.sh tunnel
 ```
 
-直接使用 LAN production UI（需登入）：
+直接使用 LAN production UI（不需登入）：
 
 ```text
 http://192.168.10.90:8765/

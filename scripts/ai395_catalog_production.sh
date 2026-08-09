@@ -89,7 +89,9 @@ curl_config() {
   {
     printf 'silent\n'
     printf 'show-error\n'
-    printf 'user = "%s:%s"\n' "${REVIEW_UI_BASIC_AUTH_USERNAME}" "${REVIEW_UI_BASIC_AUTH_PASSWORD}"
+    if [[ -n "${REVIEW_UI_BASIC_AUTH_USERNAME:-}" || -n "${REVIEW_UI_BASIC_AUTH_PASSWORD:-}" ]]; then
+      printf 'user = "%s:%s"\n' "${REVIEW_UI_BASIC_AUTH_USERNAME:-}" "${REVIEW_UI_BASIC_AUTH_PASSWORD:-}"
+    fi
   } > "${config}"
   chmod 600 "${config}"
 }
@@ -178,7 +180,10 @@ case "${action}" in
   preflight)
     require_non_default_secret POSTGRES_PASSWORD
     require_non_default_secret REVIEW_UI_DB_PASSWORD
-    require_non_default_secret REVIEW_UI_BASIC_AUTH_PASSWORD
+    if [[ -n "${REVIEW_UI_BASIC_AUTH_USERNAME:-}" || -n "${REVIEW_UI_BASIC_AUTH_PASSWORD:-}" ]]; then
+      test -n "${REVIEW_UI_BASIC_AUTH_USERNAME:-}"
+      require_non_default_secret REVIEW_UI_BASIC_AUTH_PASSWORD
+    fi
     test "$(stat -c '%a' "${env_file}")" = "600"
     test -r "${compose_file}"
     test -r "${CATALOG_RELEASE_ROOT}/scripts/serve_question_review_ui.py"
@@ -247,10 +252,14 @@ PY
     auth_config="$(mktemp)"
     trap 'rm -f "${auth_config}"' EXIT
     curl_config "${auth_config}"
-    test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://${REVIEW_UI_BIND}:${REVIEW_UI_PORT}/")" = "401"
+    expected_anonymous_status=200
+    if [[ -n "${REVIEW_UI_BASIC_AUTH_USERNAME:-}" || -n "${REVIEW_UI_BASIC_AUTH_PASSWORD:-}" ]]; then
+      expected_anonymous_status=401
+    fi
+    test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://${REVIEW_UI_BIND}:${REVIEW_UI_PORT}/")" = "${expected_anonymous_status}"
     test "$(curl --config "${auth_config}" --output /dev/null --write-out '%{http_code}' "http://${REVIEW_UI_BIND}:${REVIEW_UI_PORT}/")" = "200"
     test "$(curl --config "${auth_config}" --header 'Content-Type: application/json' --data '{}' --output /dev/null --write-out '%{http_code}' "http://${REVIEW_UI_BIND}:${REVIEW_UI_PORT}/api/preferences")" = "503"
-    printf 'Authenticated read-only UI smoke passed; writes remain blocked.\n'
+    printf 'Review UI read-only smoke passed; writes remain blocked.\n'
     ;;
   enable-writes)
     if [[ "${CATALOG_CUTOVER_APPROVED:-0}" != "1" ]]; then

@@ -9,6 +9,9 @@ PostgreSQL writer。桌面入口是 `http://192.168.10.90:8765/`，手機入口�
 `http://192.168.10.90:8766/mobile/`；兩者共用同一個 process、ReviewState、PostgreSQL 與
 formal-sync worker，並要求 Basic Auth。
 
+搬遷完成後 owner 決定此單人維護服務改採 trusted-LAN 免登入模式。自此兩個入口仍只綁固定
+LAN `192.168.10.90`，但不再要求應用程式密碼；PostgreSQL 維持只發布於 loopback。
+
 舊 Mac Studio `192.168.10.70` 的 Review UI 已停止，8765 已確認未監聽；PostgreSQL 仍健康，
 資產、Compose volume 與 fresh snapshot 均保留。至少在 2026-09-08 前不得刪除或讓它與
 AI395 同時接受寫入。
@@ -48,13 +51,14 @@ freeze 與 restore 後的 11 個基線完全相同：
 events、formal questions、formal answers、assets，以及三種 event max id。
 
 PostgreSQL 為 18.4，pgvector 為 0.8.2。Review UI 使用獨立 `tw_exam_review_ui` login role；驗收時
-`rolsuper=false`、`rolcreatedb=false`、`rolcreaterole=false`。owner/admin 密碼與 UI 密碼只存在
-AI395 mode-600 host env，不進 Git 或此文件。
+`rolsuper=false`、`rolcreatedb=false`、`rolcreaterole=false`。owner/admin 與應用程式 DB 密碼只存在
+AI395 mode-600 host env，不進 Git 或此文件；Review UI auth 欄位依 owner 決定留空。
 
 ## Security 與 smoke 結果
 
 - PostgreSQL 只發布於 `127.0.0.1:54329`。
-- Review UI 只綁固定 LAN `192.168.10.90:8765/8766`，未登入回應 401。
+- Review UI cutover 驗收時使用 Basic Auth，未登入回應 401；搬遷後依 owner 決定改為 trusted-LAN
+  免登入，anonymous LAN request 回應 200，listener 仍只綁固定 `192.168.10.90:8765/8766`。
 - 程式與 canonical main 以 read-only mount 提供；`40_manual_assets` 使用獨立 writable mount。
 - `/file` 的正式 asset request 為 200；嘗試讀 `/workspace/requirements/review-ui.txt` 為 404。
 - desktop、mobile、candidate API、pipeline API 均為 200。
@@ -83,11 +87,12 @@ AI395 host-side production control：
 /srv/ai395/stacks/tw-national-exam-catalog/production/ai395_catalog_production.sh
 ```
 
-取得 UI username/password 時，由 operator 在自己的 terminal 讀 mode-600 env；不要貼進 issue、
-commit、聊天或瀏覽器 URL：
+目前 UI auth 欄位留空，LAN 入口不需密碼。若日後使用者或可達網段擴大，請先在 mode-600 env
+同時設定 username 與長密碼，再重建 `review-ui` container；不要把密碼貼進 issue、commit、
+聊天或瀏覽器 URL。
 
 ```bash
-ssh ai395 'grep -E "^REVIEW_UI_BASIC_AUTH_(USERNAME|PASSWORD)=" /etc/ai395/tw-national-exam-catalog/production.env'
+ssh ai395 'sudoedit /etc/ai395/tw-national-exam-catalog/production.env'
 ```
 
 ## 回退
@@ -102,5 +107,5 @@ Mac volume，核對 counts/max ids/append-only events 後才切 authority。不�
 ## 後續工作（本次刻意未重構）
 
 下一階段重新檢討反覆修訂的 review workflow，為每題建立明確、可查詢且可稽核的階段模型，
-再依該模型修理 UI。這次 cutover 只加入必要的 auth、readonly、file boundary、request limits 與
+再依該模型修理 UI。這次 cutover 加入可選 auth、readonly、file boundary、request limits 與
 immutable deployment，沒有重新定義題目審核語意，也沒有批次改寫 append-only review events。

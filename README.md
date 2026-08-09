@@ -88,7 +88,8 @@ examples/
 
 自 2026-08-09 起，AI395 是預設部署、驗證與除錯目標；MacBook 保留 Git 編輯與控制面。
 AI395 已於 2026-08-09 完成 single-writer cutover，production desktop/mobile 為
-`http://192.168.10.90:8765/` 與 `http://192.168.10.90:8766/mobile/`，兩者皆需登入。
+`http://192.168.10.90:8765/` 與 `http://192.168.10.90:8766/mobile/`。依 owner 搬遷後決定，
+兩者採固定 LAN trusted access，不需應用程式登入。
 Mac Studio Review UI 已停止，但 PostgreSQL、資產、volume 與 freeze snapshot 保留作一個月回退。
 操作方式與一個月本機退場期見
 [`docs/ai395-runtime-maintenance.md`](docs/ai395-runtime-maintenance.md)；完整搬遷證據與
@@ -257,7 +258,7 @@ http://100.96.146.93:8765/
 http://192.168.10.90:8766/mobile/
 ```
 
-`192.168.10.90:8765` 提供完整桌面 Review UI；同一台 AI395 的 `192.168.10.90:8766/mobile/` 提供手機介面，而且只允許手機頁、candidate read API、reload status 與 mobile review write API。兩個 port 共用同一個 ReviewState、PostgreSQL 與 process，不會啟動兩套 ReviewState 或兩個 formal-sync worker。兩個入口都受 Basic Auth 保護，PostgreSQL 只綁 AI395 loopback。手機版優先顯示「人工未看過＋AI 通過」；若目前尚未產生 AI 初審，首次開啟會自動退回全部人工未看題目，之後仍可在篩選器切回 AI 通過佇列。介面只提供四個決策：`要・通過` 寫入 `accept`；`不要・阻止` 寫入 `block`；`備註待看` 必須先輸入註記並寫入 `needs_review`；`跳過` 不寫任何事件。手機版不載入 PDF，也不提供人工校正欄位。既有 correction 會隨新的手機審核事件保留。
+`192.168.10.90:8765` 提供完整桌面 Review UI；同一台 AI395 的 `192.168.10.90:8766/mobile/` 提供手機介面，而且只允許手機頁、candidate read API、reload status 與 mobile review write API。兩個 port 共用同一個 ReviewState、PostgreSQL 與 process，不會啟動兩套 ReviewState 或兩個 formal-sync worker。兩個入口只綁固定 LAN 位址並採 trusted-LAN 免登入模式，PostgreSQL 只綁 AI395 loopback；若日後使用者或網段範圍改變，可重新設定 Basic Auth。手機版優先顯示「人工未看過＋AI 通過」；若目前尚未產生 AI 初審，首次開啟會自動退回全部人工未看題目，之後仍可在篩選器切回 AI 通過佇列。介面只提供四個決策：`要・通過` 寫入 `accept`；`不要・阻止` 寫入 `block`；`備註待看` 必須先輸入註記並寫入 `needs_review`；`跳過` 不寫任何事件。手機版不載入 PDF，也不提供人工校正欄位。既有 correction 會隨新的手機審核事件保留。
 
 `不要` 與 `備註待看` 事件會額外寫入結構化 `ai_followup`：要求後續 AI 讀來源 PDF、產生修正提案、只使用已核准規則；遇到新型態問題必須提出規則候選並取得人工核准，且 AI 不得自動通過題目。這個欄位是後續 AI worker 的可靠路由契約；手機按鈕本身不會在同步 HTTP request 內啟動模型或直接修改 parser 規則。
 
