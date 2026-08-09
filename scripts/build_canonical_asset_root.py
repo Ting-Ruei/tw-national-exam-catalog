@@ -364,13 +364,18 @@ def load_symlink_plan(
         if row["bytes"] != target["bytes"] or row["sha256"] != target["sha256"]:
             raise BuildError(f"symlink target hash/size disagrees with manifest: {label}:{source_logical}")
         manifest_target = source["link_target"]
-        if not manifest_target or manifest_target.startswith("/") or "\x00" in manifest_target:
-            raise BuildError(f"manifest symlink target is not a safe logical relative path: {label}:{source_logical}")
-        resolved_logical = posixpath.normpath(
-            posixpath.join(posixpath.dirname(source_logical), manifest_target)
-        )
-        if resolved_logical.startswith("../") or resolved_logical == ".." or resolved_logical != target_logical:
-            raise BuildError(f"safe plan changes manifest symlink semantics: {label}:{source_logical}")
+        if not manifest_target or "\x00" in manifest_target:
+            raise BuildError(f"manifest symlink target is empty or invalid: {label}:{source_logical}")
+        if manifest_target.startswith("/"):
+            normalized_manifest_target = posixpath.normpath(manifest_target)
+            if not normalized_manifest_target.endswith("/" + target_logical):
+                raise BuildError(f"safe plan changes legacy absolute symlink semantics: {label}:{source_logical}")
+        else:
+            resolved_logical = posixpath.normpath(
+                posixpath.join(posixpath.dirname(source_logical), manifest_target)
+            )
+            if resolved_logical.startswith("../") or resolved_logical == ".." or resolved_logical != target_logical:
+                raise BuildError(f"safe plan changes manifest symlink semantics: {label}:{source_logical}")
         source_storage = storage_for(source_logical, name_map)
         link_target = row["normalized_link_target"]
         if not link_target or link_target.startswith("/") or "\x00" in link_target:

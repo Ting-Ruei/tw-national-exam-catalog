@@ -282,6 +282,9 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             fixture.add_file("left", logical, b"target", storage)
             fixture.add_mapping("left", logical, storage)
             fixture.add_symlink("left", "links/target.txt", logical, storage)
+            next(row for row in fixture.left_rows if row["entry_type"] == "symlink")["link_target"] = (
+                "/Users/tim/legacy-assets/" + logical
+            )
             fixture.add_file("right", "right.txt", b"right")
             fixture.finalize()
             result = fixture.run("--apply")
@@ -289,6 +292,20 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             link = fixture.output / "links/target.txt"
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve().read_bytes(), b"target")
+
+    def test_legacy_absolute_symlink_must_end_with_logical_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Fixture(Path(tmp))
+            fixture.add_file("left", "target.txt", b"target")
+            fixture.add_symlink("left", "links/target.txt", "target.txt", "target.txt")
+            next(row for row in fixture.left_rows if row["entry_type"] == "symlink")["link_target"] = (
+                "/Users/tim/legacy-assets/different.txt"
+            )
+            fixture.add_file("right", "right.txt", b"right")
+            fixture.finalize()
+            result = fixture.run()
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("legacy absolute symlink semantics", result.stdout)
 
     def test_escaping_symlink_plan_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
