@@ -19,6 +19,7 @@ import os
 import posixpath
 import shutil
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -610,11 +611,13 @@ def canonical_map_rows(plan: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def copy_verified(source: Path, destination: Path, expected_bytes: int, expected_hash: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+    temporary: Path | None = None
     digest = hashlib.sha256()
     copied = 0
     try:
-        with source.open("rb") as reader, temporary.open("xb") as writer:
+        file_descriptor, temporary_name = tempfile.mkstemp(prefix=".cb-", dir=destination.parent)
+        temporary = Path(temporary_name)
+        with os.fdopen(file_descriptor, "wb") as writer, source.open("rb") as reader:
             for chunk in iter(lambda: reader.read(CHUNK_BYTES), b""):
                 writer.write(chunk)
                 digest.update(chunk)
@@ -626,7 +629,7 @@ def copy_verified(source: Path, destination: Path, expected_bytes: int, expected
         shutil.copystat(source, temporary, follow_symlinks=False)
         os.replace(temporary, destination)
     finally:
-        if temporary.exists():
+        if temporary is not None and temporary.exists():
             temporary.unlink()
 
 

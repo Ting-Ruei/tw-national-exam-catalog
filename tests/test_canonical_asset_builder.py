@@ -311,6 +311,18 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             self.assertIn(logical, mapping)
             self.assertFalse((fixture.output / ".canonical-build-incomplete.json").exists())
 
+    def test_apply_supports_legal_255_byte_basename_with_short_atomic_temp_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Fixture(Path(tmp))
+            basename = "a" * 251 + ".txt"
+            self.assertEqual(len(basename.encode("utf-8")), 255)
+            fixture.add_file("left", basename, b"max-name")
+            fixture.add_file("right", "right.txt", b"right")
+            fixture.finalize()
+            result = fixture.run("--apply")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual((fixture.output / basename).read_bytes(), b"max-name")
+
     def test_safe_symlink_is_rebuilt_to_selected_mapped_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Fixture(Path(tmp))
