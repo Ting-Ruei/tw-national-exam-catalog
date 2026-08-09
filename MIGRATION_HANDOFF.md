@@ -1,8 +1,9 @@
 # 專案移機交接狀態
 
-> 現行狀態（2026-08-09）：AI395 已成為預設部署、驗證與除錯目標；操作入口與
-> 一個月本機退場計畫見 `docs/ai395-runtime-maintenance.md`。AI395 現在仍是隔離
-> restore drill，Mac Studio `192.168.10.70:8765` 仍是唯一 production writer。
+> 現行狀態（2026-08-09 14:47 +08:00）：AI395 已完成 single-writer cutover；production
+> Review UI 是 `192.168.10.90:8765/8766`。Mac Studio UI 已停止並保留回退資料。
+> 操作入口與一個月退場計畫見 `docs/ai395-runtime-maintenance.md`，完整證據見
+> `docs/ai395-production-cutover-2026-08-09.md`。
 >
 > 歷史狀態警告（2026-08-07）：本文件保存 2026-07-20 的非醫學 MinerU queue
 > checkpoint，不是 Ryzen AI Max 395 的現行搬遷手冊。PID、批次數與「目前正在執行」
@@ -15,7 +16,7 @@
 
 - 20,000 份非醫學 MinerU 歷史佇列已於 2026-07-20 17:24:29 從 `part515` 恢復執行。
 - 目前固定 `WORKERS=1`、`TIMEOUT_SECONDS=0`，讓工作一路跑到 queue 清空；不得另開第二個 worker／queue。
-- 本機目前執行 MinerU queue 與醫學增量 worker；人工審核權威為 `http://192.168.10.70:8765/`。
+- 歷史 checkpoint 當時由本機執行 MinerU queue 與醫學增量 worker；該段不是現行主機狀態。
 - Active queue PID/PGID 為 `31901`，PID 檔為 `Registry/mineru_remote_batches/local_queue__active.pid`。
 - 執行 log：`Registry/mineru_remote_batches/local_queue__20260720-172429.log`。
 - 暫停時未刪除、移動或清理任何正式 PDF、batch directory 或既有 MinerU 輸出。

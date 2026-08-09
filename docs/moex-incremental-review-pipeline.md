@@ -8,7 +8,7 @@
 
 Dify 不適合負責檔案下載、checkpoint、MinerU process 與 PostgreSQL migration；它可以在候選題已進審核層後，負責 AI advisory、RAG 或詳解草稿。AI 結果仍不得自動通過或阻擋題目。
 
-目前人工審核權威是 `http://192.168.10.70:8765/` 與該主機的 PostgreSQL；本機 PostgreSQL 只可視為執行／驗證 staging，不得把本機審核事件反向覆蓋遠端。每次新增題目應先同步 PDF 與 MinerU 產物，再用 `merge` 匯入遠端，最後直接從遠端 UI 驗證題目與 PDF。
+目前人工審核權威是 AI395 的 `http://192.168.10.90:8765/` 與其 loopback-only PostgreSQL；本機與舊 Mac Studio PostgreSQL 只可視為驗證／回退資料，不得把各自事件反向覆蓋 production。每次新增題目應先同步 PDF 與 MinerU 產物，再用 `merge` 匯入 AI395，最後直接從 AI395 UI 驗證題目與 PDF。遠端 DB 維護必須經 SSH tunnel，不得把 54329 發布到 LAN。
 
 ```text
 考選部當年度 catalog

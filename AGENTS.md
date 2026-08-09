@@ -22,12 +22,13 @@ bash scripts/ai395_catalog_runtime.sh tunnel
 
 ## Review UI
 
-- Since 2026-08-09, AI395 (`ssh ai395`, Tailscale `100.65.112.73`) is the default deployment, verification, and debugging target. Its mutable checkout is `/home/tim/src/tw-national-exam-catalog`.
-- The current AI395 Catalog service is the isolated restore drill at loopback `8875/8876` with PostgreSQL on `54330`. Reach it through `scripts/ai395_catalog_runtime.sh tunnel`; do not treat it as a production writer.
-- Production authority has not moved yet: the Mac Studio at `http://192.168.10.70:8765/` remains the only human-review writer and its PostgreSQL remains the production review truth until a separately approved single-writer cutover.
+- Since the 2026-08-09 cutover, AI395 (`ssh ai395`, LAN `192.168.10.90`) is the sole production Review UI and PostgreSQL writer. Desktop is `http://192.168.10.90:8765/`; mobile is `http://192.168.10.90:8766/mobile/`; both require Basic Auth.
+- The immutable production release is `/srv/ai395/releases/tw-national-exam-catalog/e89c60fd7502a0fce1c47c7b9577a211888504a9`; the clean mutable operator checkout is `/home/tim/src/tw-national-exam-catalog`. Production control is `/srv/ai395/stacks/tw-national-exam-catalog/production/ai395_catalog_production.sh`.
+- PostgreSQL is published only on AI395 loopback `127.0.0.1:54329`; use an SSH tunnel for remote DB maintenance. The older AI395 restore drill remains isolated on `8875/8876/54330` and is not a writer.
+- The Mac Studio `192.168.10.70` Review UI is stopped. Its PostgreSQL, assets, Compose volume, and freeze snapshot remain intact as rollback evidence through at least 2026-09-08; do not restart its Review UI while AI395 accepts writes.
 - The MacBook Compose stack is a legacy fallback during the retirement window ending no earlier than 2026-09-08. Keep it loopback-only, do not start new long-running maintenance jobs there, and never treat its events as production.
 - Move code through reviewed Git commits. Keep the AI395 operator checkout clean, build immutable releases from exact SHAs, and never patch an immutable release or leave a server-only change.
-- Do not create or repoint `/srv/ai395/data/tw-national-exam-catalog/main`, mount the versioned candidate into production, stop the Mac Studio writer, or use `rsync --delete` without explicit cutover approval.
+- Never run two Review UI writers. Any rollback must first stop AI395; if AI395 has accepted writes, take a fresh AI395 dump before restoring an isolated Mac environment. Never use `rsync --delete` for migration or rollback.
 - Question review writes to `question_review_events.jsonl`.
 - Answer review writes to `answer_review_events.jsonl`.
 - AI format audit writes to `question_ai_review_events.jsonl` and must remain advisory until a human accepts the question.

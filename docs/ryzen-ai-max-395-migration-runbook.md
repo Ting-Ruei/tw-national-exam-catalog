@@ -2,22 +2,21 @@
 
 更新：2026-08-09（Asia/Taipei）
 
-> 2026-08-09 狀態更新：AI395 已成為預設 runtime maintenance target；operator checkout
-> 為 `/home/tim/src/tw-national-exam-catalog`，隔離 restore drill 使用 loopback
-> `8875/8876/54330`。Versioned canonical candidate 已通過 physical acceptance，但仍有
-> 15 個 regeneration items，`main` 尚未建立。Mac Studio 仍是唯一 production writer。
-> 即時操作與本機退場期以 `docs/ai395-runtime-maintenance.md` 為準；下列 2026-08-07
-> 盤點數值保留作歷史基線，不應覆蓋 2026-08-09 的 checksum-backed evidence。
+> 2026-08-09 14:47 +08:00 狀態更新：本手冊的 cutover 已完成。AI395 production 使用
+> `192.168.10.90:8765/8766`、loopback PostgreSQL `54329`；Mac Studio Review UI 已停止。
+> canonical regeneration queue 為 0，final manifest SHA-256 是
+> `e261084b60fc94f7672fa85552ee397dacd9bf5bc9b28c8004a24326f1fb0e57`。完整 live evidence
+> 見 `docs/ai395-production-cutover-2026-08-09.md`；下列盤點與步驟保留作歷史基線與回退手冊。
 
 ## 目的與現行邊界
 
 本手冊準備將 `tw-national-exam-catalog` 的程式、PostgreSQL、Review UI、官方 PDF、
 MinerU 產物、人工補圖、queue/checkpoint 與本地 AI worker 搬到 Ryzen AI Max 395。
 
-這次要求是「轉移前準備」，不是正式切換通知。因此在使用者明確宣布 cutover 完成以前：
+以下是 cutover 前的安全邊界，現保留作回退與稽核規範：
 
-- 人工審核與 production PostgreSQL 的唯一權威仍是 Mac Studio
-  `http://192.168.10.70:8765/`。
+- cutover 前人工審核與 production PostgreSQL 的唯一權威是 Mac Studio
+  `http://192.168.10.70:8765/`；自 2026-08-09 14:47 起已改為 AI395。
 - 不得讓新主機和 Mac Studio 同時接受人工審核寫入。
 - 不得刪除 Mac Studio 的 PostgreSQL volume、資產或舊機回退能力。
 - `MIGRATION_HANDOFF.md` 只保存 2026-07-20 的歷史 MinerU queue checkpoint，不能當成
@@ -143,18 +142,16 @@ Ubuntu 24.04.4 的 production support，PyTorch 基線為 2.9.1、Python 3.12、
 - `migration_preflight.py`、`build_migration_asset_manifest.py` 與
   `postgres_migration_backup.sh` 提供可重跑證據。
 
-## P0 阻擋項目
+## P0 阻擋項目（cutover 後結果）
 
-未完成下列項目以前不得切換：
+Review UI/PostgreSQL/asset cutover 所需項目已於 2026-08-09 完成：舊 worktree 以 patch、bundle 與
+untracked archive 保存；production 使用精確 Git SHA；雙來源 asset manifest/conflict resolution、
+restore drill、固定 LAN bind、fresh dump 與雙主機 checksum backup 均通過。
 
-1. Mac Studio worktree 的 34 個 tracked 修改與 149 個 untracked 檔尚未整理；production
-   code 不能只以舊 HEAD 或 MacBook HEAD 猜測。
-2. MacBook worktree 也有進行中的修改；兩端需先做 diff、測試、commit/tag 或不可變 bundle。
-3. 尚未在 Ryzen 實機驗證 MinerU 3.3.1 的 ROCm backend、輸出目錄與 parser 回歸。
-4. 尚未產生兩台來源的全量 SHA-256 asset manifest 與同路徑 conflict report。
-5. 尚未在 Ryzen 的隔離 volume 做 PostgreSQL restore drill。
-6. 尚未決定 Ryzen 的固定 LAN IP／hostname、TLS/VPN、防火牆、實際 RAM 與磁碟配置。
-7. 尚未建立切換當日的新 production dump 與第二位置備份。
+MinerU production lane 不在 cutover 當天自動啟用。AI395 已有 ROCm 與 MinerU 3.4.4 runtime，
+但 3.3.1 歷史假設不再視為可直接沿用的 production 認證；正式 OCR 排程前仍須用目前 3.4.4
+runtime 做 golden corpus 與 parser regression。這不影響已完成的 Review UI/PostgreSQL writer
+authority，也不得成為臨時啟用未驗證排程的理由。
 
 ## 第一階段：程式碼對齊
 

@@ -9,7 +9,7 @@ Build faithful, review-ready candidates while spending model tokens only on resi
 
 ## Non-negotiable boundaries
 
-- Treat Mac Studio PostgreSQL as current production review truth and official PDF as source truth. Use AI395 as the default runtime maintenance and inference target, but never treat its restore-drill database as production or write results back automatically.
+- Treat AI395 production PostgreSQL as current review truth and official PDF as source truth. The AI395 restore-drill database, Mac Studio standby, and MacBook fallback are not production and must never receive automatic review writes.
 - Preserve raw PDF, MinerU, candidate, human corrections, and append-only events as separate lineage layers.
 - Compute effective content independently from review state: `reset_review`
   reopens only the question decision and never invalidates a prior human text,

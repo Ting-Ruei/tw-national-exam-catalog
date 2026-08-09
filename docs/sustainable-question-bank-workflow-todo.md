@@ -16,10 +16,10 @@
 
 - [x] `BASE-01` 目前以醫學／locked-27 類科為新題優先範圍。
 - [x] `BASE-02` 原始 PDF、測試資料、MinerU 與開發環境目前在本機。
-- [x] `BASE-03` 人工審核權威目前是 Mac Studio 的 `http://192.168.10.70:8765/` 與其 PostgreSQL。
+- [x] `BASE-03` 人工審核權威自 2026-08-09 14:47 起是 AI395 的 `http://192.168.10.90:8765/` 與其 PostgreSQL；Mac Studio 是 stopped rollback standby。
 - [x] `BASE-04` 舊 20,000 份任務是獨立的歷史 backfill queue，可用 1 worker 接續；「20,000」是任務原始規模，不可當成目前剩餘數量。
 - [x] `BASE-05` 長時間 MinerU 任務不設單份工作時限，使用 checkpoint、heartbeat 與可續跑設計，讓工作一路完成。
-- [x] `BASE-06` 未來 AI MAX 395 到位後，預計搬移自動化、OCR、本地 LLM、PostgreSQL 與 Review UI。
+- [x] `BASE-06` AI MAX 395 已承接 PostgreSQL 與 Review UI；自動化、OCR、本地 LLM 與審核階段模型仍需逐項重新確認。
 - [x] `BASE-07` 目前階段只討論架構；架構逐項確認後，才進入測試與實作。
 
 ## 目標流程草案
@@ -72,7 +72,7 @@ flowchart LR
   - 正式題庫真相：formal tables 與已發布版本。
 
 - [ ] `GOV-04` 定義環境：`dev`、`staging`、`production`。
-  - 建議預設：本機可建 dev/staging；Mac Studio 暫為 production review authority。
+  - 建議預設：本機可建 dev/staging；AI395 是 production review authority；Mac Studio 只作 rollback standby。
   - 驗收：測試資料不可能誤寫正式審核事件或正式題庫。
 
 ### AI 與人工權限
@@ -300,7 +300,7 @@ flowchart LR
   - bundle 有固定 sync ID；重試同一 bundle，不重新掃描或重做 MinerU。
 
 - [ ] `SYNC-06` 定義 conflict policy。
-  - Mac Studio 的人工事件為權威；本機不得建立另一條 production 人工審核歷史。
+  - AI395 production 的人工事件為權威；Mac Studio standby 與本機不得建立另一條 production 人工審核歷史。
   - 同 candidate key 內容不同時建立 source/parser revision，不用 last-write-wins。
 
 ---

@@ -67,7 +67,7 @@ wait_for_review_ui() {
   local attempt
   for attempt in $(seq 1 90); do
     if "${compose[@]}" ps --status running --services | grep -qx review-ui; then
-      if python3 - "${REVIEW_UI_BIND}" "${REVIEW_UI_PORT}" <<'PY'
+      if python3 - "${REVIEW_UI_BIND}" "${REVIEW_UI_PORT}" 2>/dev/null <<'PY'
 import socket
 import sys
 with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3):

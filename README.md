@@ -87,10 +87,12 @@ examples/
 ## AI395 開發維護目標與本機工作資料夾
 
 自 2026-08-09 起，AI395 是預設部署、驗證與除錯目標；MacBook 保留 Git 編輯與控制面。
-目前 AI395 Catalog 是隔離 restore drill，Mac Studio 仍是唯一 production Review UI writer。
+AI395 已於 2026-08-09 完成 single-writer cutover，production desktop/mobile 為
+`http://192.168.10.90:8765/` 與 `http://192.168.10.90:8766/mobile/`，兩者皆需登入。
+Mac Studio Review UI 已停止，但 PostgreSQL、資產、volume 與 freeze snapshot 保留作一個月回退。
 操作方式與一個月本機退場期見
 [`docs/ai395-runtime-maintenance.md`](docs/ai395-runtime-maintenance.md)；完整搬遷證據與
-cutover gate 仍依 [`docs/ryzen-ai-max-395-migration-runbook.md`](docs/ryzen-ai-max-395-migration-runbook.md)。
+cutover 結果見 [`docs/ai395-production-cutover-2026-08-09.md`](docs/ai395-production-cutover-2026-08-09.md)。
 `MIGRATION_HANDOFF.md` 只保存 2026-07-20 的歷史 queue checkpoint。
 
 PDF 下載、MinerU 輸出、人工檢查佇列、入庫前候選資料等大型或中間產物，預設放在：
@@ -245,23 +247,23 @@ Review UI 的 Compose port 預設只綁定本機：
 `REVIEW_UI_BIND` 明確設為該主機的固定 LAN／VPN IP，再用該 IP 連線，例如：
 
 ```text
-http://192.168.10.70:8765/
+http://192.168.10.90:8765/
 http://100.96.146.93:8765/
 ```
 
 手機快速分流介面使用同一個 ReviewState、同一份 PostgreSQL 與同一個 process，但由獨立 listener 提供：
 
 ```text
-http://192.168.10.70:8766/
+http://192.168.10.90:8766/mobile/
 ```
 
-`192.168.10.70:8765` 保留完整桌面 Review UI；同一台主機的 `192.168.10.70:8766` 根目錄直接提供手機介面，而且只允許手機頁、candidate read API、reload status 與 mobile review write API。兩個 port 共用同一個 ReviewState、PostgreSQL 與 process，不會啟動兩套 ReviewState 或兩個 formal-sync worker。手機版優先顯示「人工未看過＋AI 通過」；若目前尚未產生 AI 初審，首次開啟會自動退回全部人工未看題目，之後仍可在篩選器切回 AI 通過佇列。介面只提供四個決策：`要・通過` 寫入 `accept`；`不要・阻止` 寫入 `block`；`備註待看` 必須先輸入註記並寫入 `needs_review`；`跳過` 不寫任何事件。手機版不載入 PDF，也不提供人工校正欄位。既有 correction 會隨新的手機審核事件保留。
+`192.168.10.90:8765` 提供完整桌面 Review UI；同一台 AI395 的 `192.168.10.90:8766/mobile/` 提供手機介面，而且只允許手機頁、candidate read API、reload status 與 mobile review write API。兩個 port 共用同一個 ReviewState、PostgreSQL 與 process，不會啟動兩套 ReviewState 或兩個 formal-sync worker。兩個入口都受 Basic Auth 保護，PostgreSQL 只綁 AI395 loopback。手機版優先顯示「人工未看過＋AI 通過」；若目前尚未產生 AI 初審，首次開啟會自動退回全部人工未看題目，之後仍可在篩選器切回 AI 通過佇列。介面只提供四個決策：`要・通過` 寫入 `accept`；`不要・阻止` 寫入 `block`；`備註待看` 必須先輸入註記並寫入 `needs_review`；`跳過` 不寫任何事件。手機版不載入 PDF，也不提供人工校正欄位。既有 correction 會隨新的手機審核事件保留。
 
 `不要` 與 `備註待看` 事件會額外寫入結構化 `ai_followup`：要求後續 AI 讀來源 PDF、產生修正提案、只使用已核准規則；遇到新型態問題必須提出規則候選並取得人工核准，且 AI 不得自動通過題目。這個欄位是後續 AI worker 的可靠路由契約；手機按鈕本身不會在同步 HTTP request 內啟動模型或直接修改 parser 規則。
 
-目前人工審核權威仍固定為 `http://192.168.10.70:8765/`。AI395 `8875/8876` 與本機
-`8765/8766` 都是隔離驗證環境，不得與該主庫各自產生正式人工審核事件。增量資料同步方式與
-checkpoint 見 `docs/moex-incremental-review-pipeline.md`。
+目前唯一人工審核權威固定為 `http://192.168.10.90:8765/`。AI395 restore drill
+`8875/8876`、舊 Mac Studio 與 MacBook 本機 `8765/8766` 都不得產生正式人工審核事件。
+增量資料同步方式與 checkpoint 見 `docs/moex-incremental-review-pipeline.md`。
 
 查看 log：
 

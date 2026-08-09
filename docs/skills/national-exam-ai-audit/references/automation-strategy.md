@@ -160,9 +160,9 @@ Skill、task/result contract、rules、negative controls、gold、validator 與 
 新模型必須逐 lane 認證。不能因 post-MinerU 文字校對 lane 通過就同時授權 group 或
 visual lane；文字校對不得重新執行 OCR。
 
-AI MAX 395 作為 inference worker 時，不持有 Review PostgreSQL 寫入權限。Mac Studio 凍結
-task/manifest，AI MAX 只消化封包並回傳 sparse result、raw response、token 與 timing；
-結果回到 Mac Studio 或維護端後才執行 validator、materializer preview 與人工審核。
+AI MAX 395 的 inference worker 不持有 Review PostgreSQL 寫入權限。production-side orchestrator
+凍結 task/manifest，模型 worker 只消化封包並回傳 sparse result、raw response、token 與 timing；
+結果回到 AI395 的受控 validator/materializer preview 邊界後，才交給人工審核。
 部署細節見 `ai-max-395-deployment.md`。
 
 ## 失敗與恢復

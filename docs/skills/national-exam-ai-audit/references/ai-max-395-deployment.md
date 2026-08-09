@@ -1,26 +1,27 @@
 # AI MAX 395 常駐部署
 
-> 2026-08-09 起 AI395 是預設 runtime maintenance 與 inference target，並已具備隔離
-> PostgreSQL/Review UI restore drill。這不代表 production authority 已切換；single-writer
-> cutover 與 rollback 驗收完成以前，以下 Mac Studio 權威邊界仍有效。
+> 2026-08-09 14:47 +08:00 起 AI395 已是唯一 production Review UI/PostgreSQL writer。
+> 隔離 restore drill、模型 shadow run 與 production 權限仍必須分離；以下 artifact-only
+> AI audit 邊界繼續有效。
 
 ## 角色
 
-AI MAX 是預設執行與驗證主機；模型 worker 不持有 production DB 寫入權。AI395 restore drill
-只寫自己的隔離 volume。Mac Studio 仍是 Review UI、PostgreSQL、人工事件與正式資料的權威端。
+AI MAX 是 production 與預設執行主機，但模型 worker 仍不持有 production DB 寫入權。
+production Review UI 與人工事件權威在 AI395 production stack；restore drill 只寫隔離 volume，
+Mac Studio 是停止狀態的 rollback standby。
 
 ```text
-Mac Studio read-only snapshot
+AI395 production read-only task snapshot
   -> frozen task + manifest + profile
   -> AI MAX inbox
   -> local deterministic preflight
   -> Ollama sparse batches
   -> raw response + results + token journal
-  -> Mac Studio validator
+  -> AI395 production-side validator
   -> correction preview / human review
 ```
 
-不要將 PostgreSQL owner password、Review UI owner token 或人工事件檔同步到 AI MAX。
+不要將 PostgreSQL owner password、Review UI credential 或人工事件檔放進模型 task packet。
 
 ## 目錄約定
 
