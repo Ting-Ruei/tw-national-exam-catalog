@@ -11,9 +11,20 @@ This repository catalogs Taiwan national exam PDFs, MinerU outputs, parsed quest
 - If parser changes alter already-reviewed candidate content, append a per-question `reset_review` event and preserve previous notes.
 - Do not auto-accept or auto-block questions from AI output alone. AI review is advisory.
 
+## Governance and GitHub Change Control
+
+- The human-readable governance authority is `docs/governance/README.md`; the machine-readable companion is `governance/policy.json`.
+- New work uses a `codex/*` or `agent/*` branch and a pull request. Agents must not push new work directly to `main`, self-approve a PR, force-push `main`, or treat a merged PR as production approval.
+- Agents may act autonomously through G2 only: G0 read-only inspection, G1 branch/PR work, and G2 advisory or isolated staging work. Every G3 production mutation needs exact per-run human approval. G4 human review decisions, restore, writer changes, append-only repair, and material deletion remain owner-only.
+- Unattended OpenClaw cron or hook runs cannot obtain approval mid-run. They must stop after producing evidence, a report, an issue, a package, or a PR; they may not continue into G3/G4 work.
+- Changes to governance, GitHub workflows, database schema, production deployment, or AI395 control paths require owner review through CODEOWNERS.
+- Keep agent operational evidence separate from human question-review events. An agent must never impersonate a human reviewer.
+
 ## Useful Commands
 
 ```bash
+python3 scripts/validate_agent_governance.py
+python3 -m unittest discover -s tests
 python3 -m py_compile scripts/serve_question_review_ui.py scripts/build_question_candidates_from_mineru.py
 bash scripts/ai395_catalog_runtime.sh checkout
 bash scripts/ai395_catalog_runtime.sh verify
@@ -29,9 +40,9 @@ bash scripts/ai395_catalog_runtime.sh tunnel
 - The MacBook Compose stack is a legacy fallback during the retirement window ending no earlier than 2026-09-08. Keep it loopback-only, do not start new long-running maintenance jobs there, and never treat its events as production.
 - Move code through reviewed Git commits. Keep the AI395 operator checkout clean, build immutable releases from exact SHAs, and never patch an immutable release or leave a server-only change.
 - Never run two Review UI writers. Any rollback must first stop AI395; if AI395 has accepted writes, take a fresh AI395 dump before restoring an isolated Mac environment. Never use `rsync --delete` for migration or rollback.
-- Question review writes to `question_review_events.jsonl`.
-- Answer review writes to `answer_review_events.jsonl`.
-- AI format audit writes to `question_ai_review_events.jsonl` and must remain advisory until a human accepts the question.
+- Production question review writes to the append-only SQL `exam.question_review_events` table.
+- Production answer review writes to the append-only SQL `exam.answer_review_events` table.
+- AI format audit writes to `exam.question_ai_review_events` and must remain advisory until a human accepts the question. Legacy JSONL files are historical/exchange artifacts, not the production review authority.
 
 ## DevSpace / ChatGPT MCP
 

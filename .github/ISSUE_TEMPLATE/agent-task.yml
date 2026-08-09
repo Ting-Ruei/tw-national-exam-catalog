@@ -1,0 +1,79 @@
+name: Agent task
+description: Define bounded work for Codex, OpenClaw, or another project agent.
+title: "[agent] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to define scope and authority before an agent acts. Opening an issue does not grant G3/G4 production approval.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Describe the concrete outcome, not only the activity.
+    validations:
+      required: true
+  - type: dropdown
+    id: authority
+    attributes:
+      label: Maximum authority
+      description: See governance/policy.json and docs/governance/authority-matrix.md.
+      options:
+        - G0 — observe
+        - G1 — branch and PR
+        - G2 — advisory or staging
+        - G3 — exact approved production operation
+        - G4 — owner-only; agent prepares evidence only
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Target environment
+      options:
+        - Development
+        - Staging
+        - Production read-only
+        - Production mutation (separate approval required)
+        - Rollback standby (owner-only mutation)
+    validations:
+      required: true
+  - type: textarea
+    id: allowed_actions
+    attributes:
+      label: Allowed actions and exact targets
+      description: Name repositories, paths, services, data ranges, or packages in scope.
+    validations:
+      required: true
+  - type: textarea
+    id: forbidden_actions
+    attributes:
+      label: Explicitly forbidden actions
+      description: Include production, deletion, credential, review-authority, or external-message boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: data_impact
+    attributes:
+      label: Data and review impact
+      description: Explain candidate, parser, schema, append-only event, formal-table, and asset impact.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and validation
+      description: Define checks, expected evidence, stop conditions, and rollback.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Governance acknowledgement
+      options:
+        - label: A PR merge does not grant production execution approval.
+          required: true
+        - label: AI output cannot accept/block questions or impersonate a human reviewer.
+          required: true
+        - label: G3 requires exact per-run approval and G4 remains owner-only.
+          required: true

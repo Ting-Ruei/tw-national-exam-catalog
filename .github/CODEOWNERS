@@ -1,0 +1,14 @@
+# Repository owner review is the default. Server-side enforcement requires the
+# main-branch ruleset described in docs/governance/github-ruleset.md.
+* @Ting-Ruei
+
+# Repeat governance and production-sensitive paths for clarity in GitHub UI.
+/AGENTS.md @Ting-Ruei
+/governance/ @Ting-Ruei
+/docs/governance/ @Ting-Ruei
+/.github/ @Ting-Ruei
+/schemas/database/ @Ting-Ruei
+/deploy/ai395/ @Ting-Ruei
+/deploy/openclaw/ @Ting-Ruei
+/scripts/ai395_catalog_production.sh @Ting-Ruei
+/scripts/ai395_catalog_runtime.sh @Ting-Ruei

@@ -1,0 +1,85 @@
+// Non-secret governance example only. Review against the installed OpenClaw
+// version before use. Production credentials and production operator agents are
+// intentionally absent.
+{
+  agents: {
+    defaults: {
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        workspaceAccess: "none",
+      },
+      subagents: {
+        maxConcurrent: 1,
+      },
+    },
+    list: [
+      {
+        id: "catalog-observer",
+        name: "National Exam Catalog Observer",
+        workspace: "/srv/openclaw/workspaces/tw-national-exam-catalog-observer",
+        sandbox: {
+          mode: "all",
+          scope: "session",
+          workspaceAccess: "ro",
+        },
+        tools: {
+          allow: ["read", "exec"],
+          deny: [
+            "write",
+            "edit",
+            "apply_patch",
+            "process",
+            "browser",
+            "message",
+            "cron",
+            "sessions_spawn",
+            "elevated",
+          ],
+        },
+      },
+      {
+        id: "catalog-maintainer",
+        name: "National Exam Catalog Maintainer",
+        workspace: "/srv/openclaw/workspaces/tw-national-exam-catalog-maintainer",
+        sandbox: {
+          mode: "all",
+          scope: "agent",
+          workspaceAccess: "rw",
+        },
+        tools: {
+          allow: ["read", "write", "edit", "apply_patch", "exec", "process"],
+          deny: [
+            "browser",
+            "message",
+            "cron",
+            "sessions_spawn",
+            "elevated",
+          ],
+          exec: {
+            mode: "allowlist",
+            strictInlineEval: true,
+            applyPatch: {
+              workspaceOnly: true,
+            },
+          },
+        },
+      },
+    ],
+  },
+  tools: {
+    exec: {
+      host: "auto",
+      mode: "allowlist",
+      strictInlineEval: true,
+      applyPatch: {
+        workspaceOnly: true,
+      },
+    },
+    subagents: {
+      tools: {
+        deny: ["gateway", "cron", "message", "sessions_spawn", "elevated"],
+      },
+    },
+  },
+}

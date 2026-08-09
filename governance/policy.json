@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "policy_version": "1.0.0",
+  "effective_date": "2026-08-09",
+  "project": "Ting-Ruei/tw-national-exam-catalog",
+  "default_branch": "main",
+  "allowed_work_branch_patterns": [
+    "^codex/[a-z0-9][a-z0-9._/-]*$",
+    "^agent/[a-z0-9][a-z0-9._/-]*$"
+  ],
+  "authorities": {
+    "official_source": "MOEX pages and official Q/ANS/MOD PDFs with source URL and hash",
+    "code_and_policy": "reviewed commits on GitHub main",
+    "workflow_state": "AI395 PostgreSQL job state and artifact manifests",
+    "human_review": "AI395 append-only review event tables",
+    "formal_question_bank": "AI395 formal tables derived through approved gates",
+    "published_data": "immutable packages, manifests, checksums, release IDs, and import evidence"
+  },
+  "environments": {
+    "development": {
+      "production_writes": false,
+      "isolated": true
+    },
+    "staging": {
+      "production_writes": false,
+      "isolated": true
+    },
+    "production": {
+      "host": "AI395",
+      "single_writer": true,
+      "minimum_mutation_level": "G3"
+    },
+    "rollback_standby": {
+      "host": "Mac Studio",
+      "must_remain_stopped_while_production_writes": true
+    }
+  },
+  "levels": {
+    "G0": {
+      "rank": 0,
+      "name": "observe",
+      "autonomous": true,
+      "human_approval": "not_required",
+      "production_mutation": false
+    },
+    "G1": {
+      "rank": 1,
+      "name": "develop_on_branch",
+      "autonomous": true,
+      "human_approval": "required_to_merge",
+      "production_mutation": false
+    },
+    "G2": {
+      "rank": 2,
+      "name": "advise_or_stage",
+      "autonomous": true,
+      "human_approval": "required_to_promote",
+      "production_mutation": false
+    },
+    "G3": {
+      "rank": 3,
+      "name": "approved_production_operation",
+      "autonomous": false,
+      "human_approval": "required_per_exact_action",
+      "production_mutation": true
+    },
+    "G4": {
+      "rank": 4,
+      "name": "owner_only_authority",
+      "autonomous": false,
+      "human_approval": "owner_executes_or_directly_supervises",
+      "production_mutation": true
+    }
+  },
+  "roles": {
+    "observer": {
+      "max_level": "G0",
+      "production_credentials": false
+    },
+    "maintainer_agent": {
+      "max_level": "G1",
+      "production_credentials": false
+    },
+    "advisory_agent": {
+      "max_level": "G2",
+      "production_credentials": false
+    },
+    "release_builder": {
+      "max_level": "G2",
+      "production_credentials": false
+    },
+    "production_operator_agent": {
+      "max_level": "G3",
+      "production_credentials": "ephemeral_and_action_scoped",
+      "standing_g3_authority": false
+    },
+    "owner": {
+      "max_level": "G4",
+      "production_credentials": true
+    }
+  },
+  "actions": [
+    {
+      "id": "repository.inspect",
+      "level": "G0",
+      "environments": ["development", "staging", "production"],
+      "agent_may_initiate": true,
+      "approval": "none",
+      "constraints": ["read_only"]
+    },
+    {
+      "id": "validation.run",
+      "level": "G0",
+      "environments": ["development", "staging", "production"],
+      "agent_may_initiate": true,
+      "approval": "none",
+      "constraints": ["no_production_mutation"]
+    },
+    {
+      "id": "branch.modify",
+      "level": "G1",
+      "environments": ["development"],
+      "agent_may_initiate": true,
+      "approval": "human_merge_review",
+      "constraints": ["non_default_branch", "pull_request_required"]
+    },
+    {
+      "id": "github.pull_request.create",
+      "level": "G1",
+      "environments": ["development"],
+      "agent_may_initiate": true,
+      "approval": "human_merge_review",
+      "constraints": ["agent_cannot_self_approve"]
+    },
+    {
+      "id": "advisory.generate",
+      "level": "G2",
+      "environments": ["development", "staging"],
+      "agent_may_initiate": true,
+      "approval": "approved_profile",
+      "constraints": ["versioned_schema", "provenance_required", "no_human_review_action"]
+    },
+    {
+      "id": "staging.ingest",
+      "level": "G2",
+      "environments": ["staging"],
+      "agent_may_initiate": true,
+      "approval": "approved_workflow",
+      "constraints": ["isolated_database", "idempotent", "no_production_credentials"]
+    },
+    {
+      "id": "parser_or_rule_change.propose",
+      "level": "G2",
+      "environments": ["development", "staging"],
+      "agent_may_initiate": true,
+      "approval": "human_merge_review",
+      "constraints": ["regression_evidence", "review_reset_assessment", "pull_request_required"]
+    },
+    {
+      "id": "reviewed_package.build",
+      "level": "G2",
+      "environments": ["staging", "production"],
+      "agent_may_initiate": true,
+      "approval": "approved_workflow",
+      "constraints": ["read_only_formal_source", "immutable_output", "checksums_required"]
+    },
+    {
+      "id": "production.deploy",
+      "level": "G3",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "exact_per_run",
+      "constraints": ["exact_git_sha", "preflight", "smoke_test", "rollback_evidence"]
+    },
+    {
+      "id": "production.schema_migrate",
+      "level": "G3",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "exact_per_run",
+      "constraints": ["backup", "staging_evidence", "dry_run", "rollback_evidence"]
+    },
+    {
+      "id": "production.advisory_import",
+      "level": "G3",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "exact_per_run",
+      "constraints": ["append_only", "schema_validated", "no_human_review_action"]
+    },
+    {
+      "id": "package.publish_or_import_apply",
+      "level": "G3",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "exact_per_run",
+      "constraints": ["immutable_package", "checksums_verified", "dry_run", "rollback_evidence"]
+    },
+    {
+      "id": "review.human_decision",
+      "level": "G4",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "owner_only",
+      "constraints": ["agent_must_not_impersonate_reviewer"]
+    },
+    {
+      "id": "production.restore",
+      "level": "G4",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "owner_only",
+      "constraints": ["stop_writer_first", "fresh_backup", "isolated_restore", "count_and_event_verification"]
+    },
+    {
+      "id": "production.writer_authority_change",
+      "level": "G4",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "owner_only",
+      "constraints": ["single_writer", "fresh_backup", "cutover_evidence", "rollback_plan"]
+    },
+    {
+      "id": "append_only_event.repair",
+      "level": "G4",
+      "environments": ["production"],
+      "agent_may_initiate": false,
+      "approval": "owner_only",
+      "constraints": ["repair_script", "backup", "preserve_history_and_notes", "audit_evidence"]
+    },
+    {
+      "id": "material_artifact.delete",
+      "level": "G4",
+      "environments": ["staging", "production", "rollback_standby"],
+      "agent_may_initiate": false,
+      "approval": "owner_only",
+      "constraints": ["exact_targets", "backup_proof", "retention_policy", "recovery_plan"]
+    }
+  ],
+  "invariants": [
+    "ai_output_cannot_accept_or_block_questions",
+    "human_review_events_are_append_only",
+    "ai395_is_the_single_production_writer",
+    "reviewed_candidate_changes_require_reset_review_events",
+    "immutable_releases_are_never_patched_in_place",
+    "secrets_and_large_derived_artifacts_stay_out_of_git",
+    "migration_and_rollback_never_use_rsync_delete",
+    "agents_never_force_push_main"
+  ],
+  "protected_paths": [
+    "AGENTS.md",
+    "governance/",
+    "docs/governance/",
+    ".github/",
+    "schemas/database/",
+    "deploy/ai395/",
+    "scripts/ai395_catalog_production.sh",
+    "scripts/ai395_catalog_runtime.sh"
+  ],
+  "github_controls": {
+    "require_pull_request": true,
+    "required_checks": ["governance", "unit-tests"],
+    "block_force_push": true,
+    "agent_ruleset_bypass": false,
+    "current_single_owner_required_approvals": 0,
+    "distinct_agent_identity_required_approvals": 1,
+    "distinct_agent_identity_requires_codeowner_review": true
+  },
+  "required_pr_checks": ["governance", "unit-tests"],
+  "large_file_policy": {
+    "default_max_bytes": 2000000,
+    "exceptions": {
+      "catalogs/moex_official_category_subjects__y100-115.csv": 14000000,
+      "catalogs/moex_official_category_track_summary__y100-115.csv": 3000000,
+      "catalogs/moex_subject_catalog__y100-115.csv": 40000000
+    }
+  }
+}

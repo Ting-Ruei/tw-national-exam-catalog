@@ -16,6 +16,19 @@
 
 本專案不是考選部官方專案，也不代表考選部立場。
 
+## 專案治理
+
+程式與治理的權威版本是 GitHub `main` 上經審查的 commit。新工作使用
+`codex/*` 或 `agent/*` 分支，經 pull request、必要檢查與人工 review 後才合併；Agent
+不可自行核准 PR，也不可把合併視為 production 操作授權。
+
+AI Agent 的權限分成 G0～G4：G0 唯讀、G1 分支與 PR、G2 advisory／隔離 staging、
+G3 每次 production 操作都需明確人工核准、G4 的人工審題、restore、writer 切換、
+append-only repair 與實質刪除只能由 owner 執行。完整政策見
+[`docs/governance/README.md`](docs/governance/README.md)，機器可讀規則見
+[`governance/policy.json`](governance/policy.json)，OpenClaw 起始安全設定見
+[`deploy/openclaw/README.md`](deploy/openclaw/README.md)。
+
 ## 目前範圍
 
 第一階段公開範圍是 metadata，不包含題目 PDF 或題文解析結果：
@@ -44,6 +57,11 @@ catalogs/
   moex_official_category_subjects__y100-115.csv
   expansion_download_lists/
 docs/
+  governance/
+    README.md
+    authority-matrix.md
+    change-control.md
+    github-ruleset.md
   source-policy.md
   contribution-guide.md
   known-issues.md
@@ -63,6 +81,7 @@ schemas/
   database/
     postgresql_schema.sql
 scripts/
+  validate_agent_governance.py
   export_moex_subject_catalog.py
   download_moex_pdfs_from_catalog.py
   download_moex_pdfs_from_official_track_list.py
@@ -81,6 +100,11 @@ scripts/
   run_remote_mineru_queue.sh
 examples/
   sample-question-candidate.json
+governance/
+  policy.json
+deploy/openclaw/
+  README.md
+  openclaw.catalog-agents.example.json5
 國考題資料夾/              # 本機工作資料夾，已加入 .gitignore
 ```
 

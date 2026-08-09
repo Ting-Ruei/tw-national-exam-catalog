@@ -1,15 +1,15 @@
 # 國考題蒐集、審核、整理、上線：決策型 TODO
 
-更新日期：2026-07-27（Asia/Taipei）
+更新日期：2026-08-09（Asia/Taipei）
 
 ## 這份清單怎麼用
 
-本文件先做架構討論，不代表已授權實作。每個項目都用固定編號，後續可直接用編號逐項討論，例如「先討論 `REV-01`」。
+本文件保存架構決策與待辦。2026-08-09 已核准並開始實作治理 baseline v1；其餘未勾選項目仍不代表已授權實作。治理權威見 `docs/governance/README.md` 與 `governance/policy.json`。每個項目都用固定編號，後續可直接用編號逐項討論，例如「先討論 `REV-01`」。
 
 - `[ ]`：尚未確認。
 - `[x]`：已明確確認。
 - `建議預設`：目前建議的起點，仍可修改。
-- 所有 `P0` 決策確認後，才開始小批測試與正式實作。
+- 除本次已核准的治理 baseline 外，其餘大型流程仍需先確認相關 `P0` 決策，再開始小批測試與正式實作。
 - 大型正式資料不放進 Git；Git 只保存程式、schema、設定範例、文件與小型測試樣本。
 
 ## 已知前提
@@ -20,7 +20,7 @@
 - [x] `BASE-04` 舊 20,000 份任務是獨立的歷史 backfill queue，可用 1 worker 接續；「20,000」是任務原始規模，不可當成目前剩餘數量。
 - [x] `BASE-05` 長時間 MinerU 任務不設單份工作時限，使用 checkpoint、heartbeat 與可續跑設計，讓工作一路完成。
 - [x] `BASE-06` AI MAX 395 已承接 PostgreSQL 與 Review UI；自動化、OCR、本地 LLM 與審核階段模型仍需逐項重新確認。
-- [x] `BASE-07` 目前階段只討論架構；架構逐項確認後，才進入測試與實作。
+- [x] `BASE-07` 治理 baseline v1 已獲准以 PR 實作；其他流程仍須逐項確認後，才進入測試與實作。
 
 ## 目標流程草案
 
@@ -57,30 +57,32 @@ flowchart LR
 
 ### 專案與資料權威
 
-- [ ] `GOV-01` 確認 GitHub 的權威分支與合併方式。
-  - 建議預設：`main` 保持可運行；架構與功能用 `codex/*` 分支及 PR 合併。
-  - 驗收：本機、Mac Studio、未來 AI MAX 395 都能指出相同 commit SHA。
+- [x] `GOV-01` 確認 GitHub 的權威分支與合併方式。
+  - `main` 是程式與治理權威；新工作用 `codex/*` 或 `agent/*` 分支及 PR 合併。
+  - Agent 不得自行核准、直接推新工作到 `main`、force-push 或擁有 ruleset bypass。
+  - GitHub ruleset 設定清單見 `docs/governance/github-ruleset.md`。
 
-- [ ] `GOV-02` 統一本機與 Mac Studio 目前已漂移的程式碼。
-  - 需列出兩邊未提交變更，決定哪一份是權威，不直接互相覆蓋。
-  - 驗收：Review UI、schema、ingest scripts 只有一份正式版本。
+- [x] `GOV-02` 統一本機、GitHub 與部署主機的程式碼權威。
+  - GitHub `main` 是唯一來源；AI395 operator checkout 只接受已 review 的 exact SHA。
+  - immutable release 不得 patch，Mac Studio 只保留 stopped rollback evidence。
 
-- [ ] `GOV-03` 確認四種權威來源。
+- [x] `GOV-03` 確認各領域權威來源。
   - 官方真相：考選部頁面、PDF、ANS、MOD。
   - 工作流真相：PostgreSQL job state 與 artifact manifest。
-  - 審核真相：append-only review events。
-  - 正式題庫真相：formal tables 與已發布版本。
+  - 審核真相：AI395 append-only review event tables。
+  - 正式題庫真相：AI395 formal tables。
+  - 發布真相：immutable package、manifest、checksum、release ID 與 import evidence。
 
-- [ ] `GOV-04` 定義環境：`dev`、`staging`、`production`。
-  - 建議預設：本機可建 dev/staging；AI395 是 production review authority；Mac Studio 只作 rollback standby。
-  - 驗收：測試資料不可能誤寫正式審核事件或正式題庫。
+- [x] `GOV-04` 定義環境：`development`、`staging`、`production`、`rollback_standby`。
+  - 本機可建隔離 dev/staging；AI395 是 production review authority；Mac Studio 只作 stopped rollback standby。
+  - dev/staging 不得持有 production write credentials 或寫入正式審核事件／正式題庫。
 
 ### AI 與人工權限
 
-- [ ] `GOV-05` 決定 AI 是否可以讓題目進入正式庫。
-  - 現行 `AGENTS.md`：AI 只能 advisory，不可單憑 AI 自動 accept/block。
-  - 建議第一階段：AI 產生 `machine_clear`，人工只做「批次放行」，系統再追加可追溯的人工作業事件。
-  - 若要完全無人工批次放行，必須明確修改治理規則、正式表 promotion 條件與 rollback 規格。
+- [x] `GOV-05` 決定 AI 是否可以讓題目進入正式庫。
+  - AI 只能 advisory，不可單憑 AI 自動 accept/block，也不可冒充人工 reviewer。
+  - Agent 可自主到 G2；G3 production mutation 每次需 exact human approval；G4 人工審題與 authority action 僅 owner。
+  - 未來若要改變此邊界，必須另開 governance PR、重新定義 promotion gate、eval、audit 與 rollback。
 
 - [ ] `GOV-06` 定義人工一定要看的政策清單。
   - 候選項：MOD、更正答案、多重答案、全部給分、答案缺失、申論題、新版型、圖片裁切失敗、官方 PDF 被替換、指定類科／年度。
@@ -280,13 +282,13 @@ flowchart LR
 
 ---
 
-## P1：本機到 Mac Studio Review DB 的對齊
+## P1：工作節點到 AI395 Review DB 的對齊
 
 - [ ] `SYNC-01` 確認遠端 schema version 與 migration 機制。
-  - 每次同步前比對 schema；不允許兩台主機各自手改 production schema。
+  - 每次同步前比對 schema；不允許工作節點與 AI395 各自手改 production schema。
 
 - [ ] `SYNC-02` 決定傳輸方式。
-  - 建議預設：精準 artifact bundle + manifest + SHA-256，rsync 檔案；SQL 走明確 ingest CLI。
+  - 建議預設：精準 artifact bundle + manifest + SHA-256，rsync 檔案；AI395 SQL 走明確 ingest CLI。
   - 不直接複製 PostgreSQL data directory。
 
 - [ ] `SYNC-03` 定義 merge-only ingest。
@@ -356,7 +358,9 @@ flowchart LR
 
 ---
 
-## P2：AI MAX 395 搬移
+## P2：AI395 搬移後收尾（原搬移清單）
+
+> AI395 已於 2026-08-09 完成 single-writer cutover；本節未完成項目改視為 post-cutover hardening、容量規劃與舊環境退場，不得用來重新啟動第二個 writer。
 
 - [ ] `MIG-01` 將所有機器差異改成設定。
   - `TW_EXAM_REPO`、`ASSET_ROOT`、`MINERU_BIN`、DB、Review UI、Ollama endpoint 與 storage path 不寫死。
@@ -396,7 +400,7 @@ flowchart LR
 2. `REV-01`～`REV-04`：人工真正要看到什麼、按什麼。
 3. `LLM-01`～`LLM-08`：本地／Cloud 路由、shadow audit、prompt 與 eval。
 4. `JOB-01`～`JOB-07`：n8n、狀態機、無時限續跑與資源優先級。
-5. `SYNC-01`～`SYNC-06`：本機與 Mac Studio 主庫如何安全對齊。
+5. `SYNC-01`～`SYNC-06`：工作節點與 AI395 production 如何安全對齊。
 6. `REL-01`～`REL-06`：正式入庫、平台上線與 rollback。
 7. `SRC-*`、`STO-*`、`OCR-*`、`PAR-*`：來源、資產、MinerU 與 parser 細節。
 8. `OPS-*`、`SEC-*`、`MIG-*`：營運、安全與 AI MAX 395 搬移。
