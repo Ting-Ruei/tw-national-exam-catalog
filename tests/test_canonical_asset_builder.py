@@ -149,7 +149,7 @@ class Fixture:
             self.resolution_rows.append(
                 {
                     "schema_version": "test_v1",
-                    "decision_id": f"decision-{index}",
+                    "decision_id": "decision-set-v1",
                     "approved_at": "2026-08-09T00:00:00+08:00",
                     "comparison_sha256": comparison_hash,
                     "relative_path": row["relative_path"],
@@ -211,14 +211,16 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             fixture.add_file("right", "right.txt", b"right")
             fixture.add_file("left", ".DS_Store", b"left-metadata")
             fixture.add_file("right", ".DS_Store", b"right-metadata")
+            fixture.add_file("left", "generated-report.txt", b"left-report")
+            fixture.add_file("right", "generated-report.txt", b"right-report")
             fixture.finalize()
             result = fixture.run("--verify-source-files")
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertFalse(fixture.output.exists())
             report = json.loads((fixture.report / "canonical-build-report.json").read_text())
             self.assertEqual(report["state"], "dry_run_complete")
-            self.assertEqual(report["counts"]["approved_conflicts"], 1)
-            self.assertEqual(report["counts"]["actions"]["omit"], 1)
+            self.assertEqual(report["counts"]["approved_conflicts"], 2)
+            self.assertEqual(report["counts"]["actions"]["omit"], 2)
             self.assertTrue(report["gates"]["source_files_rehashed"])
 
     def test_missing_resolution_fails_closed(self):

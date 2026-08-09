@@ -261,14 +261,12 @@ def load_resolutions(
 ) -> dict[str, dict[str, str]]:
     require_hash(path, expected_hash, "approved resolution")
     result: dict[str, dict[str, str]] = {}
-    decision_ids: set[str] = set()
     for row in read_delimited(path, RESOLUTION_FIELDS):
         relative = safe_relative(row["relative_path"], "resolution relative_path").as_posix()
         if relative in result:
             raise BuildError(f"duplicate resolution path: {relative}")
-        if not row["decision_id"] or row["decision_id"] in decision_ids:
-            raise BuildError(f"missing or duplicate decision_id: {row['decision_id']!r}")
-        decision_ids.add(row["decision_id"])
+        if not row["decision_id"]:
+            raise BuildError(f"missing decision_id for resolution path: {relative}")
         if row["comparison_sha256"] != comparison_hash:
             raise BuildError(f"resolution is bound to a different comparison: {relative}")
         if (row["resolution"], row["canonical_action"]) not in ALLOWED_RESOLUTIONS:
