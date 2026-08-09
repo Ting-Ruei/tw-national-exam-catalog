@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,29 @@ class ThreeSourcePilotTests(unittest.TestCase):
                 timeout=0.1,
                 cache=cache,
             )
+            self.assertEqual(resolved, source.resolve())
+
+    def test_fetch_remote_asset_handles_repeated_repository_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = (
+                Path(directory)
+                / "tw-national-exam-catalog"
+                / "tw-national-exam-catalog"
+            )
+            source = project_root / "tmp" / "asset.png"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"png")
+            with (
+                patch.object(self.module, "PROJECT_ROOT", project_root),
+                patch.object(self.module, "ASSET_ROOT", project_root / "國考題資料夾"),
+            ):
+                resolved = self.module.fetch_remote_asset(
+                    str(source),
+                    base_url="http://127.0.0.1:9",
+                    cache_dir=project_root / "tmp" / "cache",
+                    timeout=0.1,
+                    cache={},
+                )
             self.assertEqual(resolved, source.resolve())
 
     def test_walk_asset_values_deduplicates_option_and_image_refs(self):
