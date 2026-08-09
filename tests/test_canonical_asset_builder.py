@@ -258,6 +258,43 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stdout)
             self.assertIn("regular file is not SHA-256 bound", result.stdout)
 
+    def test_approved_volatile_drift_requires_flag_and_writes_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Fixture(Path(tmp))
+            fixture.add_file("left", "latest.json", b"left-old")
+            fixture.add_file("right", "latest.json", b"right-old")
+            fixture.finalize()
+            fixture.resolution_rows[0]["resolution"] = "regenerate_on_ai395"
+            fixture.resolution_rows[0]["canonical_action"] = "omit_then_regenerate"
+            fixture.resolution_rows[0]["rebuild_source"] = "runtime reporter"
+            write_rows(fixture.resolution, MODULE.RESOLUTION_FIELDS, fixture.resolution_rows)
+            (fixture.right_root / "latest.json").write_bytes(b"right-new")
+
+            strict = fixture.run("--verify-source-files")
+            self.assertEqual(strict.returncode, 2, strict.stdout)
+            self.assertIn("source file SHA-256 mismatch", strict.stdout)
+
+            fixture.report = fixture.base / "reports" / "build-2"
+            allowed = fixture.run("--verify-source-files", "--allow-approved-volatile-drift")
+            self.assertEqual(allowed.returncode, 0, allowed.stdout)
+            with (fixture.report / "approved-volatile-drift.csv").open(encoding="utf-8", newline="") as handle:
+                drift = list(csv.DictReader(handle))
+            self.assertEqual(len(drift), 1)
+            self.assertEqual(drift[0]["source_label"], "right")
+            report = json.loads((fixture.report / "canonical-build-report.json").read_text())
+            self.assertEqual(report["counts"]["approved_volatile_drift"], 1)
+
+    def test_excluded_metadata_drift_is_fatal_even_with_volatile_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Fixture(Path(tmp))
+            fixture.add_file("left", ".DS_Store", b"left-old")
+            fixture.add_file("right", ".DS_Store", b"right-old")
+            fixture.finalize()
+            (fixture.right_root / ".DS_Store").write_bytes(b"right-new")
+            result = fixture.run("--verify-source-files", "--allow-approved-volatile-drift")
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("source file SHA-256 mismatch", result.stdout)
+
     def test_linux_filename_mapping_is_used_and_written_to_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Fixture(Path(tmp))

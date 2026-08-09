@@ -99,6 +99,16 @@ REGEN_FIELDS = (
     "rebuild_source",
     "decision_id",
 )
+VOLATILE_DRIFT_FIELDS = (
+    "logical_relative_path",
+    "source_label",
+    "expected_bytes",
+    "actual_bytes",
+    "expected_sha256",
+    "actual_sha256",
+    "resolution",
+    "canonical_action",
+)
 ALLOWED_RESOLUTIONS = {
     ("exclude_both", "omit"),
     ("exclude_from_canonical", "omit"),
@@ -483,36 +493,68 @@ def source_path_for(row: dict[str, str], roots: dict[str, Path]) -> Path:
 def verify_sources(
     plan: list[dict[str, str]],
     roots: dict[str, Path],
-    conflict_rows: Iterable[tuple[str, dict[str, str], str]],
+    conflict_rows: Iterable[tuple[str, dict[str, str], str, dict[str, str]]],
     name_maps: dict[str, dict[str, dict[str, str]]],
     manifests: dict[str, dict[str, dict[str, str]]],
     symlink_plans: dict[str, dict[str, dict[str, str]]],
     progress_every: int,
-) -> int:
-    checks: dict[tuple[str, str], tuple[str, str, str]] = {}
+    allow_approved_volatile_drift: bool,
+) -> tuple[int, list[dict[str, str]]]:
+    checks: dict[tuple[str, str], dict[str, str]] = {}
     symlinks: list[dict[str, str]] = []
+    approved_drift: list[dict[str, str]] = []
     for row in plan:
         if row["action"] == "copy":
-            checks[(row["source_label"], row["source_storage_relative_path"])] = (
-                row["bytes"], row["sha256"], row["logical_relative_path"]
-            )
+            checks[(row["source_label"], row["source_storage_relative_path"])] = {
+                "expected_bytes": row["bytes"],
+                "expected_sha256": row["sha256"],
+                "logical_relative_path": row["logical_relative_path"],
+                "resolution": "",
+                "canonical_action": "copy",
+            }
         elif row["action"] == "rebuild_symlink":
             symlinks.append(row)
-    for relative, manifest_row, label in conflict_rows:
+    for relative, manifest_row, label, resolution in conflict_rows:
         if manifest_row["entry_type"] != "file":
             raise BuildError(f"conflict source is not a regular file and cannot be hash rebound: {label}:{relative}")
         storage = storage_for(relative, name_maps[label])
-        checks[(label, storage)] = (manifest_row["bytes"], manifest_row["sha256"], relative)
+        checks[(label, storage)] = {
+            "expected_bytes": manifest_row["bytes"],
+            "expected_sha256": manifest_row["sha256"],
+            "logical_relative_path": relative,
+            "resolution": resolution["resolution"],
+            "canonical_action": resolution["canonical_action"],
+        }
     checked = 0
-    for (label, storage), (expected_bytes, expected_hash, logical) in sorted(checks.items()):
+    for (label, storage), expected in sorted(checks.items()):
+        expected_bytes = expected["expected_bytes"]
+        expected_hash = expected["expected_sha256"]
+        logical = expected["logical_relative_path"]
         source = root_path(roots[label], storage, "source storage path")
         if not source.is_file() or source.is_symlink():
             raise BuildError(f"source file missing or wrong type: {label}:{logical} via {storage}")
-        if source.stat().st_size != int(expected_bytes):
-            raise BuildError(f"source file size mismatch: {label}:{logical}")
+        actual_bytes = source.stat().st_size
         actual = sha256_file(source)
-        if actual != expected_hash:
-            raise BuildError(f"source file SHA-256 mismatch: {label}:{logical}")
+        if actual_bytes != int(expected_bytes) or actual != expected_hash:
+            volatile_allowed = (
+                allow_approved_volatile_drift
+                and expected["resolution"] == "regenerate_on_ai395"
+                and expected["canonical_action"] == "omit_then_regenerate"
+            )
+            if not volatile_allowed:
+                raise BuildError(f"source file SHA-256 mismatch: {label}:{logical}")
+            approved_drift.append(
+                {
+                    "logical_relative_path": logical,
+                    "source_label": label,
+                    "expected_bytes": expected_bytes,
+                    "actual_bytes": str(actual_bytes),
+                    "expected_sha256": expected_hash,
+                    "actual_sha256": actual,
+                    "resolution": expected["resolution"],
+                    "canonical_action": expected["canonical_action"],
+                }
+            )
         checked += 1
         if progress_every and checked % progress_every == 0:
             print(f"source verification: {checked:,} files", file=sys.stderr, flush=True)
@@ -523,7 +565,7 @@ def verify_sources(
         expected = symlink_plans[row["source_label"]][row["logical_relative_path"]]["normalized_link_target"]
         if os.readlink(source) != expected:
             raise BuildError(f"staged symlink target differs from safe plan: {row['source_label']}:{row['logical_relative_path']}")
-    return checked
+    return checked, approved_drift
 
 
 def write_csv_atomic(path: Path, fields: Iterable[str], rows: Iterable[dict[str, Any]], *, delimiter: str = ",") -> str:
@@ -703,7 +745,13 @@ def ensure_report_dir(report_dir: Path, roots: dict[str, Path], output_root: Pat
     if resolved == target or target in resolved.parents:
         raise BuildError(f"report directory is inside output root: {report_dir}")
     report_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("canonical-build-plan.csv", "regeneration-queue.csv", "canonical-build-report.json"):
+    for name in (
+        "canonical-build-plan.csv",
+        "regeneration-queue.csv",
+        "approved-volatile-drift.csv",
+        "canonical-build-report.json",
+        "canonical-physical-manifest.csv",
+    ):
         if (report_dir / name).exists():
             raise BuildError(f"report output already exists; use a new report directory: {report_dir / name}")
 
@@ -786,12 +834,13 @@ def run(args: argparse.Namespace) -> int:
     regeneration_hash = write_csv_atomic(report_dir / "regeneration-queue.csv", REGEN_FIELDS, regeneration)
 
     conflict_rows = []
-    for relative in resolutions:
-        conflict_rows.append((relative, left[relative], args.left_label))
-        conflict_rows.append((relative, right[relative], args.right_label))
+    for relative, resolution in resolutions.items():
+        conflict_rows.append((relative, left[relative], args.left_label, resolution))
+        conflict_rows.append((relative, right[relative], args.right_label, resolution))
     verified_sources = 0
+    approved_drift: list[dict[str, str]] = []
     if args.verify_source_files or args.apply:
-        verified_sources = verify_sources(
+        verified_sources, approved_drift = verify_sources(
             plan,
             roots,
             conflict_rows,
@@ -799,7 +848,13 @@ def run(args: argparse.Namespace) -> int:
             manifests,
             symlink_plans,
             args.progress_every,
+            args.allow_approved_volatile_drift,
         )
+    drift_hash = write_csv_atomic(
+        report_dir / "approved-volatile-drift.csv",
+        VOLATILE_DRIFT_FIELDS,
+        approved_drift,
+    )
 
     counts = Counter(row["action"] for row in plan)
     status_counts = Counter(row["comparison_status"] for row in plan)
@@ -822,6 +877,7 @@ def run(args: argparse.Namespace) -> int:
             "resolution_sha256": args.expect_resolution_sha256,
             "plan_sha256": plan_hash,
             "regeneration_queue_sha256": regeneration_hash,
+            "approved_volatile_drift_sha256": drift_hash,
             "linux_filename_maps": {
                 label: {"path": str(map_paths[label].resolve()), "sha256": map_hash_values[label]}
                 for label in sorted(map_paths)
@@ -839,6 +895,7 @@ def run(args: argparse.Namespace) -> int:
             "regeneration_queue": len(regeneration),
             "source_files_rehashed": verified_sources,
             "canonical_name_mappings": len(canonical_map_rows(plan)),
+            "approved_volatile_drift": len(approved_drift),
         },
         "gates": {
             "evidence_hashes_match": True,
@@ -847,6 +904,7 @@ def run(args: argparse.Namespace) -> int:
             "filename_maps_valid": True,
             "selected_symlinks_have_safe_plans": True,
             "source_files_rehashed": bool(args.verify_source_files or args.apply),
+            "unapproved_source_drift": False,
             "regeneration_queue_empty": not regeneration,
             "production_authority_changed": False,
         },
@@ -907,6 +965,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
     parser.add_argument("--verify-source-files", action="store_true")
+    parser.add_argument(
+        "--allow-approved-volatile-drift",
+        action="store_true",
+        help=(
+            "Continue only for rehashed conflict paths whose approved resolution is "
+            "regenerate_on_ai395 + omit_then_regenerate; all other drift remains fatal."
+        ),
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--progress-every", type=int, default=1000)
     return parser

@@ -286,6 +286,11 @@ python3 scripts/build_canonical_asset_root.py \
 resolution、overlong filename mapping、source bytes/hash 或 symlink target 不符，exit code 都是 2。
 Apply 中途失敗會保留 `.canonical-build-incomplete.json`，不得把該目錄提升為 current。
 
+`regenerate_on_ai395 + omit_then_regenerate` 的 runtime pointer 是唯一可明確例外的 source drift。
+Builder 預設仍阻擋；只有 operator 明確加入 `--allow-approved-volatile-drift`，且重新計算後的 mismatch
+完全落在這個 resolution/action 組合時才繼續，並輸出 `approved-volatile-drift.csv`。這個旗標不適用於
+selected files、`.DS_Store`、preference fallback 或 catalog-derived reports；它們有任何漂移仍 fail closed。
+
 目前核准的 conflict policy 會先省略 27 個衝突項目，其中 15 個進 regeneration queue。因此
 `candidate_complete` 仍不等於 `ready_for_promotion`；必須完成衍生報告/runtime pointer 重建、fresh
 writer-freeze delta、UI/DB 驗收與單一 writer 批准，才可切換 authority。
