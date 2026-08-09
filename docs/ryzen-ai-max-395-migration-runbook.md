@@ -1,6 +1,13 @@
 # Ryzen AI Max 395 專案搬遷手冊
 
-更新：2026-08-07（Asia/Taipei）
+更新：2026-08-09（Asia/Taipei）
+
+> 2026-08-09 狀態更新：AI395 已成為預設 runtime maintenance target；operator checkout
+> 為 `/home/tim/src/tw-national-exam-catalog`，隔離 restore drill 使用 loopback
+> `8875/8876/54330`。Versioned canonical candidate 已通過 physical acceptance，但仍有
+> 15 個 regeneration items，`main` 尚未建立。Mac Studio 仍是唯一 production writer。
+> 即時操作與本機退場期以 `docs/ai395-runtime-maintenance.md` 為準；下列 2026-08-07
+> 盤點數值保留作歷史基線，不應覆蓋 2026-08-09 的 checksum-backed evidence。
 
 ## 目的與現行邊界
 

@@ -1,5 +1,9 @@
 # 專案移機交接狀態
 
+> 現行狀態（2026-08-09）：AI395 已成為預設部署、驗證與除錯目標；操作入口與
+> 一個月本機退場計畫見 `docs/ai395-runtime-maintenance.md`。AI395 現在仍是隔離
+> restore drill，Mac Studio `192.168.10.70:8765` 仍是唯一 production writer。
+>
 > 歷史狀態警告（2026-08-07）：本文件保存 2026-07-20 的非醫學 MinerU queue
 > checkpoint，不是 Ryzen AI Max 395 的現行搬遷手冊。PID、批次數與「目前正在執行」
 > 等敘述都必須在切換前重新產生，不能直接採信。完整主機、Git、PostgreSQL、資產、

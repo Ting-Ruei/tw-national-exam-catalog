@@ -84,11 +84,13 @@ examples/
 國考題資料夾/              # 本機工作資料夾，已加入 .gitignore
 ```
 
-## 本機工作資料夾
+## AI395 開發維護目標與本機工作資料夾
 
-未來搬到 Ryzen AI Max 395 的主機盤點、Git／PostgreSQL／資產權威來源、SHA-256
-傳輸驗證、MinerU/ROCm 相容性、cutover 與 rollback，統一依
-[`docs/ryzen-ai-max-395-migration-runbook.md`](docs/ryzen-ai-max-395-migration-runbook.md) 執行。
+自 2026-08-09 起，AI395 是預設部署、驗證與除錯目標；MacBook 保留 Git 編輯與控制面。
+目前 AI395 Catalog 是隔離 restore drill，Mac Studio 仍是唯一 production Review UI writer。
+操作方式與一個月本機退場期見
+[`docs/ai395-runtime-maintenance.md`](docs/ai395-runtime-maintenance.md)；完整搬遷證據與
+cutover gate 仍依 [`docs/ryzen-ai-max-395-migration-runbook.md`](docs/ryzen-ai-max-395-migration-runbook.md)。
 `MIGRATION_HANDOFF.md` 只保存 2026-07-20 的歷史 queue checkpoint。
 
 PDF 下載、MinerU 輸出、人工檢查佇列、入庫前候選資料等大型或中間產物，預設放在：
@@ -191,7 +193,18 @@ SQL review events + formal_sync_queue
 正式 questions / answers / groups / assets
 ```
 
-啟動 Review UI：
+AI395 runtime 第一輪檢查：
+
+```bash
+bash scripts/ai395_catalog_runtime.sh checkout
+bash scripts/ai395_catalog_runtime.sh verify
+bash scripts/ai395_catalog_runtime.sh tunnel
+```
+
+Tunnel 建立後，desktop/mobile 分別是 `http://127.0.0.1:8875/` 與
+`http://127.0.0.1:8876/mobile/`。這是 non-production restore drill；不得在其中進行正式審題。
+
+本機 legacy fallback（只在 AI395 無法使用且需要隔離驗證時啟動）：
 
 ```bash
 docker compose up -d review-ui
@@ -246,7 +259,9 @@ http://192.168.10.70:8766/
 
 `不要` 與 `備註待看` 事件會額外寫入結構化 `ai_followup`：要求後續 AI 讀來源 PDF、產生修正提案、只使用已核准規則；遇到新型態問題必須提出規則候選並取得人工核准，且 AI 不得自動通過題目。這個欄位是後續 AI worker 的可靠路由契約；手機按鈕本身不會在同步 HTTP request 內啟動模型或直接修改 parser 規則。
 
-目前人工審核權威固定為 `http://192.168.10.70:8765/`。其他機器上的 PostgreSQL／Review UI 僅供 pipeline 驗證，不得與該主庫各自產生人工審核事件。增量資料同步方式與 checkpoint 見 `docs/moex-incremental-review-pipeline.md`。
+目前人工審核權威仍固定為 `http://192.168.10.70:8765/`。AI395 `8875/8876` 與本機
+`8765/8766` 都是隔離驗證環境，不得與該主庫各自產生正式人工審核事件。增量資料同步方式與
+checkpoint 見 `docs/moex-incremental-review-pipeline.md`。
 
 查看 log：
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -25,7 +26,14 @@ FILTER_ORDER = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://192.168.10.70:8765")
+    parser.add_argument(
+        "--base-url",
+        default=(
+            os.environ.get("CATALOG_RUNTIME_UI_URL")
+            or os.environ.get("REVIEW_PRIMARY_UI_URL")
+            or "http://127.0.0.1:8875"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--review-status", default="unreviewed")
     parser.add_argument("--ai-review-status", default="unreviewed")

@@ -1,14 +1,13 @@
 # AI MAX 395 常駐部署
 
-> 本文件只描述搬遷前的 inference-worker 階段。若 Ryzen 主機未來要接管 PostgreSQL、
-> Review UI 與 production authority，必須先完成
-> `docs/ryzen-ai-max-395-migration-runbook.md` 的 restore drill、single-writer cutover 與
-> rollback 驗收；在正式 cutover 宣布前，以下 Mac Studio 權威邊界仍有效。
+> 2026-08-09 起 AI395 是預設 runtime maintenance 與 inference target，並已具備隔離
+> PostgreSQL/Review UI restore drill。這不代表 production authority 已切換；single-writer
+> cutover 與 rollback 驗收完成以前，以下 Mac Studio 權威邊界仍有效。
 
 ## 角色
 
-AI MAX 是無資料庫寫入權限的 inference worker。Mac Studio 仍是 Review UI、PostgreSQL、
-人工事件與正式資料的權威端。
+AI MAX 是預設執行與驗證主機；模型 worker 不持有 production DB 寫入權。AI395 restore drill
+只寫自己的隔離 volume。Mac Studio 仍是 Review UI、PostgreSQL、人工事件與正式資料的權威端。
 
 ```text
 Mac Studio read-only snapshot

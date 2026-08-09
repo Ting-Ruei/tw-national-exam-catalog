@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--review-base-url",
-        default="http://192.168.10.70:8765/",
+        default=(
+            os.environ.get("CATALOG_RUNTIME_UI_URL")
+            or os.environ.get("REVIEW_PRIMARY_UI_URL")
+            or "http://127.0.0.1:8875/"
+        ),
         help="Review UI base URL used for focusKey links in the human queue.",
     )
     return parser.parse_args()

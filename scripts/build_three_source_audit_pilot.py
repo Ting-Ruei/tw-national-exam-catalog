@@ -41,8 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("REVIEW_PRIMARY_UI_URL", "http://127.0.0.1:8765"),
-        help="Review UI URL (default: REVIEW_PRIMARY_UI_URL or localhost)",
+        default=(
+            os.environ.get("CATALOG_RUNTIME_UI_URL")
+            or os.environ.get("REVIEW_PRIMARY_UI_URL")
+            or "http://127.0.0.1:8875"
+        ),
+        help="Read-only Review UI URL (default: CATALOG_RUNTIME_UI_URL, then REVIEW_PRIMARY_UI_URL)",
     )
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--render-dpi", type=int, default=180)

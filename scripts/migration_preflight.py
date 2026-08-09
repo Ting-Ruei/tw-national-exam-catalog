@@ -32,6 +32,7 @@ SECRET_ENV_NAMES = {
     "POSTGRES_PASSWORD",
     "REVIEW_UI_DATABASE_URL",
 }
+SUPPORTED_TARGET_UBUNTU_VERSIONS = {"24.04", "26.04"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -246,12 +247,17 @@ def inspect_platform(report: dict[str, Any], mode: str) -> None:
                 key, value = line.split("=", 1)
                 values[key] = value.strip().strip('"')
         report["platform"]["os_release"] = values
-        supported = values.get("ID") == "ubuntu" and values.get("VERSION_ID") == "24.04"
+        version_id = values.get("VERSION_ID")
+        supported = values.get("ID") == "ubuntu" and version_id in SUPPORTED_TARGET_UBUNTU_VERSIONS
         add_check(
             report,
             "target-os-release",
             "pass" if supported else "warn",
-            "Ubuntu 24.04 detected." if supported else "Target is outside the documented Ubuntu 24.04 baseline.",
+            (
+                f"Ubuntu {version_id} detected."
+                if supported
+                else "Target is outside the documented Ubuntu 24.04/26.04 baseline."
+            ),
             id=values.get("ID"),
             version_id=values.get("VERSION_ID"),
         )
