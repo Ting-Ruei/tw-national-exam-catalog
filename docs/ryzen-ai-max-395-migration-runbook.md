@@ -246,6 +246,50 @@ python3 scripts/build_migration_asset_manifest.py compare \
 - `same_metadata`：沒有 hash，只能視為未證明相同；final cutover 不接受。
 - Final root 完成後再建一份新的 SHA-256 manifest，不能只保留兩份來源 manifest。
 
+### 建立 versioned canonical candidate
+
+`scripts/build_canonical_asset_root.py` 是 fail-closed builder。預設只產生 plan；必須明確加
+`--apply` 才會建立全新的 candidate，而且 output root 已存在時一律拒絕。它不會修改兩個
+source-separated staging roots，也不會更新 `main` symlink、Review UI mount 或 production authority。
+
+執行時必須綁定 source manifests、comparison、approved resolution、Linux filename maps 與 safe
+symlink plan 的 SHA-256。先用同一組參數執行 `--verify-source-files` dry-run，確認 report 為
+`dry_run_complete`，才對另一個全新 report/candidate 目錄加 `--apply`：
+
+```bash
+python3 scripts/build_canonical_asset_root.py \
+  --left-manifest /migration-evidence/macbook-manifest/macbook-assets.csv \
+  --left-label macbook-main \
+  --left-root /migration-inbox/macbook-assets/macbook-main \
+  --expect-left-manifest-sha256 LEFT_MANIFEST_SHA256 \
+  --right-manifest /migration-evidence/macstudio-manifests/macstudio-main.csv \
+  --right-label macstudio-main \
+  --right-root /migration-inbox/macstudio-main \
+  --expect-right-manifest-sha256 RIGHT_MANIFEST_SHA256 \
+  --comparison /migration-evidence/comparison/main-root-comparison.csv \
+  --expect-comparison-sha256 COMPARISON_SHA256 \
+  --resolution /migration-evidence/conflict-resolution/main-root-conflict-resolution-v1.csv \
+  --expect-resolution-sha256 RESOLUTION_SHA256 \
+  --name-map macbook-main=/migration-evidence/macbook-linux-filenames/linux-filename-map.tsv \
+  --expect-name-map-sha256 macbook-main=MACBOOK_NAME_MAP_SHA256 \
+  --name-map macstudio-main=/migration-evidence/macstudio-linux-filenames/linux-filename-map.tsv \
+  --expect-name-map-sha256 macstudio-main=MACSTUDIO_NAME_MAP_SHA256 \
+  --safe-symlink-plan macbook-main=/migration-evidence/macbook-symlinks/safe-symlink-plan.tsv \
+  --expect-safe-symlink-plan-sha256 macbook-main=SAFE_SYMLINK_PLAN_SHA256 \
+  --output-root /srv/ai395/data/tw-national-exam-catalog/main-candidates/BUILD_ID \
+  --report-dir /migration-evidence/canonical-builds/BUILD_ID-dry-run \
+  --verify-source-files
+```
+
+`canonical-build-report.json`、`canonical-build-plan.csv`、`regeneration-queue.csv` 與 apply 後的
+`canonical-physical-manifest.csv` 是一組 evidence。任何 evidence hash、manifest row、conflict
+resolution、overlong filename mapping、source bytes/hash 或 symlink target 不符，exit code 都是 2。
+Apply 中途失敗會保留 `.canonical-build-incomplete.json`，不得把該目錄提升為 current。
+
+目前核准的 conflict policy 會先省略 27 個衝突項目，其中 15 個進 regeneration queue。因此
+`candidate_complete` 仍不等於 `ready_for_promotion`；必須完成衍生報告/runtime pointer 重建、fresh
+writer-freeze delta、UI/DB 驗收與單一 writer 批准，才可切換 authority。
+
 ## 第三階段：PostgreSQL logical backup 與 restore drill
 
 arm64 Mac Studio 與 amd64 Ryzen 之間不得複製 `/var/lib/postgresql` 或 Docker named volume。
