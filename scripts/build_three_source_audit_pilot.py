@@ -100,9 +100,16 @@ def local_path(value: str | None) -> Path | None:
     text = str(value)
     path = Path(text)
     if path.is_absolute():
+        try:
+            direct = path.resolve()
+        except OSError:
+            return None
+        roots = (PROJECT_ROOT.resolve(), ASSET_ROOT.resolve())
+        if any(direct == root or root in direct.parents for root in roots):
+            return direct
         parts = path.parts
         if "tw-national-exam-catalog" in parts:
-            index = parts.index("tw-national-exam-catalog")
+            index = len(parts) - 1 - parts[::-1].index("tw-national-exam-catalog")
             path = PROJECT_ROOT.joinpath(*parts[index + 1 :])
     elif text.startswith("國考題資料夾/"):
         path = PROJECT_ROOT / text

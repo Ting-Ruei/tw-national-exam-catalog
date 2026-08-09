@@ -581,8 +581,15 @@ def project_path(value: str) -> Path:
         index = parts.index("國考題資料夾")
         return ASSET_ROOT.joinpath(*parts[index + 1 :])
     if path.is_absolute():
+        try:
+            direct = path.resolve()
+        except OSError:
+            direct = path
+        roots = (PROJECT_ROOT.resolve(), ASSET_ROOT.resolve())
+        if any(direct == root or root in direct.parents for root in roots):
+            return direct
         if "tw-national-exam-catalog" in parts:
-            index = parts.index("tw-national-exam-catalog")
+            index = len(parts) - 1 - parts[::-1].index("tw-national-exam-catalog")
             return PROJECT_ROOT.joinpath(*parts[index + 1 :])
         return path
     if value.startswith("國考題資料夾/"):

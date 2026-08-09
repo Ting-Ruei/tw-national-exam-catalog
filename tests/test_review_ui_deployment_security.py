@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,23 @@ class ReviewUiDeploymentSecurityTests(unittest.TestCase):
                 review_ui.safe_file_path(str(PROJECT_ROOT / "README.md")),
                 (PROJECT_ROOT / "README.md").resolve(),
             )
+
+    def test_project_files_allow_repeated_repository_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = (
+                Path(directory)
+                / "tw-national-exam-catalog"
+                / "tw-national-exam-catalog"
+            )
+            readme = project_root / "README.md"
+            readme.parent.mkdir(parents=True)
+            readme.write_text("test", encoding="utf-8")
+            with (
+                patch.object(review_ui, "PROJECT_ROOT", project_root),
+                patch.object(review_ui, "ASSET_ROOT", project_root / "國考題資料夾"),
+                patch.dict(os.environ, {"REVIEW_UI_ALLOW_PROJECT_FILES": "1"}),
+            ):
+                self.assertEqual(review_ui.safe_file_path(str(readme)), readme.resolve())
 
     def test_basic_auth_challenge_and_success(self) -> None:
         credentials = base64.b64encode(b"tim:secret").decode("ascii")
