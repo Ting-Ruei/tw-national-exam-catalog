@@ -310,8 +310,8 @@ SQL_REVIEW_PREVIOUS_ACTION_EXPR = (
 SQL_REVIEW_ACCEPTED_REAUDIT_EXPR = (
     "(lq.action IN ('unreviewed', 'reset_review') AND ("
     f"{SQL_REVIEW_PREVIOUS_ACTION_EXPR} IN ('accept', 'unblock') "
-    "OR lower(COALESCE(lq.event_json->>'approval_ref', '')) LIKE '%accepted%reaudit%' "
-    "OR lower(COALESCE(lq.reviewer, '')) LIKE '%accepted%reaudit%'"
+    "OR lower(COALESCE(lq.event_json->>'approval_ref', '')) LIKE '%%accepted%%reaudit%%' "
+    "OR lower(COALESCE(lq.reviewer, '')) LIKE '%%accepted%%reaudit%%'"
     "))"
 )
 SQL_REVIEW_REPAIR_PENDING_EXPR = (
@@ -322,11 +322,11 @@ SQL_REVIEW_REPAIR_PENDING_EXPR = (
     "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_action' "
     "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_scope' "
     "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'source_event_id' "
-    "OR COALESCE(lq.reviewer, '') LIKE 'repair_%' "
-    "OR COALESCE(lq.reviewer, '') LIKE 'backfill_%' "
-    "OR COALESCE(lq.reviewer, '') LIKE 'parser_global_refresh%' "
-    "OR COALESCE(lq.reviewer, '') LIKE 'codex-repair%' "
-    "OR COALESCE(lq.reviewer, '') LIKE 'codex-text-normalization-repair%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'repair_%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'backfill_%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'parser_global_refresh%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-repair%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-text-normalization-repair%%' "
     "OR COALESCE(lq.notes, '') ~ '(修復|正規化|待複核|需人工複核)' "
     "OR COALESCE(c.raw_candidate_json->'metadata'->>'review_block_repair', '') <> '' "
     "OR COALESCE(c.raw_candidate_json->'metadata'->>'backfill_repair', '') <> '' "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -398,6 +399,14 @@ process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
         cte, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "unreviewed"})
         self.assertIn("is_never_reviewed", cte)
         self.assertNotIn("review_action IN ('unreviewed', 'reset_review')", cte)
+
+    def test_sql_review_like_patterns_are_escaped_for_psycopg(self):
+        for expression in (
+            self.ui.SQL_REVIEW_ACCEPTED_REAUDIT_EXPR,
+            self.ui.SQL_REVIEW_REPAIR_PENDING_EXPR,
+        ):
+            self.assertIsNone(re.search(r"LIKE '%[A-Za-z_]", expression))
+            self.assertIn("LIKE '%%", expression)
 
     def test_review_page_exposes_separate_reaudit_filter_and_labels(self):
         page = self.ui.PAGE_HTML
