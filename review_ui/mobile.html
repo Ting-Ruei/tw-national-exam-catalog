@@ -467,6 +467,8 @@
           <select id="reviewStatus">
             <option value="unreviewed">未看過</option>
             <option value="reset_review">退回未審</option>
+            <option value="repair_pending">修復待複核</option>
+            <option value="accepted_reaudit">已通過後待複核</option>
             <option value="needs_review">待看／保留疑問</option>
             <option value="block">阻止入庫</option>
             <option value="accept">已通過</option>
@@ -761,12 +763,16 @@
     }
 
     function isHumanUnreviewed(item) {
-      return Boolean(item?.review?.is_reset_unreviewed)
+      const review = item?.review || {};
+      return Boolean(review.is_never_reviewed)
+        || Boolean(review.is_reset_unreviewed)
         || !reviewAction(item)
-        || item?.review?.status === 'unreviewed';
+        || review.status === 'unreviewed';
     }
 
     function reviewStatusClass(item) {
+      const review = item?.review || {};
+      if (review.is_accepted_reaudit_pending || review.is_repair_pending) return 'needs-review';
       const action = reviewAction(item);
       if (['accept', 'unblock'].includes(action)) return 'accepted';
       if (['block', 'blocked', 'reject', 'exclude'].includes(action)) return 'blocked';
@@ -800,8 +806,14 @@
     function matchesCurrentReviewStatus(item) {
       const filter = state.filters.reviewStatus;
       const action = reviewAction(item);
-      if (!filter || filter === 'unreviewed') return isHumanUnreviewed(item);
-      if (filter === 'reset_review') return Boolean(item?.review?.is_reset_unreviewed);
+      const review = item?.review || {};
+      if (!filter) return true;
+      if (filter === 'unreviewed') return Boolean(review.is_never_reviewed);
+      if (filter === 'repair_pending') return Boolean(review.is_repair_pending);
+      if (filter === 'accepted_reaudit') return Boolean(review.is_accepted_reaudit_pending);
+      if (filter === 'reset_review') {
+        return Boolean(review.is_reset_unreviewed && !review.is_repair_pending && !review.is_accepted_reaudit_pending);
+      }
       if (filter === 'reviewed') return !isHumanUnreviewed(item);
       if (filter === 'accept') return ['accept', 'unblock'].includes(action);
       if (filter === 'block') return ['block', 'blocked'].includes(action);
@@ -874,6 +886,8 @@
       }
       if (item.table_markup_suppressed || visual.has_structured_table) flags.push(['visual', '表格']);
       if (String(item.review?.notes || '').trim()) flags.push(['note', '人工註記']);
+      if (item.review?.is_accepted_reaudit_pending) flags.push(['issue', '已通過後待複核']);
+      else if (item.review?.is_repair_pending) flags.push(['issue', '修復後待複核']);
       if ((item.issues || []).length || Number(item.review_advisory_count || 0) > 0) {
         flags.push(['issue', '格式疑點']);
       }
@@ -1189,7 +1203,12 @@
           ...(item.review || {}),
           action,
           status: action === 'accept' ? 'accepted' : action === 'block' ? 'blocked' : 'needs_review',
-          is_reset_unreviewed: false
+          is_reset_unreviewed: false,
+          is_never_reviewed: false,
+          is_repair_pending: false,
+          is_accepted_reaudit_pending: false,
+          queue_bucket: 'reviewed',
+          queue_label: '已看過'
         };
       };
       state.candidates.forEach(update);

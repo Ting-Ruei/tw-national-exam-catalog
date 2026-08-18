@@ -7,6 +7,9 @@
   `corrected_candidate_json`, regardless of whether a newer `reset_review`
   reopened the question state. Manual assets and unlinks remain effective.
 - Human question state: latest non-group/non-visual row in `exam.question_review_events`.
+- Human question queue projection: no question event = `unreviewed`; repair-marked reopen =
+  `repair_pending`; an explicitly approved reopen whose `previous_action` was `accept`/`unblock` =
+  `accepted_reaudit`; other reopen events = `reset_review`. These filters are mutually exclusive.
 - Human answer state: latest row in `exam.answer_review_events`.
 - AI state: latest non-reset row in `exam.question_ai_review_events`, active only when newer than the relevant human decision.
 - AI audit feedback: latest rating per candidate/scope/reviewer in

@@ -298,6 +298,42 @@ SQL_ANSWER_CATEGORY_EXPR = (
     "NULLIF(c.raw_candidate_json->'metadata'->>'group_name', ''), '')"
 )
 
+# Human-review queue state is projected from the latest question event.  Keep
+# these expressions in one place so the heavy and lightweight SQL paths use
+# exactly the same mutually-exclusive buckets.  A reset/reopen event never
+# replaces the historical content correction; it only changes the queue state.
+SQL_REVIEW_PREVIOUS_ACTION_EXPR = (
+    "COALESCE(NULLIF(lq.event_json->>'previous_action', ''), "
+    "NULLIF(lq.event_json->>'preserved_action', ''), "
+    "NULLIF(lq.event_json->>'previous_review_action', ''), '')"
+)
+SQL_REVIEW_ACCEPTED_REAUDIT_EXPR = (
+    "(lq.action IN ('unreviewed', 'reset_review') AND ("
+    f"{SQL_REVIEW_PREVIOUS_ACTION_EXPR} IN ('accept', 'unblock') "
+    "OR lower(COALESCE(lq.event_json->>'approval_ref', '')) LIKE '%accepted%reaudit%' "
+    "OR lower(COALESCE(lq.reviewer, '')) LIKE '%accepted%reaudit%'"
+    "))"
+)
+SQL_REVIEW_REPAIR_PENDING_EXPR = (
+    "(lq.action IN ('unreviewed', 'reset_review') "
+    f"AND NOT {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AND ("
+    "COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_kind' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_type' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_action' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_scope' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'source_event_id' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'repair_%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'backfill_%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'parser_global_refresh%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-repair%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-text-normalization-repair%' "
+    "OR COALESCE(lq.notes, '') ~ '(修復|正規化|待複核|需人工複核)' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'review_block_repair', '') <> '' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'backfill_repair', '') <> '' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'backfill_source', '') <> ''"
+    "))"
+)
+
 AI_ANSWER_DEFER_LABELS = {"answer_pair_suspect", "needs_human_review", "pass_likely"}
 AI_OCR_TEXT_REPLACEMENTS = [
     *CAPSULE_EXACT_REPLACEMENTS.items(),
@@ -783,6 +819,111 @@ def file_signature(path: Path) -> tuple[int, int] | None:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+def _first_event_value(event: dict[str, Any] | None, *keys: str) -> str:
+    if not isinstance(event, dict):
+        return ""
+    for key in keys:
+        value = event.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def review_projection(
+    latest_review: dict[str, Any] | None,
+    latest_reset_review: dict[str, Any] | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project append-only review events into disjoint human queue buckets.
+
+    ``unreviewed`` is reserved for candidates with no question-level human
+    event at all.  Parser/text repairs and accepted-question re-audits are
+    still open work, but they are separate buckets so a reviewer does not see
+    a repaired or already-accepted item masquerading as a brand-new question.
+    This function is deliberately read-only: it never rewrites events or
+    candidate content.
+    """
+
+    latest = latest_review if isinstance(latest_review, dict) else None
+    reset = latest_reset_review if isinstance(latest_reset_review, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    event = latest or reset or {}
+    reset_waiting = bool(reset and not latest)
+    action = _first_event_value(event, "action")
+    reset_action = _first_event_value(reset, "action")
+    previous_action = _first_event_value(
+        reset,
+        "previous_action",
+        "preserved_action",
+        "previous_review_action",
+    )
+    approval_ref = _first_event_value(reset, "approval_ref", "approval", "approval_reference")
+    reviewer = _first_event_value(reset or latest, "reviewer")
+    repair_kind = _first_event_value(
+        reset or latest,
+        "repair_kind",
+        "repair_type",
+        "repair_action",
+        "repair_scope",
+        "source_event_id",
+    )
+    notes = _first_event_value(
+        reset or latest,
+        "reset_notes",
+        "notes",
+        "previous_notes",
+    )
+    metadata_sources = [
+        str(metadata.get(key) or "")
+        for key in ("review_block_repair", "backfill_repair", "backfill_source")
+        if metadata.get(key)
+    ]
+    repair_reviewer = reviewer.startswith(REPAIR_REVIEWER_PREFIXES)
+    repair_note = bool(re.search(r"修復|正規化|待複核|需人工複核", notes))
+    repair_event = bool(repair_kind or repair_reviewer or repair_note or metadata_sources)
+    was_previously_accepted = (
+        previous_action in QUESTION_READY_ACTIONS
+        or ("accepted" in approval_ref.lower() and "reaudit" in approval_ref.lower())
+        or ("accepted" in reviewer.lower() and "reaudit" in reviewer.lower())
+    )
+    is_accepted_reaudit_pending = bool(reset_waiting and was_previously_accepted)
+    is_repair_pending = bool(reset_waiting and not is_accepted_reaudit_pending and repair_event)
+    is_reset_unreviewed = bool(reset_waiting)
+    is_never_reviewed = not latest and not reset
+    if is_never_reviewed:
+        queue_bucket = "never_reviewed"
+        display_label = "未看過"
+    elif is_accepted_reaudit_pending:
+        queue_bucket = "accepted_reaudit"
+        display_label = "已通過後待複核"
+    elif is_repair_pending:
+        queue_bucket = "repair_pending"
+        display_label = "修復後待複核"
+    elif is_reset_unreviewed:
+        queue_bucket = "reset_review"
+        display_label = "退回未審"
+    else:
+        queue_bucket = "reviewed"
+        display_label = "已看過"
+    return {
+        "has_human_event": bool(latest or reset),
+        "is_never_reviewed": is_never_reviewed,
+        "is_reset_unreviewed": is_reset_unreviewed,
+        "is_repair_pending": is_repair_pending,
+        "is_accepted_reaudit_pending": is_accepted_reaudit_pending,
+        "was_previously_accepted": was_previously_accepted,
+        "previous_action": previous_action or None,
+        "reset_action": reset_action or None,
+        "reviewer": reviewer or None,
+        "repair_kind": repair_kind or None,
+        "approval_ref": approval_ref or None,
+        "repair_event": repair_event,
+        "queue_bucket": queue_bucket,
+        "display_label": display_label,
+        "action": action or None,
+    }
+
+
 def repair_event_info(
     latest_review: dict[str, Any] | None,
     latest_reset_review: dict[str, Any] | None,
@@ -793,13 +934,14 @@ def repair_event_info(
         return {"active": False}
 
     event = latest_review or latest_reset_review
+    projection = review_projection(latest_review, latest_reset_review, metadata)
     reviewer = str((event or {}).get("reviewer") or "")
     metadata_sources = [
         str(metadata.get(key) or "")
         for key in ("review_block_repair", "backfill_repair", "backfill_source")
         if metadata.get(key)
     ]
-    is_repair_event = reviewer.startswith(REPAIR_REVIEWER_PREFIXES)
+    is_repair_event = bool(projection.get("repair_event"))
     is_reset_waiting = bool(latest_reset_review and not latest_review)
     if not (is_repair_event or is_reset_waiting or metadata_sources):
         return {"active": False}
@@ -812,12 +954,19 @@ def repair_event_info(
     )
     return {
         "active": True,
-        "label": "已修待複核",
+        "label": (
+            projection.get("display_label")
+            if is_reset_waiting
+            else "已修待複核"
+        ),
         "reviewer": reviewer,
         "action": latest_action or str((latest_reset_review or {}).get("action") or "reset_review"),
         "notes": notes,
         "sources": metadata_sources,
         "updated_at": (event or {}).get("created_at"),
+        "queue_bucket": projection.get("queue_bucket"),
+        "previous_action": projection.get("previous_action"),
+        "was_previously_accepted": projection.get("was_previously_accepted", False),
     }
 
 
@@ -2243,7 +2392,8 @@ class ReviewState:
                 """
                 (
                     (is_reviewed AND review_action NOT IN ('accept', 'correct', 'unblock', 'exclude'))
-                    OR review_action IN ('unreviewed', 'reset_review')
+                    OR is_never_reviewed
+                    OR is_reset_unreviewed
                 )
                 """
             )
@@ -2258,7 +2408,9 @@ class ReviewState:
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
         elif review_status == "repair_pending":
-            clauses.append("COALESCE(review_event_json->>'repair_kind', '') = 'safe_text_normalization'")
+            clauses.append("is_repair_pending")
+        elif review_status == "accepted_reaudit":
+            clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
             clauses.append(
                 """
@@ -2270,9 +2422,11 @@ class ReviewState:
                 """
             )
         elif review_status == "reset_review":
-            clauses.append("review_action IN ('unreviewed', 'reset_review')")
+            clauses.append(
+                "is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending"
+            )
         elif review_status == "unreviewed":
-            clauses.append("NOT is_reviewed")
+            clauses.append("is_never_reviewed")
         elif review_status == "reviewed":
             clauses.append("is_reviewed")
         elif review_status:
@@ -2390,6 +2544,7 @@ latest_question AS (
         e.corrected_candidate_json,
         e.event_json,
         e.notes,
+        e.reviewer,
         e.created_at,
         e.id
     FROM exam.question_review_events e
@@ -2552,8 +2707,13 @@ base AS (
         lqc.corrected_candidate_json,
         lq.event_json AS review_event_json,
         lq.notes AS review_notes,
+        lq.reviewer AS review_reviewer,
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
+        (lq.candidate_key IS NULL) AS is_never_reviewed,
+        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
+        {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         lai.action AS ai_action,
         lai.provider AS ai_provider,
         lai.model_name AS ai_model_name,
@@ -2731,8 +2891,8 @@ filtered AS (
                 """
                 (
                     (is_reviewed AND review_action NOT IN ('accept', 'correct', 'unblock', 'exclude'))
-                    OR review_action IN ('unreviewed', 'reset_review')
-                    OR review_action IS NULL
+                    OR is_never_reviewed
+                    OR is_reset_unreviewed
                 )
                 """
             )
@@ -2746,6 +2906,10 @@ filtered AS (
             clauses.append("formal_usable")
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
+        elif review_status == "repair_pending":
+            clauses.append("is_repair_pending")
+        elif review_status == "accepted_reaudit":
+            clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
             clauses.append(
                 """
@@ -2757,9 +2921,11 @@ filtered AS (
                 """
             )
         elif review_status == "reset_review":
-            clauses.append("review_action IN ('unreviewed', 'reset_review')")
+            clauses.append(
+                "is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending"
+            )
         elif review_status == "unreviewed":
-            clauses.append("NOT is_reviewed")
+            clauses.append("is_never_reviewed")
         elif review_status == "reviewed":
             clauses.append("is_reviewed")
         elif review_status:
@@ -2779,6 +2945,7 @@ latest_question AS (
         e.corrected_candidate_json,
         e.event_json,
         e.notes,
+        e.reviewer,
         e.created_at,
         e.id
     FROM exam.question_review_events e
@@ -2851,8 +3018,13 @@ base AS (
         lq.action AS review_action,
         lq.corrected_candidate_json,
         lq.event_json AS review_event_json,
+        lq.reviewer AS review_reviewer,
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
+        (lq.candidate_key IS NULL) AS is_never_reviewed,
+        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
+        {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         (
             COALESCE(i.has_question_issue, false)
             OR (
@@ -4218,6 +4390,7 @@ filtered AS (
         copy["answer_issue_count"] = len(answer_issues)
         latest_review = latest_reviews.get(key)
         latest_reset_review = latest_reset_reviews.get(key)
+        review_projection_data = review_projection(latest_review, latest_reset_review, metadata)
         copy["repair_status"] = repair_event_info(latest_review, latest_reset_review, metadata)
         review_event = latest_review or latest_reset_review
         correction = normalized_correction(review_event.get("correction") if review_event else None)
@@ -4284,7 +4457,15 @@ filtered AS (
             "has_correction": bool(correction),
             "correction": correction or None,
             "reset": latest_reset_review,
-            "is_reset_unreviewed": bool(latest_reset_review and not latest_review),
+            "is_reset_unreviewed": review_projection_data["is_reset_unreviewed"],
+            "has_human_event": review_projection_data["has_human_event"],
+            "is_never_reviewed": review_projection_data["is_never_reviewed"],
+            "is_repair_pending": review_projection_data["is_repair_pending"],
+            "is_accepted_reaudit_pending": review_projection_data["is_accepted_reaudit_pending"],
+            "was_previously_accepted": review_projection_data["was_previously_accepted"],
+            "previous_action": review_projection_data["previous_action"],
+            "queue_bucket": review_projection_data["queue_bucket"],
+            "queue_label": review_projection_data["display_label"],
         }
         latest_action = latest_review.get("action") if latest_review else None
         formal = dict(formal_question_map.get(key) or {"in_formal": False})
@@ -4886,14 +5067,23 @@ filtered AS (
             key = item["candidate_key"]
             latest_review = self.latest_reviews.get(key)
             latest_reset_review = self.latest_reset_reviews.get(key)
+            metadata = item.get("metadata") or {}
+            review_projection_data = review_projection(latest_review, latest_reset_review, metadata)
             review = {
                 "status": "reviewed" if latest_review else "unreviewed",
                 "action": latest_review.get("action") if latest_review else None,
                 "notes": latest_review.get("notes") if latest_review else None,
                 "reset": latest_reset_review,
-                "is_reset_unreviewed": bool(latest_reset_review and not latest_review),
+                "is_reset_unreviewed": review_projection_data["is_reset_unreviewed"],
+                "has_human_event": review_projection_data["has_human_event"],
+                "is_never_reviewed": review_projection_data["is_never_reviewed"],
+                "is_repair_pending": review_projection_data["is_repair_pending"],
+                "is_accepted_reaudit_pending": review_projection_data["is_accepted_reaudit_pending"],
+                "was_previously_accepted": review_projection_data["was_previously_accepted"],
+                "previous_action": review_projection_data["previous_action"],
+                "queue_bucket": review_projection_data["queue_bucket"],
+                "queue_label": review_projection_data["display_label"],
             }
-            metadata = item.get("metadata") or {}
             category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
             subject = metadata.get("normalized_subject_name") or ""
             latest_ai_review = self.latest_ai_reviews.get(key)
@@ -4909,12 +5099,23 @@ filtered AS (
             if review_status == "not_accept":
                 review_match = (
                     (review["status"] == "reviewed" and review["action"] not in {"accept", "correct", "unblock", "exclude"})
-                    or bool(latest_reset_review and not latest_review)
+                    or review["is_never_reviewed"]
+                    or review["is_reset_unreviewed"]
                 )
             elif review_status == "correct":
                 review_match = bool(latest_review and normalized_correction(latest_review.get("correction")))
+            elif review_status == "repair_pending":
+                review_match = review["is_repair_pending"]
+            elif review_status == "accepted_reaudit":
+                review_match = review["is_accepted_reaudit_pending"]
             elif review_status == "reset_review":
-                review_match = bool(latest_reset_review and not latest_review)
+                review_match = (
+                    review["is_reset_unreviewed"]
+                    and not review["is_repair_pending"]
+                    and not review["is_accepted_reaudit_pending"]
+                )
+            elif review_status == "unreviewed":
+                review_match = review["is_never_reviewed"]
             elif review_status == "exclude":
                 review_match = review["action"] == "exclude"
             else:
@@ -8281,6 +8482,8 @@ PAGE_HTML = r"""<!doctype html>
     .badge.reviewed { background:#dbeafe; color:var(--blue); }
     .badge.unreviewed { background:#edf0f5; color:#475467; }
     .badge.reset_review { background:#fff1cf; color:#9a5b00; border:1px solid #f2c94c; }
+    .badge.repair_pending { background:#eef4ff; color:#174ea6; border:1px solid #b9cdf8; }
+    .badge.accepted_reaudit { background:#f2ecff; color:#6941c6; border:1px solid #c7b5f6; }
     .badge.repaired { background:#e0f2fe; color:#0369a1; border:1px solid #7dd3fc; }
     .badge.formal { background:#eef4ff; color:#175cd3; border:1px solid #b2ccff; }
     .badge.formal_drift { background:#fff1cf; color:#9a5b00; border:1px solid #f2c94c; }
@@ -8439,6 +8642,7 @@ PAGE_HTML = r"""<!doctype html>
       <option value="unreviewed" selected>未看過</option>
       <option value="reset_review">退回未審</option>
       <option value="repair_pending">修復待複核</option>
+      <option value="accepted_reaudit">已通過後待複核</option>
       <option value="not_accept">未通過</option>
       <option value="exclude">非題目/已排除</option>
       <option value="formal">已入正式庫</option>
@@ -8557,6 +8761,8 @@ const STATUS_LABELS = {
   reviewed: '已看過',
   unreviewed: '未看過',
   reset_review: '退回未審',
+  repair_pending: '修復待複核',
+  accepted_reaudit: '已通過後待複核',
   formal: '已入正式庫',
   formal_drift: '正式庫待同步',
   visual: '待處理',
@@ -8599,6 +8805,8 @@ function systemListLabel(status) {
 }
 
 function humanListLabel(review) {
+  if (review?.is_accepted_reaudit_pending) return '已通過後待複核';
+  if (review?.is_repair_pending) return '修復後待複核';
   if (review?.is_reset_unreviewed) return '退回未審';
   const action = String(review?.action || '').trim();
   const labels = {
@@ -8635,6 +8843,7 @@ function workflowStageLabel(item, itemMode = mode) {
   const review = item?.review || {};
   const action = String(review.action || '');
   if (action === 'exclude') return '已排除';
+  if (review.is_accepted_reaudit_pending || review.is_repair_pending) return '題目待複核';
   if (review.is_reset_unreviewed || review.status !== 'reviewed' || ['unreviewed', 'reset_review', ''].includes(action)) return '題目待人工';
   if (['block', 'needs_review', 'correct', 'comment'].includes(action)) return '題目待處理';
   const formal = item?.formal || {};
@@ -9725,7 +9934,8 @@ function itemMatchesCurrentReviewFilter(item) {
   if (reviewStatus !== 'exclude' && action === 'exclude') return false;
   if (!reviewStatus) return true;
   if (reviewStatus === 'not_accept') {
-    return (status === 'reviewed' && !['accept', 'correct', 'unblock', 'exclude'].includes(action)) || Boolean(review.is_reset_unreviewed);
+    return (status === 'reviewed' && !['accept', 'correct', 'unblock', 'exclude'].includes(action))
+      || Boolean(review.is_never_reviewed || review.is_reset_unreviewed);
   }
   if (reviewStatus === 'exclude') {
     return action === 'exclude';
@@ -9733,8 +9943,17 @@ function itemMatchesCurrentReviewFilter(item) {
   if (reviewStatus === 'correct') {
     return Boolean(review.correction);
   }
+  if (reviewStatus === 'repair_pending') {
+    return Boolean(review.is_repair_pending);
+  }
+  if (reviewStatus === 'accepted_reaudit') {
+    return Boolean(review.is_accepted_reaudit_pending);
+  }
   if (reviewStatus === 'reset_review') {
-    return Boolean(review.is_reset_unreviewed);
+    return Boolean(review.is_reset_unreviewed && !review.is_repair_pending && !review.is_accepted_reaudit_pending);
+  }
+  if (reviewStatus === 'unreviewed') {
+    return Boolean(review.is_never_reviewed);
   }
   if (reviewStatus === 'formal') {
     return Boolean(item.formal?.in_formal);
@@ -9873,7 +10092,13 @@ function renderList() {
       </button>`;
     }
     const review = mode === 'answer' ? (item.answer_review || {}) : (item.review || {});
-    const reviewBadge = review.is_reset_unreviewed ? 'reset_review' : (review.action || review.status || 'unreviewed');
+    const reviewBadge = review.is_accepted_reaudit_pending
+      ? 'accepted_reaudit'
+      : review.is_repair_pending
+        ? 'repair_pending'
+        : review.is_reset_unreviewed
+          ? 'reset_review'
+          : (review.action || review.status || 'unreviewed');
     const reviewLabel = humanListLabel(review);
     const aiReview = item.ai_review || {};
     const aiBadge = mode !== 'visual' && aiReview.active !== false && aiReview.audit_status && aiReview.audit_status !== 'pass'
@@ -10200,8 +10425,14 @@ function renderDetail() {
   }
   const meta = current.metadata || {};
   const reviewState = current.review || {};
-  const reviewBadge = reviewState.is_reset_unreviewed ? 'reset_review' : (reviewState.action || reviewState.status || 'unreviewed');
-  const reviewLabel = reviewState.is_reset_unreviewed ? '退回未審' : statusLabel(reviewBadge);
+  const reviewBadge = reviewState.is_accepted_reaudit_pending
+    ? 'accepted_reaudit'
+    : reviewState.is_repair_pending
+      ? 'repair_pending'
+      : reviewState.is_reset_unreviewed
+        ? 'reset_review'
+        : (reviewState.action || reviewState.status || 'unreviewed');
+  const reviewLabel = reviewState.queue_label || statusLabel(reviewBadge);
   const hasCorrection = Boolean(reviewState.has_correction);
   updatePdfViewer();
   if (mode === 'answer') {
@@ -10243,10 +10474,12 @@ function renderDetail() {
     </div>` : '';
   const reset = reviewState.reset || {};
   const repairStatus = current.repair_status || {};
-  const repairBadge = repairStatus.active ? '<span class="badge repaired">已修待複核</span>' : '';
+  const repairBadge = repairStatus.active
+    ? `<span class="badge ${esc(reviewBadge)}">${esc(reviewState.queue_label || repairStatus.label || '待複核')}</span>`
+    : '';
   const repairNote = repairStatus.active ? `
     <div class="issue info">
-      <b>已修待複核</b><br>
+      <b>${esc(reviewState.queue_label || repairStatus.label || '待複核')}</b><br>
       <span class="meta">來源：${esc(repairStatus.reviewer || (repairStatus.sources || []).join(', ') || '系統修整')} ${esc(repairStatus.updated_at || '')}</span>
       ${repairStatus.notes ? `<div class="stem">${renderText(repairStatus.notes)}</div>` : ''}
     </div>` : '';
@@ -10254,7 +10487,7 @@ function renderDetail() {
   const resetNotes = reset.reset_notes || reset.notes || '';
   const resetNote = reviewState.is_reset_unreviewed ? `
     <div class="issue warning">
-      <b>退回未審</b><br>
+      <b>${esc(reviewState.queue_label || '退回未審')}</b><br>
       <span class="meta">上一個狀態：${esc(reset.previous_action || '未知')} ${esc(reset.previous_reviewed_at || '')}</span>
       ${previousNotes ? `<hr><b>原人工註記</b><div class="stem">${renderText(previousNotes)}</div>` : ''}
       ${resetNotes ? `<hr><b>本次修整說明</b><div class="stem">${renderText(resetNotes)}</div>` : ''}

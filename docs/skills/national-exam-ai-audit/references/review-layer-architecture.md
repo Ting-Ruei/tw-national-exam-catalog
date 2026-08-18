@@ -31,6 +31,11 @@ question_state    = latest_question_state_event(L5)
 `latest_content_correction` 是最後一筆含 `corrected_candidate_json` 的有效內容事件；
 `latest_question_state_event` 是最後一筆題目審核事件。兩者可以來自不同 event id。
 
+Review UI 的人工佇列是再由 `question_state` 唯讀投影出的互斥分類：沒有任何題目事件才是
+「未看過」；修復事件是「修復後待複核」；帶有 `previous_action=accept/unblock` 的核准重審是
+「已通過後待複核」；其餘 reset 才是「退回未審」。這個分類只影響篩選與顯示，不會建立、刪除
+或重寫 L3/L5 事件。
+
 例如：
 
 ```text

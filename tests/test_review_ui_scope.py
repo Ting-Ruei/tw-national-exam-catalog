@@ -347,6 +347,65 @@ process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
         self.assertTrue(payload["options"][0]["image"]["path"].endswith("40_manual_assets/correct.png"))
         self.assertTrue(payload["review"]["is_reset_unreviewed"])
 
+    def test_review_queue_projection_separates_never_seen_repair_and_accepted_reaudit(self):
+        never_seen = self.ui.review_projection(None, None, {})
+        repair = self.ui.review_projection(
+            None,
+            {
+                "action": "unreviewed",
+                "reviewer": "codex-text-normalization-repair",
+                "repair_kind": "safe_text_normalization",
+            },
+            {},
+        )
+        accepted_reaudit = self.ui.review_projection(
+            None,
+            {
+                "action": "reset_review",
+                "reviewer": "codex-luna-accepted-reaudit",
+                "previous_action": "accept",
+                "approval_ref": "user-approved-accepted-reaudit-20260803",
+            },
+            {},
+        )
+        returned = self.ui.review_projection(
+            None,
+            {"action": "reset_review", "reviewer": "local", "notes": "使用者退回未審"},
+            {},
+        )
+
+        self.assertEqual(never_seen["queue_bucket"], "never_reviewed")
+        self.assertTrue(never_seen["is_never_reviewed"])
+        self.assertEqual(repair["queue_bucket"], "repair_pending")
+        self.assertFalse(repair["is_never_reviewed"])
+        self.assertTrue(repair["is_repair_pending"])
+        self.assertEqual(accepted_reaudit["queue_bucket"], "accepted_reaudit")
+        self.assertTrue(accepted_reaudit["is_accepted_reaudit_pending"])
+        self.assertTrue(accepted_reaudit["was_previously_accepted"])
+        self.assertEqual(returned["queue_bucket"], "reset_review")
+        self.assertFalse(returned["is_repair_pending"])
+
+    def test_sql_review_filters_are_disjoint(self):
+        state = object.__new__(self.ui.ReviewState)
+        for status, marker in (
+            ("unreviewed", "is_never_reviewed"),
+            ("repair_pending", "is_repair_pending"),
+            ("accepted_reaudit", "is_accepted_reaudit_pending"),
+            ("reset_review", "is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending"),
+        ):
+            cte, _ = state._sql_candidate_filter_parts({"reviewStatus": status})
+            self.assertIn(marker, cte)
+        cte, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "unreviewed"})
+        self.assertIn("is_never_reviewed", cte)
+        self.assertNotIn("review_action IN ('unreviewed', 'reset_review')", cte)
+
+    def test_review_page_exposes_separate_reaudit_filter_and_labels(self):
+        page = self.ui.PAGE_HTML
+        self.assertIn('value="accepted_reaudit">已通過後待複核</option>', page)
+        self.assertIn("review.is_accepted_reaudit_pending", page)
+        self.assertIn("review.is_repair_pending", page)
+        self.assertIn("Boolean(review.is_never_reviewed)", page)
+
     def test_reset_review_allows_ai_one_click_suggestion(self):
         candidate = {
             "candidate_key": "reset-allows-ai-suggestion",
@@ -395,6 +454,50 @@ process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
         self.assertEqual(payload["review"]["action"], "reset_review")
         self.assertEqual(payload["ai_review"]["suggested_correction"]["stem"], "下列何者具有莢膜？")
         self.assertTrue(payload["ai_review"]["suggestion_apply_allowed"])
+
+    def test_accepted_reaudit_keeps_effective_correction_and_is_not_new_queue(self):
+        candidate = {
+            "candidate_key": "accepted-reaudit-keeps-content",
+            "question_number": "2",
+            "stem": "MinerU 原始題幹",
+            "options": [{"key": "A", "text": "原始選項"}],
+            "metadata": {},
+        }
+        correction = {
+            "stem": "已通過的人工題幹",
+            "options": [{"key": "A", "text": "已通過的人工選項"}],
+        }
+        events = [
+            {
+                "candidate_key": candidate["candidate_key"],
+                "action": "accept",
+                "correction": correction,
+            },
+            {
+                "candidate_key": candidate["candidate_key"],
+                "action": "reset_review",
+                "reviewer": "codex-luna-accepted-reaudit",
+                "previous_action": "accept",
+                "approval_ref": "user-approved-accepted-reaudit-20260803",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidates.jsonl"
+            review_log = root / "question_review_events.jsonl"
+            candidate_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
+            review_log.write_text(
+                "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+                encoding="utf-8",
+            )
+            state = self.ui.ReviewState(candidate_path, None, review_log, review_backend="jsonl")
+            payload = state.candidate_payload(candidate)
+
+        self.assertEqual(payload["stem"], "已通過的人工題幹")
+        self.assertEqual(payload["options"][0]["text"], "已通過的人工選項")
+        self.assertTrue(payload["review"]["is_accepted_reaudit_pending"])
+        self.assertFalse(payload["review"]["is_never_reviewed"])
+        self.assertEqual(payload["review"]["previous_action"], "accept")
 
     def test_luna_worklist_uses_persistent_content_projection(self):
         source = (
