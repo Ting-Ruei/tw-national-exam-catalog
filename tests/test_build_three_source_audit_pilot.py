@@ -57,6 +57,16 @@ class ThreeSourcePilotTests(unittest.TestCase):
         self.assertNotIn("answer", self.module.candidate_content(candidate, original=False))
         self.assertNotIn("answer", self.module.candidate_content(candidate, original=True))
 
+    def test_official_pdf_reference_accepts_exported_staging_metadata(self):
+        candidate = {
+            "source_files": None,
+            "metadata": {"question_pdf_relative": "10_official_pdf/example.pdf"},
+        }
+        self.assertEqual(
+            self.module.official_pdf_reference(candidate),
+            "10_official_pdf/example.pdf",
+        )
+
     def test_question_consensus_deduplicates_poppler_variants(self):
         engines = {
             "pdftotext_raw": {"source_family": "poppler", "text": "31. KCl"},
