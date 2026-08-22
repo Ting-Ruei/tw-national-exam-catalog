@@ -62,6 +62,8 @@ class AI395ReviewStagingTests(unittest.TestCase):
             qwen_probe.normalized_base_url("http://macbook.tailnet.ts.net/v1")
         with self.assertRaises(qwen_probe.ProbeError):
             qwen_probe.normalized_base_url("http://0.0.0.0:11434/v1")
+        with self.assertRaisesRegex(qwen_probe.ProbeError, "placeholder"):
+            qwen_probe.normalized_base_url("https://你的MacBook.你的tailnet.ts.net/v1")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,10 @@ def normalized_base_url(raw: str) -> tuple[str, str]:
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.username or parsed.password:
         raise ProbeError("endpoint must not contain embedded credentials")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ProbeError("endpoint contains placeholder/non-ASCII hostname; use the actual *.ts.net hostname") from exc
     if parsed.scheme not in {"http", "https"} or not host:
         raise ProbeError("endpoint must be an http(s) URL")
 
