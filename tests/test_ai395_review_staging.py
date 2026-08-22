@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import ai395_review_staging as staging  # noqa: E402
+import ai395_llm_adapter as llm_adapter  # noqa: E402
 import probe_qwen_mlx_tailscale as qwen_probe  # noqa: E402
 
 
@@ -64,6 +65,44 @@ class AI395ReviewStagingTests(unittest.TestCase):
             qwen_probe.normalized_base_url("http://0.0.0.0:11434/v1")
         with self.assertRaisesRegex(qwen_probe.ProbeError, "placeholder"):
             qwen_probe.normalized_base_url("https://你的MacBook.你的tailnet.ts.net/v1")
+
+    def test_qwen_native_adapter_keeps_json_and_pixel_contracts(self) -> None:
+        request = llm_adapter.build_request(
+            "text_evidence",
+            {"candidate_key": "q1", "stem": "題目", "options": [], "metadata": {}},
+            [],
+            "qwen3.8:27b-mlx",
+            256,
+        )
+        native = llm_adapter.build_native_request(request, [])
+        self.assertFalse(native["think"])
+        self.assertEqual(native["format"], "json")
+        self.assertEqual(native["options"]["num_predict"], 256)
+        self.assertEqual(
+            llm_adapter._extract_content(
+                {"message": {"role": "assistant", "content": '{"status":"pass"}'}}
+            ),
+            '{"status":"pass"}',
+        )
+        with self.assertRaises(llm_adapter.PixelsUnavailable):
+            llm_adapter.build_packet(
+                "vision",
+                {
+                    "candidate_key": "q1",
+                    "stem": "看圖",
+                    "options": [],
+                    "metadata": {},
+                    "image_refs": [{"relative_path": "missing.svg"}],
+                },
+                {
+                    "candidate_key": "q1",
+                    "stem": "看圖",
+                    "options": [],
+                    "metadata": {},
+                    "image_refs": [],
+                },
+                ROOT / "fixtures" / "ai395_review" / "mini20",
+            )
 
 
 if __name__ == "__main__":

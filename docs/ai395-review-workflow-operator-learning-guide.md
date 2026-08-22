@@ -279,7 +279,9 @@ QWEN_MLX_MODEL='<ollama list 的精確 tag>' \
 
 第一個 probe 只做 `/v1/models`；不要用 `--live` 當健康檢查。要測生成時再單獨執行 `--live`，要測 vision 才加 `--image <fixture image>`。腳本只接受 localhost 或 HTTPS `*.ts.net`，不會呼叫 public Funnel，也不會寫資料庫。Serve 代理的是整個 Ollama API，同一 tailnet 的其他裝置也能依 ACL 使用，不限 AI395。
 
-AI395 staging 的 `QWEN_MLX_BASE_URL`、`QWEN_MLX_MODEL` 可以先填入，但 `QWEN_MLX_ENABLED` 維持 `0`；provider registry 也維持 `local_qwen_mlx.enabled=false`。完成 text／JSON、vision pixel transport、100 requests、OOM／重啟、MinerU 共存與 gold comparison 後，才把它加入指定 lane 的 shadow。這次本機跑通的 SQLite 結果只證明 runner contract，不代表 AI395 Docker/PostgreSQL staging 已驗收。
+AI395 staging 的 `QWEN_MLX_BASE_URL`、`QWEN_MLX_MODEL` 可以先填入；版本庫的 provider registry 仍維持 `local_qwen_mlx.enabled=false`，但 owner 可在 staging `.env` 明確設定 `QWEN_MLX_ENABLED=1`、`AI395_STAGING_ALLOW_LIVE_LLM=1`，再以 `model_mode=local_qwen_mlx` 跑測試。runner 讀取 `/v1` 根址，實際使用 Ollama 原生 `/api/chat` 搭配 `think:false`、`format:json`；這是目前 Qwen MLX 比 `/v1/chat/completions` 穩定的路徑。五條 lane 的模型輸出仍是 advisory，不能直接建立人工事件或正式 revision。
+
+已完成的本機 live smoke run（2026-08-22）使用 `existing_artifact` source／MinerU、`mini20`、`qwen3.8:27b-mlx`、`residual` policy：20 題 scope、五條 lane、21 個 revision、0 production writes、0 human review events；9 個 residual model attempts 中 5 個實際文字／題組／答案呼叫成功，4 個視覺項目因 fixture 只有 SVG 或缺少 raster pixels 而安全進 `pixels_unavailable`。這證明 adapter、SQL、revision、exception、dry-run 與 MacBook transport 已串通，不等於 AI395 production 認證；AI395 staging 還要依 `deploy/ai395-review-staging/README.md` 的命令重新跑一次。
 
 ### Level 7：1,000 題 rehearsal 與 Review UI
 

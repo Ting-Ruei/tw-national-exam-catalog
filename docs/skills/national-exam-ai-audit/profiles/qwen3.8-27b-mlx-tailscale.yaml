@@ -5,12 +5,12 @@
   "model_default": "qwen3.8:27b-mlx",
   "model_env": "QWEN_MLX_MODEL",
   "provider": "local_qwen_mlx",
-  "adapter": "ollama_openai_compatible",
+  "adapter": "ollama_native",
   "endpoint_env": "QWEN_MLX_BASE_URL",
   "transport": {
-    "protocol": "openai_chat_completions",
+    "protocol": "ollama_native_chat",
     "health_path": "/models",
-    "completion_path": "/chat/completions",
+    "completion_path": "/api/chat",
     "api_key_mode": "ollama_placeholder",
     "stream": false
   },

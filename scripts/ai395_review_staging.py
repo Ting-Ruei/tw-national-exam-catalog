@@ -26,7 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ai395_llm_adapter import LLMAdapterError, PixelsUnavailable, PROMPT_VERSION, call_lane
 from ai395_source_adapter import ContractError, validate_manifests
+from probe_qwen_mlx_tailscale import ProbeError, normalized_base_url
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -388,6 +390,97 @@ def enqueue_jobs(db: StagingDB, run_id: str, candidate_key: str, revision_id: st
         )
 
 
+def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve an explicit staging model mode without changing production config."""
+
+    mode = str(getattr(args, "model_mode", "mock"))
+    model_stage = config.get("pipeline", {}).get("model_stage") or {}
+    if model_stage.get("advisory_only") is not True:
+        raise StagingContractError("model stage must remain advisory_only")
+    if mode == "mock":
+        return {
+            "mode": "mock",
+            "provider": "mock",
+            "model": "mock-fixture-v1",
+            "profile_id": "mock-fixture-v1",
+            "prompt_version": None,
+            "base_url": None,
+            "timeout": 0,
+            "max_tokens": 0,
+        }
+    if mode != "local_qwen_mlx":
+        raise StagingContractError(f"unsupported model_mode: {mode}")
+    if not bool(getattr(args, "allow_live_provider", False)):
+        raise StagingContractError("live provider requires the explicit --allow-live-provider flag")
+    provider = (config.get("provider_registry", {}).get("providers") or {}).get("local_qwen_mlx") or {}
+    env_enabled = os.environ.get("QWEN_MLX_ENABLED", "0").lower() in {"1", "true", "yes"}
+    if provider.get("enabled") is not True and not env_enabled:
+        raise StagingContractError("local_qwen_mlx is disabled; set QWEN_MLX_ENABLED=1 for an explicit staging run")
+    base_url = os.environ.get(str(provider.get("endpoint_env") or "QWEN_MLX_BASE_URL"), "").strip()
+    model = os.environ.get(str(provider.get("model_env") or "QWEN_MLX_MODEL"), "").strip()
+    if not base_url or not model:
+        raise StagingContractError("local_qwen_mlx requires QWEN_MLX_BASE_URL and QWEN_MLX_MODEL")
+    try:
+        base_url, endpoint_class = normalized_base_url(base_url)
+    except ProbeError as exc:
+        raise StagingContractError(f"invalid local_qwen_mlx endpoint: {exc}") from exc
+    if provider.get("network_allowed") is not True or provider.get("tailnet_only") is not True:
+        raise StagingContractError("local_qwen_mlx provider contract does not allow the required tailnet transport")
+    return {
+        "mode": "local_qwen_mlx",
+        "provider": "local_qwen_mlx",
+        "model": model,
+        "profile_id": "qwen3.8-27b-mlx-tailscale",
+        "prompt_version": PROMPT_VERSION,
+        "base_url": base_url,
+        "timeout": float(getattr(args, "model_timeout", 120.0)),
+        "max_tokens": int(getattr(args, "model_max_tokens", 512)),
+        "transport": str(provider.get("transport") or "ollama_native"),
+        "endpoint_class": endpoint_class,
+        "enabled_by_env": env_enabled,
+    }
+
+
+def lane_needs_model(lane: str, revised: dict[str, Any], policy: str) -> bool:
+    if policy == "all":
+        return True
+    metadata = revised.get("metadata") or {}
+    if lane == "text_evidence":
+        return bool(metadata.get("demo_text_issue") or metadata.get("llm_residual"))
+    if lane == "notation":
+        return bool(metadata.get("demo_notation_issue") or metadata.get("llm_residual_notation"))
+    if lane == "group":
+        return bool(revised.get("group_ref") and metadata.get("group_boundary") == "ambiguous")
+    if lane == "vision":
+        return bool(revised.get("image_refs") or metadata.get("visual_expected") or metadata.get("visual_cue") or metadata.get("crop_status") == "bad")
+    if lane == "answer":
+        return bool(metadata.get("answer_mode") in {"voided", "multiple"} or revised.get("answer") == "#" or isinstance(revised.get("answer"), list))
+    return False
+
+
+def model_finding(model_result: dict[str, Any], lane: str) -> dict[str, Any] | None:
+    status = str(model_result.get("status") or "unclear")
+    if status == "pass":
+        return None
+    codes = model_result.get("finding_codes") or []
+    if codes:
+        code = str(codes[0])
+    elif model_result.get("error") == "pixels_unavailable":
+        code = "pixels_unavailable"
+    elif model_result.get("error") == "provider_error":
+        code = "provider_error"
+    elif model_result.get("error") == "model_call_budget_exhausted":
+        code = "call_budget_exhausted"
+    else:
+        code = "model_unclear" if status == "unclear" else "model_finding"
+    severity = "error" if status in {"unclear", "error"} or lane in {"group", "vision", "answer"} else "warning"
+    return {
+        "code": f"model_{code}"[:100],
+        "severity": severity,
+        "message": str(model_result.get("reason") or model_result.get("message") or "模型要求人工核對")[:160],
+    }
+
+
 def evaluate_lane(lane: str, item: dict[str, Any], revised: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     metadata = revised.get("metadata") or {}
     findings: list[dict[str, Any]] = []
@@ -426,24 +519,94 @@ def evaluate_lane(lane: str, item: dict[str, Any], revised: dict[str, Any]) -> t
     return status, result, findings
 
 
-def run_lane(db: StagingDB, run_id: str, candidate_key: str, revision_id: str, item: dict[str, Any], revised: dict[str, Any], lane: str, parser_blocked: bool) -> None:
+def run_lane(
+    db: StagingDB,
+    run_id: str,
+    candidate_key: str,
+    revision_id: str,
+    item: dict[str, Any],
+    revised: dict[str, Any],
+    lane: str,
+    parser_blocked: bool,
+    model_runtime: dict[str, Any],
+    model_budget: dict[str, int],
+    fixture_root: Path,
+    llm_lane_policy: str,
+) -> None:
     table = db.table("review_lane_runs")
     if parser_blocked:
         status = "skipped"
         result = {"checked_count": 0, "status": "skipped", "reason": "parser_blocked", "advisory_only": True}
         findings: list[dict[str, Any]] = []
     else:
-        status, result, findings = evaluate_lane(lane, item, revised)
+        _deterministic_status, result, findings = evaluate_lane(lane, item, revised)
+        result["provider"] = model_runtime["provider"]
+        result["model"] = model_runtime["model"]
+        result["model_called"] = False
+        result["model_result"] = None
+        if model_runtime["mode"] == "local_qwen_mlx" and lane_needs_model(lane, revised, llm_lane_policy):
+            if model_budget["calls"] >= model_budget["max_calls"]:
+                model_result = {
+                    "status": "error",
+                    "error": "model_call_budget_exhausted",
+                    "advisory_only": True,
+                    "materialize": False,
+                }
+                model_budget["errors"] += 1
+            else:
+                model_budget["attempts"] += 1
+                model_budget["calls"] += 1
+                try:
+                    model_result = call_lane(
+                        base_url=str(model_runtime["base_url"]),
+                        model=str(model_runtime["model"]),
+                        lane=lane,
+                        item=item,
+                        revised=revised,
+                        fixture_root=fixture_root,
+                        timeout=float(model_runtime["timeout"]),
+                        max_tokens=int(model_runtime["max_tokens"]),
+                        transport=str(model_runtime["transport"]),
+                    )
+                except PixelsUnavailable as exc:
+                    model_budget["calls"] -= 1
+                    model_result = {
+                        "status": "error",
+                        "error": "pixels_unavailable",
+                        "message": str(exc),
+                        "advisory_only": True,
+                        "materialize": False,
+                    }
+                    model_budget["errors"] += 1
+                except LLMAdapterError as exc:
+                    model_result = {
+                        "status": "error",
+                        "error": "provider_error",
+                        "message": str(exc),
+                        "advisory_only": True,
+                        "materialize": False,
+                    }
+                    model_budget["errors"] += 1
+            result["model_called"] = model_result.get("error") not in {"pixels_unavailable", "model_call_budget_exhausted"}
+            result["model_result"] = model_result
+            finding = model_finding(model_result, lane)
+            if finding:
+                findings.append(finding)
+        status = "finding" if findings else "machine_pass"
+        result["status"] = status
+        result["finding_codes"] = [finding["code"] for finding in findings]
+        result["model_action"] = "proposal_only" if findings else "no_model_finding"
     output_hash = sha256_text(canonical_json(result))
     route_key = lane
-    model_name = f"mock-{lane}"
+    provider = str(model_runtime["provider"])
+    model_name = str(model_runtime["model"])
     db.execute(
         f"""INSERT INTO {table}
             (run_id, candidate_key, revision_id, lane_key, route_key, provider, model_name,
              status, advisory_only, result_json, output_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, 'mock', ?, ?, 1, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(run_id, candidate_key, revision_id, lane_key) DO NOTHING""",
-        (run_id, candidate_key, revision_id, lane, route_key, model_name, status, canonical_json(result), output_hash, now_iso()),
+        (run_id, candidate_key, revision_id, lane, route_key, provider, model_name, status, canonical_json(result), output_hash, now_iso()),
     )
     lane_row = db.fetchone(
         f"SELECT lane_run_id FROM {table} WHERE run_id=? AND candidate_key=? AND revision_id=? AND lane_key=?",
@@ -454,13 +617,13 @@ def run_lane(db: StagingDB, run_id: str, candidate_key: str, revision_id: str, i
         existing = db.fetchone(f"SELECT 1 FROM {finding_table} WHERE lane_run_id=?", (lane_row["lane_run_id"],))
         if not existing:
             for finding in findings:
-                disposition = "human_exception" if finding["severity"] in {"error", "blocked"} or lane in {"group", "answer"} or finding["code"] in {"notation_residual", "false_positive_image", "text_residual", "missing_visual_asset", "crop_needed"} else "advisory"
+                disposition = "human_exception" if finding["severity"] in {"error", "blocked"} or lane in {"group", "answer"} or finding["code"].startswith("model_") or finding["code"] in {"notation_residual", "false_positive_image", "text_residual", "missing_visual_asset", "crop_needed"} else "advisory"
                 db.execute(
                     f"""INSERT INTO {finding_table}
                         (lane_run_id, run_id, candidate_key, revision_id, lane_key, owner_stage,
                          finding_code, severity, disposition, evidence_json, proposal_json, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (lane_row["lane_run_id"], run_id, candidate_key, revision_id, lane, {"text_evidence": "question", "notation": "question", "group": "group", "vision": "image", "answer": "answer"}[lane], finding["code"], finding["severity"], disposition, canonical_json({"fixture": True, "source_fidelity_required": True}), canonical_json({"materialize": False}), now_iso()),
+                    (lane_row["lane_run_id"], run_id, candidate_key, revision_id, lane, {"text_evidence": "question", "notation": "question", "group": "group", "vision": "image", "answer": "answer"}[lane], finding["code"], finding["severity"], disposition, canonical_json({"fixture": True, "source_fidelity_required": True, "provider": provider, "model": model_name}), canonical_json({"materialize": False, "advisory_only": True}), now_iso()),
                 )
                 if disposition == "human_exception":
                     exception_table = db.table("review_exception_queue")
@@ -585,7 +748,22 @@ def locate_manifests(args: argparse.Namespace) -> tuple[Path, Path, str]:
 
 
 def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
-    config, config_hash = load_config(args.config_dir.resolve())
+    config, base_config_hash = load_config(args.config_dir.resolve())
+    model_runtime = build_model_runtime(config, args)
+    llm_lane_policy = str(getattr(args, "llm_lane_policy", "residual"))
+    if llm_lane_policy not in {"residual", "all"}:
+        raise StagingContractError(f"unsupported llm_lane_policy: {llm_lane_policy}")
+    max_calls = int(getattr(args, "llm_max_calls", 20))
+    if max_calls < 0:
+        raise StagingContractError("llm_max_calls must be >= 0")
+    model_budget = {"attempts": 0, "calls": 0, "errors": 0, "max_calls": max_calls}
+    effective_config_hash = sha256_text(canonical_json({
+        "base_config_sha256": base_config_hash,
+        "model_runtime": {key: value for key, value in model_runtime.items() if key != "base_url"},
+        "model_endpoint": model_runtime.get("base_url"),
+        "llm_lane_policy": llm_lane_policy,
+        "llm_max_calls": max_calls,
+    }))
     source_manifest, mineru_manifest, fixture_id = locate_manifests(args)
     source_mode = args.source_mode
     mineru_mode = args.mineru_mode
@@ -604,13 +782,14 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
         expected_total = catalog.get("expected_question_count")
     if expected_total is not None and int(expected_total) != len(candidates):
         raise StagingContractError(f"fixture coverage mismatch: expected {expected_total}, got {len(candidates)}")
+    fixture_root = source_manifest.resolve().parent
     run_id = args.run_id or datetime.now(timezone.utc).strftime("staging-%Y%m%dT%H%M%SZ")
     artifact_dir = (args.artifact_dir / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     db = StagingDB(args.database_url)
     try:
         db.apply_migration()
-        is_new = insert_run(db, run_id, config_hash, source_mode, mineru_mode, fixture_id)
+        is_new = insert_run(db, run_id, effective_config_hash, source_mode, mineru_mode, fixture_id)
         if not is_new:
             existing = db.fetchone(f"SELECT report_json FROM {db.table('formal_dry_runs')} WHERE run_id=?", (run_id,))
             if existing:
@@ -639,9 +818,45 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             revision_id = revision_map[key]
             blocked = parser_status(item)[0] == "blocked"
             for lane in LANES:
-                run_lane(db, run_id, key, revision_id, item, revised_items[key], lane, blocked)
+                run_lane(
+                    db,
+                    run_id,
+                    key,
+                    revision_id,
+                    item,
+                    revised_items[key],
+                    lane,
+                    blocked,
+                    model_runtime,
+                    model_budget,
+                    fixture_root,
+                    llm_lane_policy,
+                )
         report = build_formal_report(db, run_id, candidates)
-        report.update({"config_sha256": config_hash, "source_mode": source_mode, "mineru_mode": mineru_mode, "fixture_id": fixture_id, "issue_rows": len(issues), "revisions_created": int(db.fetchone(f"SELECT count(*) AS count FROM {db.table('question_revisions')} WHERE run_id=?", (run_id,))["count"])})
+        report.update({
+            "config_sha256": effective_config_hash,
+            "base_config_sha256": base_config_hash,
+            "source_mode": source_mode,
+            "mineru_mode": mineru_mode,
+            "fixture_id": fixture_id,
+            "issue_rows": len(issues),
+            "revisions_created": int(db.fetchone(f"SELECT count(*) AS count FROM {db.table('question_revisions')} WHERE run_id=?", (run_id,))["count"]),
+            "model_mode": model_runtime["mode"],
+            "model_provider": model_runtime["provider"],
+            "model_name": model_runtime["model"],
+            "model_transport": model_runtime.get("transport"),
+            "model_endpoint_class": model_runtime.get("endpoint_class"),
+            "model_profile_id": model_runtime["profile_id"],
+            "model_prompt_version": model_runtime["prompt_version"],
+            "llm_lane_policy": llm_lane_policy,
+            "llm_attempts": model_budget["attempts"],
+            "llm_calls": model_budget["calls"],
+            "llm_errors": model_budget["errors"],
+        })
+        db.execute(
+            f"UPDATE {db.table('formal_dry_runs')} SET report_json=? WHERE run_id=?",
+            (canonical_json(report), run_id),
+        )
         write_json(artifact_dir / "formal_dry_run.json", report)
         run_manifest = {
             "run_id": run_id,
@@ -649,14 +864,25 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "script_path": "scripts/ai395_review_staging.py",
             "git_sha": git_sha(),
             "script_sha256": sha256_file(Path(__file__)),
-            "config_sha256": config_hash,
+            "config_sha256": effective_config_hash,
+            "base_config_sha256": base_config_hash,
             "container_or_runtime": "python-local-or-staging-container",
             "container_image_digest": os.environ.get("AI395_CONTAINER_IMAGE_DIGEST"),
             "started_at": now_iso(),
             "input_artifacts": [verified["source"]["candidate_jsonl"], verified["source"]["issue_csv"], verified["mineru"]],
             "output_artifacts": [{"path": str(artifact_dir / "formal_dry_run.json"), "sha256": sha256_file(artifact_dir / "formal_dry_run.json")}],
-            "model_profile_id": "mock-fixture-v1",
-            "prompt_version": None,
+            "model_profile_id": model_runtime["profile_id"],
+            "model_provider": model_runtime["provider"],
+            "model_name": model_runtime["model"],
+            "model_mode": model_runtime["mode"],
+            "model_transport": model_runtime.get("transport"),
+            "model_endpoint_class": model_runtime.get("endpoint_class"),
+            "model_endpoint": model_runtime.get("base_url"),
+            "prompt_version": model_runtime["prompt_version"],
+            "llm_lane_policy": llm_lane_policy,
+            "llm_attempts": model_budget["attempts"],
+            "llm_calls": model_budget["calls"],
+            "llm_errors": model_budget["errors"],
             "parent_run_ids": [],
             "database_written": True,
             "review_events_written": False,
@@ -708,6 +934,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id")
     parser.add_argument("--source-mode", choices=("existing_artifact", "mock_fixture", "live_download"), default="mock_fixture")
     parser.add_argument("--mineru-mode", choices=("existing_artifact", "mock_fixture", "run_mineru"), default="mock_fixture")
+    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx"), default="mock")
+    parser.add_argument("--allow-live-provider", action="store_true", help="explicitly allow the configured staging provider to make network calls")
+    parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default="residual")
+    parser.add_argument("--llm-max-calls", type=int, default=20)
+    parser.add_argument("--model-timeout", type=float, default=120.0)
+    parser.add_argument("--model-max-tokens", type=int, default=512)
     parser.add_argument("--describe", action="store_true")
     return parser.parse_args()
 

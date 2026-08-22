@@ -60,3 +60,44 @@ curl --fail "$OLLAMA_TAILNET_URL/v1/chat/completions" \
 ```
 
 `Authorization: Bearer ollama` 是 Ollama OpenAI-compatible adapter 的 placeholder，不是要提交的秘密。這個入口不是只提供 Qwen；只要模型已在 MacBook 的 `ollama list` 中，就能透過同一 API 使用。若未來要縮小為只有 AI395 或特定裝置，請改 Tailscale ACL，不要把 API 暴露到公網。
+
+## 在 AI395 staging 明確啟用 MacBook Qwen
+
+預設仍是 mock；只有 owner 在 staging `.env` 明確開啟時，worker 才會連到 MacBook。`QWEN_MLX_BASE_URL` 保留 `/v1`，供 model probe 使用；實際審核 adapter 會在同一個 root 呼叫 Ollama 原生 `/api/chat`，因為目前 Qwen MLX 需要原生介面的 `think:false` 與 `format:json` 才能穩定取得 JSON。
+
+先在 AI395（或同一個 pipeline-worker network namespace）做 tailnet read-only 檢查：
+
+```bash
+export QWEN_MLX_ROOT='https://<macbook>.<tailnet>.ts.net'
+export QWEN_MLX_BASE_URL="$QWEN_MLX_ROOT/v1"
+export QWEN_MLX_MODEL='qwen3.8:27b-mlx'
+curl --fail "$QWEN_MLX_BASE_URL/models"
+curl --fail "$QWEN_MLX_ROOT/api/tags"
+```
+
+在 `deploy/ai395-review-staging/.env` 只對 staging 設定：
+
+```dotenv
+QWEN_MLX_ENABLED=1
+QWEN_MLX_BASE_URL=https://<macbook>.<tailnet>.ts.net/v1
+QWEN_MLX_MODEL=qwen3.8:27b-mlx
+AI395_STAGING_ALLOW_LIVE_LLM=1
+AI395_STAGING_MODEL_MODE=local_qwen_mlx
+AI395_STAGING_LLM_LANE_POLICY=residual
+AI395_STAGING_LLM_MAX_CALLS=20
+AI395_STAGING_MODEL_TIMEOUT=120
+AI395_STAGING_MODEL_MAX_TOKENS=512
+```
+
+重建 staging worker 後，以 n8n 或 HTTP bridge 啟動；這個請求仍然只產生 staging SQL、advisory findings 與 dry-run：
+
+```bash
+docker compose --env-file deploy/ai395-review-staging/.env \
+  -f deploy/ai395-review-staging/compose.yaml up -d --build pipeline-worker
+curl --fail -X POST http://127.0.0.1:58080/runs/e2e \
+  -H 'Content-Type: application/json' \
+  -d '{"fixture":"mini20","run_id":"ai395-mini20-qwen-local","model_mode":"local_qwen_mlx"}'
+curl --fail http://127.0.0.1:58080/runs/ai395-mini20-qwen-local
+```
+
+若 AI395 不是 Tailscale tailnet member 或 ACL 不允許，worker 應保留 provider exception；不要把 11434 直接開到 LAN／公網。模型回覆、endpoint、transport、prompt version 與錯誤都會留在 staging lane result；不能自動寫入人工 accept、block、group confirm 或正式題目 revision。mini20 的 SVG fixture 刻意不會送給 vision model，會進 `pixels_unavailable` 例外；接上真實 MinerU PNG/JPEG/WebP 產物後，才測視覺 pixel lane。

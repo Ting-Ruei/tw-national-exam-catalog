@@ -25,7 +25,7 @@
       "credential_env": null,
       "endpoint_env": "QWEN_MLX_BASE_URL",
       "model_env": "QWEN_MLX_MODEL",
-      "transport": "ollama_openai_compatible",
+      "transport": "ollama_native",
       "network_allowed": true,
       "tailnet_only": true,
       "access_scope": "tailnet",

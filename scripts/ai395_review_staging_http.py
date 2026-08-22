@@ -26,14 +26,31 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class State:
-    def __init__(self, database_url: str, artifact_root: Path):
+    def __init__(
+        self,
+        database_url: str,
+        artifact_root: Path,
+        *,
+        allow_live_llm: bool,
+        default_model_mode: str,
+        llm_lane_policy: str,
+        llm_max_calls: int,
+        model_timeout: float,
+        model_max_tokens: int,
+    ):
         self.database_url = database_url
         self.artifact_root = artifact_root
+        self.allow_live_llm = allow_live_llm
+        self.default_model_mode = default_model_mode
+        self.llm_lane_policy = llm_lane_policy
+        self.llm_max_calls = llm_max_calls
+        self.model_timeout = model_timeout
+        self.model_max_tokens = model_max_tokens
         self.lock = threading.Lock()
         self.active = False
         self.runs: dict[str, dict[str, Any]] = {}
 
-    def launch(self, fixture: str, run_id: str) -> None:
+    def launch(self, fixture: str, run_id: str, model_mode: str) -> None:
         with self.lock:
             if self.active:
                 raise RuntimeError("a staging run is already active")
@@ -52,6 +69,12 @@ class State:
                     run_id=run_id,
                     source_mode="mock_fixture",
                     mineru_mode="mock_fixture",
+                    model_mode=model_mode,
+                    allow_live_provider=model_mode == "local_qwen_mlx",
+                    llm_lane_policy=self.llm_lane_policy,
+                    llm_max_calls=self.llm_max_calls,
+                    model_timeout=self.model_timeout,
+                    model_max_tokens=self.model_max_tokens,
                 )
                 report = run_e2e(args)
                 with self.lock:
@@ -122,9 +145,17 @@ class Handler(BaseHTTPRequestHandler):
             run_id = str(payload.get("run_id") or f"http-{int(time.time())}")
             if not SAFE_ID.fullmatch(run_id):
                 raise ValueError("run_id contains unsupported characters")
-            self.state.launch(fixture, run_id)
+            model_mode = str(payload.get("model_mode") or self.state.default_model_mode)
+            if model_mode not in {"mock", "local_qwen_mlx"}:
+                raise ValueError("model_mode must be mock or local_qwen_mlx")
+            if model_mode == "local_qwen_mlx" and not self.state.allow_live_llm:
+                raise PermissionError("live LLM mode is disabled; set AI395_STAGING_ALLOW_LIVE_LLM=1 explicitly")
+            self.state.launch(fixture, run_id, model_mode)
         except RuntimeError as exc:
             self.send_json(409, {"status": "busy", "error": str(exc)})
+            return
+        except PermissionError as exc:
+            self.send_json(403, {"status": "forbidden", "error": str(exc)})
             return
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send_json(400, {"status": "failed", "error": str(exc)})
@@ -141,6 +172,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--database-url", default=os.environ.get("AI395_STAGING_DATABASE_URL", "sqlite:///tmp/ai395_review_staging_http.sqlite3"))
     parser.add_argument("--artifact-root", type=Path, default=Path(os.environ.get("AI395_STAGING_ARTIFACT_ROOT", "/var/lib/ai395-review-staging")))
+    parser.add_argument("--allow-live-llm", action="store_true", default=os.environ.get("AI395_STAGING_ALLOW_LIVE_LLM", "0").lower() in {"1", "true", "yes"})
+    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx"), default=os.environ.get("AI395_STAGING_MODEL_MODE", "mock"))
+    parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default=os.environ.get("AI395_STAGING_LLM_LANE_POLICY", "residual"))
+    parser.add_argument("--llm-max-calls", type=int, default=int(os.environ.get("AI395_STAGING_LLM_MAX_CALLS", "20")))
+    parser.add_argument("--model-timeout", type=float, default=float(os.environ.get("AI395_STAGING_MODEL_TIMEOUT", "120")))
+    parser.add_argument("--model-max-tokens", type=int, default=int(os.environ.get("AI395_STAGING_MODEL_MAX_TOKENS", "512")))
     return parser.parse_args()
 
 
@@ -148,7 +185,16 @@ def main() -> int:
     args = parse_args()
     args.artifact_root.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.state = State(args.database_url, args.artifact_root)  # type: ignore[attr-defined]
+    server.state = State(  # type: ignore[attr-defined]
+        args.database_url,
+        args.artifact_root,
+        allow_live_llm=args.allow_live_llm,
+        default_model_mode=args.model_mode,
+        llm_lane_policy=args.llm_lane_policy,
+        llm_max_calls=args.llm_max_calls,
+        model_timeout=args.model_timeout,
+        model_max_tokens=args.model_max_tokens,
+    )
     print(json.dumps({"status": "ready", "host": args.host, "port": args.port}, sort_keys=True), flush=True)
     try:
         server.serve_forever()
