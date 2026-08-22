@@ -106,6 +106,20 @@ class AI395ReviewStagingTests(unittest.TestCase):
                 ROOT / "fixtures" / "ai395_review" / "mini20",
             )
 
+    def test_json_parser_recovers_only_unambiguous_root_object(self) -> None:
+        self.assertEqual(
+            llm_adapter._parse_json_object("說明文字\n{\"status\":\"pass\"}\n結束"),
+            {"status": "pass"},
+        )
+        self.assertEqual(
+            llm_adapter._parse_json_object(
+                '{"status":"pass"}\n```json\n{"status":"pass"}\n```'
+            ),
+            {"status": "pass"},
+        )
+        with self.assertRaisesRegex(llm_adapter.LLMAdapterError, "invalid JSON"):
+            llm_adapter._parse_json_object('{"status":"pass"}\n{"status":"finding"}')
+
     def test_context_guard_fails_closed_before_transport(self) -> None:
         with self.assertRaises(ContextBudgetExceeded) as raised:
             enforce_payload({"prompt": "x" * 2_000}, output_tokens=32, context_limit_tokens=1_024, safety_margin_tokens=64)

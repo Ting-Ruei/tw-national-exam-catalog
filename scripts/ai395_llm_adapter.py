@@ -433,15 +433,34 @@ def _parse_json_object(content: str) -> dict[str, Any]:
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
+    except json.JSONDecodeError as parse_error:
+        # Qwen sometimes obeys the JSON contract but adds a short preface or
+        # repeats the same object after a fenced answer.  Recover only from
+        # independently decodable root objects; never repair malformed JSON
+        # strings or choose between contradictory objects.
+        decoder = json.JSONDecoder()
+        candidates: list[dict[str, Any]] = []
+        cursor = 0
+        while cursor < len(cleaned):
+            start = cleaned.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                candidate, end = decoder.raw_decode(cleaned, start)
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            if isinstance(candidate, dict):
+                candidates.append(candidate)
+                cursor = end
+            else:
+                cursor = start + 1
+        if not candidates:
             raise LLMAdapterError("Ollama content is not a JSON object")
-        try:
-            parsed = json.loads(cleaned[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise LLMAdapterError("Ollama content contains invalid JSON") from exc
+        unique_candidates = {canonical_json(candidate) for candidate in candidates}
+        if len(unique_candidates) != 1:
+            raise LLMAdapterError("Ollama content contains invalid JSON") from parse_error
+        parsed = candidates[0]
     if not isinstance(parsed, dict):
         raise LLMAdapterError("Ollama JSON result is not an object")
     return parsed
