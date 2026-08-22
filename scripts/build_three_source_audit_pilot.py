@@ -717,8 +717,10 @@ def main() -> int:
         if not key:
             raise RuntimeError(f"case has no candidate_key: {case}")
         if key not in by_key:
-            prefix = str(case.get("id") or "").split("_", 1)[0]
-            category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
+            category_scope = str(case.get("category_scope") or "")
+            if not category_scope:
+                prefix = str(case.get("id") or "").split("_", 1)[0]
+                category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
             missing.append((case, key, category_scope))
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(missing)))) as executor:
         futures = {

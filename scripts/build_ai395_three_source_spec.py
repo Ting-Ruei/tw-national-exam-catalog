@@ -36,11 +36,14 @@ def build_spec(rows: list[dict[str, Any]], *, scope_id: str, tags: set[str]) -> 
         matched = sorted(row_tags & tags)
         if not matched:
             continue
+        group_name = str(metadata.get("group_name") or "")
+        category_scope = "__pharmacist_track__" if group_name == "藥師" else "醫事檢驗師"
         cases.append(
             {
                 "id": f"{scope_id}_{index:03d}",
                 "candidate_key": str(row.get("candidate_key") or ""),
                 "lane": "text_evidence",
+                "category_scope": category_scope,
                 "scope_tags": matched,
                 "expected": [],
             }

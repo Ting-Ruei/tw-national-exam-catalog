@@ -29,6 +29,7 @@ class AI395ThreeSourceSpecTests(unittest.TestCase):
         self.assertEqual(result["case_count"], 2)
         self.assertEqual([case["candidate_key"] for case in result["cases"]], ["q1", "q3"])
         self.assertEqual(result["cases"][1]["scope_tags"], ["visual_missing"])
+        self.assertEqual(result["cases"][0]["category_scope"], "醫事檢驗師")
 
 
 if __name__ == "__main__":
