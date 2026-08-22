@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import ai395_review_staging as staging  # noqa: E402
 import ai395_llm_adapter as llm_adapter  # noqa: E402
+from ai395_context_guard import ContextBudgetExceeded, enforce_payload  # noqa: E402
 import probe_qwen_mlx_tailscale as qwen_probe  # noqa: E402
 
 
@@ -103,6 +105,86 @@ class AI395ReviewStagingTests(unittest.TestCase):
                 },
                 ROOT / "fixtures" / "ai395_review" / "mini20",
             )
+
+    def test_context_guard_fails_closed_before_transport(self) -> None:
+        with self.assertRaises(ContextBudgetExceeded) as raised:
+            enforce_payload({"prompt": "x" * 2_000}, output_tokens=32, context_limit_tokens=1_024, safety_margin_tokens=64)
+        self.assertFalse(raised.exception.details["within_budget"])
+        self.assertEqual(raised.exception.details["context_limit_tokens"], 1_024)
+
+    def test_lane_packet_allow_lists_metadata_and_declares_evidence_requests(self) -> None:
+        item = {
+            "candidate_key": "q1",
+            "question_number": "1",
+            "stem": "題目",
+            "options": [{"key": "A", "text": "選項", "image": {"bytes": 12, "path": "/secret/path.png"}}],
+            "metadata": {
+                "group_name": "藥師",
+                "year": "115",
+                "raw_block": "不應該送出的完整來源區塊",
+                "question_pdf": "/secret/question.pdf",
+            },
+        }
+        packet, _refs = llm_adapter.build_packet("text_evidence", item, item, ROOT)
+        self.assertNotIn("raw_block", packet["metadata"])
+        self.assertNotIn("question_pdf", packet["metadata"])
+        self.assertNotIn("path", packet["options"][0])
+        request = llm_adapter.build_request("text_evidence", packet, [], "qwen", 64)
+        self.assertIn("requested_evidence", request["messages"][1]["content"])
+
+    def test_model_agent_performs_one_allowlisted_evidence_followup(self) -> None:
+        item = {
+            "candidate_key": "q1",
+            "question_number": "1",
+            "stem": "題目",
+            "options": [],
+            "metadata": {},
+        }
+        runtime = {
+            "base_url": "https://macbook.tailnet.ts.net/v1",
+            "model": "qwen3.8:27b-mlx",
+            "timeout": 5,
+            "max_tokens": 64,
+            "transport": "ollama_native",
+            "context_limit_tokens": 131072,
+            "context_safety_margin_tokens": 8192,
+            "slow_threshold_seconds": 30,
+            "max_tool_turns": 1,
+        }
+        budget = {
+            "attempts": 0,
+            "calls": 0,
+            "errors": 0,
+            "max_calls": 3,
+            "slow_calls": 0,
+            "tool_turns": 0,
+            "context_rejections": 0,
+            "compact_level": 0,
+        }
+        first = {"status": "unclear", "requested_evidence": [{"kind": "question_markdown", "reason": "need source"}], "model_called": True}
+        second = {"status": "pass", "requested_evidence": [], "model_called": True}
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(staging, "call_lane", side_effect=[first, second]) as call_mock, mock.patch.object(
+                staging,
+                "collect_evidence",
+                return_value=[{"kind": "question_markdown", "status": "available", "text": "來源"}],
+            ) as tool_mock:
+                result = staging.run_model_agent(
+                    db=None,
+                    run_id="test",
+                    lane="text_evidence",
+                    item=item,
+                    revised=item,
+                    fixture_root=ROOT,
+                    model_runtime=runtime,
+                    model_budget=budget,
+                    evidence_cache_dir=Path(directory),
+                )
+        self.assertEqual(call_mock.call_count, 2)
+        self.assertEqual(tool_mock.call_count, 1)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["tool_turn_count"], 1)
+        self.assertEqual(budget["tool_turns"], 1)
 
 
 if __name__ == "__main__":

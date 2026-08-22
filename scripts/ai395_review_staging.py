@@ -22,10 +22,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ai395_context_guard import ContextBudgetExceeded
+from ai395_evidence_tools import collect_evidence
 from ai395_llm_adapter import LLMAdapterError, PixelsUnavailable, PROMPT_VERSION, call_lane
 from ai395_source_adapter import ContractError, validate_manifests
 from probe_qwen_mlx_tailscale import ProbeError, normalized_base_url
@@ -193,8 +196,19 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
             key = str(item["candidate_key"])
             if not key or key in seen:
                 raise StagingContractError(f"duplicate or empty candidate_key: {key!r}")
-            if not isinstance(item["options"], list) or len(item["options"]) < 2:
-                raise StagingContractError(f"candidate {key} has invalid options")
+            if not isinstance(item["options"], list):
+                raise StagingContractError(f"candidate {key} has invalid options type")
+            if len(item["options"]) < 2:
+                # Real parser output is allowed to enter staging with an
+                # incomplete option list so the defect can be shown to the
+                # human exception queue.  It must already be explicitly
+                # marked as blocked/needs_review (or carry parser issues);
+                # otherwise this is a malformed upstream contract and should
+                # still stop the run rather than silently downgrade it.
+                metadata = item.get("metadata") or {}
+                parser_status_hint = str(metadata.get("parser_status") or item.get("quality_status") or "")
+                if parser_status_hint not in {"blocked", "needs_review"} and int(item.get("issue_count") or 0) <= 0:
+                    raise StagingContractError(f"candidate {key} has invalid options")
             if not isinstance(item["metadata"], dict):
                 raise StagingContractError(f"candidate {key} metadata must be an object")
             seen.add(key)
@@ -426,6 +440,16 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
         raise StagingContractError(f"invalid local_qwen_mlx endpoint: {exc}") from exc
     if provider.get("network_allowed") is not True or provider.get("tailnet_only") is not True:
         raise StagingContractError("local_qwen_mlx provider contract does not allow the required tailnet transport")
+    context_policy = model_stage.get("context_policy") or {}
+    context_limit_tokens = int(getattr(args, "context_limit_tokens", None) or context_policy.get("hard_limit_tokens", 131_072))
+    context_safety_margin_tokens = int(getattr(args, "context_safety_margin_tokens", None) or context_policy.get("safety_margin_tokens", 8_192))
+    if context_limit_tokens <= 0 or context_limit_tokens > 131_072:
+        raise StagingContractError("local_qwen_mlx context limit must be between 1 and 131072 tokens")
+    if context_safety_margin_tokens < 0 or context_safety_margin_tokens >= context_limit_tokens:
+        raise StagingContractError("invalid local_qwen_mlx context safety margin")
+    max_tool_turns = int(getattr(args, "max_tool_turns", None) if getattr(args, "max_tool_turns", None) is not None else context_policy.get("max_tool_turns", 1))
+    if max_tool_turns < 0 or max_tool_turns > 2:
+        raise StagingContractError("max_tool_turns must be between 0 and 2")
     return {
         "mode": "local_qwen_mlx",
         "provider": "local_qwen_mlx",
@@ -438,6 +462,13 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
         "transport": str(provider.get("transport") or "ollama_native"),
         "endpoint_class": endpoint_class,
         "enabled_by_env": env_enabled,
+        # This is a staging admission limit for the MacBook provider.  It is
+        # intentionally independent of AI395's current llama.cpp setting;
+        # AI395 is not routed by this mode.
+        "context_limit_tokens": context_limit_tokens,
+        "context_safety_margin_tokens": context_safety_margin_tokens,
+        "slow_threshold_seconds": float(getattr(args, "model_slow_threshold", None) or context_policy.get("slow_threshold_seconds", 30.0)),
+        "max_tool_turns": max_tool_turns,
     }
 
 
@@ -445,6 +476,9 @@ def lane_needs_model(lane: str, revised: dict[str, Any], policy: str) -> bool:
     if policy == "all":
         return True
     metadata = revised.get("metadata") or {}
+    configured_targets = metadata.get("llm_lane_targets")
+    if isinstance(configured_targets, list):
+        return lane in {str(value) for value in configured_targets}
     if lane == "text_evidence":
         return bool(metadata.get("demo_text_issue") or metadata.get("llm_residual"))
     if lane == "notation":
@@ -471,6 +505,8 @@ def model_finding(model_result: dict[str, Any], lane: str) -> dict[str, Any] | N
         code = "provider_error"
     elif model_result.get("error") == "model_call_budget_exhausted":
         code = "call_budget_exhausted"
+    elif model_result.get("error") == "context_budget_exceeded":
+        code = "context_budget_exceeded"
     else:
         code = "model_unclear" if status == "unclear" else "model_finding"
     severity = "error" if status in {"unclear", "error"} or lane in {"group", "vision", "answer"} else "warning"
@@ -519,6 +555,148 @@ def evaluate_lane(lane: str, item: dict[str, Any], revised: dict[str, Any]) -> t
     return status, result, findings
 
 
+def run_model_agent(
+    *,
+    db: StagingDB,
+    run_id: str,
+    lane: str,
+    item: dict[str, Any],
+    revised: dict[str, Any],
+    fixture_root: Path,
+    model_runtime: dict[str, Any],
+    model_budget: dict[str, Any],
+    evidence_cache_dir: Path,
+) -> dict[str, Any]:
+    """Run bounded model turns with allow-listed evidence tool requests."""
+
+    evidence: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
+    final_result: dict[str, Any] | None = None
+    compact_level = int(model_budget.get("compact_level", 0))
+    max_tool_turns = int(model_runtime.get("max_tool_turns", 1))
+    slow_threshold = float(model_runtime.get("slow_threshold_seconds", 30.0))
+
+    for turn in range(max_tool_turns + 1):
+        if model_budget["calls"] >= model_budget["max_calls"]:
+            final_result = {
+                "status": "error",
+                "error": "model_call_budget_exhausted",
+                "advisory_only": True,
+                "materialize": False,
+                "requested_evidence": [],
+            }
+            model_budget["errors"] += 1
+            break
+        model_budget["attempts"] += 1
+        model_budget["calls"] += 1
+        started = time.monotonic()
+        try:
+            result = call_lane(
+                base_url=str(model_runtime["base_url"]),
+                model=str(model_runtime["model"]),
+                lane=lane,
+                item=item,
+                revised=revised,
+                fixture_root=fixture_root,
+                timeout=float(model_runtime["timeout"]),
+                max_tokens=int(model_runtime["max_tokens"]),
+                transport=str(model_runtime["transport"]),
+                evidence=evidence,
+                compact_level=compact_level,
+                context_limit_tokens=int(model_runtime.get("context_limit_tokens", 131_072)),
+                context_safety_margin_tokens=int(model_runtime.get("context_safety_margin_tokens", 8_192)),
+            )
+        except PixelsUnavailable as exc:
+            model_budget["calls"] -= 1
+            result = {
+                "status": "error",
+                "error": "pixels_unavailable",
+                "message": str(exc),
+                "advisory_only": True,
+                "materialize": False,
+                "requested_evidence": [],
+            }
+            model_budget["errors"] += 1
+        except ContextBudgetExceeded as exc:
+            model_budget["calls"] -= 1
+            model_budget["context_rejections"] += 1
+            result = {
+                "status": "error",
+                "error": "context_budget_exceeded",
+                "message": str(exc),
+                "context_guard": exc.details,
+                "advisory_only": True,
+                "materialize": False,
+                "requested_evidence": [],
+            }
+            model_budget["errors"] += 1
+        except LLMAdapterError as exc:
+            result = {
+                "status": "error",
+                "error": "provider_error",
+                "message": str(exc),
+                "advisory_only": True,
+                "materialize": False,
+                "requested_evidence": [],
+            }
+            model_budget["errors"] += 1
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        result["turn"] = turn
+        result["latency_ms"] = elapsed_ms
+        result["latency_status"] = "slow" if elapsed_ms > slow_threshold * 1000 else "normal"
+        result["compact_level"] = compact_level
+        result["model_called"] = result.get("error") not in {"pixels_unavailable", "context_budget_exceeded", "model_call_budget_exhausted"}
+        trace_row: dict[str, Any] = {
+            "turn": turn,
+            "latency_ms": elapsed_ms,
+            "latency_status": result["latency_status"],
+            "compact_level": compact_level,
+            "requested_evidence": result.get("requested_evidence") or [],
+        }
+        if result["latency_status"] == "slow":
+            model_budget["slow_calls"] += 1
+            model_budget["compact_level"] = 1
+            compact_level = 1
+            trace_row["adaptive_action"] = "compact_context_for_next_turn_and_lane"
+
+        final_result = result
+        requests = result.get("requested_evidence") or []
+        if not requests or result.get("error") or turn >= max_tool_turns:
+            trace.append(trace_row)
+            break
+        tool_started = time.monotonic()
+        tool_results = collect_evidence(
+            requests,
+            item,
+            cache_dir=evidence_cache_dir,
+            compact_level=compact_level,
+        )
+        tool_elapsed_ms = round((time.monotonic() - tool_started) * 1000, 1)
+        trace_row["tool_elapsed_ms"] = tool_elapsed_ms
+        trace_row["tool_results"] = tool_results
+        trace.append(trace_row)
+        model_budget["tool_turns"] += 1
+        evidence = tool_results
+
+    if final_result is None:
+        final_result = {
+            "status": "error",
+            "error": "model_agent_no_result",
+            "advisory_only": True,
+            "materialize": False,
+            "requested_evidence": [],
+        }
+        model_budget["errors"] += 1
+    final_result["agentic_trace"] = trace
+    final_result["tool_turn_count"] = sum(1 for row in trace if row.get("tool_results"))
+    final_result["context_policy"] = {
+        "hard_limit_tokens": int(model_runtime.get("context_limit_tokens", 131_072)),
+        "safety_margin_tokens": int(model_runtime.get("context_safety_margin_tokens", 8_192)),
+        "slow_threshold_seconds": slow_threshold,
+    }
+    return final_result
+
+
 def run_lane(
     db: StagingDB,
     run_id: str,
@@ -529,9 +707,10 @@ def run_lane(
     lane: str,
     parser_blocked: bool,
     model_runtime: dict[str, Any],
-    model_budget: dict[str, int],
+    model_budget: dict[str, Any],
     fixture_root: Path,
     llm_lane_policy: str,
+    evidence_cache_dir: Path,
 ) -> None:
     table = db.table("review_lane_runs")
     if parser_blocked:
@@ -545,49 +724,18 @@ def run_lane(
         result["model_called"] = False
         result["model_result"] = None
         if model_runtime["mode"] == "local_qwen_mlx" and lane_needs_model(lane, revised, llm_lane_policy):
-            if model_budget["calls"] >= model_budget["max_calls"]:
-                model_result = {
-                    "status": "error",
-                    "error": "model_call_budget_exhausted",
-                    "advisory_only": True,
-                    "materialize": False,
-                }
-                model_budget["errors"] += 1
-            else:
-                model_budget["attempts"] += 1
-                model_budget["calls"] += 1
-                try:
-                    model_result = call_lane(
-                        base_url=str(model_runtime["base_url"]),
-                        model=str(model_runtime["model"]),
-                        lane=lane,
-                        item=item,
-                        revised=revised,
-                        fixture_root=fixture_root,
-                        timeout=float(model_runtime["timeout"]),
-                        max_tokens=int(model_runtime["max_tokens"]),
-                        transport=str(model_runtime["transport"]),
-                    )
-                except PixelsUnavailable as exc:
-                    model_budget["calls"] -= 1
-                    model_result = {
-                        "status": "error",
-                        "error": "pixels_unavailable",
-                        "message": str(exc),
-                        "advisory_only": True,
-                        "materialize": False,
-                    }
-                    model_budget["errors"] += 1
-                except LLMAdapterError as exc:
-                    model_result = {
-                        "status": "error",
-                        "error": "provider_error",
-                        "message": str(exc),
-                        "advisory_only": True,
-                        "materialize": False,
-                    }
-                    model_budget["errors"] += 1
-            result["model_called"] = model_result.get("error") not in {"pixels_unavailable", "model_call_budget_exhausted"}
+            model_result = run_model_agent(
+                db=db,
+                run_id=run_id,
+                lane=lane,
+                item=item,
+                revised=revised,
+                fixture_root=fixture_root,
+                model_runtime=model_runtime,
+                model_budget=model_budget,
+                evidence_cache_dir=evidence_cache_dir,
+            )
+            result["model_called"] = bool(model_result.get("model_called"))
             result["model_result"] = model_result
             finding = model_finding(model_result, lane)
             if finding:
@@ -665,6 +813,76 @@ def add_parser_exception(db: StagingDB, run_id: str, candidate_key: str, revisio
         )
 
 
+def add_source_issue_exceptions(
+    db: StagingDB,
+    run_id: str,
+    revision_map: dict[str, str],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Project deterministic parser issue rows into the staging human queue.
+
+    The parser CSV is immutable evidence. This projection is append-safe and
+    remains staging-only; it does not impersonate a human review event.
+    """
+
+    owner_by_code = {
+        "image_hint_without_asset": "image",
+        "missing_image_asset": "image",
+        "empty_image_asset": "image",
+        "markup_needs_review": "question",
+        "amino_acid_translation_suspect": "question",
+        "suspicious_ocr_chars": "question",
+        "option_order_unusual": "question",
+        "too_few_options": "question",
+        "empty_option": "question",
+        "missing_answer": "answer",
+        "missing_answer_markdown": "answer",
+    }
+    exception_table = db.table("review_exception_queue")
+    for issue in issues:
+        candidate_key = str(issue.get("candidate_key") or "")
+        if not candidate_key or candidate_key not in revision_map:
+            continue
+        code = str(issue.get("issue_code") or "parser_issue")
+        revision_id = revision_map[candidate_key]
+        owner_stage = owner_by_code.get(code, "parser")
+        severity = str(issue.get("severity") or "warning")
+        if severity not in {"info", "warning", "error", "blocked"}:
+            severity = "warning"
+        raw_issue_json = issue.get("issue_json") or "{}"
+        try:
+            issue_json = json.loads(raw_issue_json) if isinstance(raw_issue_json, str) else raw_issue_json
+        except json.JSONDecodeError:
+            issue_json = {"raw": raw_issue_json}
+        reason_code = f"parser_{code}"[:120]
+        exists = db.fetchone(
+            f"SELECT 1 FROM {exception_table} WHERE run_id=? AND candidate_key=? AND revision_id=? AND owner_stage=? AND reason_code=?",
+            (run_id, candidate_key, revision_id, owner_stage, reason_code),
+        )
+        if exists:
+            continue
+        db.execute(
+            f"""INSERT INTO {exception_table}
+                (run_id, candidate_key, revision_id, owner_stage, reason_code, severity,
+                 status, evidence_json, ai_advisory_only, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', ?, 1, ?)""",
+            (
+                run_id,
+                candidate_key,
+                revision_id,
+                owner_stage,
+                reason_code,
+                severity,
+                canonical_json({
+                    "source": "parser_issue_csv",
+                    "issue_code": code,
+                    "message": str(issue.get("message") or ""),
+                    "question_number": issue.get("question_number"),
+                    "issue_json": issue_json,
+                }),
+                now_iso(),
+            ),
+        )
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -756,7 +974,16 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
     max_calls = int(getattr(args, "llm_max_calls", 20))
     if max_calls < 0:
         raise StagingContractError("llm_max_calls must be >= 0")
-    model_budget = {"attempts": 0, "calls": 0, "errors": 0, "max_calls": max_calls}
+    model_budget = {
+        "attempts": 0,
+        "calls": 0,
+        "errors": 0,
+        "max_calls": max_calls,
+        "slow_calls": 0,
+        "tool_turns": 0,
+        "context_rejections": 0,
+        "compact_level": 0,
+    }
     effective_config_hash = sha256_text(canonical_json({
         "base_config_sha256": base_config_hash,
         "model_runtime": {key: value for key, value in model_runtime.items() if key != "base_url"},
@@ -782,10 +1009,11 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
         expected_total = catalog.get("expected_question_count")
     if expected_total is not None and int(expected_total) != len(candidates):
         raise StagingContractError(f"fixture coverage mismatch: expected {expected_total}, got {len(candidates)}")
-    fixture_root = source_manifest.resolve().parent
+    fixture_root = Path(verified["mineru"].get("resolved_image_root") or source_manifest.resolve().parent)
     run_id = args.run_id or datetime.now(timezone.utc).strftime("staging-%Y%m%dT%H%M%SZ")
     artifact_dir = (args.artifact_dir / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    evidence_cache_dir = artifact_dir / "evidence_cache"
     db = StagingDB(args.database_url)
     try:
         db.apply_migration()
@@ -811,6 +1039,7 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             revised_items[str(item["candidate_key"])] = json.loads(row["content_json"])
             enqueue_jobs(db, run_id, str(item["candidate_key"]), revision_id)
             add_parser_exception(db, run_id, str(item["candidate_key"]), revision_id, item)
+        add_source_issue_exceptions(db, run_id, revision_map, issues)
         db.commit()
 
         for item in candidates:
@@ -831,6 +1060,7 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
                     model_budget,
                     fixture_root,
                     llm_lane_policy,
+                    evidence_cache_dir,
                 )
         report = build_formal_report(db, run_id, candidates)
         report.update({
@@ -852,6 +1082,15 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "llm_attempts": model_budget["attempts"],
             "llm_calls": model_budget["calls"],
             "llm_errors": model_budget["errors"],
+            "llm_slow_calls": model_budget["slow_calls"],
+            "llm_tool_turns": model_budget["tool_turns"],
+            "llm_context_rejections": model_budget["context_rejections"],
+            "model_context_policy": {
+                "hard_limit_tokens": model_runtime.get("context_limit_tokens"),
+                "safety_margin_tokens": model_runtime.get("context_safety_margin_tokens"),
+                "slow_threshold_seconds": model_runtime.get("slow_threshold_seconds"),
+                "max_tool_turns": model_runtime.get("max_tool_turns"),
+            },
         })
         db.execute(
             f"UPDATE {db.table('formal_dry_runs')} SET report_json=? WHERE run_id=?",
@@ -883,6 +1122,15 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "llm_attempts": model_budget["attempts"],
             "llm_calls": model_budget["calls"],
             "llm_errors": model_budget["errors"],
+            "llm_slow_calls": model_budget["slow_calls"],
+            "llm_tool_turns": model_budget["tool_turns"],
+            "llm_context_rejections": model_budget["context_rejections"],
+            "model_context_policy": {
+                "hard_limit_tokens": model_runtime.get("context_limit_tokens"),
+                "safety_margin_tokens": model_runtime.get("context_safety_margin_tokens"),
+                "slow_threshold_seconds": model_runtime.get("slow_threshold_seconds"),
+                "max_tool_turns": model_runtime.get("max_tool_turns"),
+            },
             "parent_run_ids": [],
             "database_written": True,
             "review_events_written": False,
@@ -940,6 +1188,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-max-calls", type=int, default=20)
     parser.add_argument("--model-timeout", type=float, default=120.0)
     parser.add_argument("--model-max-tokens", type=int, default=512)
+    parser.add_argument("--context-limit-tokens", type=int, default=None, help="hard staging admission limit for the MacBook provider")
+    parser.add_argument("--context-safety-margin-tokens", type=int, default=None)
+    parser.add_argument("--model-slow-threshold", type=float, default=None, help="seconds after which subsequent lanes use compact context")
+    parser.add_argument("--max-tool-turns", type=int, default=None, help="maximum bounded evidence-tool follow-up turns per lane")
     parser.add_argument("--describe", action="store_true")
     return parser.parse_args()
 

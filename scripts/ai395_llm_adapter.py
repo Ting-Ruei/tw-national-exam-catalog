@@ -20,13 +20,23 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ai395_context_guard import ContextBudgetExceeded, enforce_payload
 from probe_qwen_mlx_tailscale import normalized_base_url
 
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
-PROMPT_VERSION = "ai395_lane_advisory_v1"
+PROMPT_VERSION = "ai395_lane_advisory_v2_context_guarded"
+ALLOWED_EVIDENCE_KINDS = {
+    "question_markdown",
+    "answer_markdown",
+    "adjacent_questions",
+    "pdf_reference",
+    "image_manifest",
+}
+MAX_PACKET_TEXT_CHARS = 12_000
+MAX_EVIDENCE_TEXT_CHARS = 16_000
 
 
 class LLMAdapterError(RuntimeError):
@@ -69,18 +79,120 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _truncate_text(value: Any, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 24)] + "\n[…truncated by context policy…]"
+
+
+def _compact_metadata(metadata: Any, lane: str, compact_level: int) -> dict[str, Any]:
+    """Allow-list metadata; file paths and raw document blocks never go to LLM."""
+
+    if not isinstance(metadata, dict):
+        return {}
+    common_keys = (
+        "group_name",
+        "normalized_category_name",
+        "normalized_subject_name",
+        "year",
+        "parser_version",
+        "parser_status",
+        "ai395_scope_tags",
+    )
+    lane_keys = {
+        "text_evidence": ("text_issue_codes",),
+        "notation": ("notation_issue_codes", "stem_markup_status"),
+        "group": ("group_boundary", "group_type", "group_sequence_no"),
+        "vision": ("visual_expected", "visual_cue", "crop_status"),
+        "answer": ("answer_mode", "answer_role_primary", "is_special_correction"),
+    }
+    result: dict[str, Any] = {}
+    for key in (*common_keys, *lane_keys.get(lane, ())):
+        value = metadata.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, list):
+            result[key] = [str(item)[:120] for item in value[:16]]
+        elif isinstance(value, (bool, int, float)):
+            result[key] = value
+        else:
+            result[key] = _truncate_text(value, 600 if compact_level == 0 else 240)
+    return result
+
+
+def _compact_options(options: Any, lane: str) -> list[dict[str, Any]]:
+    if not isinstance(options, list):
+        return []
+    compacted: list[dict[str, Any]] = []
+    for option in options[:8]:
+        if not isinstance(option, dict):
+            continue
+        row: dict[str, Any] = {
+            "key": str(option.get("key") or "")[:16],
+            "text": _truncate_text(option.get("text"), 3000),
+        }
+        if option.get("markup"):
+            row["markup"] = _truncate_text(option.get("markup"), 2000)
+        image = option.get("image")
+        if isinstance(image, dict):
+            row["has_image"] = True
+            row["image_bytes"] = int(image.get("bytes") or 0)
+        if lane == "vision" and option.get("image") is not None:
+            row["visual_slot"] = True
+        compacted.append(row)
+    return compacted
+
+
+def _compact_evidence(evidence: Any, compact_level: int) -> list[dict[str, Any]]:
+    if not evidence:
+        return []
+    rows = evidence if isinstance(evidence, list) else [evidence]
+    remaining = 8_000 if compact_level else MAX_EVIDENCE_TEXT_CHARS
+    compacted: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or remaining <= 0:
+            continue
+        item: dict[str, Any] = {}
+        for key in ("kind", "source", "status", "locator", "page", "family", "tool"):
+            value = row.get(key)
+            if value is not None and value != "":
+                item[key] = _truncate_text(value, 300)
+        text = _truncate_text(row.get("text"), min(remaining, 6_000 if compact_level else 8_000))
+        if text:
+            item["text"] = text
+            remaining -= len(text)
+        if row.get("error"):
+            item["error"] = _truncate_text(row.get("error"), 500)
+        if item:
+            compacted.append(item)
+    return compacted
+
+
 def _image_refs(item: dict[str, Any], fixture_root: Path) -> list[dict[str, Any]]:
     root = fixture_root.resolve()
     resolved_refs: list[dict[str, Any]] = []
     for raw_ref in item.get("image_refs") or []:
         if not isinstance(raw_ref, dict):
             raise PixelsUnavailable("image reference is not an object")
-        raw_path = raw_ref.get("resolved_path") or raw_ref.get("relative_path") or raw_ref.get("path")
+        # Prefer the parser's verified absolute path when it is still present.
+        # Older candidate exports put the project-relative path first; joining
+        # that value to an image root that is already ``.../20_mineru_output``
+        # would duplicate ``國考題資料夾/20_mineru_output`` and falsely report
+        # a missing pixel asset.
+        raw_path = raw_ref.get("resolved_path") or raw_ref.get("path") or raw_ref.get("relative_path")
         if not raw_path:
             raise PixelsUnavailable("image reference has no path")
         candidate = Path(str(raw_path))
         if not candidate.is_absolute():
-            candidate = root / candidate
+            relative_candidate = root / candidate
+            if not relative_candidate.is_file() and str(candidate).startswith("國考題資料夾/"):
+                # The portable path is project-root relative while the
+                # confinement root is the MinerU asset subtree.
+                project_candidate = root.parents[1] / candidate
+                if project_candidate.is_file():
+                    relative_candidate = project_candidate
+            candidate = relative_candidate
         resolved = candidate.resolve()
         try:
             resolved.relative_to(root)
@@ -105,24 +217,49 @@ def _image_refs(item: dict[str, Any], fixture_root: Path) -> list[dict[str, Any]
     return resolved_refs
 
 
-def build_packet(lane: str, item: dict[str, Any], revised: dict[str, Any], fixture_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def build_packet(
+    lane: str,
+    item: dict[str, Any],
+    revised: dict[str, Any],
+    fixture_root: Path,
+    *,
+    evidence: Any = None,
+    compact_level: int = 0,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if lane not in LANE_INSTRUCTIONS:
         raise LLMAdapterError(f"unsupported lane: {lane}")
     packet: dict[str, Any] = {
         "candidate_key": str(revised.get("candidate_key") or item.get("candidate_key")),
         "lane": lane,
         "question_number": str(revised.get("question_number") or item.get("question_number")),
-        "stem": str(revised.get("stem") or ""),
-        "options": revised.get("options") or [],
-        "group_ref": revised.get("group_ref"),
-        "metadata": revised.get("metadata") or {},
+        "stem": _truncate_text(revised.get("stem"), 12_000),
+        "options": _compact_options(revised.get("options") or [], lane),
+        "metadata": _compact_metadata(revised.get("metadata") or {}, lane, compact_level),
     }
+    if revised.get("stem_markup"):
+        packet["stem_markup"] = _truncate_text(revised.get("stem_markup"), 4_000)
+    if revised.get("group_ref") and lane == "group":
+        packet["group_ref"] = revised.get("group_ref")
     if lane == "answer":
         packet["answer"] = revised.get("answer")
+        answer_payload = revised.get("answer_payload")
+        if isinstance(answer_payload, dict):
+            packet["answer_payload"] = {
+                key: value
+                for key, value in answer_payload.items()
+                if key in {"accepted_values", "answer", "raw_answer", "is_special_correction"}
+            }
     image_refs = _image_refs(revised, fixture_root) if lane == "vision" else []
     if lane == "vision" and not image_refs:
         raise PixelsUnavailable("vision lane requires at least one supported raster image")
-    packet["image_refs"] = [{key: value for key, value in ref.items() if key != "data_url"} for ref in image_refs]
+    if lane == "vision":
+        packet["image_slots"] = [
+            {"slot": index + 1, "bytes": int(ref.get("bytes") or 0), "mime_type": ref.get("mime_type")}
+            for index, ref in enumerate(image_refs)
+        ]
+    compacted_evidence = _compact_evidence(evidence, compact_level)
+    if compacted_evidence:
+        packet["evidence"] = compacted_evidence
     return packet, image_refs
 
 
@@ -133,10 +270,18 @@ def build_request(lane: str, packet: dict[str, Any], image_refs: list[dict[str, 
         "finding_codes": ["short_code"],
         "reason": "observable reason in 160 characters or fewer",
         "proposed_changes": [],
+        "requested_evidence": [
+            {
+                "kind": "question_markdown|answer_markdown|adjacent_questions|pdf_reference|image_manifest",
+                "reason": "why this bounded evidence is needed",
+            }
+        ],
     }
     user_text = (
         f"LANE_INSTRUCTION={LANE_INSTRUCTIONS[lane]}\n"
         "Return ONLY one JSON object. Do not output markdown. The result is advisory.\n"
+        "If the packet is insufficient, request only allow-listed bounded evidence in "
+        "requested_evidence; do not guess, do not request arbitrary files, commands, secrets, or full documents.\n"
         f"JSON_SHAPE={canonical_json(schema_hint)}\n"
         f"PACKET={canonical_json(packet)}"
     )
@@ -302,7 +447,43 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _normalize_result(payload: dict[str, Any], content: str, raw_response: str, *, lane: str, model: str, endpoint: str, transport: str, elapsed_ms: float, pixels_sent: int) -> dict[str, Any]:
+def _normalize_evidence_requests(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    requests: list[dict[str, Any]] = []
+    for row in value[:4]:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip()
+        if kind not in ALLOWED_EVIDENCE_KINDS:
+            continue
+        request = {
+            "kind": kind,
+            "reason": _truncate_text(row.get("reason"), 240),
+        }
+        if row.get("max_chars") is not None:
+            try:
+                request["max_chars"] = max(256, min(8_000, int(row["max_chars"])))
+            except (TypeError, ValueError):
+                pass
+        requests.append(request)
+    return requests
+
+
+def _normalize_result(
+    payload: dict[str, Any],
+    content: str,
+    raw_response: str,
+    *,
+    lane: str,
+    model: str,
+    endpoint: str,
+    transport: str,
+    elapsed_ms: float,
+    pixels_sent: int,
+    context_guard: dict[str, Any],
+    compact_level: int,
+) -> dict[str, Any]:
     parsed = _parse_json_object(content)
     status = str(parsed.get("status") or "unclear").lower()
     if status not in {"pass", "finding", "unclear"}:
@@ -319,6 +500,7 @@ def _normalize_result(payload: dict[str, Any], content: str, raw_response: str, 
     proposals = parsed.get("proposed_changes") or []
     if not isinstance(proposals, list):
         proposals = [proposals]
+    requested_evidence = _normalize_evidence_requests(parsed.get("requested_evidence"))
     usage = payload.get("usage")
     if not isinstance(usage, dict):
         usage = {}
@@ -328,6 +510,7 @@ def _normalize_result(payload: dict[str, Any], content: str, raw_response: str, 
         "finding_codes": finding_codes,
         "reason": str(parsed.get("reason") or "未提供可觀察理由")[:160],
         "proposed_changes": proposals,
+        "requested_evidence": requested_evidence,
         "advisory_only": True,
         "materialize": False,
         "provider": "local_qwen_mlx",
@@ -339,14 +522,38 @@ def _normalize_result(payload: dict[str, Any], content: str, raw_response: str, 
         "elapsed_ms": elapsed_ms,
         "usage": usage,
         "pixels_sent": pixels_sent,
+        "context_guard": context_guard,
+        "compact_level": compact_level,
         "raw_response_sha256": sha256_text(raw_response),
         "raw_content": content,
     }
 
 
-def call_lane(*, base_url: str, model: str, lane: str, item: dict[str, Any], revised: dict[str, Any], fixture_root: Path, timeout: float = 120.0, max_tokens: int = 512, transport: str = "ollama_native") -> dict[str, Any]:
+def call_lane(
+    *,
+    base_url: str,
+    model: str,
+    lane: str,
+    item: dict[str, Any],
+    revised: dict[str, Any],
+    fixture_root: Path,
+    timeout: float = 120.0,
+    max_tokens: int = 512,
+    transport: str = "ollama_native",
+    evidence: Any = None,
+    compact_level: int = 0,
+    context_limit_tokens: int = 131_072,
+    context_safety_margin_tokens: int = 8_192,
+) -> dict[str, Any]:
     endpoint, _ = normalized_base_url(base_url)
-    packet, image_refs = build_packet(lane, item, revised, fixture_root)
+    packet, image_refs = build_packet(
+        lane,
+        item,
+        revised,
+        fixture_root,
+        evidence=evidence,
+        compact_level=compact_level,
+    )
     openai_request = build_request(lane, packet, image_refs, model, max_tokens)
     if transport == "ollama_native":
         request_payload = build_native_request(openai_request, image_refs)
@@ -357,6 +564,12 @@ def call_lane(*, base_url: str, model: str, lane: str, item: dict[str, Any], rev
         response_url = f"{endpoint}/chat/completions"
     else:
         raise LLMAdapterError(f"unsupported Ollama transport: {transport}")
+    context_guard = enforce_payload(
+        request_payload,
+        output_tokens=max_tokens,
+        context_limit_tokens=context_limit_tokens,
+        safety_margin_tokens=context_safety_margin_tokens,
+    )
     response_payload, raw_response, elapsed_ms = _post_json(response_url, request_payload, timeout)
     content = _extract_content(response_payload)
     return _normalize_result(
@@ -369,4 +582,6 @@ def call_lane(*, base_url: str, model: str, lane: str, item: dict[str, Any], rev
         transport=transport,
         elapsed_ms=elapsed_ms,
         pixels_sent=len(image_refs),
+        context_guard=context_guard,
+        compact_level=compact_level,
     )

@@ -41,6 +41,20 @@
   "model_stage": {
     "provider_mode": "mock",
     "allow_live_provider": false,
-    "advisory_only": true
+    "advisory_only": true,
+    "context_policy": {
+      "hard_limit_tokens": 131072,
+      "safety_margin_tokens": 8192,
+      "slow_threshold_seconds": 30,
+      "max_tool_turns": 1,
+      "evidence_cache": "staging_artifact_only",
+      "allowlisted_tools": [
+        "question_markdown",
+        "answer_markdown",
+        "adjacent_questions",
+        "pdf_reference",
+        "image_manifest"
+      ]
+    }
   }
 }
