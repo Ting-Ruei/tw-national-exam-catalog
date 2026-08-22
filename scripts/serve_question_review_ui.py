@@ -66,6 +66,7 @@ ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料�
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
+WORKFLOW_UI_PATH = MOBILE_UI_ROOT / "workflow.html"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
 STRUCTURED_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
 VISUAL_DEPENDENCY_RE = re.compile(
@@ -150,6 +151,22 @@ AI_REVIEW_ACTIONS_WITH_WORK = {
     "fix_parser_rule",
     "add_manual_asset",
 }
+
+# The new console assigns every candidate to exactly one primary queue.  The
+# lane results remain visible on the detail page, but a question must not
+# appear in five different human queues at the same time.
+WORKFLOW_QUEUE_DEFINITIONS = (
+    ("source", "來源／parser", "題數、題號、選項或 MinerU/parser contract 仍有阻擋。"),
+    ("answer", "答案／MOD", "答案表、送分、多答案或答案證據需要人工核對。"),
+    ("vision", "圖片／裁切", "先判斷是否真的有圖，再核對 MinerU asset 與裁切範圍。"),
+    ("group", "題組範圍", "題組關鍵字或 range proposal 需要人工確認。"),
+    ("notation", "上下標／字形", "符號、上下標或 compatibility glyph proposal 需要驗證。"),
+    ("text", "文字三證據", "三個 PDF extractor 或來源文字仍有差異。"),
+    ("revision", "修訂／重跑", "已有修訂或 lane stale，需要確認 revision loop。"),
+    ("sample", "機器通過抽樣", "沒有開放例外；保留少量抽樣以量測漏檢。"),
+)
+WORKFLOW_QUEUE_LABELS = {key: label for key, label, _description in WORKFLOW_QUEUE_DEFINITIONS}
+WORKFLOW_QUEUE_DESCRIPTIONS = {key: description for key, _label, description in WORKFLOW_QUEUE_DEFINITIONS}
 
 
 class SqlWriteError(RuntimeError):
@@ -556,6 +573,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-jsonl", type=Path, default=None)
     parser.add_argument("--issue-csv", type=Path, default=None)
     parser.add_argument("--review-log", type=Path, default=None)
+    parser.add_argument(
+        "--run-summary",
+        type=Path,
+        default=None,
+        help="Optional isolated staging summary.json for the workflow console.",
+    )
+    parser.add_argument(
+        "--three-source-analysis",
+        type=Path,
+        default=None,
+        help="Optional three-source analysis.json for evidence queues.",
+    )
+    parser.add_argument(
+        "--three-source-packets",
+        type=Path,
+        default=None,
+        help="Optional blind-packets.jsonl containing bounded PDF evidence.",
+    )
+    parser.add_argument(
+        "--repair-log",
+        type=Path,
+        default=None,
+        help="Optional repair log path shown as an audit reference only.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -1619,11 +1660,24 @@ def html_page() -> bytes:
     return PAGE_HTML.encode("utf-8")
 
 
+def workflow_page() -> bytes:
+    """Return the revision/evidence workbench used by the new workflow."""
+    try:
+        return WORKFLOW_UI_PATH.read_bytes()
+    except OSError:
+        # Keep the legacy page available if a source checkout is incomplete.
+        return html_page()
+
+
 def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
     """Return a mobile Review UI asset without exposing arbitrary project files."""
     route = path.rstrip("/") or "/"
     route_map = {
+        # Keep the established fast-triage contract at /mobile/ for existing
+        # bookmarks and event consumers.  The rebuilt responsive workflow
+        # console has an explicit phone route and is the mobile-port root.
         "/mobile": ("mobile.html", "text/html; charset=utf-8", "no-store"),
+        "/mobile/workflow": ("workflow.html", "text/html; charset=utf-8", "no-store"),
         "/mobile/manifest.webmanifest": (
             "mobile.webmanifest",
             "application/manifest+json; charset=utf-8",
@@ -1696,6 +1750,201 @@ def mobile_review_event(payload: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def compact_ai_lane_results(audit: Any) -> list[dict[str, Any]]:
+    """Expose lane telemetry without returning raw model responses to the UI.
+
+    The staging exporter keeps the complete model result for auditability.  A
+    browser queue only needs the decision path, latency, context guard and
+    evidence request.  In particular, never send ``raw_content`` through the
+    dashboard API; it is both noisy and easy to mistake for an approved edit.
+    """
+    if not isinstance(audit, dict):
+        return []
+    compact: list[dict[str, Any]] = []
+    for row in audit.get("lane_results") or []:
+        if not isinstance(row, dict):
+            continue
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        model_result = result.get("model_result") if isinstance(result.get("model_result"), dict) else {}
+        context_guard = model_result.get("context_guard") if isinstance(model_result.get("context_guard"), dict) else {}
+        compact.append(
+            {
+                "lane": str(row.get("lane") or ""),
+                "status": str(row.get("status") or result.get("status") or "unknown"),
+                "revision_id": str(row.get("revision_id") or ""),
+                "provider": str(row.get("provider") or result.get("provider") or ""),
+                "model": str(row.get("model") or result.get("model") or ""),
+                "created_at": row.get("created_at"),
+                "checked_count": result.get("checked_count"),
+                "model_called": bool(result.get("model_called")),
+                "model_action": str(result.get("model_action") or ""),
+                "finding_codes": [str(value) for value in (result.get("finding_codes") or [])],
+                "reason": str(model_result.get("reason") or result.get("reason") or ""),
+                "requested_evidence": model_result.get("requested_evidence") or [],
+                "proposed_changes": model_result.get("proposed_changes") or [],
+                "error": str(model_result.get("error") or result.get("error") or ""),
+                "latency_ms": model_result.get("latency_ms"),
+                "latency_status": str(model_result.get("latency_status") or ""),
+                "tool_turn_count": model_result.get("tool_turn_count"),
+                "pixels_sent": model_result.get("pixels_sent"),
+                "transport": str(model_result.get("transport") or ""),
+                "context_guard": {
+                    key: context_guard.get(key)
+                    for key in (
+                        "context_limit_tokens",
+                        "safety_margin_tokens",
+                        "admitted_input_budget_tokens",
+                        "estimated_input_tokens_upper_bound",
+                        "total_upper_bound_tokens",
+                        "within_budget",
+                    )
+                    if key in context_guard
+                },
+            }
+        )
+    return compact
+
+
+def workflow_lane_map(item: dict[str, Any]) -> tuple[dict[str, str], dict[str, list[str]], list[dict[str, Any]]]:
+    ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+    checks = {
+        str(key): str(value)
+        for key, value in (ai_review.get("checks") or {}).items()
+        if str(key).strip()
+    }
+    lane_results = ai_review.get("lane_results") if isinstance(ai_review.get("lane_results"), list) else []
+    findings_by_lane: dict[str, list[str]] = {}
+    for finding in ai_review.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        lane = str(finding.get("lane") or "").strip()
+        code = str(finding.get("code") or finding.get("finding_code") or "").strip()
+        if lane:
+            findings_by_lane.setdefault(lane, [])
+        if lane and code:
+            findings_by_lane[lane].append(code)
+    for result in lane_results:
+        if not isinstance(result, dict):
+            continue
+        lane = str(result.get("lane") or "").strip()
+        if not lane:
+            continue
+        checks.setdefault(lane, str(result.get("status") or "unknown"))
+        findings_by_lane.setdefault(lane, [])
+        for code in result.get("finding_codes") or []:
+            if str(code) not in findings_by_lane[lane]:
+                findings_by_lane[lane].append(str(code))
+    return checks, findings_by_lane, lane_results
+
+
+def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Assign one candidate to one human queue using deterministic priority."""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    issues = [issue for issue in (item.get("issues") or []) if isinstance(issue, dict)]
+    answer_issues = [issue for issue in (item.get("answer_issues") or []) if isinstance(issue, dict)]
+    tags = {str(value).strip() for value in (metadata.get("ai395_scope_tags") or []) if str(value).strip()}
+    checks, findings_by_lane, lane_results = workflow_lane_map(item)
+    all_finding_codes = {
+        code
+        for values in findings_by_lane.values()
+        for code in values
+        if code
+    }
+    issue_codes = {
+        str(issue.get("issue_code") or "").strip()
+        for issue in [*issues, *answer_issues]
+        if str(issue.get("issue_code") or "").strip()
+    }
+    owner_stages = {
+        str(issue.get("owner_stage") or "").strip().lower()
+        for issue in [*issues, *answer_issues]
+        if str(issue.get("owner_stage") or "").strip()
+    }
+    review = item.get("review") if isinstance(item.get("review"), dict) else {}
+    repair_status = item.get("repair_status") if isinstance(item.get("repair_status"), dict) else {}
+    source = evidence.get("source") if isinstance(evidence, dict) else {}
+    source_status = str(source.get("status") or "")
+    source_conflict = source_status in {
+        "source_text_difference",
+        "insufficient_independent_families",
+    } or str(source.get("question_consensus") or "") == "question_text_disagreement"
+    has_parser_issue = bool(
+        metadata.get("parser_status") in {"blocked", "needs_review"}
+        or any(
+            code.startswith("parser_")
+            or code in {"question_count_mismatch", "question_number_gap", "option_anomaly", "parser_warning", "parser_blocked"}
+            for code in issue_codes | tags
+        )
+        or "parser" in owner_stages
+    )
+    has_answer_issue = bool(
+        answer_issues
+        or "answer" in owner_stages
+        or "answer" in checks and checks.get("answer") in {"finding", "failed"}
+        or findings_by_lane.get("answer")
+        or any(code.startswith("answer_") or code in {"mod_answer", "multiple_answer", "answer_special"} for code in all_finding_codes | issue_codes)
+    )
+    has_vision_issue = bool(
+        findings_by_lane.get("vision")
+        or checks.get("vision") in {"finding", "failed"}
+        or "image" in owner_stages
+        or "visual_missing" in tags
+        or item.get("visual_profile", {}).get("needs_visual_asset_review")
+        or item.get("visual_profile", {}).get("visual_review_status") == "visual_asset_problem"
+    )
+    has_group_issue = bool(
+        findings_by_lane.get("group")
+        or checks.get("group") in {"finding", "failed"}
+        or "group" in tags
+        or item.get("inferred_group_ref")
+        or item.get("group_ref")
+    )
+    has_notation_issue = bool(
+        findings_by_lane.get("notation")
+        or checks.get("notation") in {"finding", "failed"}
+        or "notation" in tags
+        or any(code in {"notation", "subscript", "superscript", "glyph", "compatibility_glyph"} for code in all_finding_codes | issue_codes)
+    )
+    has_revision_issue = bool(
+        repair_status.get("active")
+        or review.get("is_repair_pending")
+        or review.get("is_accepted_reaudit_pending")
+        or metadata.get("ai395_staging_revision_status") not in {None, "", "active"}
+    )
+    if has_revision_issue:
+        queue = "revision"
+    elif has_parser_issue:
+        queue = "source"
+    elif has_answer_issue:
+        queue = "answer"
+    elif has_vision_issue:
+        queue = "vision"
+    elif has_group_issue:
+        queue = "group"
+    elif has_notation_issue:
+        queue = "notation"
+    elif source_conflict or findings_by_lane.get("text_evidence") or checks.get("text_evidence") in {"finding", "failed"} or "text_evidence" in tags:
+        queue = "text"
+    else:
+        queue = "sample"
+
+    severities = {str(issue.get("severity") or "").lower() for issue in [*issues, *answer_issues]}
+    severity = "error" if "error" in severities or queue in {"source", "answer", "vision"} and (issues or answer_issues) else "warning" if severities & {"warning", "warn"} else "info"
+    reasons = sorted(issue_codes | all_finding_codes | tags)
+    if source_status:
+        reasons.insert(0, source_status)
+    return {
+        "id": queue,
+        "label": WORKFLOW_QUEUE_LABELS[queue],
+        "description": WORKFLOW_QUEUE_DESCRIPTIONS[queue],
+        "severity": severity,
+        "reason_codes": list(dict.fromkeys(reasons)),
+        "lane_statuses": checks,
+        "lane_findings": findings_by_lane,
+        "lane_results": lane_results,
+    }
+
+
 class ReviewState:
     def __init__(
         self,
@@ -1705,12 +1954,33 @@ class ReviewState:
         *,
         auto_reload_candidates: bool = False,
         review_backend: str = "sql",
+        run_summary_path: Path | None = None,
+        three_source_analysis_path: Path | None = None,
+        three_source_packets_path: Path | None = None,
+        repair_log_path: Path | None = None,
     ) -> None:
         self.candidate_path = candidate_path
         self.issue_path = issue_path
         self.review_log = review_log
         self.auto_reload_candidates = auto_reload_candidates
         self.review_backend = review_backend
+        self.run_summary_path = run_summary_path
+        self.three_source_analysis_path = three_source_analysis_path
+        self.three_source_packets_path = three_source_packets_path
+        self.repair_log_path = repair_log_path
+        self.workflow_summary = self._load_json_object(run_summary_path)
+        self.three_source_analysis = self._load_json_object(three_source_analysis_path)
+        self.three_source_packets = self._load_packet_map(three_source_packets_path)
+        self.three_source_cases = {
+            str(case.get("candidate_key")): case
+            for case in (self.three_source_analysis.get("cases") or [])
+            if isinstance(case, dict) and case.get("candidate_key")
+        }
+        self.evidence_root = (
+            three_source_packets_path.parent.resolve()
+            if three_source_packets_path is not None
+            else None
+        )
         self._candidate_reload_lock = threading.Lock()
         self._candidate_reload_status: dict[str, Any] = {
             "ok": True,
@@ -1796,6 +2066,36 @@ class ReviewState:
         if self.sql_review_enabled:
             self._start_pipeline_cache_refresh()
 
+    @staticmethod
+    def _load_json_object(path: Path | None) -> dict[str, Any]:
+        if path is None or not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _load_packet_map(path: Path | None) -> dict[str, dict[str, Any]]:
+        if path is None or not path.exists():
+            return {}
+        packets: dict[str, dict[str, Any]] = {}
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        packet = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(packet, dict) and packet.get("candidate_key"):
+                        packets[str(packet["candidate_key"])] = packet
+        except OSError:
+            return {}
+        return packets
+
     def candidate_data_status(self) -> dict[str, Any]:
         current_candidate_signature = file_signature(self.candidate_path)
         current_issue_signature = file_signature(self.issue_path) if self.issue_path else None
@@ -1820,6 +2120,207 @@ class ReviewState:
                 else "primary"
             ),
             "formal_sync": self.formal_sync_status(),
+        }
+
+    @staticmethod
+    def _short_text(value: Any, limit: int = 1800) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+    def workflow_evidence_payload(self, candidate_key: str) -> dict[str, Any] | None:
+        case = self.three_source_cases.get(candidate_key)
+        packet = self.three_source_packets.get(candidate_key)
+        if not case and not packet:
+            return None
+        packet = packet if isinstance(packet, dict) else {}
+        official = packet.get("official_pdf_second_source") if isinstance(packet.get("official_pdf_second_source"), dict) else {}
+        visual = packet.get("visual_evidence") if isinstance(packet.get("visual_evidence"), dict) else {}
+        question_consensus = official.get("question_consensus") if isinstance(official.get("question_consensus"), dict) else {}
+        text_by_engine = question_consensus.get("question_text_by_engine") or official.get("question_text_by_engine") or {}
+        engines: dict[str, dict[str, str]] = {}
+        for engine, value in text_by_engine.items():
+            if isinstance(value, dict):
+                engines[str(engine)] = {
+                    "source_family": str(value.get("source_family") or engine),
+                    "text": self._short_text(value.get("text"), 1600),
+                }
+            else:
+                engines[str(engine)] = {"source_family": str(engine), "text": self._short_text(value, 1600)}
+        case_source = case.get("source") if isinstance(case, dict) and isinstance(case.get("source"), dict) else {}
+        evidence: dict[str, Any] = {
+            "case_id": str(case.get("case_id") or packet.get("case_id") or ""),
+            "scope_tags": [str(value) for value in (case.get("scope_tags") or [])] if isinstance(case, dict) else [],
+            "model_finding_codes": [str(value) for value in (case.get("model_finding_codes") or [])] if isinstance(case, dict) else [],
+            "pdf_flags": [str(value) for value in (case.get("pdf_flags") or official.get("flags") or [])] if isinstance(case, dict) else [str(value) for value in (official.get("flags") or [])],
+            "source": {
+                "status": str(case_source.get("status") or ""),
+                "question_consensus": str(case_source.get("question_consensus") or question_consensus.get("status") or ""),
+                "family_count": case_source.get("family_count", question_consensus.get("family_count")),
+                "raw_support": case_source.get("raw_support"),
+                "nfkc_support": case_source.get("nfkc_support"),
+                "auto_rule_candidate": bool(case_source.get("auto_rule_candidate")),
+            },
+            "pdf": {
+                "consensus_status": str(official.get("consensus_status") or ""),
+                "families": [str(value) for value in (official.get("families") or [])],
+                "page": official.get("page"),
+                "pages": official.get("pages") or [],
+                "pdf_sha256": str(official.get("pdf_sha256") or ""),
+                "text_by_engine": engines,
+            },
+            "visual": {
+                "current_asset_count": visual.get("current_asset_count", case.get("current_asset_count") if isinstance(case, dict) else 0),
+                "old_mineru_asset_count": visual.get("old_mineru_asset_count"),
+                "official_question_crop_url": f"/evidence-file?key={urllib.parse.quote(candidate_key, safe='')}&asset=official_question_crop" if visual.get("official_question_crop") else "",
+                "contact_sheet_url": f"/evidence-file?key={urllib.parse.quote(candidate_key, safe='')}&asset=contact_sheet" if visual.get("contact_sheet") else "",
+            },
+        }
+        return evidence
+
+    def evidence_file_path(self, candidate_key: str, asset_name: str) -> Path | None:
+        if self.evidence_root is None:
+            return None
+        packet = self.three_source_packets.get(candidate_key)
+        if not isinstance(packet, dict):
+            return None
+        visual = packet.get("visual_evidence") if isinstance(packet.get("visual_evidence"), dict) else {}
+        allowed = {
+            "official_question_crop": visual.get("official_question_crop"),
+            "contact_sheet": visual.get("contact_sheet"),
+        }
+        raw_path = allowed.get(asset_name)
+        if not raw_path:
+            return None
+        try:
+            path = Path(str(raw_path)).resolve()
+            path.relative_to(self.evidence_root)
+        except (OSError, ValueError):
+            return None
+        return path if path.is_file() else None
+
+    def workflow_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
+        params = params or {}
+        self.refresh_event_logs()
+        if self.sql_review_enabled:
+            source_payload = self.filtered_candidate_payloads({**params, "reviewStatus": "", "limit": "1000"})
+            payloads = list(source_payload.get("candidates") or [])
+        else:
+            payloads = [self.candidate_payload(item) for item in self.candidates]
+        selected_key = str(params.get("candidate_key") or params.get("candidateKey") or "")
+        if selected_key and all(str(item.get("candidate_key") or "") != selected_key for item in payloads):
+            item = self.candidate_by_key.get(selected_key)
+            if item is not None:
+                payloads.append(self.candidate_payload(item))
+
+        queue_counts = {key: 0 for key, _label, _description in WORKFLOW_QUEUE_DEFINITIONS}
+        queue_items: list[dict[str, Any]] = []
+        enriched_by_key: dict[str, dict[str, Any]] = {}
+        severity_rank = {"error": 0, "warning": 1, "info": 2}
+        for item in payloads:
+            key = str(item.get("candidate_key") or "")
+            if not key:
+                continue
+            evidence = self.workflow_evidence_payload(key)
+            queue = workflow_primary_queue(item, evidence)
+            queue_counts[queue["id"]] += 1
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            review = item.get("review") if isinstance(item.get("review"), dict) else {}
+            ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+            summary = {
+                "candidate_key": key,
+                "question_number": str(item.get("question_number") or ""),
+                "stem_preview": self._short_text(item.get("stem"), 220),
+                "category": str(metadata.get("normalized_category_name") or metadata.get("group_name") or ""),
+                "subject": str(metadata.get("normalized_subject_name") or ""),
+                "year": str(metadata.get("year") or ""),
+                "ordinal": str(metadata.get("exam_ordinal") or ""),
+                "primary_queue": queue["id"],
+                "queue_label": queue["label"],
+                "severity": queue["severity"],
+                "reason_codes": queue["reason_codes"],
+                "lane_statuses": queue["lane_statuses"],
+                "lane_findings": queue["lane_findings"],
+                "ai_status": str(ai_review.get("audit_status") or "unreviewed"),
+                "human_action": str(review.get("action") or "unreviewed"),
+                "human_queue": str(review.get("queue_label") or "未看過"),
+                "revision_id": str(metadata.get("ai395_staging_revision_id") or ""),
+                "has_visual_asset": bool((item.get("visual_profile") or {}).get("has_visual_asset")),
+                "evidence_status": str((evidence or {}).get("source", {}).get("status") or ""),
+            }
+            queue_items.append(summary)
+            enriched_by_key[key] = {"candidate": item, "queue": queue, "evidence": evidence}
+
+        queue_items.sort(
+            key=lambda row: (
+                severity_rank.get(str(row.get("severity") or "info"), 9),
+                0 if str(row.get("human_action") or "") in {"unreviewed", "reset_review", "needs_review"} else 1,
+                str(row.get("primary_queue") or ""),
+                str(row.get("category") or ""),
+                int_or_zero(row.get("year")),
+                int_or_zero(row.get("question_number")),
+                str(row.get("candidate_key") or ""),
+            )
+        )
+        summary = self.workflow_summary
+        analysis = self.three_source_analysis
+        analysis_cases = analysis.get("cases") if isinstance(analysis.get("cases"), list) else []
+        source_status_counts: dict[str, int] = {}
+        consensus_counts: dict[str, int] = {}
+        pdf_flag_counts: dict[str, int] = {}
+        for case in analysis_cases:
+            source = case.get("source") if isinstance(case, dict) and isinstance(case.get("source"), dict) else {}
+            status = str(source.get("status") or "unknown")
+            source_status_counts[status] = source_status_counts.get(status, 0) + 1
+            consensus = str(source.get("question_consensus") or "unknown")
+            consensus_counts[consensus] = consensus_counts.get(consensus, 0) + 1
+            for flag in case.get("pdf_flags") or []:
+                key = str(flag)
+                pdf_flag_counts[key] = pdf_flag_counts.get(key, 0) + 1
+        lane_status_counts = summary.get("lane_status_counts") if isinstance(summary.get("lane_status_counts"), dict) else {}
+        if not lane_status_counts:
+            lane_status_counts = {}
+            for item in payloads:
+                checks = (item.get("ai_review") or {}).get("checks") or {}
+                for lane, status in checks.items():
+                    lane_status_counts.setdefault(str(lane), {})[str(status)] = lane_status_counts.setdefault(str(lane), {}).get(str(status), 0) + 1
+        queue_defs = [
+            {"id": key, "label": label, "description": description, "count": queue_counts.get(key, 0)}
+            for key, label, description in WORKFLOW_QUEUE_DEFINITIONS
+        ]
+        selected = enriched_by_key.get(selected_key) if selected_key else None
+        return {
+            "ok": True,
+            "experience": "workflow_console_v1",
+            "read_only": os.environ.get("REVIEW_UI_READ_ONLY", "0").lower() not in {"0", "false", "no"},
+            "advisory_only": bool(summary.get("production_write_count", 0) == 0) if summary else True,
+            "run": {
+                key: summary.get(key)
+                for key in (
+                    "run_id", "model_mode", "model_name", "model_provider", "model_transport",
+                    "model_profile_id", "model_prompt_version", "model_endpoint_class", "source_mode",
+                    "mineru_mode", "scope_count", "llm_calls", "llm_attempts", "llm_errors",
+                    "llm_context_rejections", "llm_slow_calls", "llm_tool_turns", "revisions_created",
+                    "production_write_count", "human_review_events_written", "config_sha256",
+                )
+                if key in summary
+            },
+            "context_policy": summary.get("model_context_policy") or {},
+            "queues": queue_defs,
+            "queue_total": len(queue_items),
+            "queue_counts": queue_counts,
+            "queue_items": queue_items[:2000],
+            "selected": selected,
+            "facets": self.facets(params),
+            "three_source": {
+                "case_count": len(analysis_cases),
+                "automation": analysis.get("automation_assessment") or {},
+                "status_counts": source_status_counts,
+                "consensus_counts": consensus_counts,
+                "pdf_flag_counts": pdf_flag_counts,
+                "analysis_path": str(self.three_source_analysis_path) if self.three_source_analysis_path else None,
+            },
+            "repair_log": str(self.repair_log_path) if self.repair_log_path else None,
+            "candidate_data": self.candidate_data_status(),
         }
 
     def reload_candidate_data(self, force: bool = False, block: bool = True) -> dict[str, Any]:
@@ -4555,6 +5056,7 @@ filtered AS (
             "findings": ai_audit.get("findings") if isinstance(ai_audit, dict) else [],
             "labels": ai_audit.get("labels") if isinstance(ai_audit, dict) else [],
             "checks": ai_audit.get("checks") if isinstance(ai_audit, dict) else {},
+            "lane_results": compact_ai_lane_results(historical_ai_audit),
             "suggested_correction": ai_suggestion,
             "suggested_changes": ai_suggestion_changes,
             "correction_coverage": ai_audit.get("correction_coverage") if isinstance(ai_audit, dict) else None,
@@ -7875,12 +8377,33 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path, head_only=True):
             return
-        if parsed.path == "/":
+        if parsed.path in {"/", "/workflow", "/workflow/"}:
+            data = workflow_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path in {"/legacy", "/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path == "/evidence-file":
+            query = urllib.parse.parse_qs(parsed.query)
+            path = self.state.evidence_file_path(query.get("key", [""])[0], query.get("asset", [""])[0])
+            if path is None:
+                self.send_error(404, "Evidence file not found or not allowed")
+                return
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(path.stat().st_size))
             self.end_headers()
             return
         if parsed.path == "/file":
@@ -7905,7 +8428,16 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path):
             return
-        if parsed.path == "/":
+        if parsed.path in {"/", "/workflow", "/workflow/"}:
+            data = workflow_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path in {"/legacy", "/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -7913,6 +8445,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        if parsed.path == "/evidence-file":
+            query = urllib.parse.parse_qs(parsed.query)
+            path = self.state.evidence_file_path(query.get("key", [""])[0], query.get("asset", [""])[0])
+            if path is None:
+                self.send_error(404, "Evidence file not found or not allowed")
+                return
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/api/workflow":
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            self.send_json(self.state.workflow_payload(params))
             return
         if parsed.path == "/api/candidates":
             self.state.refresh_event_logs()
@@ -8408,7 +8960,7 @@ class MobileHandler(Handler):
     def do_HEAD(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            self.path = "/mobile/"
+            self.path = "/mobile/workflow/"
             super().do_HEAD()
             return
         if parsed.path.startswith("/mobile"):
@@ -8419,17 +8971,17 @@ class MobileHandler(Handler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            self.path = "/mobile/"
+            self.path = "/mobile/workflow/"
             super().do_GET()
             return
-        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/reload-status"}:
+        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/workflow", "/api/reload-status", "/evidence-file", "/file", "/legacy", "/legacy/"}:
             super().do_GET()
             return
         self.send_error(404, "Not found")
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/mobile-review":
+        if parsed.path in {"/api/mobile-review", "/api/review"}:
             super().do_POST()
             return
         self.send_error(404, "Not found")
@@ -11893,6 +12445,10 @@ def main() -> None:
         review_log,
         auto_reload_candidates=args.auto_reload_candidates,
         review_backend=args.review_backend,
+        run_summary_path=args.run_summary,
+        three_source_analysis_path=args.three_source_analysis,
+        three_source_packets_path=args.three_source_packets,
+        repair_log_path=args.repair_log,
     )
     if args.mobile_port == args.port:
         raise SystemExit("--mobile-port must differ from --port")

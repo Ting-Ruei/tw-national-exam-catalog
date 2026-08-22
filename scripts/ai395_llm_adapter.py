@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from ai395_context_guard import ContextBudgetExceeded, enforce_payload
+from ai395_context_guard import DEFAULT_CONTEXT_LIMIT_TOKENS, ContextBudgetExceeded, enforce_payload
 from probe_qwen_mlx_tailscale import normalized_base_url
 
 
@@ -561,7 +561,7 @@ def call_lane(
     transport: str = "ollama_native",
     evidence: Any = None,
     compact_level: int = 0,
-    context_limit_tokens: int = 131_072,
+    context_limit_tokens: int = DEFAULT_CONTEXT_LIMIT_TOKENS,
     context_safety_margin_tokens: int = 8_192,
 ) -> dict[str, Any]:
     endpoint, _ = normalized_base_url(base_url)

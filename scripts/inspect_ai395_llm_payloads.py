@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from ai395_context_guard import ContextBudgetExceeded, inspect_payload
+from ai395_context_guard import DEFAULT_CONTEXT_LIMIT_TOKENS, ContextBudgetExceeded, inspect_payload
 from ai395_llm_adapter import LANE_INSTRUCTIONS, build_native_request, build_packet, build_request
 
 
@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixture-root", type=Path, required=True)
     parser.add_argument("--model", default="qwen3.8:27b-mlx")
     parser.add_argument("--model-max-tokens", type=int, default=256)
-    parser.add_argument("--context-limit-tokens", type=int, default=131_072)
+    parser.add_argument("--context-limit-tokens", type=int, default=DEFAULT_CONTEXT_LIMIT_TOKENS)
     parser.add_argument("--context-safety-margin-tokens", type=int, default=8_192)
     parser.add_argument("--output-json", type=Path)
     return parser.parse_args()

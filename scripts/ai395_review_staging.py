@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from ai395_context_guard import ContextBudgetExceeded
+from ai395_context_guard import DEFAULT_CONTEXT_LIMIT_TOKENS, ContextBudgetExceeded
 from ai395_evidence_tools import collect_evidence
 from ai395_llm_adapter import LLMAdapterError, PixelsUnavailable, PROMPT_VERSION, call_lane
 from ai395_source_adapter import ContractError, validate_manifests
@@ -40,6 +40,7 @@ DEFAULT_FIXTURE_ROOT = PROJECT_ROOT / "fixtures" / "ai395_review"
 DEFAULT_SQL_DIR = PROJECT_ROOT / "deploy" / "ai395-review-staging" / "sql"
 LANES = ("text_evidence", "notation", "group", "vision", "answer")
 REQUIRED_CANDIDATE_KEYS = ("candidate_key", "source_registry_key", "question_number", "stem", "options", "answer", "metadata")
+MAX_LOCAL_QWEN_CONTEXT_TOKENS = 196_608
 
 
 class StagingContractError(ValueError):
@@ -441,10 +442,12 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
     if provider.get("network_allowed") is not True or provider.get("tailnet_only") is not True:
         raise StagingContractError("local_qwen_mlx provider contract does not allow the required tailnet transport")
     context_policy = model_stage.get("context_policy") or {}
-    context_limit_tokens = int(getattr(args, "context_limit_tokens", None) or context_policy.get("hard_limit_tokens", 131_072))
+    context_limit_tokens = int(getattr(args, "context_limit_tokens", None) or context_policy.get("hard_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS))
     context_safety_margin_tokens = int(getattr(args, "context_safety_margin_tokens", None) or context_policy.get("safety_margin_tokens", 8_192))
-    if context_limit_tokens <= 0 or context_limit_tokens > 131_072:
-        raise StagingContractError("local_qwen_mlx context limit must be between 1 and 131072 tokens")
+    if context_limit_tokens <= 0 or context_limit_tokens > MAX_LOCAL_QWEN_CONTEXT_TOKENS:
+        raise StagingContractError(
+            f"local_qwen_mlx context limit must be between 1 and {MAX_LOCAL_QWEN_CONTEXT_TOKENS} tokens"
+        )
     if context_safety_margin_tokens < 0 or context_safety_margin_tokens >= context_limit_tokens:
         raise StagingContractError("invalid local_qwen_mlx context safety margin")
     max_tool_turns = int(getattr(args, "max_tool_turns", None) if getattr(args, "max_tool_turns", None) is not None else context_policy.get("max_tool_turns", 1))
@@ -603,7 +606,7 @@ def run_model_agent(
                 transport=str(model_runtime["transport"]),
                 evidence=evidence,
                 compact_level=compact_level,
-                context_limit_tokens=int(model_runtime.get("context_limit_tokens", 131_072)),
+                context_limit_tokens=int(model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)),
                 context_safety_margin_tokens=int(model_runtime.get("context_safety_margin_tokens", 8_192)),
             )
         except PixelsUnavailable as exc:
@@ -690,7 +693,7 @@ def run_model_agent(
     final_result["agentic_trace"] = trace
     final_result["tool_turn_count"] = sum(1 for row in trace if row.get("tool_results"))
     final_result["context_policy"] = {
-        "hard_limit_tokens": int(model_runtime.get("context_limit_tokens", 131_072)),
+        "hard_limit_tokens": int(model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)),
         "safety_margin_tokens": int(model_runtime.get("context_safety_margin_tokens", 8_192)),
         "slow_threshold_seconds": slow_threshold,
     }
@@ -961,12 +964,17 @@ def describe() -> dict[str, Any]:
 
 
 def locate_manifests(args: argparse.Namespace) -> tuple[Path, Path, str]:
+    # An explicit artifact pair must win over the parser's backwards-compatible
+    # mini20 default.  Without this ordering, a real existing-artifact run can
+    # silently execute the fixture while still accepting the user's manifests.
+    if args.source_manifest or args.mineru_manifest:
+        if not args.source_manifest or not args.mineru_manifest:
+            raise StagingContractError("provide both --source-manifest and --mineru-manifest")
+        return args.source_manifest, args.mineru_manifest, "external-existing-artifact"
     if args.fixture:
         fixture = resolve_fixture(args.fixture)
         return fixture / "source_manifest.json", fixture / "mineru_manifest.json", args.fixture
-    if not args.source_manifest or not args.mineru_manifest:
-        raise StagingContractError("provide --fixture or both --source-manifest and --mineru-manifest")
-    return args.source_manifest, args.mineru_manifest, "external-existing-artifact"
+    raise StagingContractError("provide --fixture or both --source-manifest and --mineru-manifest")
 
 
 def run_e2e(args: argparse.Namespace) -> dict[str, Any]:

@@ -43,7 +43,7 @@
     "allow_live_provider": false,
     "advisory_only": true,
     "context_policy": {
-      "hard_limit_tokens": 131072,
+      "hard_limit_tokens": 196608,
       "safety_margin_tokens": 8192,
       "slow_threshold_seconds": 30,
       "max_tool_turns": 1,

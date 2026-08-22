@@ -5,14 +5,14 @@
 ## 目前可用的路由
 
 - `local_qwen_mlx`：MacBook 的 `qwen3.8:27b-mlx`，透過 tailnet HTTPS Serve，Ollama native `/api/chat`。
-- AI395 本地 Qwen：目前只做 read-only preflight。等 owner 將 AI395 runtime 調整並驗證到 128K 後，再新增正式 provider profile；本文件不先改 `--ctx-size`。
+- AI395 本地 Qwen：目前只做 read-only preflight；AI395 runtime 與 `--ctx-size` 不在本次變更範圍。以下 192K policy 只套用 MacBook Qwen staging。
 - `local-model-manager`：指南標示為 target contract，沒有 manager listener 時，workflow 必須停在 staging，不猜 port、不自行啟動模型。
 
 ## Context admission
 
 MacBook staging 預設使用：
 
-- hard limit：131,072 tokens
+- hard limit：196,608 tokens（192K；模型宣稱支援 256K，但保留 64K 未使用空間以控制延遲）
 - safety margin：8,192 tokens
 - output reserve：由 `--model-max-tokens` 保留
 - 估算方法：UTF-8 JSON byte upper bound；這是保守估算，超過就於 transport 前 fail closed
@@ -23,7 +23,7 @@ MacBook staging 預設使用：
 python3 scripts/inspect_ai395_llm_payloads.py \
   --candidate-jsonl /path/to/candidates.jsonl \
   --fixture-root '/path/to/國考題資料夾/20_mineru_output' \
-  --context-limit-tokens 131072 \
+  --context-limit-tokens 196608 \
   --context-safety-margin-tokens 8192 \
   --output-json /private/tmp/ai395-payload-inspection.json
 ```

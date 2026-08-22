@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +20,63 @@ import probe_qwen_mlx_tailscale as qwen_probe  # noqa: E402
 
 
 class AI395ReviewStagingTests(unittest.TestCase):
+    def test_local_qwen_context_policy_accepts_192k_but_caps_above_it(self) -> None:
+        config = {
+            "pipeline": {
+                "model_stage": {
+                    "advisory_only": True,
+                    "context_policy": {},
+                }
+            },
+            "provider_registry": {
+                "providers": {
+                    "local_qwen_mlx": {
+                        "enabled": False,
+                        "endpoint_env": "QWEN_MLX_BASE_URL",
+                        "model_env": "QWEN_MLX_MODEL",
+                        "network_allowed": True,
+                        "tailnet_only": True,
+                        "transport": "ollama_native",
+                    }
+                }
+            },
+        }
+        args = argparse.Namespace(
+            model_mode="local_qwen_mlx",
+            allow_live_provider=True,
+            context_limit_tokens=196608,
+            context_safety_margin_tokens=8192,
+            max_tool_turns=1,
+            model_timeout=5,
+            model_max_tokens=256,
+            model_slow_threshold=30,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "QWEN_MLX_ENABLED": "1",
+                "QWEN_MLX_BASE_URL": "https://macbook.tailnet.ts.net/v1",
+                "QWEN_MLX_MODEL": "qwen3.8:27b-mlx",
+            },
+            clear=False,
+        ):
+            runtime = staging.build_model_runtime(config, args)
+            self.assertEqual(runtime["context_limit_tokens"], 196608)
+            args.context_limit_tokens = 196609
+            with self.assertRaisesRegex(staging.StagingContractError, "196608"):
+                staging.build_model_runtime(config, args)
+
+    def test_explicit_artifact_manifests_override_default_fixture(self) -> None:
+        args = argparse.Namespace(
+            fixture="mini20",
+            source_manifest=Path("/tmp/real-source-manifest.json"),
+            mineru_manifest=Path("/tmp/real-mineru-manifest.json"),
+        )
+        self.assertEqual(
+            staging.locate_manifests(args),
+            (args.source_manifest, args.mineru_manifest, "external-existing-artifact"),
+        )
+
     def test_exam_question_count_is_not_compared_to_single_candidate_count(self) -> None:
         ordinary = {"candidate_key": "q1", "metadata": {"expected_question_count": 20}}
         broken = {

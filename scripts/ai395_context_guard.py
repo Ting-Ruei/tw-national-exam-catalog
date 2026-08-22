@@ -15,7 +15,10 @@ import json
 from typing import Any
 
 
-DEFAULT_CONTEXT_LIMIT_TOKENS = 131_072
+# MacBook Qwen staging profile: keep a deliberate margin below the model's
+# advertised 256K context.  AI395's eventual runtime limit is configured
+# separately and is not changed by this staging default.
+DEFAULT_CONTEXT_LIMIT_TOKENS = 196_608
 DEFAULT_SAFETY_MARGIN_TOKENS = 8_192
 
 
