@@ -254,6 +254,33 @@ python3 scripts/manage_ai395_review_pipeline.py run-node text_evidence --run-id 
 
 通過條件：text／vision 分 lane 報告；resource、品質與失敗恢復都達 gate。
 
+### 6.1 目前這台 MacBook 的 Qwen 3.8-27B-MLX 測試節點
+
+這不是剛才本機 SQLite E2E 的必要元件，也不是 AI395 production。它是一個預設關閉的 shadow provider：MacBook 原生 Ollama 載入 MLX model，AI395 透過 Tailscale Serve 呼叫；模型掛掉時，AI395 主流程仍應繼續使用 mock／Ollama Cloud 或進人工例外。
+
+先在 MacBook 確認模型實際名稱，不要直接假設 tag：
+
+```bash
+ollama list
+python3 scripts/setup_qwen_mlx_tailscale_serve.sh --plan
+```
+
+`--plan` 只顯示檢查與 Serve 命令。確認 Tailscale 已登入、ACL 只允許 AI395 存取後，才由 owner 執行：
+
+```bash
+QWEN_MLX_MODEL='<ollama list 的精確 tag>' \
+  python3 scripts/setup_qwen_mlx_tailscale_serve.sh --apply
+
+QWEN_MLX_MODEL='<ollama list 的精確 tag>' \
+  python3 scripts/probe_qwen_mlx_tailscale.py \
+  --base-url https://<machine>.<tailnet>.ts.net/v1 \
+  --model '<ollama list 的精確 tag>'
+```
+
+第一個 probe 只做 `/v1/models`；不要用 `--live` 當健康檢查。要測生成時再單獨執行 `--live`，要測 vision 才加 `--image <fixture image>`。腳本只接受 localhost 或 HTTPS `*.ts.net`，不會呼叫 public Funnel，也不會寫資料庫。
+
+AI395 staging 的 `QWEN_MLX_BASE_URL`、`QWEN_MLX_MODEL` 可以先填入，但 `QWEN_MLX_ENABLED` 維持 `0`；provider registry 也維持 `local_qwen_mlx.enabled=false`。完成 text／JSON、vision pixel transport、100 requests、OOM／重啟、MinerU 共存與 gold comparison 後，才把它加入指定 lane 的 shadow。這次本機跑通的 SQLite 結果只證明 runner contract，不代表 AI395 Docker/PostgreSQL staging 已驗收。
+
 ### Level 7：1,000 題 rehearsal 與 Review UI
 
 目的：測 provider outage、重試、stale lane、人工 queue、成本與手機操作。

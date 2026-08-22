@@ -1,0 +1,19 @@
+{
+  "manifest_version": "ai395-mineru-manifest-v1",
+  "mineru_run_id": "fixture-mini20-mineru-v1",
+  "source_artifact_id": "fixture-mini20-catalog",
+  "status": "existing_artifact",
+  "mode": "mock_fixture",
+  "mineru_version": "fixture-mineru-v1",
+  "input_sha256": "ef439d2030bdacb773ae0f1ea9c06afd7ff1aa7080b84fd4fafcb12140b383f9",
+  "output_root": "mineru_output",
+  "markdown_path": "mineru_output/doc-001.md",
+  "layout_path": null,
+  "image_root": "assets",
+  "output_manifest": {
+    "documents": 1,
+    "markdown_sha256": "489afe9e8486e14eeae4a5b743ab07df9056cd436a7afd7ddc6f6871a0dac762",
+    "asset_count": 3
+  },
+  "read_only": true
+}

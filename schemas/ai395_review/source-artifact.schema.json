@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/ai395_review/source-artifact.schema.json",
+  "title": "AI395 Source Artifact Contract",
+  "type": "object",
+  "required": ["artifact_id", "artifact_type", "status", "path", "sha256", "immutable", "read_only"],
+  "properties": {
+    "artifact_id": {"type": "string", "minLength": 1},
+    "artifact_type": {"enum": ["catalog_snapshot", "official_pdf", "answer_pdf", "mod_pdf"]},
+    "status": {"enum": ["existing_artifact", "validated", "provisional", "failed", "disabled"]},
+    "source_registry_key": {"type": ["string", "null"]},
+    "source_url": {"type": ["string", "null"]},
+    "path": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "bytes": {"type": ["integer", "null"]},
+    "mime_type": {"type": ["string", "null"]},
+    "producer": {"type": "string"},
+    "producer_version": {"type": "string"},
+    "immutable": {"const": true},
+    "read_only": {"const": true}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": "ai395_review_provider_registry_v1",
+  "providers": {
+    "mock": {
+      "enabled": true,
+      "status": "certified_for_fixture",
+      "credential_env": null,
+      "network_allowed": false
+    },
+    "ollama_cloud": {
+      "enabled": true,
+      "status": "configured_but_not_required_for_walking_skeleton",
+      "credential_env": "OLLAMA_API_KEY",
+      "network_allowed": true
+    },
+    "local_qwen": {
+      "enabled": false,
+      "status": "disabled_until_device_certification",
+      "credential_env": null,
+      "network_allowed": false
+    },
+    "local_qwen_mlx": {
+      "enabled": false,
+      "status": "disabled_until_tailscale_probe_and_lane_certification",
+      "credential_env": null,
+      "endpoint_env": "QWEN_MLX_BASE_URL",
+      "model_env": "QWEN_MLX_MODEL",
+      "transport": "ollama_openai_compatible",
+      "network_allowed": true,
+      "tailnet_only": true,
+      "public_exposure": false,
+      "requires_manual_enable": true,
+      "allowed_modes": ["shadow", "test"]
+    },
+    "opencode_go": {
+      "enabled": false,
+      "status": "disabled_unconfigured",
+      "credential_env": "OPENCODE_GO_API_KEY",
+      "network_allowed": true,
+      "requires_manual_enable": true
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": "ai395_review_schedule_policy_v1",
+  "catalog_scan": {"enabled": false, "cron": "0 3 * * *"},
+  "mineru": {"enabled": false, "cron": null},
+  "review_batches": {"enabled": true, "max_items": 20},
+  "live_provider_windows": []
+}

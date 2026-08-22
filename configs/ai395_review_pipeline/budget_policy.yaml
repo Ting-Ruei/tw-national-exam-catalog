@@ -1,0 +1,9 @@
+{
+  "schema_version": "ai395_review_budget_policy_v1",
+  "currency": "USD",
+  "soft_usage_ratio": 0.8,
+  "hard_stop_new_model_jobs": true,
+  "auto_subscribe_provider": false,
+  "auto_enable_opencode_go": false,
+  "walking_skeleton_max_model_usd": 0.0
+}

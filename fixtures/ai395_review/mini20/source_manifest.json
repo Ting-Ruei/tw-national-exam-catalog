@@ -1,0 +1,29 @@
+{
+  "manifest_version": "ai395-source-manifest-v1",
+  "fixture_id": "mini20",
+  "source_artifacts": [
+    {
+      "artifact_id": "fixture-mini20-catalog",
+      "artifact_type": "catalog_snapshot",
+      "status": "existing_artifact",
+      "source_registry_key": "fixture:mini20:catalog",
+      "source_url": null,
+      "path": "source_catalog.json",
+      "sha256": "ef439d2030bdacb773ae0f1ea9c06afd7ff1aa7080b84fd4fafcb12140b383f9",
+      "bytes": 221,
+      "mime_type": "application/json",
+      "producer": "ai395-fixture",
+      "producer_version": "v1",
+      "immutable": true,
+      "read_only": true
+    }
+  ],
+  "candidate_jsonl": {
+    "path": "candidates.jsonl",
+    "sha256": "1deaa2ab78b419142c439ce7d977022c963ec799bd502dac0e6baed780b1797f"
+  },
+  "issue_csv": {
+    "path": "issues.csv",
+    "sha256": "eab321348e2ad35549fbaabc1fb031dc76089fb71b20aefda808e93bef5c55f7"
+  }
+}

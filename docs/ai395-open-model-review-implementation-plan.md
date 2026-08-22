@@ -9,7 +9,7 @@
 
 1. 整套架構部署在 AI395：官方 PDF 歸檔、MinerU、parser、evidence、工作 queue、validator、Review UI、embedding 與 reranker 都由 AI395 執行。
 2. 第一版審題 LLM 以 Ollama Cloud 為唯一必備推論池；其中 `kimi-k2.7-code:cloud` 納入可調式 vision challenger。OpenCode Go 預設停用、無需先訂閱，只有 Ollama Cloud 實測不足或中斷時才由 owner 選擇啟用。
-3. AI395 預留本地 `Qwen/Qwen3.8-27B` 測試 profile。它預設停用，不影響第一版跑通；等設備完成 text、vision、JSON、效能與 MinerU 共存測試後，再作 shadow challenger 或受控 fallback。
+3. AI395 預留本地 `Qwen/Qwen3.8-27B` 測試 profile；目前這台 MacBook 另提供 `qwen3.8-27b-mlx` 的 Ollama／MLX 測試算力，透過 Tailscale Serve 以 tailnet-only OpenAI-compatible endpoint 給 AI395。兩者都預設停用，不影響第一版跑通；完成 text、vision、JSON、效能、重啟與 MinerU 共存測試後，才作 shadow challenger 或受控 fallback。
 4. production 審題 runtime 只允許開源／開放權重模型；GPT-5.6 Luna 只作為實作本計畫的 coding agent，不列入審題模型 allowlist。
 5. 第一版使用 `n8n + PostgreSQL job state + Python workers`。Dify 可於後續作 prompt 實驗或 RAG 介面，但不保存權威狀態，也不直接寫 production review events。
 6. deterministic-first：能由 PDF、MinerU、parser、答案規則或像素證據確定的工作，不呼叫 LLM。
@@ -170,6 +170,7 @@ Python workers on AI395
 Open/open-weight model services
   ├─ Ollama Cloud: required primary text + primary vision
   ├─ AI395 local Qwen 3.8-27B: optional, disabled until certified
+  ├─ MacBook Qwen 3.8-27B-MLX via Tailscale Serve: optional shadow/test only
   └─ OpenCode Go: optional provider, disabled until owner subscribes
 ```
 
@@ -214,6 +215,39 @@ services
 - staging port 預設只 bind AI395 loopback；若要從 LAN 開 n8n 測試頁，另由 owner 核准固定 LAN bind 與防火牆，不重用 production Review UI port。
 - secrets 只由 AI395 mode-600 EnvironmentFile／Docker secret 注入，不進 Compose YAML、Git、manifest 或 n8n export。
 - production containerization 是獨立 G3 部署決策；walking skeleton 跑通不代表可以替換或重啟既有 production stack。
+
+### 4.1.1 MacBook Qwen 3.8-27B-MLX 測試節點
+
+這台 MacBook 的角色是「可拔除的外部測試 provider」，不是 AI395 production service，也不是本地 runner 的必要依賴：
+
+```text
+MacBook 原生 Ollama（MLX model）
+  └─ 127.0.0.1:11434/v1
+       └─ Tailscale Serve（HTTPS、tailnet-only）
+            └─ AI395 pipeline-worker → local_qwen_mlx provider
+```
+
+設定與安全邊界：
+
+- `local_qwen_mlx.enabled=false`、profile `certification=disabled`、route 只能放在 `optional_local`；未完成 probe 前不作 primary、fallback 或自動修正來源。
+- `QWEN_MLX_BASE_URL` 只接受 MacBook 的 `https://<machine>.<tailnet>.ts.net/v1`；同機測試才允許 `http://127.0.0.1:11434/v1`。provider adapter 不接受公網 HTTP、`0.0.0.0` 或直接暴露 11434。
+- MacBook 只用 `tailscale serve`，不使用 public Funnel；Tailscale ACL 應限制 AI395 節點才能存取該主機。不要把 auth key、Ollama credential 或 tailnet secret 放進 Git。
+- exact model tag 不寫死在 workflow；先在 MacBook 執行 `ollama list`，以 `QWEN_MLX_MODEL` 指定實際 tag。預設值 `qwen3.8:27b-mlx` 只是待確認 placeholder。
+- first probe 先 GET `/v1/models`，之後才由 owner 明確執行一次 text live probe 與一次 vision pixel probe；probe 不寫 SQL，也不改 route enable flag。
+- AI395 worker 只保存 provider、實際 model、endpoint class、request／response hash、latency、錯誤與 usage；模型結果仍是 advisory，不能產生人工 accept／block 或 materialize 未核准修正。
+
+MacBook owner 操作：
+
+```bash
+python3 scripts/setup_qwen_mlx_tailscale_serve.sh --plan
+ollama list
+QWEN_MLX_MODEL='<ollama list 顯示的精確 tag>' \
+  python3 scripts/probe_qwen_mlx_tailscale.py \
+  --base-url https://<machine>.<tailnet>.ts.net/v1 \
+  --model '<ollama list 顯示的精確 tag>'
+```
+
+只有確認 local Ollama、model tag、Tailscale ACL 與 endpoint 後，owner 才能另外執行 `--apply`。AI395 端先只填 `QWEN_MLX_BASE_URL`／`QWEN_MLX_MODEL` 並保持 `QWEN_MLX_ENABLED=0`；完成 100 requests 穩定性、OOM／重啟、MinerU GPU lease 與 200 題 gold comparison 後，才由 owner 把 provider 從 disabled 改成 shadow。
 
 ### 4.2 Owner 可調整的模型路由層
 

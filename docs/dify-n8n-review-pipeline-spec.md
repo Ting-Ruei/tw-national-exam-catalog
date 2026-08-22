@@ -539,10 +539,33 @@ n8n node 不保存實際 model id，只保存 lane／`route_key`。Python resolv
 ```text
 ollama_cloud.enabled = true
 local_qwen.enabled = false
+local_qwen_mlx.enabled = false
 opencode_go.enabled = false
 ```
 
 owner 日後調整某一關的 primary、challenger、fallback、batch size、timeout 或 sampling，只改經 schema 驗證的設定檔，不改 n8n DAG。每次執行保存 effective config 與 SHA；disabled、uncertified 或能力不符的 profile 必須 fail closed。完整檔案與解析優先序見 `docs/ai395-open-model-review-implementation-plan.md` 第 4.2 節。
+
+### 14.4 MacBook MLX／Tailscale provider contract
+
+MacBook 的 `qwen3.8-27b-mlx` 是可拔除的測試算力，不是 n8n 的特殊 node。n8n 只傳 lane／`route_key`，由 provider resolver 讀取：
+
+```text
+provider_id = local_qwen_mlx
+profile_id  = qwen3.8-27b-mlx-tailscale
+endpoint    = QWEN_MLX_BASE_URL
+model       = QWEN_MLX_MODEL
+enabled     = provider_registry.local_qwen_mlx.enabled
+```
+
+初始 contract：
+
+- `QWEN_MLX_BASE_URL` 只能是 `https://<machine>.<tailnet>.ts.net/v1`；同機 probe 才能用 `http://127.0.0.1:11434/v1`。
+- transport 使用 Ollama 的 OpenAI-compatible `/v1/models` 與 `/v1/chat/completions`；API key 使用非秘密的 `ollama` placeholder，網路邊界由 Tailscale ACL／Serve 提供。
+- `local_qwen_mlx` 預設 disabled、只允許 `shadow`／`test`，未認證不得進 primary／outage fallback，也不能 materialize AI proposal。
+- 首次執行先做 read-only model list probe；live text／vision probe 必須由 owner 明確加 `--live`，結果進 provider certification evidence，不進人工 review events。
+- 不直通 11434、不用 public Funnel、不把 Tailscale auth key 放在 n8n credential export；AI395 與 MacBook 不可因 provider 暫時離線而阻塞 deterministic lanes。
+
+實作檔案：`scripts/probe_qwen_mlx_tailscale.py`、`scripts/setup_qwen_mlx_tailscale_serve.sh`、`configs/ai395_review_pipeline/provider_registry.yaml`、`docs/skills/national-exam-ai-audit/profiles/qwen3.8-27b-mlx-tailscale.yaml`。Docker staging 只注入 endpoint／model 環境變數，並維持 `QWEN_MLX_ENABLED=0` 直到設備認證完成。
 
 ## 15. Revision 與有限重跑模型
 

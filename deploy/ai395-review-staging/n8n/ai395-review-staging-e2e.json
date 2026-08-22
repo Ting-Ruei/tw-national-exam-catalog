@@ -1,0 +1,68 @@
+{
+  "name": "AI395 Review Staging - Fixture E2E",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai395-review-staging/e2e",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b7c8f1b8-6a72-4b95-96c2-1d4e87542a01",
+      "name": "Manual or Webhook E2E",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "ai395-review-staging-e2e"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI395_STAGING_WORKER_URL + '/runs/e2e' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body || $json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "ed69f35b-01a7-4604-8abf-baa45f97b2ae",
+      "name": "Start Isolated E2E",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "c28c5a39-3ddc-42f5-8b33-5dc6391dcd93",
+      "name": "Return Run Receipt",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 300]
+    }
+  ],
+  "connections": {
+    "Manual or Webhook E2E": {
+      "main": [[{"node": "Start Isolated E2E", "type": "main", "index": 0}]]
+    },
+    "Start Isolated E2E": {
+      "main": [[{"node": "Return Run Receipt", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "ai395": {
+      "productionWrites": false,
+      "allowedFixture": "mini20"
+    }
+  }
+}

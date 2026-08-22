@@ -1,0 +1,7 @@
+{
+  "fixture_id": "mini20",
+  "description": "Synthetic, non-copyrighted 20-question walking-skeleton source snapshot.",
+  "expected_question_count": 20,
+  "source_mode": "mock_fixture",
+  "mineru_mode": "mock_fixture"
+}
