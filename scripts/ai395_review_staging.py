@@ -792,6 +792,10 @@ def run_lane(
         f"UPDATE {job_table} SET status=?, attempt=attempt+1, updated_at=? WHERE run_id=? AND candidate_key=? AND revision_id=? AND lane_key=?",
         ("succeeded" if status in {"machine_pass", "finding", "skipped"} else "failed", now_iso(), run_id, candidate_key, revision_id, lane),
     )
+    # Persist each lane checkpoint so a slow or interrupted advisory batch can
+    # be observed without waiting for the final dry-run transaction.  This is
+    # still isolated staging; no production or human-review event is written.
+    db.commit()
 
 
 def add_parser_exception(db: StagingDB, run_id: str, candidate_key: str, revision_id: str, item: dict[str, Any]) -> None:
