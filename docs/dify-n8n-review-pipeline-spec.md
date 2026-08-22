@@ -563,7 +563,7 @@ enabled     = provider_registry.local_qwen_mlx.enabled
 - transport 使用 Ollama 的 OpenAI-compatible `/v1/models` 與 `/v1/chat/completions`；API key 使用非秘密的 `ollama` placeholder，網路邊界由 Tailscale ACL／Serve 提供。
 - `local_qwen_mlx` 預設 disabled、只允許 `shadow`／`test`，未認證不得進 primary／outage fallback，也不能 materialize AI proposal。
 - 首次執行先做 read-only model list probe；live text／vision probe 必須由 owner 明確加 `--live`，結果進 provider certification evidence，不進人工 review events。
-- 不直通 11434、不用 public Funnel、不把 Tailscale auth key 放在 n8n credential export；AI395 與 MacBook 不可因 provider 暫時離線而阻塞 deterministic lanes。
+- 不直通 11434、不用 public Funnel、不把 Tailscale auth key 放在 n8n credential export；該 Serve endpoint 是通用 tailnet Ollama 入口，消費者由 Tailscale ACL 控制，不綁定單一 AI395；AI395 與 MacBook 不可因 provider 暫時離線而阻塞 deterministic lanes。
 
 實作檔案：`scripts/probe_qwen_mlx_tailscale.py`、`scripts/setup_qwen_mlx_tailscale_serve.sh`、`configs/ai395_review_pipeline/provider_registry.yaml`、`docs/skills/national-exam-ai-audit/profiles/qwen3.8-27b-mlx-tailscale.yaml`。Docker staging 只注入 endpoint／model 環境變數，並維持 `QWEN_MLX_ENABLED=0` 直到設備認證完成。
 

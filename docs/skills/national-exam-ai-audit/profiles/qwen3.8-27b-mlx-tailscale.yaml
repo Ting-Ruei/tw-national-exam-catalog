@@ -34,6 +34,8 @@
   "may_materialize_without_active_rule": false,
   "network_policy": {
     "tailnet_only": true,
+    "access_scope": "tailnet",
+    "authorized_consumers": "tailnet_members_subject_to_acl",
     "allow_local_http_hosts": ["127.0.0.1", "localhost"],
     "allow_tailnet_https_suffix": ".ts.net",
     "require_https_for_tailnet": true,

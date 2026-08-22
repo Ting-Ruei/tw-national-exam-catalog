@@ -231,7 +231,7 @@ MacBook 原生 Ollama（MLX model）
 
 - `local_qwen_mlx.enabled=false`、profile `certification=disabled`、route 只能放在 `optional_local`；未完成 probe 前不作 primary、fallback 或自動修正來源。
 - `QWEN_MLX_BASE_URL` 只接受 MacBook 的 `https://<machine>.<tailnet>.ts.net/v1`；同機測試才允許 `http://127.0.0.1:11434/v1`。provider adapter 不接受公網 HTTP、`0.0.0.0` 或直接暴露 11434。
-- MacBook 只用 `tailscale serve`，不使用 public Funnel；Tailscale ACL 應限制 AI395 節點才能存取該主機。不要把 auth key、Ollama credential 或 tailnet secret 放進 Git。
+- MacBook 只用 `tailscale serve`，不使用 public Funnel；這個通用 Ollama endpoint 可供同一 tailnet 且符合 ACL 的裝置使用，不綁定 AI395。若 owner 要縮小範圍，再由 Tailscale ACL 限制消費者；不要把 auth key、Ollama credential 或 tailnet secret 放進 Git。
 - exact model tag 不寫死在 workflow；先在 MacBook 執行 `ollama list`，以 `QWEN_MLX_MODEL` 指定實際 tag。預設值 `qwen3.8:27b-mlx` 只是待確認 placeholder。
 - first probe 先 GET `/v1/models`，之後才由 owner 明確執行一次 text live probe 與一次 vision pixel probe；probe 不寫 SQL，也不改 route enable flag。
 - AI395 worker 只保存 provider、實際 model、endpoint class、request／response hash、latency、錯誤與 usage；模型結果仍是 advisory，不能產生人工 accept／block 或 materialize 未核准修正。

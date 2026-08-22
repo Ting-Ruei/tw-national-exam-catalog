@@ -28,6 +28,7 @@
       "transport": "ollama_openai_compatible",
       "network_allowed": true,
       "tailnet_only": true,
+      "access_scope": "tailnet",
       "public_exposure": false,
       "requires_manual_enable": true,
       "allowed_modes": ["shadow", "test"]

@@ -277,7 +277,7 @@ QWEN_MLX_MODEL='<ollama list 的精確 tag>' \
   --model '<ollama list 的精確 tag>'
 ```
 
-第一個 probe 只做 `/v1/models`；不要用 `--live` 當健康檢查。要測生成時再單獨執行 `--live`，要測 vision 才加 `--image <fixture image>`。腳本只接受 localhost 或 HTTPS `*.ts.net`，不會呼叫 public Funnel，也不會寫資料庫。
+第一個 probe 只做 `/v1/models`；不要用 `--live` 當健康檢查。要測生成時再單獨執行 `--live`，要測 vision 才加 `--image <fixture image>`。腳本只接受 localhost 或 HTTPS `*.ts.net`，不會呼叫 public Funnel，也不會寫資料庫。Serve 代理的是整個 Ollama API，同一 tailnet 的其他裝置也能依 ACL 使用，不限 AI395。
 
 AI395 staging 的 `QWEN_MLX_BASE_URL`、`QWEN_MLX_MODEL` 可以先填入，但 `QWEN_MLX_ENABLED` 維持 `0`；provider registry 也維持 `local_qwen_mlx.enabled=false`。完成 text／JSON、vision pixel transport、100 requests、OOM／重啟、MinerU 共存與 gold comparison 後，才把它加入指定 lane 的 shadow。這次本機跑通的 SQLite 結果只證明 runner contract，不代表 AI395 Docker/PostgreSQL staging 已驗收。
 

@@ -37,6 +37,26 @@ python3 scripts/probe_qwen_mlx_tailscale.py \
   --model "$QWEN_MLX_MODEL"
 ```
 
-`--plan` 與 probe 不會改變服務；`--apply` 才會執行 `tailscale serve --bg --https=443 http://127.0.0.1:11434`。Serve 是 tailnet 內的私有入口；不要使用 public Funnel、不要直接轉發 11434、不要把 endpoint 寫成 HTTP 公網 URL。Tailscale ACL 也必須限制只有 AI395 節點能存取該主機。
+`--plan` 與 probe 不會改變服務；`--apply` 才會執行 `tailscale serve --bg --https=443 http://127.0.0.1:11434`。這會代理整個 Ollama API（不只 Qwen），同一個 tailnet 中符合 ACL 的裝置都可以使用，不綁定 AI395。不要使用 public Funnel、不要直接轉發 11434、不要把 endpoint 寫成 HTTP 公網 URL；若要限制使用者，請在 Tailscale ACL 管理，而不是在 Ollama API 裡放秘密。
 
 完成 `/v1/models` read-only probe、一次 text live probe、一次 vision pixel probe、延遲／OOM／重啟與 200 題 gold comparison 前，`QWEN_MLX_ENABLED` 必須維持 `0`，profile 只能是 shadow/test。
+
+## 從其他 tailnet 裝置使用通用 API
+
+Serve 成功後，`tailscale serve status` 會顯示這台 MacBook 的 MagicDNS HTTPS 網址。把它替換成下列 `<macbook-tailnet-url>`，同一 tailnet 且 ACL 允許的其他裝置即可查詢所有本機 Ollama model：
+
+```bash
+export OLLAMA_TAILNET_URL='https://<macbook>.<tailnet>.ts.net'
+curl --fail "$OLLAMA_TAILNET_URL/v1/models"
+
+curl --fail "$OLLAMA_TAILNET_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ollama' \
+  -d '{
+    "model": "qwen3.8:27b-mlx",
+    "messages": [{"role": "user", "content": "請只回覆：API_OK"}],
+    "stream": false
+  }'
+```
+
+`Authorization: Bearer ollama` 是 Ollama OpenAI-compatible adapter 的 placeholder，不是要提交的秘密。這個入口不是只提供 Qwen；只要模型已在 MacBook 的 `ollama list` 中，就能透過同一 API 使用。若未來要縮小為只有 AI395 或特定裝置，請改 Tailscale ACL，不要把 API 暴露到公網。
