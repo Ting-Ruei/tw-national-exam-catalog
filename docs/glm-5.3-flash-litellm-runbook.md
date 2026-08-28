@@ -124,11 +124,16 @@ python3 scripts/ai395_review_staging.py e2e \
   --llm-lane-policy residual \
   --context-limit-tokens 262144 \
   --context-safety-margin-tokens 8192 \
-  --model-max-tokens 512 \
+  --model-max-tokens 4096 \
   --max-tool-turns 1
 ```
 
 想先讓每個 lane 都進行模型測試時才使用 `--llm-lane-policy all`；大批次第一次不要用 all。`--llm-max-calls` 是總 call budget，應先用小批次與低上限確認 latency、usage、JSON adherence、vision pixels 與 exception 比例。
+
+GLM-5.3-Flash 可能先把 completion budget 用在 `reasoning_content`；實測 512
+tokens 會以 `finish_reason=length` 結束而沒有 final JSON。因此 staging 預設為
+4096，可依模型 profile 調整；若再次出現 JSON parse error，先檢查
+`finish_reason`、`content` 長度與 `usage.completion_tokens`，不要直接放寬 context。
 
 檢查：
 

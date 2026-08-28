@@ -92,7 +92,7 @@ python3 scripts/ai395_review_staging.py e2e \
   --llm-lane-policy residual \
   --context-limit-tokens 262144 \
   --context-safety-margin-tokens 8192 \
-  --model-max-tokens 512 \
+  --model-max-tokens 4096 \
   --max-tool-turns 1
 ```
 

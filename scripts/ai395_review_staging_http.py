@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ai395_review_staging import DEFAULT_CONFIG_DIR, describe, run_e2e
+from ai395_review_staging import DEFAULT_CONFIG_DIR, DEFAULT_MODEL_MAX_TOKENS, describe, run_e2e
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -189,7 +189,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default=os.environ.get("AI395_STAGING_LLM_LANE_POLICY", "residual"))
     parser.add_argument("--llm-max-calls", type=int, default=int(os.environ.get("AI395_STAGING_LLM_MAX_CALLS", "20")))
     parser.add_argument("--model-timeout", type=float, default=float(os.environ.get("AI395_STAGING_MODEL_TIMEOUT", "120")))
-    parser.add_argument("--model-max-tokens", type=int, default=int(os.environ.get("AI395_STAGING_MODEL_MAX_TOKENS", "512")))
+    parser.add_argument(
+        "--model-max-tokens",
+        type=int,
+        default=int(os.environ.get("AI395_STAGING_MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS))),
+    )
     return parser.parse_args()
 
 

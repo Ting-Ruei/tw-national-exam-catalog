@@ -55,6 +55,10 @@ LANES = ("text_evidence", "notation", "group", "vision", "answer")
 REQUIRED_CANDIDATE_KEYS = ("candidate_key", "source_registry_key", "question_number", "stem", "options", "answer", "metadata")
 MAX_LOCAL_QWEN_CONTEXT_TOKENS = 196_608
 MAX_LITELLM_CONTEXT_TOKENS = 1_000_000
+# GLM-5.3-Flash may spend part of the completion budget in
+# ``reasoning_content`` before it emits the required JSON. A 512-token cap
+# can therefore end with ``finish_reason=length`` and no final content.
+DEFAULT_MODEL_MAX_TOKENS = 4_096
 
 
 class StagingContractError(ValueError):
@@ -553,7 +557,7 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
             "prompt_version": PROMPT_VERSION,
             "base_url": base_url,
             "timeout": float(getattr(args, "model_timeout", 120.0)),
-            "max_tokens": int(getattr(args, "model_max_tokens", 512)),
+            "max_tokens": int(getattr(args, "model_max_tokens", DEFAULT_MODEL_MAX_TOKENS)),
             "transport": transport,
             "endpoint_class": endpoint_class,
             "enabled_by_env": env_enabled,
@@ -612,7 +616,7 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
         "prompt_version": PROMPT_VERSION,
         "base_url": base_url,
         "timeout": float(getattr(args, "model_timeout", 120.0)),
-        "max_tokens": int(getattr(args, "model_max_tokens", 512)),
+        "max_tokens": int(getattr(args, "model_max_tokens", DEFAULT_MODEL_MAX_TOKENS)),
         "transport": str(provider.get("transport") or "ollama_native"),
         "endpoint_class": endpoint_class,
         "enabled_by_env": env_enabled,
@@ -1406,7 +1410,12 @@ def write_json(path: Path, payload: Any) -> None:
 
 def git_sha() -> str | None:
     try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True).strip()
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 
@@ -1758,7 +1767,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default="residual")
     parser.add_argument("--llm-max-calls", type=int, default=20)
     parser.add_argument("--model-timeout", type=float, default=120.0)
-    parser.add_argument("--model-max-tokens", type=int, default=512)
+    parser.add_argument("--model-max-tokens", type=int, default=DEFAULT_MODEL_MAX_TOKENS)
     parser.add_argument("--context-limit-tokens", type=int, default=None, help="hard staging admission limit for the selected model provider")
     parser.add_argument("--context-safety-margin-tokens", type=int, default=None)
     parser.add_argument("--model-slow-threshold", type=float, default=None, help="seconds after which subsequent lanes use compact context")

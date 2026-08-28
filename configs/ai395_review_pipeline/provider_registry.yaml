@@ -31,6 +31,7 @@
       "capabilities": ["text", "vision", "structured_output", "function_calling"],
       "advertised_context_limit_tokens": 1000000,
       "advertised_max_output_tokens": 131072,
+      "model_max_tokens_default": 4096,
       "reasoning_effort_env": "LITELLM_REASONING_EFFORT",
       "reasoning_effort_default": "low",
       "send_reasoning_effort_env": "LITELLM_SEND_REASONING_EFFORT",
