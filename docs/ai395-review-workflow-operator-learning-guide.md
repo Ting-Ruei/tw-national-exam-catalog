@@ -208,6 +208,7 @@ python3 scripts/manage_ai395_review_pipeline.py run-node text_evidence --run-id 
 | `catalog_scan` | 已下載清單、考選部 catalog | new／unchanged／missing manifest | 如何判斷真的有新考試，不把 scan 當下載完成 |
 | `pdf_archive` | 官方 URL | PDF、SHA-256、Q／ANS／MOD metadata | MOD 優先與原始檔不可覆寫 |
 | `mineru_extract` | immutable PDF | markdown、layout、images、run manifest | OCR 產物不是 source truth；失敗如何 resume |
+| `vision_png_normalize` | MinerU JPG／PNG＋image refs | 隔離 PNG asset view、改寫 manifest、conversion report | 不覆寫原圖；GLM transport 必須是真實 PNG 與 `data:image/png;base64,...` |
 | `candidate_parse` | MinerU output | candidate、parse issues、題數 proof | 題號、選項、題組、圖片與題數 invariant |
 | `staging_ingest` | validated candidate | SQL candidate revision | merge、idempotency、reviewed diff gate |
 | `text_evidence` | candidate＋三來源＋pixels | pass／finding／proposal | 三 extractor 不是三份真相；何時不能改簡繁 |

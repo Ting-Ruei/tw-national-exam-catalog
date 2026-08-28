@@ -286,6 +286,27 @@ class AI395ReviewStagingTests(unittest.TestCase):
             with self.assertRaisesRegex(llm_adapter.PixelsUnavailable, "real PNG"):
                 llm_adapter.build_packet("vision", item, item, ROOT)
 
+    def test_image_reference_rebinds_portable_path_to_runtime_mineru_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory) / "20_mineru_output"
+            root.mkdir()
+            image = root / "by_official_catalog" / "sample.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(TEST_PNG)
+            item = {
+                "candidate_key": "q1",
+                "stem": "看圖",
+                "options": [],
+                "metadata": {},
+                "image_refs": [{
+                    "path": "/Users/old-machine/國考題資料夾/20_mineru_output/by_official_catalog/sample.png",
+                    "relative_path": "國考題資料夾/20_mineru_output/by_official_catalog/sample.png",
+                }],
+            }
+            _packet, refs = llm_adapter.build_packet("vision", item, item, root)
+            self.assertEqual(refs[0]["mime_type"], "image/png")
+            self.assertTrue(refs[0]["data_url"].startswith("data:image/png;base64,"))
+
     def test_feedback_event_is_bounded_and_never_authorizes_direct_activation(self) -> None:
         before = {
             "candidate_key": "feedback-q1",

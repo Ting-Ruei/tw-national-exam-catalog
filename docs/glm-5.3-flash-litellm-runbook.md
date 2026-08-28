@@ -67,7 +67,18 @@ python3 scripts/probe_litellm_glm.py --live --image /path/to/small-test.png
 GLM vision 的圖片 transport contract 是嚴格的：輸入檔必須是真實 PNG bytes，
 OpenAI-compatible request 的 URL 必須以 `data:image/png;base64,` 開頭。adapter
 不會把 JPEG／WebP bytes 偽裝成 PNG；若 MinerU 產生其他格式，必須先增加可追蹤的
-deterministic PNG conversion node，否則該題停在 `pixels_unavailable`／人工例外。
+deterministic PNG conversion node，例如：
+
+```bash
+python3 scripts/normalize_vision_assets_to_png.py \
+  --source-manifest /path/to/scope/source_manifest.json \
+  --mineru-manifest /path/to/scope/mineru_manifest.json \
+  --output-dir /path/to/scope/png-view
+```
+
+它不修改原始 MinerU JPG／PNG，會產生新的 candidate／manifest／PNG asset view
+與 `asset_conversion_report.json`；之後 staging runner 應使用這組新 manifest。
+若轉檔失敗，該題停在 `pixels_unavailable`／人工例外。
 
 probe 通過只代表 endpoint、key、model alias、JSON response 與視覺 transport 可用；不代表五條 lane 已通過 gold certification。
 

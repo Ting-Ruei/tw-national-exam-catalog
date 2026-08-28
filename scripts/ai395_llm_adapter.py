@@ -211,31 +211,56 @@ def _image_refs(item: dict[str, Any], fixture_root: Path) -> list[dict[str, Any]
     for raw_ref in item.get("image_refs") or []:
         if not isinstance(raw_ref, dict):
             raise PixelsUnavailable("image reference is not an object")
-        # Prefer the parser's verified absolute path when it is still present.
-        # Older candidate exports put the project-relative path first; joining
-        # that value to an image root that is already ``.../20_mineru_output``
-        # would duplicate ``國考題資料夾/20_mineru_output`` and falsely report
-        # a missing pixel asset.
-        raw_path = raw_ref.get("resolved_path") or raw_ref.get("path") or raw_ref.get("relative_path")
-        if not raw_path:
+        raw_paths = [
+            raw_ref.get("resolved_path"),
+            raw_ref.get("path"),
+            raw_ref.get("relative_path"),
+            raw_ref.get("raw_ref"),
+        ]
+        candidates: list[Path] = []
+        for raw_path in raw_paths:
+            if not raw_path:
+                continue
+            raw_value = str(raw_path)
+            candidate = Path(raw_value).expanduser()
+            if candidate.is_absolute():
+                candidates.append(candidate)
+            else:
+                candidates.append(root / candidate)
+            # Candidate exports made on another machine can retain an
+            # absolute path such as /Users/tim/.../國考題資料夾/20_mineru_output/.
+            # Rebind the portable suffix to the immutable runtime image root.
+            portable_markers = (
+                "國考題資料夾/20_mineru_output/",
+                "20_mineru_output/",
+            )
+            for marker in portable_markers:
+                if marker in raw_value:
+                    candidates.append(root / raw_value.split(marker, 1)[1])
+                    break
+        if not candidates:
             raise PixelsUnavailable("image reference has no path")
-        candidate = Path(str(raw_path))
-        if not candidate.is_absolute():
-            relative_candidate = root / candidate
-            if not relative_candidate.is_file() and str(candidate).startswith("國考題資料夾/"):
-                # The portable path is project-root relative while the
-                # confinement root is the MinerU asset subtree.
-                project_candidate = root.parents[1] / candidate
-                if project_candidate.is_file():
-                    relative_candidate = project_candidate
-            candidate = relative_candidate
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise PixelsUnavailable("image path escapes the immutable fixture root") from exc
-        if not resolved.is_file():
-            raise PixelsUnavailable(f"image asset is missing: {resolved}")
+        resolved = None
+        escaped = False
+        seen_candidates: set[str] = set()
+        for candidate in candidates:
+            candidate_resolved = candidate.resolve()
+            candidate_key = str(candidate_resolved)
+            if candidate_key in seen_candidates:
+                continue
+            seen_candidates.add(candidate_key)
+            try:
+                candidate_resolved.relative_to(root)
+            except ValueError:
+                escaped = True
+                continue
+            if candidate_resolved.is_file():
+                resolved = candidate_resolved
+                break
+        if resolved is None:
+            if escaped:
+                raise PixelsUnavailable("image path escapes the immutable fixture root")
+            raise PixelsUnavailable(f"image asset is missing under {root}")
         data = resolved.read_bytes()
         if not data:
             raise PixelsUnavailable(f"image asset is empty: {resolved}")

@@ -54,6 +54,20 @@ curl --fail http://127.0.0.1:58080/runs/ai395-mini20-glm-test
 
 若要暫停外部模型，只把 `AI395_STAGING_ALLOW_LIVE_LLM=0` 或 `LITELLM_GLM_ENABLED=0` 設回去並重建 worker；n8n 圖不需要重畫。可調整的 context／慢呼叫參數是 `AI395_STAGING_CONTEXT_LIMIT_TOKENS`、`AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS`、`AI395_STAGING_MAX_TOOL_TURNS` 與 `AI395_STAGING_MODEL_SLOW_THRESHOLD`；留白時使用版本化 pipeline policy（256K hard limit，必要時最多單次 384K extension）。GLM 的官方多模態與 OpenAI-compatible transport 仍要以 probe、gold corpus 與 latency report 認證，不能把「API 可呼叫」當成「題目已正確」。
 
+原有 MinerU 產物可能是 JPG；GLM vision staging 不會把 JPG bytes 偽裝成 PNG。先在隔離 scope 執行 deterministic conversion，讓新 manifest 指向新的 PNG view：
+
+```bash
+python3 scripts/normalize_vision_assets_to_png.py \
+  --source-manifest /path/to/scope/source_manifest.json \
+  --mineru-manifest /path/to/scope/mineru_manifest.json \
+  --output-dir /path/to/scope/png-view
+```
+
+這個節點只讀原始 MinerU 資產，會保存 source／output SHA-256、轉檔版本與
+`asset_conversion_report.json`，不修改原始 JPG／PNG。後續 `e2e` 使用
+`png-view/source_manifest.json` 與 `png-view/mineru_manifest.json`；送往 LiteLLM
+的每張圖片才會嚴格符合 `data:image/png;base64,...`。
+
 ### Correction feedback／guardrail outbox
 
 ReviewUI 真正保存人工修正時，會追加 `question_review_events` 與不可變的 `question_correction_feedback_events`；三證據自動修正只有帶三個獨立 evidence family 才能進 outbox。n8n 後續可讀取 `/api/correction-feedback?status=pending`，再把 bounded `ai_task` 交給 GLM。回傳的 `question_guardrail_candidate_v1` 只停在 `proposed`／`no_generalization`／`ai_failed` 等狀態，必須 owner approval、negative controls 與 gold regression 後才可另開版本實作；沒有任何直接寫 Skill、規則或題目檔案的節點。
