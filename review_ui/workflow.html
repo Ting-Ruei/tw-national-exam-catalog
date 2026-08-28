@@ -186,6 +186,7 @@
     .visual-preview { display: grid; gap: 7px; margin-top: 10px; }
     .visual-preview img { display: block; width: 100%; max-height: 230px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
     .visual-caption { color: var(--muted); font-size: 10px; }
+    .visual-missing { margin-top: 10px; padding: 9px; border: 1px dashed #e6c977; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font-size: 10px; line-height: 1.45; }
     .pdf-source { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
     .pdf-source button { min-height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); font-size: 10px; font-weight: 750; }
     .pdf-frame { width: 100%; height: 260px; margin-top: 9px; border: 1px solid var(--line); border-radius: 8px; background: #eef2f6; }
@@ -393,11 +394,48 @@
       return `<div class="lane-card ${esc(status)}"><div class="lane-name">${esc(LANE_LABELS[row.lane] || row.lane)}</div><div class="lane-status">${esc(statusLabel(status))}</div><div class="lane-meta">${esc(findings.join(' · ') || (row.model_action || '—'))}</div>${detail ? `<div class="lane-detail">${esc(detail)}</div>` : ''}</div>`;
     }).join('');
   }
+  function candidateImageRefs(candidate) {
+    const refs = [];
+    const seen = new Set();
+    const add = (ref, role) => {
+      if (!ref || typeof ref !== 'object') return;
+      const path = String(ref.path || ref.path_relative || ref.relative_path || ref.resolved_path || '').trim();
+      if (!path) return;
+      const identity = String(ref.sha256 || path);
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      refs.push({ref, path, role: role || ref.asset_role || ref.role || '題目圖片'});
+    };
+    (candidate.non_option_image_refs || []).forEach(ref => add(ref, ref?.asset_role || '題目圖片'));
+    (candidate.image_refs || []).forEach(ref => add(ref, ref?.asset_role || '題目圖片'));
+    add(candidate.stem_image, '題幹圖片');
+    (candidate.answer_image_refs || []).forEach(ref => add(ref, '答案圖片'));
+    (candidate.options || []).forEach(option => add(option?.image, `選項 ${option?.key || '?'} 圖片`));
+    return refs;
+  }
+  function renderCurrentImages(candidate) {
+    const refs = candidateImageRefs(candidate);
+    const available = refs.filter(item => item.ref.exists !== false);
+    const profile = candidate.visual_profile || {};
+    const vision = laneByName(candidate).find(row => row.lane === 'vision') || {};
+    const visualExpected = refs.length > 0
+      || profile.has_visual_asset
+      || profile.has_visual_dependency
+      || profile.has_structured_table
+      || ['finding', 'failed'].includes(String(vision.status || ''))
+      || Boolean(vision.model_called && !available.length);
+    if (!visualExpected) return '';
+    if (!available.length) {
+      return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>目前 MinerU 圖片／裁切</h2><span class="meta">無可展示 asset</span></div><div class="section-body"><div class="visual-missing"><strong>目前沒有可展示的圖片 asset。</strong><br>這不是自動判定「沒有圖片」；請人工確認 PDF 是否有圖、表格或被遺失的像素。${vision.error ? `<br>vision lane：${esc(vision.error)}` : ''}</div></div></div>`;
+    }
+    return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>目前 MinerU 圖片／裁切</h2><span class="meta">${fmt(available.length)} asset</span></div><div class="section-body"><div class="visual-preview">${available.map((item, index) => `<div><img src="${esc(fileUrl(item.path))}" alt="${esc(item.role || `題目圖片 ${index + 1}`)}"><div class="visual-caption">${esc(item.role || `圖片 ${index + 1}`)} · ${esc(item.ref.raw_ref || item.path)}</div></div>`).join('')}</div><div class="path">目前顯示的是 staging candidate 所引用的 PNG；人工修正前後仍須保留原始 asset 與 revision。</div></div></div>`;
+  }
   function renderQuestion(candidate) {
     const options = Array.isArray(candidate.options) ? candidate.options : [];
     return `<div class="section"><div class="section-head"><h2>目前 revision 的題目內容</h2><span class="meta">原始題文只讀；人工修正另建 event／revision</span></div><div class="section-body">
       <div class="question-text">${esc(candidate.stem || '（題幹空白）')}</div>
       ${options.map(option => `<div class="option-row"><div class="option-key">(${esc(option.key || '?')})</div><div class="option-text">${esc(option.text || '（圖片或文字缺漏）')}${option.image?.exists ? `<div class="tags"><span class="tag good">選項有 MinerU 圖片</span></div>` : ''}</div></div>`).join('')}
+      ${renderCurrentImages(candidate)}
       <div class="answer-line">目前答案：${esc(candidate.answer || '未提供；答案 lane 另行核對')}</div>
     </div></div>`;
   }
@@ -405,7 +443,20 @@
     const findings = candidate?.ai_review?.findings || [];
     const issues = candidate?.issues || [];
     if (!findings.length && !issues.length) return '<div class="finding"><strong>目前沒有開放 finding</strong><p>此題仍可能進入抽樣 queue；機器通過不等於正式人工接受。</p></div>';
-    return [...issues.map(issue => ({...issue, source:'deterministic'})), ...findings.map(finding => ({...finding, source:'AI lane'}))].map(item => `<div class="finding"><strong>${esc(item.source)} · ${esc(item.issue_code || item.code || 'finding')} · ${esc(item.severity || 'info')}</strong><p>${esc(item.message || item.reason || item.observed || '未提供說明')}</p><div class="finding-meta">${esc(item.owner_stage || item.lane || '')}${item.evidence ? ` · evidence ${esc(JSON.stringify(item.evidence))}` : ''}</div></div>`).join('');
+    const laneRows = laneByName(candidate);
+    const enrich = finding => {
+      const code = String(finding.issue_code || finding.code || '');
+      const lane = laneRows.find(row => row.lane === finding.lane && (row.finding_codes || []).includes(code))
+        || laneRows.find(row => (row.finding_codes || []).includes(code));
+      const laneReason = lane?.reason || (lane?.error ? `模型／provider error：${lane.error}` : '');
+      return {...finding, reason: finding.reason || laneReason, laneResult: lane};
+    };
+    return [...issues.map(issue => ({...issue, source:'deterministic'})), ...findings.map(finding => ({...enrich(finding), source:'AI lane'}))].map(item => {
+      const lane = item.laneResult || {};
+      const requested = (lane.requested_evidence || []).map(evidence => evidence.kind || evidence).join(', ');
+      const meta = [item.owner_stage || item.lane || '', item.evidence ? `evidence ${JSON.stringify(item.evidence)}` : '', requested ? `要求證據 ${requested}` : ''].filter(Boolean).join(' · ');
+      return `<div class="finding"><strong>${esc(item.source)} · ${esc(item.issue_code || item.code || 'finding')} · ${esc(item.severity || 'info')}</strong><p>${esc(item.message || item.reason || item.observed || '未提供說明')}</p><div class="finding-meta">${esc(meta)}</div></div>`;
+    }).join('');
   }
   function renderRevision(candidate) {
     const metadata = candidate.metadata || {};
