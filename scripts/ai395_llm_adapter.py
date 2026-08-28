@@ -28,7 +28,8 @@ from probe_qwen_mlx_tailscale import normalized_base_url
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PROMPT_VERSION = "ai395_lane_advisory_v3_provider_neutral_context_guarded"
 FEEDBACK_PROMPT_VERSION = "ai395_guardrail_feedback_v1_provider_neutral_context_guarded"
 SUPPORTED_REASONING_EFFORTS = {"low", "high", "max"}
@@ -235,21 +236,55 @@ def _image_refs(item: dict[str, Any], fixture_root: Path) -> list[dict[str, Any]
             raise PixelsUnavailable("image path escapes the immutable fixture root") from exc
         if not resolved.is_file():
             raise PixelsUnavailable(f"image asset is missing: {resolved}")
-        mime = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
-        if mime not in SUPPORTED_IMAGE_MIME:
-            raise PixelsUnavailable(f"image asset is not a supported raster format: {resolved.name} ({mime})")
         data = resolved.read_bytes()
         if not data:
             raise PixelsUnavailable(f"image asset is empty: {resolved}")
+        # GLM's OpenAI-compatible vision route is deliberately normalized to
+        # one transport contract. Do not label JPEG/WebP bytes as PNG: if a
+        # future ingest source emits another raster format, add an explicit
+        # deterministic conversion stage before this boundary.
+        if not data.startswith(PNG_SIGNATURE):
+            mime = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+            raise PixelsUnavailable(
+                "vision asset must contain real PNG bytes for the GLM route; "
+                f"got {resolved.name} ({mime}); convert upstream before sending"
+            )
         if len(data) > MAX_IMAGE_BYTES:
             raise PixelsUnavailable(f"image asset exceeds {MAX_IMAGE_BYTES} bytes: {resolved}")
         resolved_refs.append({
             "path": str(resolved),
-            "mime_type": mime,
+            "mime_type": "image/png",
             "bytes": len(data),
-            "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+            "data_url": f"{PNG_DATA_URL_PREFIX}{base64.b64encode(data).decode('ascii')}",
         })
     return resolved_refs
+
+
+def _validated_png_image_refs(image_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fail closed if an OpenAI-compatible caller supplies a non-PNG URL."""
+
+    validated: list[dict[str, Any]] = []
+    for ref in image_refs:
+        if not isinstance(ref, dict):
+            raise PixelsUnavailable("image reference is not an object")
+        data_url = str(ref.get("data_url") or "")
+        if not data_url.startswith(PNG_DATA_URL_PREFIX):
+            raise PixelsUnavailable("OpenAI-compatible vision images must use data:image/png;base64,...")
+        encoded = data_url[len(PNG_DATA_URL_PREFIX):]
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise PixelsUnavailable("PNG data URL has invalid base64") from exc
+        if not data.startswith(PNG_SIGNATURE):
+            raise PixelsUnavailable("PNG data URL does not contain PNG bytes")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise PixelsUnavailable(f"PNG data URL exceeds {MAX_IMAGE_BYTES} bytes")
+        copy = dict(ref)
+        copy["data_url"] = data_url
+        copy["mime_type"] = "image/png"
+        copy["bytes"] = len(data)
+        validated.append(copy)
+    return validated
 
 
 def build_packet(
@@ -308,6 +343,7 @@ def build_request(
     reasoning_effort: str | None = None,
     clear_thinking: bool | None = None,
 ) -> dict[str, Any]:
+    image_refs = _validated_png_image_refs(image_refs)
     schema_hint = {
         "status": "pass|finding|unclear",
         "confidence": "number 0..1",
@@ -369,6 +405,8 @@ def build_feedback_request(
 ) -> dict[str, Any]:
     """Build the bounded model request for a before/after guardrail example."""
 
+    image_refs = _validated_png_image_refs(image_refs)
+
     schema_hint = {
         "status": "candidate|no_generalization|unclear",
         "guardrail_type": "exact_ocr_rule|notation_rule|format_rule|crop_strategy|answer_rule|parser_route|skill_note|no_generalization",
@@ -428,6 +466,7 @@ def build_native_request(openai_request: dict[str, Any], image_refs: list[dict[s
     the message's ``images`` array rather than OpenAI data URLs.
     """
 
+    image_refs = _validated_png_image_refs(image_refs)
     messages = openai_request.get("messages") or []
     native_messages: list[dict[str, Any]] = []
     for message in messages:

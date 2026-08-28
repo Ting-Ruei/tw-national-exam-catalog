@@ -22,7 +22,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from ai395_llm_adapter import LLMAdapterError, normalized_openai_base_url
+from ai395_llm_adapter import (
+    LLMAdapterError,
+    PNG_DATA_URL_PREFIX,
+    PNG_SIGNATURE,
+    normalized_openai_base_url,
+)
 
 
 class ProbeError(ValueError):
@@ -39,7 +44,7 @@ def describe() -> dict[str, Any]:
         "provider": "litellm_glm",
         "default_operation": "authenticated GET /v1/models",
         "live_operation": "POST /v1/chat/completions only with --live",
-        "vision_operation": "include one local raster image only with --live --image",
+        "vision_operation": "include one local PNG image only with --live --image",
         "model_default": "glm-5.3-flash",
         "accepted_endpoints": ["https://<internal-litellm-host>/v1", "http://localhost:<port>/v1"],
         "writes": False,
@@ -100,16 +105,17 @@ def build_live_payload(model: str, image: Path | None) -> dict[str, Any]:
             'Return exactly this JSON object and no markdown: {"probe":"ok"}'
         )
     else:
-        mime = mimetypes.guess_type(image.name)[0] or "application/octet-stream"
-        if not mime.startswith("image/"):
-            raise ProbeError(f"probe image is not a raster image: {image.name}")
-        encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+        data = image.read_bytes()
+        if not data.startswith(PNG_SIGNATURE):
+            mime = mimetypes.guess_type(image.name)[0] or "application/octet-stream"
+            raise ProbeError(f"probe image must contain real PNG bytes: {image.name} ({mime})")
+        encoded = base64.b64encode(data).decode("ascii")
         content = [
             {
                 "type": "text",
                 "text": 'Return exactly this JSON object and no markdown: {"probe":"vision_ok"}',
             },
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
+            {"type": "image_url", "image_url": {"url": f"{PNG_DATA_URL_PREFIX}{encoded}"}},
         ]
     return {
         "model": model,

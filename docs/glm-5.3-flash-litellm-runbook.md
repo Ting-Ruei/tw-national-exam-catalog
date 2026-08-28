@@ -64,6 +64,11 @@ python3 scripts/probe_litellm_glm.py --live
 python3 scripts/probe_litellm_glm.py --live --image /path/to/small-test.png
 ```
 
+GLM vision 的圖片 transport contract 是嚴格的：輸入檔必須是真實 PNG bytes，
+OpenAI-compatible request 的 URL 必須以 `data:image/png;base64,` 開頭。adapter
+不會把 JPEG／WebP bytes 偽裝成 PNG；若 MinerU 產生其他格式，必須先增加可追蹤的
+deterministic PNG conversion node，否則該題停在 `pixels_unavailable`／人工例外。
+
 probe 通過只代表 endpoint、key、model alias、JSON response 與視覺 transport 可用；不代表五條 lane 已通過 gold certification。
 
 ## 3. Context 與模型參數

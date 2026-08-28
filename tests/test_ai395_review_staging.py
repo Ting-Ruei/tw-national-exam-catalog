@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import sqlite3
 import sys
@@ -11,6 +12,9 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import ai395_review_staging as staging  # noqa: E402
@@ -249,7 +253,11 @@ class AI395ReviewStagingTests(unittest.TestCase):
         request = llm_adapter.build_request(
             "vision",
             {"candidate_key": "q1", "stem": "看圖", "options": [], "metadata": {}},
-            [{"data_url": "data:image/png;base64,AAAA", "bytes": 3, "mime_type": "image/png"}],
+            [{
+                "data_url": f"{llm_adapter.PNG_DATA_URL_PREFIX}{base64.b64encode(TEST_PNG).decode('ascii')}",
+                "bytes": len(TEST_PNG),
+                "mime_type": "image/png",
+            }],
             "glm-5.3-flash",
             256,
             reasoning_effort="low",
@@ -262,7 +270,21 @@ class AI395ReviewStagingTests(unittest.TestCase):
         user_content = request["messages"][1]["content"]
         self.assertIsInstance(user_content, list)
         self.assertEqual(user_content[-1]["type"], "image_url")
-        self.assertTrue(user_content[-1]["image_url"]["url"].startswith("data:image/png"))
+        self.assertTrue(user_content[-1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_glm_vision_rejects_non_png_bytes_instead_of_mislabelling_them(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            image = Path(directory) / "not-really-a-png.png"
+            image.write_bytes(b"jpeg-or-corrupt-pixels")
+            item = {
+                "candidate_key": "q1",
+                "stem": "看圖",
+                "options": [],
+                "metadata": {},
+                "image_refs": [{"path": str(image)}],
+            }
+            with self.assertRaisesRegex(llm_adapter.PixelsUnavailable, "real PNG"):
+                llm_adapter.build_packet("vision", item, item, ROOT)
 
     def test_feedback_event_is_bounded_and_never_authorizes_direct_activation(self) -> None:
         before = {
@@ -314,10 +336,15 @@ class AI395ReviewStagingTests(unittest.TestCase):
         self.assertEqual(text_payload["response_format"], {"type": "json_object"})
         self.assertNotIn("think", text_payload)
         with tempfile.NamedTemporaryFile(suffix=".png") as image:
-            image.write(b"fake-pixels")
+            image.write(TEST_PNG)
             image.flush()
             vision_payload = glm_probe.build_live_payload("glm-5.3-flash", Path(image.name))
         self.assertEqual(vision_payload["messages"][0]["content"][-1]["type"], "image_url")
+        self.assertTrue(
+            vision_payload["messages"][0]["content"][-1]["image_url"]["url"].startswith(
+                "data:image/png;base64,"
+            )
+        )
 
     def test_glm_context_can_use_only_one_bounded_extension(self) -> None:
         runtime = {
