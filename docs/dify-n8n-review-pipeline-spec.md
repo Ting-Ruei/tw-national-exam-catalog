@@ -3,6 +3,8 @@
 更新日期：2026-08-22（Asia/Taipei）  
 狀態：以目前 repository、SQL schema、Review UI、歷史 AI 產物與 AI395 新版審核構想為基準的整合規格。
 
+> 現行模型決策（2026-08-28）：staging 的五條審核 lane 統一走 LiteLLM 的 `glm-5.3-flash`。它是本流程的多模態 primary；MacBook Qwen 只作 shadow／測試，OpenCode Go 不在正常路徑。舊段落中的 DeepSeek／Gemma／Kimi 路由屬於歷史候選方案，實際 active route 以 `configs/ai395_review_pipeline/route_registry.yaml` 為準。LiteLLM secret、probe 與 context policy 見 `docs/glm-5.3-flash-litellm-runbook.md`。
+
 AI395 模型路由、Docker staging、成本與 GPT-5.6 Luna 派工包另見 `docs/ai395-open-model-review-implementation-plan.md`；實際操作與逐關卡學習路徑見 `docs/ai395-review-workflow-operator-learning-guide.md`。
 
 ## 0. 核心結論
@@ -536,6 +538,8 @@ db_apply
 
 n8n node 不保存實際 model id，只保存 lane／`route_key`。Python resolver 從版本化的 provider、route、resource、budget、schedule 與 model profile 設定決定實際 provider。初始狀態為：
 
+目前 active route 已切換為 `litellm_glm`／`glm-5.3-flash`，五條 lane 共用同一個 OpenAI-compatible adapter；只需調整 provider env、profile 或 route registry，不需改 n8n node。所有 live 呼叫都需要明確 `--allow-live-provider`，且仍受 256K hard context、單次 384K extension、總 call budget、slow threshold 與人工例外規則限制。
+
 ```text
 ollama_cloud.enabled = true
 local_qwen.enabled = false
@@ -547,7 +551,7 @@ owner 日後調整某一關的 primary、challenger、fallback、batch size、ti
 
 ### 14.4 MacBook MLX／Tailscale provider contract
 
-MacBook 的 `qwen3.8-27b-mlx` 是可拔除的測試算力，不是 n8n 的特殊 node。n8n 只傳 lane／`route_key`，由 provider resolver 讀取：
+MacBook 的 `qwen3.8-27b-mlx` 是可拔除的測試算力，不是 n8n 的特殊 node，也不是目前 GLM primary 的必要依賴。n8n 只傳 lane／`route_key`，由 provider resolver 讀取：
 
 ```text
 provider_id = local_qwen_mlx

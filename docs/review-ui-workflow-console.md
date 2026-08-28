@@ -2,6 +2,8 @@
 
 這是新的題目審核工作台。它從既有的 MinerU/parser 產物開始，不負責下載 PDF 或重新執行 MinerU；這兩個 upstream node 仍由 contract 與 disabled flag 控制。ReviewUI 只讀取 staging／JSONL／三證據產物，人工決策才會透過明確的 review API 寫入 append-only review log。
 
+> 目前模型路由決策（2026-08-28）：五條 lane 的 staging primary 統一使用 LiteLLM 上的 `glm-5.3-flash`。MacBook Qwen 只保留為 shadow／測試；`mock` 仍是無 secret 的離線測試模式。詳見 [GLM-5.3-Flash × LiteLLM 操作手冊](glm-5.3-flash-litellm-runbook.md)。
+
 ## 啟動隔離 staging ReviewUI
 
 以下命令使用 real staging bundle；路徑請依實際 run 替換。它不連線 AI395 PostgreSQL，也不會把 Qwen 的 advisory 直接寫成正式審核結果。
@@ -54,26 +56,29 @@ Qwen 只能產生 finding、證據請求或 proposal；UI 不會因為模型輸�
 
 圖片題的人工審核仍保留三類：誤判有圖、裁切正確、裁切錯誤。裁切錯誤時，UI 應先呈現官方 PDF／crop 前後證據，再由腳本或人工決定是否建立新 revision；不能只依模型說「座標應該在這裡」就覆蓋原始資產。
 
-## Qwen context 與 agent 邊界
+## GLM context 與 agent 邊界
 
-MacBook 的 `qwen3.8:27b-mlx` 以 OpenAI-compatible endpoint 接入 staging。每個 lane 只收到 allow-list packet，不把完整 raw block、秘密路徑或整份 PDF 送入模型。現行實測設定為：
+LiteLLM 的 `glm-5.3-flash` 以 OpenAI-compatible endpoint 接入 staging；模型是原生多模態，但每個 lane 只收到 allow-list packet，不把完整 raw block、秘密路徑或整份 PDF 送入模型。現行設定為：
 
-- hard context limit：`196608` tokens（192K，仍低於模型宣稱的 256K）。
+- hard context limit：`262144` tokens（256K）。
 - safety margin：`8192` tokens。
-- output：`256` tokens。
+- 單 lane 第一次超過 hard limit 時，最多一次延伸到 `393216` tokens（384K）。
+- output：由 `--model-max-tokens` 控制。
 - slow threshold：`30` 秒；慢回應後下一 lane 自動改用 compact context。
 - evidence tool turns：每 lane 最多 `1` 回。
 
 所以這套流程可以讓模型提出額外證據需求，再由程式收集有限證據回傳；它是 bounded agent，不是可以任意讀寫檔案的 autonomous agent。所有工具請維持 allow-list，並把每次 tool turn 寫進 lane telemetry。
 
-## 正確的 real existing-artifact staging 命令
+## 正確的 GLM real existing-artifact staging 命令
 
 注意：同時提供 `--source-manifest` 與 `--mineru-manifest` 時，runner 會優先使用這對既有產物；只有未提供 manifest 時才使用預設的 `mini20` fixture。這避免把 real run 靜默降級成 fixture。
 
 ```bash
-QWEN_MLX_ENABLED=1 \
-QWEN_MLX_BASE_URL='https://<macbook-tailnet-host>/v1' \
-QWEN_MLX_MODEL='qwen3.8:27b-mlx' \
+LITELLM_GLM_ENABLED=1 \
+LITELLM_BASE_URL='https://<internal-litellm-host>/v1' \
+LITELLM_MODEL='glm-5.3-flash' \
+LITELLM_REASONING_EFFORT='low' \
+LITELLM_CLEAR_THINKING=0 \
 python3 scripts/ai395_review_staging.py e2e \
   --source-manifest /private/tmp/<scope>/source_manifest.json \
   --mineru-manifest /private/tmp/<scope>/mineru_manifest.json \
@@ -82,14 +87,16 @@ python3 scripts/ai395_review_staging.py e2e \
   --run-id <unique-run-id> \
   --source-mode existing_artifact \
   --mineru-mode existing_artifact \
-  --model-mode local_qwen_mlx \
+  --model-mode litellm_glm \
   --allow-live-provider \
   --llm-lane-policy residual \
-  --context-limit-tokens 196608 \
+  --context-limit-tokens 262144 \
   --context-safety-margin-tokens 8192 \
-  --model-max-tokens 256 \
+  --model-max-tokens 512 \
   --max-tool-turns 1
 ```
+
+實際 `LITELLM_API_KEY` 只從 shell／secret manager 注入，不要放進命令、文件或版本庫。先執行 `python3 scripts/probe_litellm_glm.py`，再執行上面的 live staging。
 
 完成後先看 `summary.json`、`run_manifest.json`、`formal_dry_run.json`，再把同一 run 的 candidates 與 evidence bundle 接到 ReviewUI。若看到 `context_budget_exceeded`、持續 slow、`provider_error` 或大量 `pixels_unavailable`，先修 adapter／fixture／asset contract，再擴大批次。
 

@@ -5,6 +5,8 @@
 上位規格：`docs/dify-n8n-review-pipeline-spec.md`  
 操作與逐關卡學習：`docs/ai395-review-workflow-operator-learning-guide.md`
 
+> 現行決策覆蓋（2026-08-28）：後續實作以 LiteLLM 測試環境的開源／開放權重 `glm-5.3-flash` 作為五條審核 lane 的統一 primary，並使用其原生多模態輸入。本文較早段落保留當時的 DeepSeek／Gemma／Kimi／Qwen 候選分析，僅作決策歷史；active provider、route、profile 與實際 adapter 以 `configs/ai395_review_pipeline/`、`docs/skills/national-exam-ai-audit/profiles/glm-5.3-flash-litellm.yaml` 及 `scripts/ai395_llm_adapter.py` 為準。OpenCode Go 與本地 Qwen 均不在正常 primary 路徑。
+
 ## 0. 已確定的決策
 
 1. 整套架構部署在 AI395：官方 PDF 歸檔、MinerU、parser、evidence、工作 queue、validator、Review UI、embedding 與 reranker 都由 AI395 執行。

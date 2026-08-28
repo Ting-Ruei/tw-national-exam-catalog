@@ -23,6 +23,8 @@ REQUIRED_FILES = [
     "contracts/task.schema.json",
     "contracts/sparse-result.schema.json",
     "contracts/rule-proposal.schema.json",
+    "contracts/question-correction-feedback.schema.json",
+    "contracts/question-guardrail-candidate.schema.json",
     "rules/ocr-exact.json",
     "rules/semantic-anchors.json",
     "rules/group-patterns.json",
@@ -54,6 +56,8 @@ REQUIRED_FILES = [
     "profiles/qwen3.6-27b.yaml",
     "profiles/gemma4-31b.yaml",
     "profiles/ai-max-qwen3.6-27b.yaml",
+    "profiles/glm-5.3-flash-litellm.yaml",
+    "adapters/openai_compatible.py",
     "runtimes/ai-max-395.yaml",
     "benchmarks/gold-corpus.jsonl",
 ]

@@ -33,6 +33,9 @@ class ReviewUiWorkflowConsoleTests(unittest.TestCase):
             "五條 lane 時間線",
             "三證據／PDF evidence",
             "Revision / invalidation",
+            "儲存人工修正並送護欄回饋",
+            "correctionOptions",
+            "/api/correction-feedback",
             "production writes",
             "advisory-only",
         ):
@@ -202,7 +205,105 @@ class ReviewUiWorkflowConsoleTests(unittest.TestCase):
             self.assertTrue(state.evidence_file_path(candidate_key, "official_question_crop").is_file())  # type: ignore[union-attr]
             self.assertIsNone(state.evidence_file_path(candidate_key, "../issues.csv"))
             lane_result = payload["selected"]["candidate"]["ai_review"]["lane_results"][0]
-            self.assertNotIn("raw_content", lane_result)
+        self.assertNotIn("raw_content", lane_result)
+
+    def test_human_correction_persists_before_after_feedback_without_replacing_original(self) -> None:
+        candidate = {
+            "candidate_key": "workflow-feedback-q1",
+            "source_registry_key": "fixture:question",
+            "question_number": "1",
+            "stem": "原始荧膜題幹",
+            "options": [{"key": "A", "text": "原始選項"}],
+            "answer": "A",
+            "metadata": {"normalized_category_name": "藥師", "normalized_subject_name": "測試"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidates.jsonl"
+            review_log = root / "question_review_events.jsonl"
+            candidate_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
+            review_log.write_text("", encoding="utf-8")
+            state = review_ui.ReviewState(candidate_path, None, review_log, review_backend="jsonl")
+            saved = state.append_review(
+                {
+                    "candidate_key": candidate["candidate_key"],
+                    "action": "correct",
+                    "source": "workflow_console",
+                    "review_surface": "desktop_workflow",
+                    "reviewer": "owner",
+                    "correction": {
+                        "stem": "修正後莢膜題幹",
+                        "options": [{"key": "A", "text": "修正後選項"}],
+                        "answer": "A",
+                    },
+                }
+            )
+            payload = state.candidate_payload(candidate)
+            feedback = saved["storage"]["correction_feedback"]["event"]
+            rows = state.correction_feedback_payload({"status": "pending"})
+
+        self.assertEqual(candidate["stem"], "原始荧膜題幹")
+        self.assertEqual(feedback["before"]["stem"], "原始荧膜題幹")
+        self.assertEqual(feedback["after"]["stem"], "修正後莢膜題幹")
+        self.assertIn("stem", feedback["changed_fields"])
+        self.assertEqual(payload["stem"], "修正後莢膜題幹")
+        self.assertEqual(payload["correction_feedback"]["feedback_id"], feedback["feedback_id"])
+        self.assertEqual(rows["count"], 1)
+        self.assertEqual(rows["events"][0]["feedback_id"], feedback["feedback_id"])
+
+    def test_accept_without_correction_does_not_create_learning_example(self) -> None:
+        candidate = {
+            "candidate_key": "workflow-noop-q1",
+            "question_number": "1",
+            "stem": "原始題幹",
+            "options": [],
+            "metadata": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidates.jsonl"
+            review_log = root / "question_review_events.jsonl"
+            candidate_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
+            review_log.write_text("", encoding="utf-8")
+            state = review_ui.ReviewState(candidate_path, None, review_log, review_backend="jsonl")
+            saved = state.append_review(
+                {"candidate_key": candidate["candidate_key"], "action": "accept", "source": "workflow_console"}
+            )
+            rows = state.correction_feedback_payload({"status": "all"})
+
+        self.assertNotIn("correction_feedback", saved["storage"])
+        self.assertEqual(rows["count"], 0)
+
+    def test_answer_correction_uses_answer_scope_in_feedback_outbox(self) -> None:
+        candidate = {
+            "candidate_key": "workflow-answer-feedback-q1",
+            "question_number": "1",
+            "stem": "答案題",
+            "options": [],
+            "answer": "A",
+            "metadata": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidates.jsonl"
+            review_log = root / "question_review_events.jsonl"
+            candidate_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
+            review_log.write_text("", encoding="utf-8")
+            state = review_ui.ReviewState(candidate_path, None, review_log, review_backend="jsonl")
+            saved = state.append_answer_review(
+                {
+                    "candidate_key": candidate["candidate_key"],
+                    "action": "correct",
+                    "corrected_answer": "B",
+                    "reviewer": "owner",
+                    "source": "answer_workflow",
+                }
+            )
+            feedback = saved["storage"]["correction_feedback"]["event"]
+
+        self.assertEqual(feedback["scope"], "answer")
+        self.assertEqual(feedback["before"]["answer"], "A")
+        self.assertEqual(feedback["after"]["answer"], "B")
 
 
 if __name__ == "__main__":

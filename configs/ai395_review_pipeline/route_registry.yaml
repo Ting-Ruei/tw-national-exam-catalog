@@ -2,32 +2,32 @@
   "schema_version": "ai395_review_route_registry_v1",
   "routes": {
     "text_evidence": {
-      "primary": "mock-text",
-      "challengers": ["deepseek-v4-flash-ollama-cloud"],
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
       "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
       "outage_fallbacks": []
     },
     "notation": {
-      "primary": "mock-notation",
-      "challengers": ["deepseek-v4-flash-ollama-cloud"],
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
       "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
       "outage_fallbacks": []
     },
     "group": {
-      "primary": "mock-group",
-      "challengers": ["deepseek-v4-flash-ollama-cloud"],
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
       "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
       "outage_fallbacks": []
     },
     "vision": {
-      "primary": "mock-vision",
-      "challengers": ["gemma4-31b-ollama-cloud", "kimi-k2.7-code-ollama-cloud"],
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
       "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
       "outage_fallbacks": []
     },
     "answer": {
-      "primary": "mock-answer",
-      "challengers": ["deepseek-v4-flash-ollama-cloud"],
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
       "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
       "outage_fallbacks": []
     }

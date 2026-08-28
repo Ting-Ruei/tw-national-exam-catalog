@@ -137,6 +137,54 @@ CREATE TABLE IF NOT EXISTS correction_proposals (
     created_at TEXT NOT NULL
 );
 
+-- Immutable before/after examples sent to the bounded guardrail curator.
+-- This is separate from thumbs-up/down feedback: a semantic pass has no
+-- correction example, while a real edit must preserve both visible versions.
+CREATE TABLE IF NOT EXISTS feedback_events (
+    feedback_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+    candidate_key TEXT NOT NULL,
+    revision_id TEXT,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('human_correction', 'three_evidence_correction')),
+    scope TEXT NOT NULL CHECK (scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'deterministic_system')),
+    reviewer TEXT,
+    event_ref TEXT,
+    changed_fields TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    diff_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    ai_task_json TEXT NOT NULL DEFAULT '{}',
+    event_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id, candidate_key) REFERENCES pipeline_candidates(run_id, candidate_key)
+);
+
+CREATE TABLE IF NOT EXISTS guardrail_candidates (
+    guardrail_id TEXT PRIMARY KEY,
+    feedback_id TEXT NOT NULL REFERENCES feedback_events(feedback_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+    candidate_key TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    change_class TEXT NOT NULL,
+    guardrail_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('observed', 'proposed', 'no_generalization', 'ai_failed', 'rejected', 'needs_owner_approval', 'approved', 'active')),
+    candidate_json TEXT NOT NULL,
+    validation_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id, candidate_key) REFERENCES pipeline_candidates(run_id, candidate_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_events_candidate
+    ON feedback_events (candidate_key, created_at DESC, feedback_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_source
+    ON feedback_events (source_kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_guardrail_candidates_status
+    ON guardrail_candidates (run_id, status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS review_exception_queue (
     exception_id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,

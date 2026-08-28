@@ -5,6 +5,12 @@
 工程規劃：`docs/ai395-open-model-review-implementation-plan.md`  
 完整流程：`docs/dify-n8n-review-pipeline-spec.md`
 
+## 目前模型決策（2026-08-28）
+
+現行 staging 工作流的五條 lane（`text_evidence`、`notation`、`group`、`vision`、`answer`）統一以 LiteLLM 的 `glm-5.3-flash` 作為 primary。GLM 是本流程的原生多模態候選，文字與圖片都走同一個 OpenAI-compatible adapter；MacBook Qwen 3.8-27B MLX 保留為 shadow／測試。舊的 DeepSeek、Gemma、Kimi route 仍可在歷史文件中看到，但不再是目前 route registry 的 primary 或 challenger。
+
+詳細的 secret、probe、256K admission 與單次 384K extension 操作請看 [`docs/glm-5.3-flash-litellm-runbook.md`](glm-5.3-flash-litellm-runbook.md)。
+
 ## 0. 這份手冊要解決什麼
 
 目標不是要求 owner 一開始就看懂所有 Python、SQL 與 n8n node，而是分兩步：
@@ -16,8 +22,8 @@
 
 - production 仍只有 AI395 Review UI／受控 importer 能寫入；staging 不掛 production DB volume。
 - AI、mock model 與 Luna 都不能寫人工 `accept`、`block`、`reset_review` 或題組／答案接受事件。
-- OpenCode Go 預設停用，不需先訂閱。
-- Ollama Cloud 是正式模型主池；本地 Qwen 3.8-27B 完成設備認證後才加入 shadow。
+- OpenCode Go 預設停用，不需先訂閱；LiteLLM 測試 key 只從 runtime secret 注入。
+- GLM-5.3-Flash 是目前 staging primary；本地 Qwen 3.8-27B 保留為 shadow，不是主流程必要依賴。
 - 每個修正建立新 revision；不覆寫 PDF、MinerU raw、舊 revision 或人工歷史。
 
 ## 1. 先記住這張地圖
@@ -121,26 +127,28 @@ configs/ai395_review_pipeline/schedule_policy.yaml
 docs/skills/national-exam-ai-audit/profiles/*.yaml
 ```
 
-### 4.1 初始狀態
+### 4.1 目前狀態
 
 ```yaml
 providers:
-  ollama_cloud:
+  litellm_glm:
     enabled: true
-  local_qwen:
+    model: glm-5.3-flash
+  local_qwen_mlx:
     enabled: false
   opencode_go:
     enabled: false
 ```
 
-| 路由 | 初始 primary | challenger／備援 |
+| 路由 | 目前 primary | challenger／備援 |
 |---|---|---|
-| `text_residual` | Ollama Cloud DeepSeek V4 Flash | Ollama Qwen 3.5；本地 Qwen 認證後可 shadow |
-| `notation_residual` | Ollama Cloud DeepSeek V4 Flash | Ollama Qwen 3.5；人工 PDF |
-| `group_boundary` | Ollama Cloud DeepSeek V4 Flash | Ollama Qwen 3.5；人工 |
-| `vision_need`／`vision_crop` | Ollama Cloud Gemma 4 31B | Ollama Kimi K2.7 Code（高難度／低信心／衝突）；Qwen 3.5／Mistral 作抽樣；本地 Qwen 認證後可 shadow |
-| `answer_special_text` | Ollama Cloud DeepSeek V4 Flash | 人工；選配 challenger |
-| `answer_special_vision` | Ollama Cloud Gemma 4 31B | Ollama Kimi K2.7 Code challenger；人工 |
+| `text_evidence` | LiteLLM `glm-5.3-flash` | 人工 exception；Qwen 僅 shadow |
+| `notation` | LiteLLM `glm-5.3-flash` | 人工 PDF exception；Qwen 僅 shadow |
+| `group` | LiteLLM `glm-5.3-flash` | 人工確認；模型只能提議範圍 |
+| `vision` | LiteLLM `glm-5.3-flash` | 人工三分類；Qwen 僅 shadow |
+| `answer` | LiteLLM `glm-5.3-flash` | 人工確認 MOD／送分／多答案 |
+
+`mock` 仍是離線 walking skeleton 的 CLI mode；它不會覆寫上述 active route，且不需要任何 secret。
 
 ### 4.2 安全換模型流程
 
@@ -168,6 +176,8 @@ resolver 必須拒絕 disabled、uncertified、license 不合格、capability �
 Go 啟用時的順序是：建立 secret → live transport probe → model/license mapping → lane certification → `provider_registry` 手動 enable → 指定 route 加入 `outage_fallbacks`。不能因缺少 Go key 讓正常主流程失敗，也不能自動用 Zen balance。
 
 ## 6. 本地 Qwen 3.8-27B 加入方式
+
+本節只描述可拔除的 MacBook／AI395 local shadow 測試。現行 staging primary 已是 LiteLLM `glm-5.3-flash`；除非 owner 另行切換 route，不要把 Qwen 指令當作正常批次的模型入口。
 
 模型：`Qwen/Qwen3.8-27B`；上游為 Apache-2.0、text＋image。可由 Ollama local、vLLM 或 SGLang 提供服務，但工作流只依賴統一 profile／adapter contract。
 

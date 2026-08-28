@@ -29,7 +29,20 @@ from typing import Any, Iterable
 
 from ai395_context_guard import DEFAULT_CONTEXT_LIMIT_TOKENS, ContextBudgetExceeded
 from ai395_evidence_tools import collect_evidence
-from ai395_llm_adapter import LLMAdapterError, PixelsUnavailable, PROMPT_VERSION, call_lane
+from ai395_llm_adapter import (
+    LLMAdapterError,
+    PixelsUnavailable,
+    PROMPT_VERSION,
+    call_feedback,
+    normalized_openai_base_url,
+    call_lane,
+)
+from ai395_feedback import (
+    FeedbackContractError,
+    NoVisibleChange,
+    build_feedback_event,
+    build_guardrail_candidate,
+)
 from ai395_source_adapter import ContractError, validate_manifests
 from probe_qwen_mlx_tailscale import ProbeError, normalized_base_url
 
@@ -41,6 +54,7 @@ DEFAULT_SQL_DIR = PROJECT_ROOT / "deploy" / "ai395-review-staging" / "sql"
 LANES = ("text_evidence", "notation", "group", "vision", "answer")
 REQUIRED_CANDIDATE_KEYS = ("candidate_key", "source_registry_key", "question_number", "stem", "options", "answer", "metadata")
 MAX_LOCAL_QWEN_CONTEXT_TOKENS = 196_608
+MAX_LITELLM_CONTEXT_TOKENS = 1_000_000
 
 
 class StagingContractError(ValueError):
@@ -105,6 +119,17 @@ def load_config(config_dir: Path) -> tuple[dict[str, Any], str]:
         raise StagingContractError("formal staging must have production_write=false")
     if pipeline.get("model_stage", {}).get("advisory_only") is not True:
         raise StagingContractError("model stage must remain advisory_only")
+    feedback_stage = pipeline.get("feedback_stage") or {}
+    if feedback_stage.get("enabled") is not True and feedback_stage.get("enabled") is not False:
+        raise StagingContractError("feedback_stage.enabled must be true or false")
+    if feedback_stage.get("advisory_only") is not True:
+        raise StagingContractError("feedback stage must remain advisory_only")
+    if feedback_stage.get("allow_direct_rule_write") is not False:
+        raise StagingContractError("feedback stage cannot write rules directly")
+    if feedback_stage.get("allow_direct_skill_write") is not False:
+        raise StagingContractError("feedback stage cannot write Skills directly")
+    if feedback_stage.get("require_owner_approval") is not True:
+        raise StagingContractError("feedback stage must require owner approval")
     return config, sha256_text(canonical_json(config))
 
 
@@ -382,7 +407,16 @@ def insert_candidate_and_revisions(db: StagingDB, run_id: str, item: dict[str, A
                     WHERE NOT EXISTS (
                       SELECT 1 FROM {proposal_table} WHERE run_id=? AND candidate_key=? AND parent_revision_id=?
                     )""",
-                (run_id, candidate_key, revision_id, revision2, json.dumps(["stem"], ensure_ascii=False), raw, patched_raw, json.dumps({"rule_id": "fixture.collapse_whitespace", "exact_unique_match": True}, ensure_ascii=False), now_iso(), run_id, candidate_key, revision_id),
+                (run_id, candidate_key, revision_id, revision2, json.dumps(["stem"], ensure_ascii=False), raw, patched_raw, json.dumps({
+                    "rule_id": "fixture.collapse_whitespace",
+                    "exact_unique_match": True,
+                    "three_evidence": True,
+                    "evidence": [
+                        {"kind": "official_pdf", "family": "fixture-official", "reference": "fixture:official_pdf:mini20"},
+                        {"kind": "mineru_alignment", "family": "fixture-layout", "reference": "fixture:mineru_layout:mini20"},
+                        {"kind": "gold_regression", "family": "fixture-gold", "reference": "fixture:gold:mini20"},
+                    ],
+                }, ensure_ascii=False), now_iso(), run_id, candidate_key, revision_id),
             )
             revision_id = revision2
     db.commit()
@@ -422,6 +456,117 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
             "base_url": None,
             "timeout": 0,
             "max_tokens": 0,
+        }
+    if mode == "litellm_glm":
+        if not bool(getattr(args, "allow_live_provider", False)):
+            raise StagingContractError("live provider requires the explicit --allow-live-provider flag")
+        provider = (config.get("provider_registry", {}).get("providers") or {}).get("litellm_glm") or {}
+        enable_env = str(provider.get("enable_env") or "LITELLM_GLM_ENABLED")
+        env_enabled = os.environ.get(enable_env, "0").lower() in {"1", "true", "yes"}
+        if provider.get("enabled") is not True and not env_enabled:
+            raise StagingContractError(
+                f"litellm_glm is disabled; set {enable_env}=1 for an explicit staging run"
+            )
+        endpoint_env = str(provider.get("endpoint_env") or "LITELLM_BASE_URL")
+        model_env = str(provider.get("model_env") or "LITELLM_MODEL")
+        credential_env = str(provider.get("credential_env") or "LITELLM_API_KEY")
+        base_url = os.environ.get(endpoint_env, "").strip()
+        model = os.environ.get(model_env, "").strip() or str(provider.get("model_default") or "glm-5.3-flash")
+        api_key = os.environ.get(credential_env, "").strip()
+        if not base_url or not api_key:
+            raise StagingContractError(
+                f"litellm_glm requires {endpoint_env} and {credential_env}; keep the secret out of the repository"
+            )
+        allow_insecure_http = os.environ.get("LITELLM_ALLOW_INSECURE_HTTP", "0").lower() in {"1", "true", "yes"}
+        try:
+            base_url, endpoint_class = normalized_openai_base_url(
+                base_url,
+                allow_insecure_http=allow_insecure_http,
+            )
+        except LLMAdapterError as exc:
+            raise StagingContractError(f"invalid litellm_glm endpoint: {exc}") from exc
+        if provider.get("network_allowed") is not True:
+            raise StagingContractError("litellm_glm provider contract does not allow network transport")
+        transport = str(provider.get("transport") or "openai_chat_completions")
+        if transport not in {"openai_compatible", "openai_chat_completions", "litellm_openai_compatible"}:
+            raise StagingContractError(f"unsupported litellm_glm transport: {transport}")
+        context_policy = model_stage.get("context_policy") or {}
+        context_limit_tokens = int(
+            getattr(args, "context_limit_tokens", None)
+            or context_policy.get("hard_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)
+        )
+        context_safety_margin_tokens = int(
+            getattr(args, "context_safety_margin_tokens", None)
+            or context_policy.get("safety_margin_tokens", 8_192)
+        )
+        if context_limit_tokens <= 0 or context_limit_tokens > MAX_LITELLM_CONTEXT_TOKENS:
+            raise StagingContractError(
+                f"litellm_glm context limit must be between 1 and {MAX_LITELLM_CONTEXT_TOKENS} tokens"
+            )
+        if context_safety_margin_tokens < 0 or context_safety_margin_tokens >= context_limit_tokens:
+            raise StagingContractError("invalid litellm_glm context safety margin")
+        context_extension_limit_tokens = int(
+            context_policy.get("one_time_extension_limit_tokens", context_limit_tokens)
+        )
+        if (
+            context_extension_limit_tokens < context_limit_tokens
+            or context_extension_limit_tokens > MAX_LITELLM_CONTEXT_TOKENS
+        ):
+            raise StagingContractError(
+                "litellm_glm one_time_extension_limit_tokens must be between the hard limit and "
+                f"{MAX_LITELLM_CONTEXT_TOKENS}"
+            )
+        max_tool_turns = int(
+            getattr(args, "max_tool_turns", None)
+            if getattr(args, "max_tool_turns", None) is not None
+            else context_policy.get("max_tool_turns", 1)
+        )
+        if max_tool_turns < 0 or max_tool_turns > 2:
+            raise StagingContractError("max_tool_turns must be between 0 and 2")
+        reasoning_effort = os.environ.get(
+            str(provider.get("reasoning_effort_env") or "LITELLM_REASONING_EFFORT"),
+            str(provider.get("reasoning_effort_default") or "low"),
+        ).strip().lower()
+        if reasoning_effort not in {"low", "high", "max"}:
+            raise StagingContractError("LITELLM_REASONING_EFFORT must be low, high, or max")
+        send_thinking = os.environ.get(
+            str(provider.get("send_thinking_env") or "LITELLM_SEND_THINKING"),
+            "1" if provider.get("send_thinking_default", True) else "0",
+        ).lower() in {"1", "true", "yes"}
+        clear_thinking = (
+            os.environ.get(
+                str(provider.get("clear_thinking_env") or "LITELLM_CLEAR_THINKING"),
+                "1" if provider.get("clear_thinking_default", False) else "0",
+            ).lower() in {"1", "true", "yes"}
+            if send_thinking
+            else None
+        )
+        return {
+            "mode": "litellm_glm",
+            "provider": "litellm_glm",
+            "model": model,
+            "profile_id": str(provider.get("profile_id") or "glm-5.3-flash-litellm"),
+            "prompt_version": PROMPT_VERSION,
+            "base_url": base_url,
+            "timeout": float(getattr(args, "model_timeout", 120.0)),
+            "max_tokens": int(getattr(args, "model_max_tokens", 512)),
+            "transport": transport,
+            "endpoint_class": endpoint_class,
+            "enabled_by_env": env_enabled,
+            "api_key_env": credential_env,
+            "reasoning_effort": reasoning_effort,
+            "clear_thinking": clear_thinking,
+            "send_thinking": send_thinking,
+            "allow_insecure_http": allow_insecure_http,
+            "context_limit_tokens": context_limit_tokens,
+            "context_extension_limit_tokens": context_extension_limit_tokens,
+            "max_context_extensions_per_lane": 1,
+            "context_safety_margin_tokens": context_safety_margin_tokens,
+            "slow_threshold_seconds": float(
+                getattr(args, "model_slow_threshold", None)
+                or context_policy.get("slow_threshold_seconds", 30.0)
+            ),
+            "max_tool_turns": max_tool_turns,
         }
     if mode != "local_qwen_mlx":
         raise StagingContractError(f"unsupported model_mode: {mode}")
@@ -579,7 +724,15 @@ def run_model_agent(
     max_tool_turns = int(model_runtime.get("max_tool_turns", 1))
     slow_threshold = float(model_runtime.get("slow_threshold_seconds", 30.0))
 
-    for turn in range(max_tool_turns + 1):
+    turn = 0
+    active_context_limit_tokens = int(
+        model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)
+    )
+    context_extension_limit_tokens = int(
+        model_runtime.get("context_extension_limit_tokens", active_context_limit_tokens)
+    )
+    context_extension_used = False
+    while True:
         if model_budget["calls"] >= model_budget["max_calls"]:
             final_result = {
                 "status": "error",
@@ -604,9 +757,18 @@ def run_model_agent(
                 timeout=float(model_runtime["timeout"]),
                 max_tokens=int(model_runtime["max_tokens"]),
                 transport=str(model_runtime["transport"]),
+                provider=str(model_runtime.get("provider") or "local_qwen_mlx"),
+                api_key=(
+                    os.environ.get(str(model_runtime.get("api_key_env")), "").strip()
+                    if model_runtime.get("api_key_env")
+                    else None
+                ),
+                reasoning_effort=model_runtime.get("reasoning_effort"),
+                clear_thinking=model_runtime.get("clear_thinking"),
+                allow_insecure_http=bool(model_runtime.get("allow_insecure_http", False)),
                 evidence=evidence,
                 compact_level=compact_level,
-                context_limit_tokens=int(model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)),
+                context_limit_tokens=active_context_limit_tokens,
                 context_safety_margin_tokens=int(model_runtime.get("context_safety_margin_tokens", 8_192)),
             )
         except PixelsUnavailable as exc:
@@ -623,16 +785,37 @@ def run_model_agent(
         except ContextBudgetExceeded as exc:
             model_budget["calls"] -= 1
             model_budget["context_rejections"] += 1
-            result = {
-                "status": "error",
-                "error": "context_budget_exceeded",
-                "message": str(exc),
-                "context_guard": exc.details,
-                "advisory_only": True,
-                "materialize": False,
-                "requested_evidence": [],
-            }
-            model_budget["errors"] += 1
+            can_extend_context = (
+                model_runtime.get("mode") == "litellm_glm"
+                and not context_extension_used
+                and context_extension_limit_tokens > active_context_limit_tokens
+                and context_extension_limit_tokens <= MAX_LITELLM_CONTEXT_TOKENS
+            )
+            if can_extend_context:
+                context_extension_used = True
+                active_context_limit_tokens = context_extension_limit_tokens
+                model_budget["context_extensions"] = model_budget.get("context_extensions", 0) + 1
+                result = {
+                    "status": "retry",
+                    "error": "context_extension_retry",
+                    "message": str(exc),
+                    "context_guard": exc.details,
+                    "advisory_only": True,
+                    "materialize": False,
+                    "requested_evidence": [],
+                    "context_extension_limit_tokens": active_context_limit_tokens,
+                }
+            else:
+                result = {
+                    "status": "error",
+                    "error": "context_budget_exceeded",
+                    "message": str(exc),
+                    "context_guard": exc.details,
+                    "advisory_only": True,
+                    "materialize": False,
+                    "requested_evidence": [],
+                }
+                model_budget["errors"] += 1
         except LLMAdapterError as exc:
             result = {
                 "status": "error",
@@ -648,7 +831,12 @@ def run_model_agent(
         result["latency_ms"] = elapsed_ms
         result["latency_status"] = "slow" if elapsed_ms > slow_threshold * 1000 else "normal"
         result["compact_level"] = compact_level
-        result["model_called"] = result.get("error") not in {"pixels_unavailable", "context_budget_exceeded", "model_call_budget_exhausted"}
+        result["model_called"] = result.get("error") not in {
+            "pixels_unavailable",
+            "context_budget_exceeded",
+            "context_extension_retry",
+            "model_call_budget_exhausted",
+        }
         trace_row: dict[str, Any] = {
             "turn": turn,
             "latency_ms": elapsed_ms,
@@ -656,6 +844,8 @@ def run_model_agent(
             "compact_level": compact_level,
             "requested_evidence": result.get("requested_evidence") or [],
         }
+        if result.get("context_guard"):
+            trace_row["context_guard"] = result["context_guard"]
         if result["latency_status"] == "slow":
             model_budget["slow_calls"] += 1
             model_budget["compact_level"] = 1
@@ -663,6 +853,10 @@ def run_model_agent(
             trace_row["adaptive_action"] = "compact_context_for_next_turn_and_lane"
 
         final_result = result
+        if result.get("error") == "context_extension_retry":
+            trace_row["adaptive_action"] = "one_time_context_extension"
+            trace.append(trace_row)
+            continue
         requests = result.get("requested_evidence") or []
         if not requests or result.get("error") or turn >= max_tool_turns:
             trace.append(trace_row)
@@ -680,6 +874,7 @@ def run_model_agent(
         trace.append(trace_row)
         model_budget["tool_turns"] += 1
         evidence = tool_results
+        turn += 1
 
     if final_result is None:
         final_result = {
@@ -694,8 +889,10 @@ def run_model_agent(
     final_result["tool_turn_count"] = sum(1 for row in trace if row.get("tool_results"))
     final_result["context_policy"] = {
         "hard_limit_tokens": int(model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS)),
+        "effective_limit_tokens": active_context_limit_tokens,
         "safety_margin_tokens": int(model_runtime.get("context_safety_margin_tokens", 8_192)),
         "slow_threshold_seconds": slow_threshold,
+        "context_extension_used": context_extension_used,
     }
     return final_result
 
@@ -726,7 +923,7 @@ def run_lane(
         result["model"] = model_runtime["model"]
         result["model_called"] = False
         result["model_result"] = None
-        if model_runtime["mode"] == "local_qwen_mlx" and lane_needs_model(lane, revised, llm_lane_policy):
+        if model_runtime["mode"] in {"local_qwen_mlx", "litellm_glm"} and lane_needs_model(lane, revised, llm_lane_policy):
             model_result = run_model_agent(
                 db=db,
                 run_id=run_id,
@@ -890,6 +1087,310 @@ def add_source_issue_exceptions(
                 now_iso(),
             ),
         )
+
+
+def _json_object(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return fallback
+
+
+def _staging_feedback_rows(db: StagingDB, run_id: str) -> list[dict[str, Any]]:
+    table = db.table("feedback_events")
+    return [
+        {
+            "feedback_id": str(row["feedback_id"]),
+            "run_id": str(row["run_id"]),
+            "candidate_key": str(row["candidate_key"]),
+            "revision_id": str(row["revision_id"] or ""),
+            "source_kind": str(row["source_kind"]),
+            "scope": str(row["scope"]),
+            "lane": str(row["lane_key"] or ""),
+            "event": _json_object(row["event_json"], {}),
+        }
+        for row in db.fetchall(
+            f"SELECT feedback_id, run_id, candidate_key, revision_id, source_kind, scope, lane_key, event_json FROM {table} WHERE run_id=? ORDER BY created_at, feedback_id",
+            (run_id,),
+        )
+    ]
+
+
+def materialize_staging_feedback_events(
+    db: StagingDB,
+    run_id: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Turn only explicitly proven deterministic repairs into feedback rows.
+
+    A normal deterministic patch is not automatically called a three-evidence
+    correction.  The proposal must carry ``three_evidence=true`` and at least
+    three independently named evidence families.  This prevents a convenient
+    fixture or a single OCR guess from teaching a future guardrail.
+    """
+
+    proposal_table = db.table("correction_proposals")
+    feedback_table = db.table("feedback_events")
+    rows = db.fetchall(
+        f"""SELECT proposal_id, candidate_key, parent_revision_id, proposed_revision_id,
+                   before_json, after_json, evidence_json
+            FROM {proposal_table}
+            WHERE run_id=? AND source='deterministic_rule' AND status='materialized'
+            ORDER BY proposal_id""",
+        (run_id,),
+    )
+    events: list[dict[str, Any]] = []
+    skipped = 0
+    for row in rows:
+        evidence_payload = _json_object(row["evidence_json"], {})
+        if not isinstance(evidence_payload, dict) or evidence_payload.get("three_evidence") is not True:
+            skipped += 1
+            continue
+        evidence = evidence_payload.get("evidence")
+        try:
+            event = build_feedback_event(
+                candidate_key=str(row["candidate_key"]),
+                before=_json_object(row["before_json"], {}),
+                after=_json_object(row["after_json"], {}),
+                source_kind="three_evidence_correction",
+                scope="question",
+                lane="text_evidence",
+                reviewer="deterministic_three_evidence",
+                run_id=run_id,
+                revision_id=str(row["proposed_revision_id"] or row["parent_revision_id"] or ""),
+                event_ref=f"staging:correction_proposal:{row['proposal_id']}",
+                evidence=evidence,
+            )
+        except (FeedbackContractError, NoVisibleChange):
+            skipped += 1
+            continue
+        db.execute(
+            f"""INSERT INTO {feedback_table}
+                (feedback_id, run_id, candidate_key, revision_id, source_kind, scope,
+                 lane_key, actor_kind, reviewer, event_ref, changed_fields, before_json,
+                 after_json, diff_json, evidence_json, ai_task_json, event_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(feedback_id) DO NOTHING""",
+            (
+                event["feedback_id"],
+                run_id,
+                event["candidate_key"],
+                event["revision_id"],
+                event["source_kind"],
+                event["scope"],
+                event["lane"],
+                event["actor_kind"],
+                event["reviewer"],
+                event["event_ref"],
+                canonical_json(event["changed_fields"]),
+                canonical_json(event["before"]),
+                canonical_json(event["after"]),
+                canonical_json(event["diff"]),
+                canonical_json(event["evidence"]),
+                canonical_json(event["ai_task"]),
+                canonical_json(event),
+                event["created_at"],
+            ),
+        )
+        events.append(event)
+    db.commit()
+    # Return the persisted view so a replay never creates a second logical
+    # example even if a previous process stopped after the insert.
+    persisted = [row["event"] for row in _staging_feedback_rows(db, run_id) if isinstance(row["event"], dict)]
+    return persisted, skipped
+
+
+def validate_guardrail_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Run fail-closed checks before an AI proposal enters staging history."""
+
+    errors: list[str] = []
+    policy = candidate.get("promotion_policy") if isinstance(candidate.get("promotion_policy"), dict) else {}
+    if policy.get("active") is not False:
+        errors.append("active_must_be_false")
+    if policy.get("direct_file_write") is not False:
+        errors.append("direct_file_write_must_be_false")
+    rule = candidate.get("rule_proposal")
+    if isinstance(rule, dict):
+        if str(rule.get("status") or "").lower() not in {"observed", "proposed", "shadow", "retired", "revoked"}:
+            errors.append("rule_status_not_non_active")
+        if rule.get("rule_type") == "exact_replacement" and rule.get("source") == rule.get("target"):
+            errors.append("exact_rule_source_equals_target")
+    if candidate.get("status") == "proposed" and not candidate.get("negative_controls"):
+        errors.append("negative_controls_missing")
+    status = "pass" if not errors else "fail"
+    return {
+        "status": status,
+        "safe_to_activate": False,
+        "errors": errors,
+        "checks": [
+            "advisory_only",
+            "owner_approval_required",
+            "negative_controls_required",
+            "no_direct_file_write",
+        ],
+    }
+
+
+def _feedback_model_result(
+    event: dict[str, Any],
+    model_runtime: dict[str, Any],
+    model_budget: dict[str, Any],
+    evidence_cache_dir: Path,
+) -> dict[str, Any]:
+    """Call the selected provider once, with the same bounded extension rule."""
+
+    if model_runtime.get("mode") == "mock":
+        return {
+            "status": "observed",
+            "model_called": False,
+            "advisory_only": True,
+            "materialize": False,
+            "rationale": "mock staging：只建立 feedback／guardrail contract，未呼叫模型。",
+        }
+    if model_budget["calls"] >= model_budget["max_calls"]:
+        model_budget["errors"] += 1
+        model_budget["feedback_errors"] = model_budget.get("feedback_errors", 0) + 1
+        return {
+            "status": "unclear",
+            "error": "model_call_budget_exhausted",
+            "model_called": False,
+            "advisory_only": True,
+            "materialize": False,
+        }
+    active_limit = int(model_runtime.get("context_limit_tokens", DEFAULT_CONTEXT_LIMIT_TOKENS))
+    extension_limit = int(model_runtime.get("context_extension_limit_tokens", active_limit))
+    extension_used = False
+    while True:
+        model_budget["attempts"] += 1
+        model_budget["calls"] += 1
+        model_budget["feedback_attempts"] = model_budget.get("feedback_attempts", 0) + 1
+        try:
+            result = call_feedback(
+                base_url=str(model_runtime["base_url"]),
+                model=str(model_runtime["model"]),
+                feedback_packet=event["ai_task"],
+                timeout=float(model_runtime["timeout"]),
+                max_tokens=min(int(model_runtime.get("feedback_max_tokens", 768)), 2_048),
+                transport=str(model_runtime["transport"]),
+                provider=str(model_runtime.get("provider") or "litellm_glm"),
+                api_key=(
+                    os.environ.get(str(model_runtime.get("api_key_env")), "").strip()
+                    if model_runtime.get("api_key_env")
+                    else None
+                ),
+                reasoning_effort=model_runtime.get("reasoning_effort"),
+                clear_thinking=model_runtime.get("clear_thinking"),
+                allow_insecure_http=bool(model_runtime.get("allow_insecure_http", False)),
+                context_limit_tokens=active_limit,
+                context_safety_margin_tokens=int(model_runtime.get("context_safety_margin_tokens", 8_192)),
+            )
+            result["feedback_context_policy"] = {
+                "hard_limit_tokens": int(model_runtime.get("context_limit_tokens", active_limit)),
+                "effective_limit_tokens": active_limit,
+                "context_extension_used": extension_used,
+            }
+            model_budget["feedback_calls"] = model_budget.get("feedback_calls", 0) + 1
+            return result
+        except ContextBudgetExceeded as exc:
+            model_budget["calls"] -= 1
+            model_budget["context_rejections"] += 1
+            can_extend = (
+                model_runtime.get("mode") == "litellm_glm"
+                and not extension_used
+                and extension_limit > active_limit
+                and extension_limit <= MAX_LITELLM_CONTEXT_TOKENS
+            )
+            if can_extend:
+                extension_used = True
+                active_limit = extension_limit
+                model_budget["context_extensions"] += 1
+                continue
+            model_budget["errors"] += 1
+            model_budget["feedback_errors"] = model_budget.get("feedback_errors", 0) + 1
+            return {
+                "status": "unclear",
+                "error": "context_budget_exceeded",
+                "message": str(exc),
+                "context_guard": exc.details,
+                "model_called": False,
+                "advisory_only": True,
+                "materialize": False,
+            }
+        except LLMAdapterError as exc:
+            model_budget["feedback_errors"] = model_budget.get("feedback_errors", 0) + 1
+            model_budget["errors"] += 1
+            return {
+                "status": "unclear",
+                "error": "provider_error",
+                "message": str(exc),
+                "model_called": False,
+                "advisory_only": True,
+                "materialize": False,
+            }
+
+
+def run_feedback_agents(
+    db: StagingDB,
+    run_id: str,
+    model_runtime: dict[str, Any],
+    model_budget: dict[str, Any],
+    evidence_cache_dir: Path,
+) -> list[dict[str, Any]]:
+    """Curate staging feedback without applying any proposed guardrail."""
+
+    feedback_rows = _staging_feedback_rows(db, run_id)
+    guardrail_table = db.table("guardrail_candidates")
+    output: list[dict[str, Any]] = []
+    for row in feedback_rows:
+        event = row["event"]
+        if not isinstance(event, dict):
+            continue
+        ai_result = _feedback_model_result(event, model_runtime, model_budget, evidence_cache_dir)
+        candidate = build_guardrail_candidate(
+            event,
+            ai_result=ai_result,
+            validation={"status": "pending"},
+            attempt=0,
+        )
+        validation = validate_guardrail_candidate(candidate)
+        if validation["status"] == "fail":
+            candidate["status"] = "rejected"
+        candidate["validation"] = validation
+        db.execute(
+            f"""INSERT INTO {guardrail_table}
+                (guardrail_id, feedback_id, run_id, candidate_key, scope, lane_key,
+                 change_class, guardrail_type, status, candidate_json, validation_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guardrail_id) DO NOTHING""",
+            (
+                candidate["guardrail_id"],
+                candidate["feedback_id"],
+                run_id,
+                candidate["candidate_key"],
+                candidate["scope"],
+                candidate.get("lane") or "",
+                candidate["change_class"],
+                candidate["guardrail_type"],
+                candidate["status"],
+                canonical_json(candidate),
+                canonical_json(validation),
+                candidate["created_at"],
+            ),
+        )
+        output.append(candidate)
+    db.commit()
+    return output
+
+
+def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -936,6 +1437,10 @@ def build_formal_report(db: StagingDB, run_id: str, candidates: list[dict[str, A
         "production_write_count": 0,
         "human_review_events_written": 0,
         "advisory_only": True,
+        "feedback_event_count": int(db.fetchone(f"SELECT count(*) AS count FROM {db.table('feedback_events')} WHERE run_id=?", (run_id,))["count"]),
+        "guardrail_candidate_count": int(db.fetchone(f"SELECT count(*) AS count FROM {db.table('guardrail_candidates')} WHERE run_id=?", (run_id,))["count"]),
+        "guardrail_active_count": int(db.fetchone(f"SELECT count(*) AS count FROM {db.table('guardrail_candidates')} WHERE run_id=? AND status='active'", (run_id,))["count"]),
+        "guardrail_owner_approval_required": True,
     }
     table = db.table("formal_dry_runs")
     db.execute(
@@ -953,10 +1458,10 @@ def build_formal_report(db: StagingDB, run_id: str, candidates: list[dict[str, A
 def describe() -> dict[str, Any]:
     return {
         "component_id": "ai395_review_staging",
-        "commands": {"doctor": "validate config and source/MinerU manifests", "e2e": "run parser, five advisory lanes, revision, exception queue and formal dry-run"},
+        "commands": {"doctor": "validate config and source/MinerU manifests", "e2e": "run parser, five advisory lanes, revision, exception queue, correction feedback and formal dry-run"},
         "inputs": ["source_manifest.json", "mineru_manifest.json", "candidate JSONL", "issue CSV"],
-        "outputs": ["run_manifest.json", "summary.json", "formal_dry_run.json", "staging database rows"],
-        "config_keys": ["source_stage.enabled", "mineru_stage.enabled", "lane_stage.lanes", "revision_stage.allow_ai_materialization", "formal_stage.production_write"],
+        "outputs": ["run_manifest.json", "summary.json", "formal_dry_run.json", "feedback_events.jsonl", "guardrail_candidates.jsonl", "staging database rows"],
+        "config_keys": ["source_stage.enabled", "mineru_stage.enabled", "lane_stage.lanes", "feedback_stage.enabled", "feedback_stage.require_owner_approval", "revision_stage.allow_ai_materialization", "formal_stage.production_write"],
         "side_effect_class": "isolated_staging_only",
         "production_writes": False,
         "exit_codes": {"0": "success", "2": "contract failure", "3": "provider/retry failure", "4": "data failure", "5": "validation failure"},
@@ -994,7 +1499,11 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
         "slow_calls": 0,
         "tool_turns": 0,
         "context_rejections": 0,
+        "context_extensions": 0,
         "compact_level": 0,
+        "feedback_attempts": 0,
+        "feedback_calls": 0,
+        "feedback_errors": 0,
     }
     effective_config_hash = sha256_text(canonical_json({
         "base_config_sha256": base_config_hash,
@@ -1052,6 +1561,11 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             enqueue_jobs(db, run_id, str(item["candidate_key"]), revision_id)
             add_parser_exception(db, run_id, str(item["candidate_key"]), revision_id, item)
         add_source_issue_exceptions(db, run_id, revision_map, issues)
+        feedback_stage = config.get("pipeline", {}).get("feedback_stage") or {}
+        if feedback_stage.get("enabled") is True:
+            feedback_events, feedback_skipped = materialize_staging_feedback_events(db, run_id)
+        else:
+            feedback_events, feedback_skipped = [], 0
         db.commit()
 
         for item in candidates:
@@ -1074,6 +1588,17 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
                     llm_lane_policy,
                     evidence_cache_dir,
                 )
+        guardrail_candidates = (
+            run_feedback_agents(
+                db,
+                run_id,
+                model_runtime,
+                model_budget,
+                evidence_cache_dir,
+            )
+            if feedback_stage.get("enabled") is True
+            else []
+        )
         report = build_formal_report(db, run_id, candidates)
         report.update({
             "config_sha256": effective_config_hash,
@@ -1097,8 +1622,19 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "llm_slow_calls": model_budget["slow_calls"],
             "llm_tool_turns": model_budget["tool_turns"],
             "llm_context_rejections": model_budget["context_rejections"],
+            "llm_context_extensions": model_budget["context_extensions"],
+            "feedback_events": len(feedback_events),
+            "feedback_skipped": feedback_skipped,
+            "feedback_agent_attempts": model_budget["feedback_attempts"],
+            "feedback_agent_calls": model_budget["feedback_calls"],
+            "feedback_agent_errors": model_budget["feedback_errors"],
+            "guardrail_candidates": len(guardrail_candidates),
+            "guardrail_active": 0,
+            "guardrail_owner_approval_required": True,
             "model_context_policy": {
                 "hard_limit_tokens": model_runtime.get("context_limit_tokens"),
+                "one_time_extension_limit_tokens": model_runtime.get("context_extension_limit_tokens"),
+                "max_context_extensions_per_lane": model_runtime.get("max_context_extensions_per_lane", 0),
                 "safety_margin_tokens": model_runtime.get("context_safety_margin_tokens"),
                 "slow_threshold_seconds": model_runtime.get("slow_threshold_seconds"),
                 "max_tool_turns": model_runtime.get("max_tool_turns"),
@@ -1109,6 +1645,8 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             (canonical_json(report), run_id),
         )
         write_json(artifact_dir / "formal_dry_run.json", report)
+        write_jsonl(artifact_dir / "feedback_events.jsonl", feedback_events)
+        write_jsonl(artifact_dir / "guardrail_candidates.jsonl", guardrail_candidates)
         run_manifest = {
             "run_id": run_id,
             "component_id": "ai395_review_staging",
@@ -1121,7 +1659,11 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "container_image_digest": os.environ.get("AI395_CONTAINER_IMAGE_DIGEST"),
             "started_at": now_iso(),
             "input_artifacts": [verified["source"]["candidate_jsonl"], verified["source"]["issue_csv"], verified["mineru"]],
-            "output_artifacts": [{"path": str(artifact_dir / "formal_dry_run.json"), "sha256": sha256_file(artifact_dir / "formal_dry_run.json")}],
+            "output_artifacts": [
+                {"path": str(artifact_dir / "formal_dry_run.json"), "sha256": sha256_file(artifact_dir / "formal_dry_run.json")},
+                {"path": str(artifact_dir / "feedback_events.jsonl"), "sha256": sha256_file(artifact_dir / "feedback_events.jsonl")},
+                {"path": str(artifact_dir / "guardrail_candidates.jsonl"), "sha256": sha256_file(artifact_dir / "guardrail_candidates.jsonl")},
+            ],
             "model_profile_id": model_runtime["profile_id"],
             "model_provider": model_runtime["provider"],
             "model_name": model_runtime["model"],
@@ -1137,8 +1679,19 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             "llm_slow_calls": model_budget["slow_calls"],
             "llm_tool_turns": model_budget["tool_turns"],
             "llm_context_rejections": model_budget["context_rejections"],
+            "llm_context_extensions": model_budget["context_extensions"],
+            "feedback_events": len(feedback_events),
+            "feedback_skipped": feedback_skipped,
+            "feedback_agent_attempts": model_budget["feedback_attempts"],
+            "feedback_agent_calls": model_budget["feedback_calls"],
+            "feedback_agent_errors": model_budget["feedback_errors"],
+            "guardrail_candidates": len(guardrail_candidates),
+            "guardrail_active": 0,
+            "guardrail_owner_approval_required": True,
             "model_context_policy": {
                 "hard_limit_tokens": model_runtime.get("context_limit_tokens"),
+                "one_time_extension_limit_tokens": model_runtime.get("context_extension_limit_tokens"),
+                "max_context_extensions_per_lane": model_runtime.get("max_context_extensions_per_lane", 0),
                 "safety_margin_tokens": model_runtime.get("context_safety_margin_tokens"),
                 "slow_threshold_seconds": model_runtime.get("slow_threshold_seconds"),
                 "max_tool_turns": model_runtime.get("max_tool_turns"),
@@ -1194,13 +1747,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id")
     parser.add_argument("--source-mode", choices=("existing_artifact", "mock_fixture", "live_download"), default="mock_fixture")
     parser.add_argument("--mineru-mode", choices=("existing_artifact", "mock_fixture", "run_mineru"), default="mock_fixture")
-    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx"), default="mock")
+    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx", "litellm_glm"), default="mock")
     parser.add_argument("--allow-live-provider", action="store_true", help="explicitly allow the configured staging provider to make network calls")
     parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default="residual")
     parser.add_argument("--llm-max-calls", type=int, default=20)
     parser.add_argument("--model-timeout", type=float, default=120.0)
     parser.add_argument("--model-max-tokens", type=int, default=512)
-    parser.add_argument("--context-limit-tokens", type=int, default=None, help="hard staging admission limit for the MacBook provider")
+    parser.add_argument("--context-limit-tokens", type=int, default=None, help="hard staging admission limit for the selected model provider")
     parser.add_argument("--context-safety-margin-tokens", type=int, default=None)
     parser.add_argument("--model-slow-threshold", type=float, default=None, help="seconds after which subsequent lanes use compact context")
     parser.add_argument("--max-tool-turns", type=int, default=None, help="maximum bounded evidence-tool follow-up turns per lane")

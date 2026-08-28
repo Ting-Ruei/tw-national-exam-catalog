@@ -70,11 +70,23 @@ class State:
                     source_mode="mock_fixture",
                     mineru_mode="mock_fixture",
                     model_mode=model_mode,
-                    allow_live_provider=model_mode == "local_qwen_mlx",
+                    allow_live_provider=model_mode in {"local_qwen_mlx", "litellm_glm"},
                     llm_lane_policy=self.llm_lane_policy,
                     llm_max_calls=self.llm_max_calls,
                     model_timeout=self.model_timeout,
                     model_max_tokens=self.model_max_tokens,
+                    model_slow_threshold=float(os.environ.get("AI395_STAGING_MODEL_SLOW_THRESHOLD", "30")),
+                    max_tool_turns=int(os.environ.get("AI395_STAGING_MAX_TOOL_TURNS", "1")),
+                    context_limit_tokens=(
+                        int(os.environ["AI395_STAGING_CONTEXT_LIMIT_TOKENS"])
+                        if os.environ.get("AI395_STAGING_CONTEXT_LIMIT_TOKENS")
+                        else None
+                    ),
+                    context_safety_margin_tokens=(
+                        int(os.environ["AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS"])
+                        if os.environ.get("AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS")
+                        else None
+                    ),
                 )
                 report = run_e2e(args)
                 with self.lock:
@@ -146,9 +158,9 @@ class Handler(BaseHTTPRequestHandler):
             if not SAFE_ID.fullmatch(run_id):
                 raise ValueError("run_id contains unsupported characters")
             model_mode = str(payload.get("model_mode") or self.state.default_model_mode)
-            if model_mode not in {"mock", "local_qwen_mlx"}:
-                raise ValueError("model_mode must be mock or local_qwen_mlx")
-            if model_mode == "local_qwen_mlx" and not self.state.allow_live_llm:
+            if model_mode not in {"mock", "local_qwen_mlx", "litellm_glm"}:
+                raise ValueError("model_mode must be mock, local_qwen_mlx, or litellm_glm")
+            if model_mode in {"local_qwen_mlx", "litellm_glm"} and not self.state.allow_live_llm:
                 raise PermissionError("live LLM mode is disabled; set AI395_STAGING_ALLOW_LIVE_LLM=1 explicitly")
             self.state.launch(fixture, run_id, model_mode)
         except RuntimeError as exc:
@@ -173,7 +185,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database-url", default=os.environ.get("AI395_STAGING_DATABASE_URL", "sqlite:///tmp/ai395_review_staging_http.sqlite3"))
     parser.add_argument("--artifact-root", type=Path, default=Path(os.environ.get("AI395_STAGING_ARTIFACT_ROOT", "/var/lib/ai395-review-staging")))
     parser.add_argument("--allow-live-llm", action="store_true", default=os.environ.get("AI395_STAGING_ALLOW_LIVE_LLM", "0").lower() in {"1", "true", "yes"})
-    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx"), default=os.environ.get("AI395_STAGING_MODEL_MODE", "mock"))
+    parser.add_argument("--model-mode", choices=("mock", "local_qwen_mlx", "litellm_glm"), default=os.environ.get("AI395_STAGING_MODEL_MODE", "mock"))
     parser.add_argument("--llm-lane-policy", choices=("residual", "all"), default=os.environ.get("AI395_STAGING_LLM_LANE_POLICY", "residual"))
     parser.add_argument("--llm-max-calls", type=int, default=int(os.environ.get("AI395_STAGING_LLM_MAX_CALLS", "20")))
     parser.add_argument("--model-timeout", type=float, default=float(os.environ.get("AI395_STAGING_MODEL_TIMEOUT", "120")))

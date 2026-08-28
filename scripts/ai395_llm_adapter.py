@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded advisory adapter for an Ollama endpoint.
+"""Bounded advisory adapter for Ollama and OpenAI-compatible endpoints.
 
 The adapter is deliberately independent of PostgreSQL and Review UI. It sends
 only one lane packet at a time, keeps the model output advisory, requires
 actual image bytes for the visual lane, and returns a normalized result plus
-lineage metadata for the staging runner.
+lineage metadata for the staging runner. Provider credentials are supplied
+only by the caller at runtime and are never included in returned telemetry.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ai395_context_guard import DEFAULT_CONTEXT_LIMIT_TOKENS, ContextBudgetExceeded, enforce_payload
 from probe_qwen_mlx_tailscale import normalized_base_url
@@ -27,7 +29,9 @@ from probe_qwen_mlx_tailscale import normalized_base_url
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
-PROMPT_VERSION = "ai395_lane_advisory_v2_context_guarded"
+PROMPT_VERSION = "ai395_lane_advisory_v3_provider_neutral_context_guarded"
+FEEDBACK_PROMPT_VERSION = "ai395_guardrail_feedback_v1_provider_neutral_context_guarded"
+SUPPORTED_REASONING_EFFORTS = {"low", "high", "max"}
 ALLOWED_EVIDENCE_KINDS = {
     "question_markdown",
     "answer_markdown",
@@ -45,6 +49,37 @@ class LLMAdapterError(RuntimeError):
 
 class PixelsUnavailable(LLMAdapterError):
     """Raised when a visual task has no supported raster pixels to send."""
+
+
+def normalized_openai_base_url(raw: str, *, allow_insecure_http: bool = False) -> tuple[str, str]:
+    """Validate a generic OpenAI-compatible base URL.
+
+    LiteLLM is normally fronted by HTTPS.  Loopback HTTP is allowed for a
+    same-host development server; any other HTTP endpoint needs an explicit
+    opt-in so a bearer key is not accidentally sent over the network.
+    """
+
+    value = str(raw or "").strip().rstrip("/")
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.username or parsed.password:
+        raise LLMAdapterError("OpenAI-compatible endpoint must not contain embedded credentials")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise LLMAdapterError("OpenAI-compatible endpoint contains a non-ASCII hostname") from exc
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise LLMAdapterError("OpenAI-compatible endpoint must be an http(s) URL")
+    if parsed.query or parsed.fragment:
+        raise LLMAdapterError("OpenAI-compatible endpoint must not contain a query or fragment")
+    if parsed.scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"} and not allow_insecure_http:
+        raise LLMAdapterError("remote OpenAI-compatible endpoint must use HTTPS")
+    path = parsed.path.rstrip("/")
+    if path not in {"", "/v1"}:
+        raise LLMAdapterError("OpenAI-compatible endpoint path must be empty or /v1")
+    path = "/v1"
+    endpoint_class = "localhost" if host in {"127.0.0.1", "localhost", "::1"} else "https_external"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")), endpoint_class
 
 
 LANE_INSTRUCTIONS: dict[str, str] = {
@@ -263,7 +298,16 @@ def build_packet(
     return packet, image_refs
 
 
-def build_request(lane: str, packet: dict[str, Any], image_refs: list[dict[str, Any]], model: str, max_tokens: int) -> dict[str, Any]:
+def build_request(
+    lane: str,
+    packet: dict[str, Any],
+    image_refs: list[dict[str, Any]],
+    model: str,
+    max_tokens: int,
+    *,
+    reasoning_effort: str | None = None,
+    clear_thinking: bool | None = None,
+) -> dict[str, Any]:
     schema_hint = {
         "status": "pass|finding|unclear",
         "confidence": "number 0..1",
@@ -290,7 +334,7 @@ def build_request(lane: str, packet: dict[str, Any], image_refs: list[dict[str, 
         content.extend({"type": "image_url", "image_url": {"url": ref["data_url"]}} for ref in image_refs)
     else:
         content = user_text
-    return {
+    request = {
         "model": model,
         "messages": [
             {"role": "system", "content": "你是國考題目審核的保守型 advisory auditor。嚴格遵守 lane，不做人工決策。"},
@@ -299,13 +343,80 @@ def build_request(lane: str, packet: dict[str, Any], image_refs: list[dict[str, 
         "temperature": 0,
         "max_tokens": max_tokens,
         "stream": False,
-        # Qwen/MLX may otherwise place the entire answer in a reasoning
-        # field and leave message.content empty.  Keep thinking disabled for
-        # this bounded JSON-only audit call; the response parser still keeps
-        # a conservative fallback for providers that ignore this hint.
-        "think": False,
         "response_format": {"type": "json_object"},
     }
+    if reasoning_effort is not None:
+        normalized_effort = str(reasoning_effort).strip().lower()
+        if normalized_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise LLMAdapterError(f"unsupported reasoning_effort: {reasoning_effort}")
+        request["reasoning_effort"] = normalized_effort
+    if clear_thinking is not None:
+        request["thinking"] = {
+            "type": "enabled",
+            "clear_thinking": bool(clear_thinking),
+        }
+    return request
+
+
+def build_feedback_request(
+    feedback_packet: dict[str, Any],
+    image_refs: list[dict[str, Any]],
+    model: str,
+    max_tokens: int,
+    *,
+    reasoning_effort: str | None = None,
+    clear_thinking: bool | None = None,
+) -> dict[str, Any]:
+    """Build the bounded model request for a before/after guardrail example."""
+
+    schema_hint = {
+        "status": "candidate|no_generalization|unclear",
+        "guardrail_type": "exact_ocr_rule|notation_rule|format_rule|crop_strategy|answer_rule|parser_route|skill_note|no_generalization",
+        "confidence": "number 0..1",
+        "rule_proposal": "object or null; observed/proposed only",
+        "skill_update_candidate": "object or null; prose patch only, never a command",
+        "positive_examples": [],
+        "negative_controls": [],
+        "do_not_generalize": [],
+        "rationale": "short observable explanation",
+        "requested_evidence": [],
+    }
+    user_text = (
+        "你是國考題目審核的保守型護欄整理器。這是一個已發生的前後修正案例。\n"
+        "只判斷是否能形成可重用的 checklist、rule proposal 或 Skill note；不要解題、不要改寫題目、"
+        "不要宣告 active、不要執行任何工具或寫檔。證據不足時回 no_generalization。\n"
+        "rule_proposal 只能是 observed/proposed，skill_update_candidate 只能是文字草稿；正式啟用一定要人工核准、"
+        "負向控制與 gold regression。Return ONLY one JSON object.\n"
+        f"JSON_SHAPE={canonical_json(schema_hint)}\n"
+        f"FEEDBACK_PACKET={canonical_json(feedback_packet)}"
+    )
+    if image_refs:
+        content: str | list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+        content.extend({"type": "image_url", "image_url": {"url": ref["data_url"]}} for ref in image_refs)
+    else:
+        content = user_text
+    request = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你只產生護欄候選，不具有正式規則、Skill 或題目寫入權限。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    if reasoning_effort is not None:
+        normalized_effort = str(reasoning_effort).strip().lower()
+        if normalized_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise LLMAdapterError(f"unsupported reasoning_effort: {reasoning_effort}")
+        request["reasoning_effort"] = normalized_effort
+    if clear_thinking is not None:
+        request["thinking"] = {
+            "type": "enabled",
+            "clear_thinking": bool(clear_thinking),
+        }
+    return request
 
 
 def build_native_request(openai_request: dict[str, Any], image_refs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -346,17 +457,30 @@ def build_native_request(openai_request: dict[str, Any], image_refs: list[dict[s
     }
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout: float) -> tuple[dict[str, Any], str, float]:
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    *,
+    provider: str = "ollama",
+    api_key: str | None = None,
+) -> tuple[dict[str, Any], str, float]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "ai395-review-llm-adapter/1",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif provider in {"local_qwen_mlx", "ollama"}:
+        # Ollama's OpenAI-compatible endpoint ignores this placeholder.  It
+        # keeps the local adapter contract compatible with OpenAI clients.
+        headers["Authorization"] = "Bearer ollama"
     request = urllib.request.Request(
         url,
         data=body,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": "Bearer ollama",
-            "User-Agent": "ai395-review-local-qwen/1",
-        },
+        headers=headers,
         method="POST",
     )
     started = time.monotonic()
@@ -365,17 +489,17 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> tuple[dict[
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         detail = exc.read(4_000).decode("utf-8", errors="replace")
-        raise LLMAdapterError(f"HTTP {exc.code} from Ollama endpoint: {detail}") from exc
+        raise LLMAdapterError(f"HTTP {exc.code} from {provider} endpoint: {detail}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise LLMAdapterError(f"Ollama request failed: {exc}") from exc
+        raise LLMAdapterError(f"{provider} request failed: {exc}") from exc
     if len(raw) > MAX_RESPONSE_BYTES:
-        raise LLMAdapterError("Ollama response exceeded the size limit")
+        raise LLMAdapterError(f"{provider} response exceeded the size limit")
     try:
         response_payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LLMAdapterError("Ollama returned non-JSON data") from exc
+        raise LLMAdapterError(f"{provider} returned non-JSON data") from exc
     if not isinstance(response_payload, dict):
-        raise LLMAdapterError("Ollama returned a non-object JSON response")
+        raise LLMAdapterError(f"{provider} returned a non-object JSON response")
     raw_text = raw.decode("utf-8", errors="replace")
     return response_payload, raw_text, round((time.monotonic() - started) * 1000, 1)
 
@@ -423,7 +547,7 @@ def _extract_content(payload: dict[str, Any]) -> str:
         return content
     message_keys = ",".join(sorted(str(key) for key in message)) or "none"
     raise LLMAdapterError(
-        f"Ollama response has no text content (message_keys={message_keys}; choice_keys={choice_keys})"
+        f"provider response has no text content (message_keys={message_keys}; choice_keys={choice_keys})"
     )
 
 
@@ -456,13 +580,13 @@ def _parse_json_object(content: str) -> dict[str, Any]:
             else:
                 cursor = start + 1
         if not candidates:
-            raise LLMAdapterError("Ollama content is not a JSON object")
+            raise LLMAdapterError("provider content is not a JSON object")
         unique_candidates = {canonical_json(candidate) for candidate in candidates}
         if len(unique_candidates) != 1:
-            raise LLMAdapterError("Ollama content contains invalid JSON") from parse_error
+            raise LLMAdapterError("provider content contains invalid JSON") from parse_error
         parsed = candidates[0]
     if not isinstance(parsed, dict):
-        raise LLMAdapterError("Ollama JSON result is not an object")
+        raise LLMAdapterError("provider JSON result is not an object")
     return parsed
 
 
@@ -502,6 +626,8 @@ def _normalize_result(
     pixels_sent: int,
     context_guard: dict[str, Any],
     compact_level: int,
+    provider: str,
+    reasoning_effort: str | None,
 ) -> dict[str, Any]:
     parsed = _parse_json_object(content)
     status = str(parsed.get("status") or "unclear").lower()
@@ -532,7 +658,7 @@ def _normalize_result(
         "requested_evidence": requested_evidence,
         "advisory_only": True,
         "materialize": False,
-        "provider": "local_qwen_mlx",
+        "provider": provider,
         "model": model,
         "lane": lane,
         "endpoint": endpoint,
@@ -543,6 +669,7 @@ def _normalize_result(
         "pixels_sent": pixels_sent,
         "context_guard": context_guard,
         "compact_level": compact_level,
+        "reasoning_effort": reasoning_effort,
         "raw_response_sha256": sha256_text(raw_response),
         "raw_content": content,
     }
@@ -559,12 +686,22 @@ def call_lane(
     timeout: float = 120.0,
     max_tokens: int = 512,
     transport: str = "ollama_native",
+    provider: str = "local_qwen_mlx",
+    api_key: str | None = None,
+    reasoning_effort: str | None = None,
+    clear_thinking: bool | None = None,
+    allow_insecure_http: bool = False,
     evidence: Any = None,
     compact_level: int = 0,
     context_limit_tokens: int = DEFAULT_CONTEXT_LIMIT_TOKENS,
     context_safety_margin_tokens: int = 8_192,
 ) -> dict[str, Any]:
-    endpoint, _ = normalized_base_url(base_url)
+    if transport in {"ollama_native", "ollama_openai_compatible"}:
+        endpoint, _ = normalized_base_url(base_url)
+    elif transport in {"openai_compatible", "openai_chat_completions", "litellm_openai_compatible"}:
+        endpoint, _ = normalized_openai_base_url(base_url, allow_insecure_http=allow_insecure_http)
+    else:
+        raise LLMAdapterError(f"unsupported provider transport: {transport}")
     packet, image_refs = build_packet(
         lane,
         item,
@@ -573,7 +710,15 @@ def call_lane(
         evidence=evidence,
         compact_level=compact_level,
     )
-    openai_request = build_request(lane, packet, image_refs, model, max_tokens)
+    openai_request = build_request(
+        lane,
+        packet,
+        image_refs,
+        model,
+        max_tokens,
+        reasoning_effort=reasoning_effort,
+        clear_thinking=clear_thinking,
+    )
     if transport == "ollama_native":
         request_payload = build_native_request(openai_request, image_refs)
         native_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
@@ -581,15 +726,22 @@ def call_lane(
     elif transport == "ollama_openai_compatible":
         request_payload = openai_request
         response_url = f"{endpoint}/chat/completions"
-    else:
-        raise LLMAdapterError(f"unsupported Ollama transport: {transport}")
+    else:  # OpenAI-compatible LiteLLM or another explicitly configured gateway.
+        request_payload = openai_request
+        response_url = f"{endpoint}/chat/completions"
     context_guard = enforce_payload(
         request_payload,
         output_tokens=max_tokens,
         context_limit_tokens=context_limit_tokens,
         safety_margin_tokens=context_safety_margin_tokens,
     )
-    response_payload, raw_response, elapsed_ms = _post_json(response_url, request_payload, timeout)
+    response_payload, raw_response, elapsed_ms = _post_json(
+        response_url,
+        request_payload,
+        timeout,
+        provider=provider,
+        api_key=api_key,
+    )
     content = _extract_content(response_payload)
     return _normalize_result(
         response_payload,
@@ -603,4 +755,122 @@ def call_lane(
         pixels_sent=len(image_refs),
         context_guard=context_guard,
         compact_level=compact_level,
+        provider=provider,
+        reasoning_effort=reasoning_effort,
     )
+
+
+def call_feedback(
+    *,
+    base_url: str,
+    model: str,
+    feedback_packet: dict[str, Any],
+    image_refs: list[dict[str, Any]] | None = None,
+    timeout: float = 120.0,
+    max_tokens: int = 768,
+    transport: str = "openai_chat_completions",
+    provider: str = "litellm_glm",
+    api_key: str | None = None,
+    reasoning_effort: str | None = None,
+    clear_thinking: bool | None = None,
+    allow_insecure_http: bool = False,
+    context_limit_tokens: int = DEFAULT_CONTEXT_LIMIT_TOKENS,
+    context_safety_margin_tokens: int = 8_192,
+) -> dict[str, Any]:
+    """Send one bounded correction example for guardrail curation.
+
+    The response is intentionally not a question revision.  The caller must
+    validate and store it as an advisory guardrail candidate before any owner
+    can promote it to a rule or Skill note.
+    """
+
+    if transport in {"ollama_native", "ollama_openai_compatible"}:
+        endpoint, _ = normalized_base_url(base_url)
+    elif transport in {"openai_compatible", "openai_chat_completions", "litellm_openai_compatible"}:
+        endpoint, _ = normalized_openai_base_url(base_url, allow_insecure_http=allow_insecure_http)
+    else:
+        raise LLMAdapterError(f"unsupported provider transport: {transport}")
+    refs = image_refs or []
+    request = build_feedback_request(
+        feedback_packet,
+        refs,
+        model,
+        max_tokens,
+        reasoning_effort=reasoning_effort,
+        clear_thinking=clear_thinking,
+    )
+    if transport == "ollama_native":
+        request_payload = build_native_request(request, refs)
+        native_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+        response_url = f"{native_endpoint}/api/chat"
+    else:
+        request_payload = request
+        response_url = f"{endpoint}/chat/completions"
+    context_guard = enforce_payload(
+        request_payload,
+        output_tokens=max_tokens,
+        context_limit_tokens=context_limit_tokens,
+        safety_margin_tokens=context_safety_margin_tokens,
+    )
+    response_payload, raw_response, elapsed_ms = _post_json(
+        response_url,
+        request_payload,
+        timeout,
+        provider=provider,
+        api_key=api_key,
+    )
+    content = _extract_content(response_payload)
+    parsed = _parse_json_object(content)
+    status = str(parsed.get("status") or "unclear").strip().lower()
+    if status not in {"candidate", "no_generalization", "unclear"}:
+        status = "unclear"
+    try:
+        confidence = float(parsed.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    guardrail_type = str(parsed.get("guardrail_type") or "no_generalization").strip()
+    if guardrail_type not in {
+        "exact_ocr_rule",
+        "notation_rule",
+        "format_rule",
+        "crop_strategy",
+        "answer_rule",
+        "parser_route",
+        "skill_note",
+        "no_generalization",
+    }:
+        guardrail_type = "no_generalization"
+    rule_proposal = parsed.get("rule_proposal") if isinstance(parsed.get("rule_proposal"), dict) else None
+    skill_update_candidate = parsed.get("skill_update_candidate") if isinstance(parsed.get("skill_update_candidate"), dict) else None
+    if rule_proposal and str(rule_proposal.get("status") or "").lower() in {"active", "verified", "approved"}:
+        # A provider that ignores the prompt is fail-closed.  Keep the raw
+        # response hash for diagnosis but do not pass an active proposal on.
+        status = "unclear"
+        rule_proposal = None
+    usage = response_payload.get("usage") if isinstance(response_payload.get("usage"), dict) else {}
+    return {
+        "status": status,
+        "guardrail_type": guardrail_type,
+        "confidence": confidence,
+        "rule_proposal": rule_proposal,
+        "skill_update_candidate": skill_update_candidate,
+        "positive_examples": parsed.get("positive_examples") if isinstance(parsed.get("positive_examples"), list) else [],
+        "negative_controls": parsed.get("negative_controls") if isinstance(parsed.get("negative_controls"), list) else [],
+        "do_not_generalize": parsed.get("do_not_generalize") if isinstance(parsed.get("do_not_generalize"), list) else [],
+        "rationale": str(parsed.get("rationale") or "未提供可觀察理由")[:2_000],
+        "requested_evidence": _normalize_evidence_requests(parsed.get("requested_evidence")),
+        "advisory_only": True,
+        "materialize": False,
+        "provider": provider,
+        "model": model,
+        "endpoint": response_url,
+        "transport": transport,
+        "prompt_version": FEEDBACK_PROMPT_VERSION,
+        "elapsed_ms": elapsed_ms,
+        "usage": usage,
+        "pixels_sent": len(refs),
+        "context_guard": context_guard,
+        "raw_response_sha256": sha256_text(raw_response),
+        "raw_content": content,
+    }

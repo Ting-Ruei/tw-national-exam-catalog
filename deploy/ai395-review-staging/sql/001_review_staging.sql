@@ -140,6 +140,54 @@ CREATE TABLE IF NOT EXISTS review_staging.correction_proposals (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Immutable before/after examples sent to the bounded guardrail curator.
+-- This is separate from thumbs-up/down feedback: a semantic pass has no
+-- correction example, while a real edit must preserve both visible versions.
+CREATE TABLE IF NOT EXISTS review_staging.feedback_events (
+    feedback_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES review_staging.pipeline_runs(run_id) ON DELETE CASCADE,
+    candidate_key TEXT NOT NULL,
+    revision_id TEXT,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('human_correction', 'three_evidence_correction')),
+    scope TEXT NOT NULL CHECK (scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'deterministic_system')),
+    reviewer TEXT,
+    event_ref TEXT,
+    changed_fields JSONB NOT NULL,
+    before_json JSONB NOT NULL,
+    after_json JSONB NOT NULL,
+    diff_json JSONB NOT NULL,
+    evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ai_task_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    event_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (run_id, candidate_key) REFERENCES review_staging.pipeline_candidates(run_id, candidate_key) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS review_staging.guardrail_candidates (
+    guardrail_id TEXT PRIMARY KEY,
+    feedback_id TEXT NOT NULL REFERENCES review_staging.feedback_events(feedback_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES review_staging.pipeline_runs(run_id) ON DELETE CASCADE,
+    candidate_key TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    change_class TEXT NOT NULL,
+    guardrail_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('observed', 'proposed', 'no_generalization', 'ai_failed', 'rejected', 'needs_owner_approval', 'approved', 'active')),
+    candidate_json JSONB NOT NULL,
+    validation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (run_id, candidate_key) REFERENCES review_staging.pipeline_candidates(run_id, candidate_key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_events_candidate
+    ON review_staging.feedback_events (candidate_key, created_at DESC, feedback_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_source
+    ON review_staging.feedback_events (source_kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_guardrail_candidates_status
+    ON review_staging.guardrail_candidates (run_id, status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS review_staging.review_exception_queue (
     exception_id BIGSERIAL PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES review_staging.pipeline_runs(run_id) ON DELETE CASCADE,

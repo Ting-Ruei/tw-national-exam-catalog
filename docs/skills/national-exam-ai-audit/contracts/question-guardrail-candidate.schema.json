@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tw-national-exam-catalog/contracts/question-guardrail-candidate.schema.json",
+  "title": "Question guardrail candidate",
+  "description": "A model-assisted rule or Skill-note proposal. This object is never active until owner approval and regression validation.",
+  "type": "object",
+  "required": ["schema_version", "guardrail_id", "feedback_id", "status", "guardrail_type", "promotion_policy"],
+  "properties": {
+    "schema_version": {"const": "question_guardrail_candidate_v1"},
+    "guardrail_id": {"type": "string", "pattern": "^guardrail:[a-f0-9]{24}$"},
+    "feedback_id": {"type": "string", "pattern": "^feedback:[a-f0-9]{24}$"},
+    "candidate_key": {"type": "string", "minLength": 1},
+    "scope": {"enum": ["question", "group", "visual", "answer"]},
+    "lane": {"type": "string"},
+    "change_class": {"type": "string"},
+    "guardrail_type": {"enum": ["exact_ocr_rule", "notation_rule", "format_rule", "crop_strategy", "answer_rule", "parser_route", "skill_note", "no_generalization"]},
+    "status": {"enum": ["observed", "proposed", "no_generalization", "ai_failed", "rejected", "needs_owner_approval", "approved", "active"]},
+    "rule_proposal": {"type": ["object", "null"]},
+    "skill_update_candidate": {"type": ["object", "null"]},
+    "positive_examples": {"type": "array"},
+    "negative_controls": {"type": "array"},
+    "do_not_generalize": {"type": "array"},
+    "rationale": {"type": "string", "maxLength": 2000},
+    "ai_result": {"type": "object"},
+    "validation": {"type": "object"},
+    "promotion_policy": {
+      "type": "object",
+      "required": ["advisory_only", "requires_owner_approval", "requires_negative_controls", "active", "direct_file_write"],
+      "properties": {
+        "advisory_only": {"const": true},
+        "requires_owner_approval": {"const": true},
+        "requires_negative_controls": {"const": true},
+        "active": {"const": false},
+        "direct_file_write": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

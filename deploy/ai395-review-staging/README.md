@@ -25,6 +25,39 @@ curl --fail http://127.0.0.1:58080/runs/ai395-mini20-first
 
 這個 stack 的 port、PostgreSQL volume、n8n volume 與 artifact volume 都是 staging 專用。不要掛 production DB volume，也不要把 staging port 改成 Review UI 的 8765／8766。日常停止用 `docker compose ... stop`；不要用 `down -v` 清除證據。
 
+## LiteLLM GLM-5.3-Flash staging provider
+
+目前五條 lane 的模型入口是可替換的 OpenAI-compatible adapter；預設仍是 mock，只有 owner 明確開啟才會對 LiteLLM 發出請求。`glm-5.3-flash` 的文字／圖片請求都會以單題 bounded packet 傳送，模型輸出只能形成 advisory finding 或 guardrail candidate，不能直接改題目或啟用 Skill／rule。
+
+AI395 上的 key 請由 owner-controlled secret file 注入，不要把 key 貼進命令、workflow JSON 或 Git。依使用者提供的環境變數名稱，可在啟動同一個 shell 先執行：
+
+```bash
+set -a
+. /etc/ai395/tw-national-exam-catalog/litellm-client.env
+set +a
+export LITELLM_BASE_URL="$LITELLM_API_BASE"
+export LITELLM_MODEL='glm-5.3-flash'
+export LITELLM_GLM_ENABLED=1
+export AI395_STAGING_ALLOW_LIVE_LLM=1
+export AI395_STAGING_MODEL_MODE=litellm_glm
+```
+
+先做 read-only model probe，再讓 n8n 或 HTTP bridge 啟動 staging run：
+
+```bash
+python3 scripts/probe_litellm_glm.py --model "$LITELLM_MODEL"
+curl --fail -X POST http://127.0.0.1:58080/runs/e2e \
+  -H 'Content-Type: application/json' \
+  -d '{"fixture":"mini20","run_id":"ai395-mini20-glm-test","model_mode":"litellm_glm"}'
+curl --fail http://127.0.0.1:58080/runs/ai395-mini20-glm-test
+```
+
+若要暫停外部模型，只把 `AI395_STAGING_ALLOW_LIVE_LLM=0` 或 `LITELLM_GLM_ENABLED=0` 設回去並重建 worker；n8n 圖不需要重畫。可調整的 context／慢呼叫參數是 `AI395_STAGING_CONTEXT_LIMIT_TOKENS`、`AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS`、`AI395_STAGING_MAX_TOOL_TURNS` 與 `AI395_STAGING_MODEL_SLOW_THRESHOLD`；留白時使用版本化 pipeline policy（256K hard limit，必要時最多單次 384K extension）。GLM 的官方多模態與 OpenAI-compatible transport 仍要以 probe、gold corpus 與 latency report 認證，不能把「API 可呼叫」當成「題目已正確」。
+
+### Correction feedback／guardrail outbox
+
+ReviewUI 真正保存人工修正時，會追加 `question_review_events` 與不可變的 `question_correction_feedback_events`；三證據自動修正只有帶三個獨立 evidence family 才能進 outbox。n8n 後續可讀取 `/api/correction-feedback?status=pending`，再把 bounded `ai_task` 交給 GLM。回傳的 `question_guardrail_candidate_v1` 只停在 `proposed`／`no_generalization`／`ai_failed` 等狀態，必須 owner approval、negative controls 與 gold regression 後才可另開版本實作；沒有任何直接寫 Skill、規則或題目檔案的節點。
+
 ## MacBook Qwen MLX 測試節點
 
 這個 staging 不在 AI395 下載或啟動 Qwen；模型跑在 MacBook 原生 Ollama，AI395 worker 只在 owner 完成測試後透過 Tailscale Serve 呼叫：

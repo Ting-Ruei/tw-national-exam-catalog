@@ -60,6 +60,25 @@ except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
         group_count_from_text,
     )
 
+try:
+    from ai395_feedback import (
+        FeedbackContractError,
+        NoVisibleChange,
+        apply_correction as apply_feedback_correction,
+        build_feedback_event,
+        build_guardrail_candidate,
+        question_snapshot,
+    )
+except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
+    from scripts.ai395_feedback import (
+        FeedbackContractError,
+        NoVisibleChange,
+        apply_correction as apply_feedback_correction,
+        build_feedback_event,
+        build_guardrail_candidate,
+        question_snapshot,
+    )
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
@@ -262,6 +281,51 @@ def load_ai_learning_events(
                 continue
             latest.setdefault(key, {})[scope] = event
     return latest
+
+
+def load_correction_feedback_events(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the latest immutable before/after feedback per candidate."""
+    latest: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return latest
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or not event.get("feedback_id"):
+                    continue
+                key = str(event.get("candidate_key") or "")
+                if key:
+                    latest[key] = event
+    except OSError:
+        return {}
+    return latest
+
+
+def load_correction_feedback_rows(path: Path, *, limit: int = 100) -> list[dict[str, Any]]:
+    """Load an append-only feedback outbox for n8n or an operator export."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("feedback_id"):
+                    rows.append(event)
+    except OSError:
+        return []
+    return rows[-max(1, min(int(limit), 500)):]
 
 
 def category_matches_filter(category: str, category_filter: str) -> bool:
@@ -1767,6 +1831,19 @@ def compact_ai_lane_results(audit: Any) -> list[dict[str, Any]]:
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
         model_result = result.get("model_result") if isinstance(result.get("model_result"), dict) else {}
         context_guard = model_result.get("context_guard") if isinstance(model_result.get("context_guard"), dict) else {}
+        context_policy = model_result.get("context_policy") if isinstance(model_result.get("context_policy"), dict) else {}
+        raw_trace = model_result.get("agentic_trace") if isinstance(model_result.get("agentic_trace"), list) else []
+        trace = []
+        for trace_row in raw_trace[:4]:
+            if not isinstance(trace_row, dict):
+                continue
+            trace.append(
+                {
+                    key: trace_row.get(key)
+                    for key in ("turn", "latency_ms", "latency_status", "compact_level", "adaptive_action")
+                    if key in trace_row
+                }
+            )
         compact.append(
             {
                 "lane": str(row.get("lane") or ""),
@@ -1788,6 +1865,12 @@ def compact_ai_lane_results(audit: Any) -> list[dict[str, Any]]:
                 "tool_turn_count": model_result.get("tool_turn_count"),
                 "pixels_sent": model_result.get("pixels_sent"),
                 "transport": str(model_result.get("transport") or ""),
+                "context_policy": {
+                    key: context_policy.get(key)
+                    for key in ("hard_limit_tokens", "effective_limit_tokens", "context_extension_used", "slow_threshold_seconds")
+                    if key in context_policy
+                },
+                "agentic_trace": trace,
                 "context_guard": {
                     key: context_guard.get(key)
                     for key in (
@@ -2028,6 +2111,7 @@ class ReviewState:
         self.ai_review_log = self.review_log.parent / "question_ai_review_events.jsonl"
         self.ai_feedback_log = self.review_log.parent / "question_ai_feedback_events.jsonl"
         self.ai_learning_log = self.review_log.parent / "question_ai_learning_events.jsonl"
+        self.correction_feedback_log = self.review_log.parent / "question_correction_feedback_events.jsonl"
         self.preference_path = self.review_log.parent / "review_ui_preferences.json"
         if self.sql_review_enabled:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = {}, {}, {}
@@ -2036,6 +2120,7 @@ class ReviewState:
             self.latest_ai_reviews, self.ai_review_counts = {}, {}
             self.latest_ai_feedbacks = {}
             self.latest_ai_learnings = {}
+            self.latest_correction_feedbacks = {}
             self._ensure_ai_feedback_schema()
         else:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = load_review_events(review_log)
@@ -2047,6 +2132,7 @@ class ReviewState:
             )
             self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
+            self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -2054,6 +2140,7 @@ class ReviewState:
         self._ai_review_log_signature = file_signature(self.ai_review_log)
         self._ai_feedback_log_signature = file_signature(self.ai_feedback_log)
         self._ai_learning_log_signature = file_signature(self.ai_learning_log)
+        self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
         if self.defer_formal_sync:
             try:
                 self._ensure_formal_sync_queue_schema()
@@ -2299,7 +2386,9 @@ class ReviewState:
                     "run_id", "model_mode", "model_name", "model_provider", "model_transport",
                     "model_profile_id", "model_prompt_version", "model_endpoint_class", "source_mode",
                     "mineru_mode", "scope_count", "llm_calls", "llm_attempts", "llm_errors",
-                    "llm_context_rejections", "llm_slow_calls", "llm_tool_turns", "revisions_created",
+                    "llm_context_rejections", "llm_context_extensions", "llm_slow_calls", "llm_tool_turns", "revisions_created",
+                    "feedback_events", "feedback_skipped", "feedback_agent_attempts", "feedback_agent_calls",
+                    "feedback_agent_errors", "guardrail_candidates", "guardrail_active", "guardrail_owner_approval_required",
                     "production_write_count", "human_review_events_written", "config_sha256",
                 )
                 if key in summary
@@ -2431,6 +2520,11 @@ class ReviewState:
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
             self._ai_learning_log_signature = ai_learning_signature
 
+        correction_feedback_signature = file_signature(self.correction_feedback_log)
+        if correction_feedback_signature != self._correction_feedback_log_signature:
+            self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
+            self._correction_feedback_log_signature = correction_feedback_signature
+
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
             raise RuntimeError("SQL review backend is not available.")
@@ -2509,6 +2603,55 @@ class ReviewState:
                         ON exam.question_ai_learning_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
                     CREATE INDEX IF NOT EXISTS idx_question_ai_learning_created
                         ON exam.question_ai_learning_events (created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS exam.question_correction_feedback_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+                        candidate_key TEXT NOT NULL,
+                        human_review_event_id BIGINT REFERENCES exam.question_review_events(id) ON DELETE SET NULL,
+                        human_answer_review_event_id BIGINT REFERENCES exam.answer_review_events(id) ON DELETE SET NULL,
+                        feedback_id TEXT NOT NULL UNIQUE,
+                        source_kind TEXT NOT NULL CHECK (source_kind IN ('human_correction', 'three_evidence_correction')),
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        lane_key TEXT,
+                        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'deterministic_system')),
+                        reviewer TEXT,
+                        event_ref TEXT,
+                        changed_fields JSONB NOT NULL,
+                        before_json JSONB NOT NULL,
+                        after_json JSONB NOT NULL,
+                        diff_json JSONB NOT NULL,
+                        evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        ai_task_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        event_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    ALTER TABLE exam.question_correction_feedback_events
+                        ADD COLUMN IF NOT EXISTS human_answer_review_event_id BIGINT
+                        REFERENCES exam.answer_review_events(id) ON DELETE SET NULL;
+                    CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_candidate
+                        ON exam.question_correction_feedback_events (candidate_key, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_source
+                        ON exam.question_correction_feedback_events (source_kind, created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS exam.question_guardrail_candidates (
+                        id BIGSERIAL PRIMARY KEY,
+                        feedback_event_id BIGINT NOT NULL REFERENCES exam.question_correction_feedback_events(id) ON DELETE RESTRICT,
+                        feedback_id TEXT NOT NULL,
+                        candidate_key TEXT NOT NULL,
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        lane_key TEXT,
+                        change_class TEXT NOT NULL,
+                        guardrail_type TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('observed', 'proposed', 'no_generalization', 'ai_failed', 'rejected', 'needs_owner_approval', 'approved', 'active')),
+                        candidate_json JSONB NOT NULL,
+                        validation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_status
+                        ON exam.question_guardrail_candidates (status, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_feedback
+                        ON exam.question_guardrail_candidates (feedback_id, created_at DESC, id DESC);
 
                     """
                 )
@@ -4198,6 +4341,193 @@ filtered AS (
                     latest.setdefault(str(key), {})[str(scope)] = event
         return latest
 
+    def _sql_correction_feedback_maps(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        """Return the latest immutable before/after feedback per candidate."""
+        latest: dict[str, dict[str, Any]] = {}
+        if not keys:
+            return latest
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (candidate_key)
+                        candidate_key,
+                        event_json,
+                        feedback_id,
+                        source_kind,
+                        audit_scope,
+                        created_at,
+                        id,
+                        (
+                            SELECT jsonb_build_object(
+                                'status', guardrail.status,
+                                'candidate', guardrail.candidate_json,
+                                'validation', guardrail.validation_json,
+                                'created_at', guardrail.created_at,
+                                'guardrail_candidate_id', guardrail.id
+                            )
+                            FROM exam.question_guardrail_candidates AS guardrail
+                            WHERE guardrail.feedback_id = feedback.feedback_id
+                            ORDER BY guardrail.id DESC
+                            LIMIT 1
+                        ) AS guardrail_candidate
+                    FROM exam.question_correction_feedback_events
+                    AS feedback
+                    WHERE candidate_key = ANY(%s)
+                    ORDER BY candidate_key, id DESC
+                    """,
+                    (keys,),
+                )
+                for key, event_json, feedback_id, source_kind, scope, created_at, event_id, guardrail_candidate in cur.fetchall():
+                    event = self._db_event_value(
+                        event_json,
+                        {
+                            "feedback_id": feedback_id,
+                            "candidate_key": key,
+                            "source_kind": source_kind,
+                            "scope": scope,
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "feedback_event_id": int(event_id),
+                        },
+                    )
+                    event.setdefault("feedback_event_id", int(event_id))
+                    if isinstance(guardrail_candidate, dict):
+                        event["guardrail_candidate"] = guardrail_candidate
+                    latest[str(key)] = event
+        return latest
+
+    def correction_feedback_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
+        """Expose the immutable correction outbox without granting activation rights."""
+        params = params or {}
+        candidate_key = str(params.get("candidate_key") or params.get("candidateKey") or "").strip()
+        try:
+            limit = max(1, min(int(params.get("limit") or "100"), 500))
+        except ValueError:
+            limit = 100
+        requested_status = str(params.get("status") or "").strip().lower()
+        if requested_status not in {"", "pending", "all"}:
+            requested_status = ""
+
+        events: list[dict[str, Any]] = []
+        if not self.sql_review_enabled:
+            events = load_correction_feedback_rows(self.correction_feedback_log, limit=500)
+        else:
+            with self._sql_connect() as conn:
+                with conn.cursor() as cur:
+                    if candidate_key:
+                        cur.execute(
+                            """
+                            SELECT id, candidate_key, feedback_id, source_kind, audit_scope,
+                                   lane_key, reviewer, event_ref, changed_fields, before_json,
+                                   after_json, diff_json, evidence_json, ai_task_json, event_json,
+                                   created_at
+                            FROM exam.question_correction_feedback_events
+                            WHERE candidate_key = %s
+                            ORDER BY id ASC
+                            LIMIT %s
+                            """,
+                            (candidate_key, limit),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT id, candidate_key, feedback_id, source_kind, audit_scope,
+                                   lane_key, reviewer, event_ref, changed_fields, before_json,
+                                   after_json, diff_json, evidence_json, ai_task_json, event_json,
+                                   created_at
+                            FROM exam.question_correction_feedback_events
+                            ORDER BY id ASC
+                            LIMIT %s
+                            """,
+                            (limit,),
+                        )
+                    rows = cur.fetchall()
+                    for (
+                        event_id,
+                        key,
+                        feedback_id,
+                        source_kind,
+                        scope,
+                        lane,
+                        reviewer,
+                        event_ref,
+                        changed_fields,
+                        before_json,
+                        after_json,
+                        diff_json,
+                        evidence_json,
+                        ai_task_json,
+                        event_json,
+                        created_at,
+                    ) in rows:
+                        fallback = {
+                            "feedback_id": feedback_id,
+                            "candidate_key": key,
+                            "source_kind": source_kind,
+                            "scope": scope,
+                            "lane": lane or "",
+                            "reviewer": reviewer or "",
+                            "event_ref": event_ref or "",
+                            "changed_fields": changed_fields or [],
+                            "before": before_json or {},
+                            "after": after_json or {},
+                            "diff": diff_json or [],
+                            "evidence": evidence_json or [],
+                            "ai_task": ai_task_json or {},
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "feedback_event_id": int(event_id),
+                        }
+                        events.append(self._db_event_value(event_json, fallback))
+
+        if self.sql_review_enabled and events:
+            feedback_ids = [str(event.get("feedback_id") or "") for event in events if event.get("feedback_id")]
+            if feedback_ids:
+                guardrails: dict[str, dict[str, Any]] = {}
+                with self._sql_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT ON (feedback_id)
+                                   feedback_id, status, candidate_json, validation_json, created_at, id
+                            FROM exam.question_guardrail_candidates
+                            WHERE feedback_id = ANY(%s)
+                            ORDER BY feedback_id, id DESC
+                            """,
+                            (feedback_ids,),
+                        )
+                        for feedback_id, status, candidate_json, validation_json, created_at, guardrail_id in cur.fetchall():
+                            guardrails[str(feedback_id)] = {
+                                "status": status,
+                                "candidate": candidate_json or {},
+                                "validation": validation_json or {},
+                                "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                                "guardrail_candidate_id": int(guardrail_id),
+                            }
+                for event in events:
+                    guardrail = guardrails.get(str(event.get("feedback_id") or ""))
+                    if guardrail:
+                        event["guardrail_candidate"] = guardrail
+
+        if requested_status == "pending":
+            events = [
+                event
+                for event in events
+                if not isinstance(event.get("guardrail_candidate"), dict)
+                or not event["guardrail_candidate"].get("status")
+            ]
+        events = events[-limit:]
+        return {
+            "ok": True,
+            "experience": "correction_feedback_outbox_v1",
+            "advisory_only": True,
+            "owner_approval_required": True,
+            "direct_rule_or_skill_write": False,
+            "candidate_key": candidate_key or None,
+            "status_filter": requested_status or "all",
+            "count": len(events),
+            "events": events,
+        }
+
     def batch_accept_questions(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "") -> dict[str, Any]:
         saved: list[dict[str, Any]] = []
         pending_events: list[dict[str, Any]] = []
@@ -4862,6 +5192,7 @@ filtered AS (
         latest_group_reviews: dict[str, dict[str, Any]] | None = None,
         latest_ai_feedbacks: dict[str, dict[str, dict[str, Any]]] | None = None,
         latest_ai_learnings: dict[str, dict[str, dict[str, Any]]] | None = None,
+        latest_correction_feedbacks: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         key = item["candidate_key"]
         issues_by_key = self.issues if issues_by_key is None else issues_by_key
@@ -4876,6 +5207,7 @@ filtered AS (
         latest_group_reviews = self.latest_group_reviews if latest_group_reviews is None else latest_group_reviews
         latest_ai_feedbacks = self.latest_ai_feedbacks if latest_ai_feedbacks is None else latest_ai_feedbacks
         latest_ai_learnings = getattr(self, "latest_ai_learnings", {}) if latest_ai_learnings is None else latest_ai_learnings
+        latest_correction_feedbacks = getattr(self, "latest_correction_feedbacks", {}) if latest_correction_feedbacks is None else latest_correction_feedbacks
         copy = dict(item)
         metadata = copy.get("metadata") or {}
         issues = issues_by_key.get(key, [])
@@ -4968,6 +5300,8 @@ filtered AS (
             "queue_bucket": review_projection_data["queue_bucket"],
             "queue_label": review_projection_data["display_label"],
         }
+        correction_feedback = latest_correction_feedbacks.get(key)
+        copy["correction_feedback"] = correction_feedback
         latest_action = latest_review.get("action") if latest_review else None
         formal = dict(formal_question_map.get(key) or {"in_formal": False})
         physical_in_formal = bool(formal.get("in_formal"))
@@ -5751,6 +6085,7 @@ filtered AS (
             keys,
             reviewer=params.get("reviewer") or "local",
         )
+        latest_correction_feedbacks = self._sql_correction_feedback_maps(keys)
 
         payloads: list[dict[str, Any]] = []
         for item in rows:
@@ -5768,6 +6103,7 @@ filtered AS (
                 latest_group_reviews=latest_group_reviews,
                 latest_ai_feedbacks=latest_ai_feedbacks,
                 latest_ai_learnings=latest_ai_learnings,
+                latest_correction_feedbacks=latest_correction_feedbacks,
             )
             payload["mobile_review"] = mobile_reviews.get(
                 str(item.get("candidate_key") or ""),
@@ -6943,6 +7279,84 @@ filtered_sheets AS (
             "event_id": event_id,
         }
 
+    def _insert_sql_correction_feedback_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self.sql_review_enabled:
+            return {"ok": True, "sql_primary": False, "table": "exam.question_correction_feedback_events"}
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_correction_feedback_events (
+                        candidate_id,
+                        candidate_key,
+                        human_review_event_id,
+                        human_answer_review_event_id,
+                        feedback_id,
+                        source_kind,
+                        audit_scope,
+                        lane_key,
+                        actor_kind,
+                        reviewer,
+                        event_ref,
+                        changed_fields,
+                        before_json,
+                        after_json,
+                        diff_json,
+                        evidence_json,
+                        ai_task_json,
+                        event_json,
+                        created_at
+                    )
+                    SELECT id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                    FROM exam.question_candidates
+                    WHERE candidate_key = %s
+                    ON CONFLICT (feedback_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        event.get("candidate_key"),
+                        event.get("human_review_event_id"),
+                        event.get("human_answer_review_event_id"),
+                        event.get("feedback_id"),
+                        event.get("source_kind"),
+                        event.get("scope"),
+                        event.get("lane") or None,
+                        event.get("actor_kind"),
+                        event.get("reviewer") or None,
+                        event.get("event_ref") or None,
+                        Jsonb(event.get("changed_fields") or []),
+                        Jsonb(event.get("before") or {}),
+                        Jsonb(event.get("after") or {}),
+                        Jsonb(event.get("diff") or []),
+                        Jsonb(event.get("evidence") or []),
+                        Jsonb(event.get("ai_task") or {}),
+                        Jsonb(event),
+                        event.get("created_at"),
+                        event.get("candidate_key"),
+                    ),
+                )
+                row = cur.fetchone()
+                if row:
+                    event_id = int(row[0])
+                else:
+                    cur.execute(
+                        "SELECT id FROM exam.question_correction_feedback_events WHERE feedback_id = %s",
+                        (event.get("feedback_id"),),
+                    )
+                    existing = cur.fetchone()
+                    if not existing:
+                        raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
+                    event_id = int(existing[0])
+            conn.commit()
+        return {
+            "ok": True,
+            "sql_primary": True,
+            "table": "exam.question_correction_feedback_events",
+            "event_id": event_id,
+        }
+
     def _ensure_formal_sync_schema(self, conn: Any) -> None:
         if self._formal_sync_schema_ready:
             return
@@ -7374,9 +7788,167 @@ filtered_sheets AS (
                 "errors": [str(exc)],
             }
 
+    def _raw_candidate_for_feedback(self, candidate_key: str) -> dict[str, Any] | None:
+        if self.sql_review_enabled:
+            return self._candidate_by_key_sql(candidate_key)
+        return self.candidate_by_key.get(candidate_key)
+
+    def _feedback_before_snapshot(self, candidate_key: str) -> dict[str, Any]:
+        candidate = self._raw_candidate_for_feedback(candidate_key) or {}
+        before = question_snapshot(candidate)
+        previous = self.current_question_review(candidate_key)
+        previous_correction = normalized_correction(previous.get("correction")) if previous else {}
+        if previous_correction:
+            before = apply_feedback_correction(before, previous_correction)
+        return question_snapshot(before)
+
+    @staticmethod
+    def _event_is_human_correction(event: dict[str, Any]) -> bool:
+        source = str(event.get("source") or "").strip().lower()
+        reviewer = str(event.get("reviewer") or "").strip().lower()
+        if source in {"ai_suggestion", "ai_auto", "deterministic_rule", "parser_repair"}:
+            return False
+        if source.startswith(("ai_", "repair_", "backfill_", "parser_", "deterministic_")):
+            return False
+        if reviewer.startswith(REPAIR_REVIEWER_PREFIXES):
+            return False
+        return True
+
+    def _append_correction_feedback(
+        self,
+        *,
+        candidate_key: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        source_kind: str,
+        scope: str,
+        lane: str,
+        reviewer: str,
+        human_review_event_id: int | None,
+        event_ref: str,
+        evidence: list[dict[str, Any]],
+        created_at: str,
+    ) -> dict[str, Any] | None:
+        try:
+            feedback = build_feedback_event(
+                candidate_key=candidate_key,
+                before=before,
+                after=after,
+                source_kind=source_kind,
+                scope=scope,
+                lane=lane,
+                reviewer=reviewer,
+                event_ref=event_ref,
+                evidence=evidence,
+                question_number=after.get("question_number") or before.get("question_number"),
+                created_at=created_at,
+            )
+        except NoVisibleChange:
+            # Accepting or re-saving an unchanged candidate is not a formatting
+            # lesson.  Keep the human review event, but do not manufacture AI
+            # feedback from a no-op.
+            return None
+        except FeedbackContractError:
+            raise
+        if source_kind == "human_correction" and scope == "answer":
+            if human_review_event_id is not None:
+                feedback["human_answer_review_event_id"] = human_review_event_id
+        elif human_review_event_id is not None:
+            feedback["human_review_event_id"] = human_review_event_id
+        sql_storage = self._insert_sql_correction_feedback_event(feedback)
+        jsonl_storage = self._legacy_jsonl_storage(self.correction_feedback_log, feedback)
+        self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
+        self.latest_correction_feedbacks[candidate_key] = feedback
+        return {
+            "event": feedback,
+            "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage},
+        }
+
+    def _record_question_correction_feedback(
+        self,
+        event: dict[str, Any],
+        *,
+        before: dict[str, Any],
+        review_storage: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidate_key = str(event.get("candidate_key") or "")
+        correction = normalized_correction(event.get("correction"))
+        if not candidate_key or not correction or not self._event_is_human_correction(event):
+            return None
+        after = apply_feedback_correction(before, correction)
+        changed_scope = "visual" if any(
+            key in correction for key in ("image_refs", "stem_image", "answer_image_refs", "visual_review")
+        ) else "group" if any(key in correction for key in ("group_ref", "group_sequence_no")) else "question"
+        evidence = [{
+            "kind": "human_review",
+            "source": str(event.get("review_surface") or event.get("source") or "review_ui"),
+            "reference": str(review_storage.get("event_id") or event.get("created_at") or "human_review"),
+            "status": "human_confirmed",
+        }]
+        if isinstance(event.get("manual_asset"), dict):
+            asset = event["manual_asset"]
+            evidence.append({
+                "kind": "human_review",
+                "family": "manual_asset",
+                "reference": str(asset.get("asset_key") or "manual_asset"),
+                "sha256": str(asset.get("sha256") or ""),
+                "status": "human_confirmed",
+            })
+        for row in event.get("evidence") or []:
+            if isinstance(row, dict):
+                evidence.append(row)
+        event_id = review_storage.get("event_id")
+        return self._append_correction_feedback(
+            candidate_key=candidate_key,
+            before=before,
+            after=after,
+            source_kind="human_correction",
+            scope=changed_scope,
+            lane=str(event.get("lane") or changed_scope),
+            reviewer=str(event.get("reviewer") or "local"),
+            human_review_event_id=int(event_id) if event_id not in (None, "") else None,
+            event_ref=f"human_review:{event_id or event.get('created_at') or candidate_key}",
+            evidence=evidence,
+            created_at=str(event.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+        )
+
+    def _record_answer_correction_feedback(
+        self,
+        event: dict[str, Any],
+        *,
+        before: dict[str, Any],
+        review_storage: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidate_key = str(event.get("candidate_key") or "")
+        if not candidate_key or not self._event_is_human_correction(event):
+            return None
+        if "corrected_answer" not in event or event.get("corrected_answer") in (None, ""):
+            return None
+        after = apply_feedback_correction(before, {"answer": event.get("corrected_answer")})
+        event_id = review_storage.get("event_id")
+        return self._append_correction_feedback(
+            candidate_key=candidate_key,
+            before=before,
+            after=after,
+            source_kind="human_correction",
+            scope="answer",
+            lane="answer",
+            reviewer=str(event.get("reviewer") or "local"),
+            human_review_event_id=int(event_id) if event_id not in (None, "") else None,
+            event_ref=f"human_answer_review:{event_id or event.get('created_at') or candidate_key}",
+            evidence=[{
+                "kind": "human_review",
+                "source": "answer_review_ui",
+                "reference": str(event_id or event.get("created_at") or "human_answer_review"),
+                "status": "human_confirmed",
+            }],
+            created_at=str(event.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+        )
+
     def append_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
+        feedback_before = self._feedback_before_snapshot(str(key or "")) if event.get("correction") else None
         if event.get("action") == "correct":
             previous = self.current_question_review(str(key or ""))
             previous_action = previous.get("action") if previous else None
@@ -7387,6 +7959,17 @@ filtered_sheets AS (
         jsonl_storage = self._legacy_jsonl_storage(self.review_log, event)
         self._review_log_signature = file_signature(self.review_log)
         storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+        if feedback_before is not None:
+            try:
+                feedback_storage = self._record_question_correction_feedback(
+                    event,
+                    before=feedback_before,
+                    review_storage=sql_storage,
+                )
+            except FeedbackContractError as exc:
+                feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+            if feedback_storage is not None:
+                storage["correction_feedback"] = feedback_storage
         if key:
             if event.get("action") not in MOBILE_REVIEW_ACTIONS:
                 self.review_counts[key] = self.review_counts.get(key, 0) + 1
@@ -7416,17 +7999,31 @@ filtered_sheets AS (
         created_at = datetime.now().isoformat(timespec="seconds")
         for raw_event in events:
             event = dict(raw_event)
-            if not str(event.get("candidate_key") or ""):
+            key = str(event.get("candidate_key") or "")
+            if not key:
                 continue
+            if event.get("action") == "correct":
+                previous = self.current_question_review(key)
+                previous_action = previous.get("action") if previous else None
+                event.setdefault("correction_action", "save")
+                event["action"] = previous_action if previous_action in {
+                    "accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"
+                } else "reviewed"
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:
             return []
+        feedback_befores = [
+            self._feedback_before_snapshot(str(event.get("candidate_key") or ""))
+            if event.get("correction") and self._event_is_human_correction(event)
+            else None
+            for event in normalized_events
+        ]
         sql_storages = self._insert_sql_question_review_events(normalized_events)
         jsonl_storage = self._legacy_jsonl_storage_many(self.review_log, normalized_events)
         self._review_log_signature = file_signature(self.review_log)
         saved: list[dict[str, Any]] = []
-        for event, sql_storage in zip(normalized_events, sql_storages):
+        for event, sql_storage, feedback_before in zip(normalized_events, sql_storages, feedback_befores):
             key = str(event.get("candidate_key") or "")
             self.review_counts[key] = self.review_counts.get(key, 0) + 1
             if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -7435,7 +8032,19 @@ filtered_sheets AS (
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
-            saved.append({**event, "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage}})
+            storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+            if feedback_before is not None:
+                try:
+                    feedback_storage = self._record_question_correction_feedback(
+                        event,
+                        before=feedback_before,
+                        review_storage=sql_storage,
+                    )
+                except FeedbackContractError as exc:
+                    feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+                if feedback_storage is not None:
+                    storage["correction_feedback"] = feedback_storage
+            saved.append({**event, "storage": storage})
         if self.defer_formal_sync:
             self._wake_formal_sync_worker()
             formal_sync = {"ok": True, "enabled": True, "queued": True}
@@ -7448,6 +8057,7 @@ filtered_sheets AS (
     def append_answer_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
+        feedback_before = self._feedback_before_snapshot(str(key or "")) if "corrected_answer" in event else None
         if event.get("action") == "correct":
             previous = self.latest_answer_reviews.get(key or "")
             previous_action = previous.get("action") if previous else None
@@ -7458,6 +8068,17 @@ filtered_sheets AS (
         jsonl_storage = self._legacy_jsonl_storage(self.answer_review_log, event)
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+        if feedback_before is not None:
+            try:
+                feedback_storage = self._record_answer_correction_feedback(
+                    event,
+                    before=feedback_before,
+                    review_storage=sql_storage,
+                )
+            except FeedbackContractError as exc:
+                feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+            if feedback_storage is not None:
+                storage["correction_feedback"] = feedback_storage
         if key:
             self.answer_review_counts[key] = self.answer_review_counts.get(key, 0) + 1
             if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -7503,6 +8124,12 @@ filtered_sheets AS (
             normalized_events.append(event)
         if not normalized_events:
             return []
+        feedback_befores = [
+            self._feedback_before_snapshot(str(event.get("candidate_key") or ""))
+            if "corrected_answer" in event and self._event_is_human_correction(event)
+            else None
+            for event in normalized_events
+        ]
         sql_storages = self._insert_sql_answer_review_events(normalized_events)
         if self.legacy_jsonl_backup_enabled or not self.sql_review_enabled:
             try:
@@ -7519,9 +8146,20 @@ filtered_sheets AS (
             jsonl_storage = {"ok": True, "enabled": False, "path": str(self.answer_review_log)}
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         saved: list[dict[str, Any]] = []
-        for event, sql_storage in zip(normalized_events, sql_storages):
+        for event, sql_storage, feedback_before in zip(normalized_events, sql_storages, feedback_befores):
             key = str(event.get("candidate_key") or "")
             storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+            if feedback_before is not None:
+                try:
+                    feedback_storage = self._record_answer_correction_feedback(
+                        event,
+                        before=feedback_before,
+                        review_storage=sql_storage,
+                    )
+                except FeedbackContractError as exc:
+                    feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+                if feedback_storage is not None:
+                    storage["correction_feedback"] = feedback_storage
             if key:
                 self.answer_review_counts[key] = self.answer_review_counts.get(key, 0) + 1
                 if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -8529,6 +9167,11 @@ class Handler(BaseHTTPRequestHandler):
             self.state.refresh_event_logs()
             self.send_json(self.state.candidate_data_status())
             return
+        if parsed.path == "/api/correction-feedback":
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            self.send_json(self.state.correction_feedback_payload(params))
+            return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
             path = safe_file_path(query.get("path", [""])[0])
@@ -8974,7 +9617,7 @@ class MobileHandler(Handler):
             self.path = "/mobile/workflow/"
             super().do_GET()
             return
-        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/workflow", "/api/reload-status", "/evidence-file", "/file", "/legacy", "/legacy/"}:
+        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/workflow", "/api/reload-status", "/api/correction-feedback", "/evidence-file", "/file", "/legacy", "/legacy/"}:
             super().do_GET()
             return
         self.send_error(404, "Not found")

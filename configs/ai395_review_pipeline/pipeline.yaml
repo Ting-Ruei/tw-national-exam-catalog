@@ -27,6 +27,16 @@
     "enabled": true,
     "lanes": ["text_evidence", "notation", "group", "vision", "answer"]
   },
+  "feedback_stage": {
+    "enabled": true,
+    "sources": ["human_correction", "three_evidence_correction"],
+    "model_task": "guardrail_candidate_review",
+    "advisory_only": true,
+    "allow_direct_rule_write": false,
+    "allow_direct_skill_write": false,
+    "require_owner_approval": true,
+    "require_negative_controls": true
+  },
   "revision_stage": {
     "enabled": true,
     "max_revisions_per_candidate": 3,
@@ -39,12 +49,17 @@
     "production_write": false
   },
   "model_stage": {
-    "provider_mode": "mock",
+    "provider_mode": "litellm_glm",
+    "default_mode": "mock",
+    "primary_profile_id": "glm-5.3-flash-litellm",
     "allow_live_provider": false,
     "advisory_only": true,
     "context_policy": {
-      "hard_limit_tokens": 196608,
+      "hard_limit_tokens": 262144,
       "safety_margin_tokens": 8192,
+      "provider_advertised_context_limit_tokens": 1000000,
+      "one_time_extension_limit_tokens": 393216,
+      "max_context_extensions_per_lane": 1,
       "slow_threshold_seconds": 30,
       "max_tool_turns": 1,
       "evidence_cache": "staging_artifact_only",

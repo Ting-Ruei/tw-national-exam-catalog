@@ -156,6 +156,18 @@
     .diff-box.after { border: 1px solid #a9ddc9; background: var(--green-soft); }
     .diff-label { margin-bottom: 5px; font-size: 10px; font-weight: 850; }
     .notes { width: 100%; min-height: 75px; resize: vertical; padding: 9px; border: 1px solid var(--line-strong); border-radius: 8px; line-height: 1.45; }
+    .edit-grid { display: grid; gap: 9px; }
+    .edit-field { display: grid; gap: 5px; }
+    .edit-field label { color: var(--muted); font-size: 10px; font-weight: 820; }
+    .edit-field input, .edit-field textarea { width: 100%; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: white; color: var(--ink); line-height: 1.45; }
+    .edit-field textarea { min-height: 86px; resize: vertical; }
+    .edit-field textarea.options-editor { min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .edit-help { color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .feedback-card { margin-top: 9px; padding: 9px; border: 1px solid #cdb8f5; border-radius: 8px; background: var(--purple-soft); }
+    .feedback-card strong { color: var(--purple); font-size: 11px; }
+    .feedback-card p { margin: 5px 0 0; color: var(--ink); font-size: 10px; line-height: 1.45; }
+    .feedback-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
+    .feedback-diff .diff-box { font-size: 10px; }
     .decision-note { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 
     .evidence-panel { min-height: 680px; overflow: hidden; }
@@ -210,7 +222,7 @@
     @media (max-width: 500px) {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .queue-nav { grid-template-columns: 1fr; }
-      .revision-grid, .diff { grid-template-columns: 1fr; }
+      .revision-grid, .diff, .feedback-diff { grid-template-columns: 1fr; }
       .question-text { font-size: 15px; }
     }
   </style>
@@ -225,6 +237,7 @@
     <div class="top-actions">
       <a href="/mobile/workflow/">手機快審</a>
       <a href="/legacy/">舊版退路</a>
+      <button onclick="refreshFeedbackOutbox()">護欄 outbox</button>
       <button class="primary" onclick="reloadWorkflow()">重新讀取</button>
     </div>
     <div id="runStrip" class="run-strip">載入 staging run…</div>
@@ -256,7 +269,7 @@
   const LANE_LABELS = {answer:'答案', group:'題組', notation:'上下標／字形', text_evidence:'文字三證據', vision:'圖片'};
   const STATUS_LABELS = {finding:'發現疑點', failed:'執行失敗', machine_pass:'機器通過', skipped:'不適用', pass:'通過', needs_review:'需人工', block:'阻擋', unknown:'未知'};
   const QUEUE_ICONS = {source:'S', answer:'A', vision:'V', group:'G', notation:'N', text:'T', revision:'R', sample:'✓'};
-  const state = {data:null, selectedKey:'', activeQueue:'source', search:'', category:'', year:'', subject:'', severity:''};
+  const state = {data:null, selectedKey:'', activeQueue:'source', search:'', category:'', year:'', subject:'', severity:'', feedbackOutbox:null};
   let toastTimer = null;
 
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -267,6 +280,12 @@
   const fmt = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString('zh-TW') : esc(value || '—');
   const statusLabel = value => STATUS_LABELS[String(value || '')] || String(value || '—');
   const fileUrl = path => path ? `/file?path=${encodeURIComponent(path)}` : '';
+  const editorJson = value => JSON.stringify(value ?? [], null, 2);
+  const prettyValue = value => {
+    if (value === undefined) return '（未提供）';
+    if (value === null) return 'null';
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+  };
   const visibleQueueItems = () => {
     const data = state.data || {};
     const query = state.search.trim().toLowerCase();
@@ -293,6 +312,7 @@
     document.getElementById('runBadges').innerHTML = `
       <span class="pill staging">隔離 staging</span>
       <span class="pill advisory">advisory-only · production writes ${fmt(run.production_write_count || 0)}</span>
+      <span class="pill advisory">待護欄 ${fmt(state.feedbackOutbox?.count || 0)}</span>
       <span class="pill model">${esc(run.model_name || 'model 未提供')}</span>`;
     document.getElementById('runStrip').innerHTML = `run <code>${esc(run.run_id || '未提供')}</code> · endpoint ${esc(run.model_endpoint_class || '未提供')} · transport ${esc(run.model_transport || '未提供')} · prompt <code>${esc(run.model_prompt_version || '未提供')}</code>`;
   }
@@ -309,6 +329,8 @@
       ['三證據修正候選', auto, `${fmt(source.case_count || 0)} 題有 PDF evidence`, auto ? 'warning' : 'good'],
       ['模型錯誤', run.llm_errors || 0, `${fmt(run.llm_slow_calls || 0)} 次慢呼叫`, run.llm_errors ? 'danger' : ''],
       ['Context guard', run.llm_context_rejections || 0, `${fmt(context.hard_limit_tokens || 0)} hard limit`, run.llm_context_rejections ? 'warning' : 'good'],
+      ['Context extension', run.llm_context_extensions || 0, `${fmt(context.one_time_extension_limit_tokens || 0)} one-time ceiling`, run.llm_context_extensions ? 'warning' : 'good'],
+      ['護欄候選', run.guardrail_candidates || 0, `${fmt(run.feedback_events || 0)} 筆前後修正`, run.guardrail_candidates ? 'warning' : 'good'],
       ['正式寫入', run.production_write_count || 0, '本次 staging 應為 0', run.production_write_count ? 'danger' : 'good']
     ];
     document.getElementById('metrics').innerHTML = cards.map(([label,value,note,klass]) => `<div class="metric ${klass}"><div class="metric-label">${esc(label)}</div><div class="metric-value">${fmt(value)}</div><div class="metric-note">${esc(note)}</div></div>`).join('');
@@ -355,6 +377,8 @@
       const status = String(row.status || 'unknown');
       const findings = row.finding_codes || [];
       const context = row.context_guard || {};
+      const contextPolicy = row.context_policy || {};
+      const traceActions = (row.agentic_trace || []).map(trace => trace.adaptive_action).filter(Boolean);
       const detail = [
         row.model ? `${row.provider || ''} / ${row.model}` : '',
         row.latency_ms ? `${Math.round(Number(row.latency_ms))} ms${row.latency_status ? ` · ${row.latency_status}` : ''}` : '',
@@ -362,7 +386,9 @@
         findings.length ? `finding: ${findings.join(', ')}` : '',
         row.error ? `error: ${row.error}` : '',
         row.requested_evidence?.length ? `要求證據：${row.requested_evidence.map(x => x.kind || x).join(', ')}` : '',
-        context.total_upper_bound_tokens ? `context upper bound ${fmt(context.total_upper_bound_tokens)} / ${fmt(context.context_limit_tokens)}` : ''
+        context.total_upper_bound_tokens ? `context upper bound ${fmt(context.total_upper_bound_tokens)} / ${fmt(context.context_limit_tokens)}` : '',
+        contextPolicy.context_extension_used ? `曾使用單次 context extension 至 ${fmt(contextPolicy.effective_limit_tokens || 0)}` : '',
+        traceActions.length ? `adaptive: ${traceActions.join(', ')}` : ''
       ].filter(Boolean).join(' · ');
       return `<div class="lane-card ${esc(status)}"><div class="lane-name">${esc(LANE_LABELS[row.lane] || row.lane)}</div><div class="lane-status">${esc(statusLabel(status))}</div><div class="lane-meta">${esc(findings.join(' · ') || (row.model_action || '—'))}</div>${detail ? `<div class="lane-detail">${esc(detail)}</div>` : ''}</div>`;
     }).join('');
@@ -386,18 +412,39 @@
     const review = candidate.review || {};
     const original = candidate.parser_original;
     const correction = review.correction;
+    const feedback = candidate.correction_feedback;
     let diff = '';
-    if (original && correction) {
+    if (feedback && Array.isArray(feedback.diff) && feedback.diff.length) {
+      diff = feedback.diff.map(row => `<div class="feedback-diff"><div class="diff-box before"><div class="diff-label">before · ${esc(row.field || 'field')}</div>${esc(prettyValue(row.before))}</div><div class="diff-box after"><div class="diff-label">after · ${esc(row.field || 'field')}</div>${esc(prettyValue(row.after))}</div></div>`).join('');
+    } else if (original && correction) {
       diff = `<div class="diff"><div class="diff-box before"><div class="diff-label">before · parser/original</div>${esc(original.stem || '')}</div><div class="diff-box after"><div class="diff-label">after · human correction</div>${esc(correction.stem || candidate.stem || '')}</div></div>`;
     } else {
       diff = '<div class="finding"><strong>本題尚未有人工修訂 diff</strong><p>AI staging 只提出 advisory；沒有自動覆寫 candidate。若人工修正，這裡會顯示 before／after 以及需要重跑的 lane。</p></div>';
     }
+    const feedbackMeta = feedback ? `<div class="feedback-card"><strong>護欄回饋已建立</strong><p>feedback <code>${esc(feedback.feedback_id || '—')}</code> · ${esc(feedback.source_kind || '—')} · scope ${esc(feedback.scope || '—')} · changed ${esc((feedback.changed_fields || []).join(', ') || '—')}</p><p>這筆前後差異會送入 n8n 的 GLM curator；模型只能提出 rule／checklist／Skill 草稿，仍需 owner approval，不會直接啟用。</p></div>` : '';
     return `<div class="section"><div class="section-head"><h2>Revision / invalidation</h2><span class="meta">${esc(review.queue_label || '未看過')}</span></div><div class="section-body"><div class="revision-grid">
       <div class="kv"><div class="kv-label">active revision</div><div class="kv-value"><code>${esc(metadata.ai395_staging_revision_id || 'candidate 原始 revision')}</code></div></div>
       <div class="kv"><div class="kv-label">parser / source</div><div class="kv-value">${esc(metadata.parser_version || '未提供')} · ${esc(metadata.parser_status || '未提供')}</div></div>
       <div class="kv"><div class="kv-label">人工事件</div><div class="kv-value">${fmt(review.event_count || 0)} 筆；AI 不可冒充</div></div>
       <div class="kv"><div class="kv-label">formal gate</div><div class="kv-value">${candidate.formal?.ready_for_formal ? 'question＋answer ready' : '尚未達正式入庫 gate'}</div></div>
-    </div>${diff}</div></div>`;
+    </div>${diff}${feedbackMeta}</div></div>`;
+  }
+  function renderCorrectionEditor(candidate) {
+    const disabled = Boolean(state.data?.read_only);
+    const options = Array.isArray(candidate.options) ? candidate.options : [];
+    const answer = candidate.answer === undefined || candidate.answer === null ? '' : (typeof candidate.answer === 'string' ? candidate.answer : editorJson(candidate.answer));
+    return `<div class="section"><div class="section-head"><h2>人工修正／回饋</h2><span class="meta">${disabled ? '目前 read-only' : '保存 before／after，交給護欄 curator'}</span></div><div class="section-body">
+      <div class="edit-help">只在你真的改了題幹、選項、答案或題組欄位時按保存。單純按「人工通過」不會製造格式學習案例；保存後會追加 human correction event 與 immutable feedback event。</div>
+      <div class="edit-grid" style="margin-top:9px">
+        <div class="edit-field"><label for="correctionStem">題幹（可含 markup）</label><textarea id="correctionStem" ${disabled ? 'disabled' : ''}>${esc(candidate.stem || '')}</textarea></div>
+        <div class="edit-field"><label for="correctionOptions">選項 JSON</label><textarea id="correctionOptions" class="options-editor" ${disabled ? 'disabled' : ''}>${esc(editorJson(options))}</textarea></div>
+        <div class="edit-field"><label for="correctionAnswer">答案／MOD 標記</label><input id="correctionAnswer" value="${esc(answer)}" ${disabled ? 'disabled' : ''}></div>
+        <div class="edit-field"><label for="correctionGroupRef">題組 reference（可留空）</label><input id="correctionGroupRef" value="${esc(candidate.group_ref || '')}" ${disabled ? 'disabled' : ''}></div>
+        <div class="edit-field"><label for="correctionNotes">這次修改的理由／PDF 頁碼</label><textarea id="correctionNotes" ${disabled ? 'disabled' : ''} placeholder="例如：官方 PDF p.3 顯示『莢膜』；MinerU 把字形讀成『荧膜』。">${esc('')}</textarea></div>
+      </div>
+      <div class="top-actions" style="margin-top:9px;justify-content:flex-start"><button class="decision accept" ${disabled ? 'disabled' : ''} onclick="saveCorrection()">儲存人工修正並送護欄回饋</button></div>
+      <div class="decision-note">修正不會覆寫原始 PDF／MinerU；伺服器會建立新的 append-only event。若內容沒有實際變化，會保留審核 event 但不建立空的 feedback。</div>
+    </div></div>`;
   }
   function renderDecision(candidate) {
     const disabled = Boolean(state.data?.read_only);
@@ -427,6 +474,7 @@
       ${renderQuestion(candidate)}
       <div class="section"><div class="section-head"><h2>五條 lane 時間線</h2><span class="meta">同一 revision · advisory only</span></div><div class="section-body"><div class="lane-grid">${renderLaneTimeline(candidate)}</div>${renderFindings(candidate)}</div></div>
       ${renderRevision(candidate)}
+      ${renderCorrectionEditor(candidate)}
       ${renderDecision(candidate)}
     </div>`;
   }
@@ -474,6 +522,7 @@
     try {
       const data = await fetchWorkflow(candidateKey);
       state.data = data;
+      await fetchCorrectionFeedback();
       if (!state.selectedKey) {
         const first = visibleQueueItems()[0] || data.queue_items?.[0];
         state.selectedKey = first?.candidate_key || '';
@@ -486,6 +535,24 @@
       document.getElementById('detail').innerHTML = `<div class="empty"><div><strong>工作流資料讀取失敗</strong><span>${esc(error.message || error)}</span></div></div>`;
       showToast(`讀取失敗：${error.message || error}`, true);
     }
+  }
+  async function fetchCorrectionFeedback() {
+    try {
+      const response = await fetch('/api/correction-feedback?status=pending&limit=100', {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+      state.feedbackOutbox = data;
+    } catch (error) {
+      // The workflow remains usable if an older read-only server has not yet
+      // exposed the feedback outbox endpoint.
+      state.feedbackOutbox = null;
+    }
+  }
+  async function refreshFeedbackOutbox() {
+    await fetchCorrectionFeedback();
+    renderBadges();
+    const count = state.feedbackOutbox?.count || 0;
+    showToast(`護欄 outbox：${fmt(count)} 筆待 GLM curator；仍需 owner approval`);
   }
   async function reloadWorkflow() { await loadWorkflow(state.selectedKey); showToast('已重新讀取 queue、lane 與 evidence'); }
   function chooseQueue(queue) {
@@ -517,6 +584,44 @@
       showToast(`已寫入 ${action}；保留 append-only event，重新排序 queue`);
       await loadWorkflow(candidate.candidate_key);
     } catch (error) { showToast(`寫入失敗：${error.message || error}`, true); }
+  }
+  async function saveCorrection() {
+    const candidate = state.data?.selected?.candidate;
+    if (!candidate) return;
+    const stem = document.getElementById('correctionStem')?.value ?? '';
+    const optionsText = document.getElementById('correctionOptions')?.value ?? '[]';
+    const answerText = document.getElementById('correctionAnswer')?.value ?? '';
+    const groupRef = document.getElementById('correctionGroupRef')?.value ?? '';
+    const notes = document.getElementById('correctionNotes')?.value?.trim() || '';
+    let options;
+    try {
+      options = JSON.parse(optionsText);
+    } catch (error) {
+      showToast(`選項 JSON 格式錯誤：${error.message || error}`, true);
+      return;
+    }
+    if (!Array.isArray(options)) { showToast('選項 JSON 必須是陣列', true); return; }
+    const correction = {stem, options, answer: answerText, group_ref: groupRef};
+    try {
+      const response = await fetch('/api/review', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          candidate_key: candidate.candidate_key,
+          action: 'correct',
+          correction,
+          notes,
+          reviewer: 'local',
+          source: 'workflow_console',
+          review_surface: 'desktop_workflow',
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      const feedbackId = data.event?.storage?.correction_feedback?.event?.feedback_id;
+      showToast(feedbackId ? `修正已保存，feedback ${feedbackId}` : '修正已保存；沒有可建立的可見差異 feedback');
+      await loadWorkflow(candidate.candidate_key);
+    } catch (error) { showToast(`修正保存失敗：${error.message || error}`, true); }
   }
   function installEvents() {
     for (const id of ['categoryFilter','yearFilter','subjectFilter','severityFilter']) document.getElementById(id).addEventListener('change', event => { state[id.replace('Filter','')] = event.target.value; renderQueueNav(); });
