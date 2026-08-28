@@ -117,16 +117,28 @@ def build_live_payload(model: str, image: Path | None) -> dict[str, Any]:
             },
             {"type": "image_url", "image_url": {"url": f"{PNG_DATA_URL_PREFIX}{encoded}"}},
         ]
-    return {
+    request: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
         "max_tokens": 32,
         "stream": False,
-        "reasoning_effort": "low",
-        "thinking": {"type": "enabled", "clear_thinking": False},
         "response_format": {"type": "json_object"},
     }
+    # Some LiteLLM routes expose GLM through an OpenAI provider that rejects
+    # non-OpenAI parameters. Keep the probe aligned with the worker's
+    # fail-closed compatibility switches; owners can explicitly enable these
+    # fields after the gateway advertises support.
+    send_reasoning = os.environ.get("LITELLM_SEND_REASONING_EFFORT", "0").lower() in {"1", "true", "yes"}
+    send_thinking = os.environ.get("LITELLM_SEND_THINKING", "0").lower() in {"1", "true", "yes"}
+    if send_reasoning:
+        request["reasoning_effort"] = os.environ.get("LITELLM_REASONING_EFFORT", "low")
+    if send_thinking:
+        request["thinking"] = {
+            "type": "enabled",
+            "clear_thinking": os.environ.get("LITELLM_CLEAR_THINKING", "0").lower() in {"1", "true", "yes"},
+        }
+    return request
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

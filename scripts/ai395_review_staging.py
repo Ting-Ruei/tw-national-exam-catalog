@@ -529,9 +529,13 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
         ).strip().lower()
         if reasoning_effort not in {"low", "high", "max"}:
             raise StagingContractError("LITELLM_REASONING_EFFORT must be low, high, or max")
+        send_reasoning_effort = os.environ.get(
+            str(provider.get("send_reasoning_effort_env") or "LITELLM_SEND_REASONING_EFFORT"),
+            "1" if provider.get("send_reasoning_effort_default", False) else "0",
+        ).lower() in {"1", "true", "yes"}
         send_thinking = os.environ.get(
             str(provider.get("send_thinking_env") or "LITELLM_SEND_THINKING"),
-            "1" if provider.get("send_thinking_default", True) else "0",
+            "1" if provider.get("send_thinking_default", False) else "0",
         ).lower() in {"1", "true", "yes"}
         clear_thinking = (
             os.environ.get(
@@ -554,7 +558,9 @@ def build_model_runtime(config: dict[str, Any], args: argparse.Namespace) -> dic
             "endpoint_class": endpoint_class,
             "enabled_by_env": env_enabled,
             "api_key_env": credential_env,
-            "reasoning_effort": reasoning_effort,
+            "reasoning_effort": reasoning_effort if send_reasoning_effort else None,
+            "configured_reasoning_effort": reasoning_effort,
+            "send_reasoning_effort": send_reasoning_effort,
             "clear_thinking": clear_thinking,
             "send_thinking": send_thinking,
             "allow_insecure_http": allow_insecure_http,

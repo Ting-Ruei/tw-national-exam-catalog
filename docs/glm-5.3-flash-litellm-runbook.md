@@ -28,7 +28,8 @@ export LITELLM_BASE_URL='https://<internal-litellm-host>/v1'
 export LITELLM_MODEL='glm-5.3-flash'
 export LITELLM_GLM_ENABLED=1
 export LITELLM_REASONING_EFFORT='low'
-export LITELLM_SEND_THINKING=1
+export LITELLM_SEND_REASONING_EFFORT=0
+export LITELLM_SEND_THINKING=0
 export LITELLM_CLEAR_THINKING=0
 
 # 互動式輸入，不要把 secret 寫進 command history 或聊天內容。
@@ -95,12 +96,15 @@ GLM 官方宣稱 context 1M、最大輸出 128K；本 workflow 不因此把整�
 | 單次 extension | 393,216 tokens（384K） |
 | 每 lane extension 次數 | 1 |
 | output 預留 | `--model-max-tokens` |
-| 初始 reasoning | `low` |
-| thinking | enabled；預設不清除 thinking |
+| reasoning 設定 | 記錄為 `low`，但預設不送 `reasoning_effort` |
+| thinking | 預設不送；只有 gateway 明確支援時才設 `LITELLM_SEND_THINKING=1` |
 
 context guard 使用 UTF-8 JSON byte upper bound，在 transport 前 fail-closed。若第一次超過 256K，GLM lane 只自動重試一次、上限 384K；仍超過則進人工 exception，不會無限放大。可由 `pipeline.yaml`、provider profile 或 CLI 調整，但每次調整都必須留下新的 config SHA。
 
-若 LiteLLM gateway 不接受 `thinking` 額外欄位，可暫時設定 `LITELLM_SEND_THINKING=0` 讓 adapter 不送該欄位，再以 probe 驗證；GLM 的 thinking 仍由 gateway／模型預設行為決定。若 gateway 仍不接受請求，應修 adapter／gateway mapping，不要刪除 context guard 或繞過 structured output。
+若 LiteLLM gateway 不接受 `thinking` 或 `reasoning_effort` 額外欄位，保持
+`LITELLM_SEND_THINKING=0` 與 `LITELLM_SEND_REASONING_EFFORT=0`，讓 adapter 與
+probe 都不送該欄位。只有 gateway 明確允許後才逐項開啟，再以 probe 驗證；不要
+刪除 context guard 或繞過 structured output。
 
 ## 4. 以既有產物跑 staging
 

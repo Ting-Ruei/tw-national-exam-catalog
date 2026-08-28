@@ -33,8 +33,10 @@
       "advertised_max_output_tokens": 131072,
       "reasoning_effort_env": "LITELLM_REASONING_EFFORT",
       "reasoning_effort_default": "low",
+      "send_reasoning_effort_env": "LITELLM_SEND_REASONING_EFFORT",
+      "send_reasoning_effort_default": false,
       "send_thinking_env": "LITELLM_SEND_THINKING",
-      "send_thinking_default": true,
+      "send_thinking_default": false,
       "clear_thinking_env": "LITELLM_CLEAR_THINKING",
       "clear_thinking_default": false
     },

@@ -221,6 +221,8 @@ class AI395ReviewStagingTests(unittest.TestCase):
                 "LITELLM_MODEL": "glm-5.3-flash",
                 "LITELLM_API_KEY": "test-secret-must-not-leak",
                 "LITELLM_REASONING_EFFORT": "low",
+                "LITELLM_SEND_REASONING_EFFORT": "0",
+                "LITELLM_SEND_THINKING": "0",
             },
             clear=False,
         ):
@@ -228,9 +230,11 @@ class AI395ReviewStagingTests(unittest.TestCase):
         self.assertEqual(runtime["provider"], "litellm_glm")
         self.assertEqual(runtime["transport"], "openai_chat_completions")
         self.assertEqual(runtime["model"], "glm-5.3-flash")
-        self.assertEqual(runtime["reasoning_effort"], "low")
-        self.assertFalse(runtime["clear_thinking"])
-        self.assertTrue(runtime["send_thinking"])
+        self.assertIsNone(runtime["reasoning_effort"])
+        self.assertEqual(runtime["configured_reasoning_effort"], "low")
+        self.assertFalse(runtime["send_reasoning_effort"])
+        self.assertIsNone(runtime["clear_thinking"])
+        self.assertFalse(runtime["send_thinking"])
         self.assertEqual(runtime["context_limit_tokens"], 262144)
         self.assertEqual(runtime["context_extension_limit_tokens"], 393216)
         self.assertNotIn("test-secret-must-not-leak", runtime.values())
@@ -353,9 +357,9 @@ class AI395ReviewStagingTests(unittest.TestCase):
 
     def test_glm_probe_builds_small_text_and_vision_contract(self) -> None:
         text_payload = glm_probe.build_live_payload("glm-5.3-flash", None)
-        self.assertEqual(text_payload["reasoning_effort"], "low")
         self.assertEqual(text_payload["response_format"], {"type": "json_object"})
         self.assertNotIn("think", text_payload)
+        self.assertNotIn("reasoning_effort", text_payload)
         with tempfile.NamedTemporaryFile(suffix=".png") as image:
             image.write(TEST_PNG)
             image.flush()
