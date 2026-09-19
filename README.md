@@ -198,7 +198,7 @@ cd qbr
     --year 115 --ordinal 2 --category 醫事檢驗師 --subject 生物化學與臨床生化學 \
     --asset-root "../國考題資料夾" --out /tmp/run1 \
     --package-version tw-national-exam-medtech-v0.0.1
-.venv/bin/python -m pytest tests/ -q          # 212 passed
+.venv/bin/python -m pytest tests/ -q          # 218 passed
 ```
 
 七個階段：`S0_intake` 凍結三卷 → `S1_triage` 分類 → `S2_dual` 兩引擎抽取比對 →

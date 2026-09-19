@@ -224,7 +224,7 @@ cd tw-national-exam-catalog/qbr
 
 ## 現況
 
-- 測試：**212 passed**（自帶 `.venv`，依賴清單 `../requirements/qbr.txt`）。
+- 測試：**218 passed**（自帶 `.venv`，依賴清單 `../requirements/qbr.txt`）。
 - 已展開：全部 醫事檢驗師 + 藥師(一)(二)；合併佇列已建。
 - 整個語料骨架通用性已證：**3,516/3,516 兩個引擎一致**。
 - Golden：`tests/golden/golden_1152_medtech_biochem_candidates.jsonl`（80 題）。

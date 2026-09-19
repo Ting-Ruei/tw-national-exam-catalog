@@ -88,6 +88,51 @@ moex:115090:308:0504:1:question:question:q001
 
 ---
 
+## 缺陷四：corpus 是「數層數到的」，不是「找到的」（**搬家暴露，驗證才發現**）
+
+前三個缺陷是在合併本身發現的。這一個是**驗證 commit 時才發現的** —— 而且是用**乾淨 checkout**
+才看得到，工作樹裡完全看不到。
+
+八個地方各自決定 corpus 在哪，沒有一致的規則：
+
+| 寫法 | 檔案 |
+|---|---|
+| `dirname(dirname(PKG)) + "tw-national-exam-catalog/國考題資料夾"` | `three_way.py`、`survey_categories.py`、`golden_path.py` |
+| `dirname(PKG)/../` 再拼同樣的字 | `batch_run.py`、`batch_package.py`、`fetch_corrections.py` |
+| **寫死的絕對路徑** | `where_is_the_text.py` |
+
+兩種「數層」的寫法**今天都是對的**，因為 `pi_test/question_bank_rebuild/` 與
+`tw-national-exam-catalog/qbr/` 的深度相同，兩次 `dirname` 剛好都落在 `ai_learning_platform/`。
+**catalog repo 單獨 clone 會少一層**，數出來的路径就跑到 repo 外面。
+
+**失敗的方式才是這件事值得單獨記錄的原因**：它不是 crash。兩個測試回報的是
+
+```
+AssertionError: assert ('moex:105020:305:33:1' and None)
+```
+
+看起來像「resolver 弄丟了一個 registry key」，實際上是「測試找不到一個目錄」。
+**錯誤的指控會把讀者帶到錯的檔案。** `read_the_registry.py` 更嚴重：找不到 manifests 時它會
+靜默降級成「用檔名猜卷的身分」—— 那正是 manifests 存在的目的要防的事。
+
+**修法**：`src/qbr/paths.py` 統一決定（環境變數 → 向上找真的持有 `國考題資料夾` 的那一層
+→ 正規預期路徑，讓錯誤訊息能說出它找過哪裡，而不是回 `None`）。
+
+同時修好：兩個讀 corpus 的測試沒有 skip guard，另外三個直接呼叫 `__load_manifest()` 繞過
+fixture 的 guard，於是在乾淨 checkout 上因空輸入而失敗。
+
+**驗收（三個環境，這才是重點）**：
+
+| 環境 | 結果 |
+|---|---|
+| 本工作區（有 corpus） | **218 passed** |
+| 乾淨 checkout（有 corpus） | **208 passed, 10 skipped** |
+| 乾淨 checkout（無 corpus、無 data） | **204 passed, 14 skipped, 0 failed** |
+
+並且 golden 那卷仍逐欄相同、`golden_path` 七階段全過。
+
+---
+
 ## 一個不是缺陷的差異：`HbA₁c` → `HbA1c`
 
 逐欄比對時 `HbA₁c` 差了一個字。查紙張：`HbA` 是 11.03pt，後面 `1c` 是 5.51pt 下標 —— 紙上確實有下標。
@@ -121,12 +166,18 @@ Golden 檔已固定為 `tests/golden/golden_1152_medtech_biochem_candidates.json
 
 ## 測試
 
-* 合併後位置、自帶 venv：**212 passed**。
-* 從 `/tmp` 執行同一套測試：**212 passed**（路徑解析不依賴工作目錄）。
+* 合併後位置、自帶 venv：**218 passed**。
+* 從 `/tmp` 執行同一套測試：**218 passed**（路徑解析不依賴工作目錄）。
+* 乾淨 checkout（無 corpus、無 `data/`）：**204 passed, 14 skipped, 0 failed**。
 
 ## 未解
 
-1. **`.gitignore` 要納入 `qbr/data/`**（corpus 副本 6.3M 不進版控）。
+1. **`.gitignore` 已納入 `qbr/data/`**（corpus 副本 6.3M 不進版控）—— 已處理。
 2. **`qbr/venv` 是新建的**，依賴清單 `requirements/qbr.txt` 是下界不是凍結。
 3. `read_the_registry.py` 自己吃不到新的 registry CSV 格式（`load_csv_rows` 拋錯），
    與合併無關，是既有缺陷。
+4. **CI 不跑 qbr 的測試。** CI 是 `unittest discover -s tests`，qbr 用 pytest 且有自己的
+   `.venv`，所以 CI 綠燈**不涵蓋 qbr**。目前靠人工跑，這是一個真實的缺口。
+5. **`qbr/scripts/test_vision.py` 與 `qbr/tests/test_vision.py` 同名**，用 `unittest` discover
+   會撞名（`unittest` 報 `module incorrectly imported from .../scripts`）。既有問題，
+   文件指定的 runner 是 pytest。

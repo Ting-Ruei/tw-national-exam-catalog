@@ -68,7 +68,7 @@ previous = [args.out] if os.path.isdir(...) else []   # 重建到新目錄 -> �
 | 同一題多事件（block→accept） | 2 筆都保留 |
 | 題目已消失的孤兒紀錄 | 保留並計數，不丟棄 |
 | 動工前後 live 紀錄 | 144 筆、md5 相同 |
-| 測試 | `tests/test_review_queue.py` 16 passed；全套 201 passed |
+| 測試 | `tests/test_review_queue.py` 16 passed；全套 **201 passed**（寫這份報告時的快照；合併後全套已是 **218 passed**） |
 
 ## 五、還沒解決的（誠實列出來）
 
