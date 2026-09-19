@@ -27,6 +27,8 @@ it checkable:
   * **empty-option** - an option came out with no text. Either the paper printed nothing there, or
     the text went somewhere else. The two look identical in the data.
   * **unresolved-mark** - the paper defines a private-use mark and the reading cannot resolve it.
+  * **substituted-ideograph** - the paper prints one ideograph and the text layer stores a
+    different codepoint that NFKC does not fold back, so the reader sees the wrong character.
   * **engine-disagreement** - the two engines do not agree on a paper's question count.
 
 What is deliberately NOT a dispute
@@ -46,6 +48,36 @@ from __future__ import annotations
 #: cannot be trusted as it stands; `review` means it can be shown but a person should look.
 SEVERITY_ORDER = ("blocker", "review", "info")
 
+#: The rare codepoints this corpus actually uses, and the character the paper means by each.
+#:
+#: These are the **CJK Radicals Supplement** block (U+2E80..U+2EFF), and the distinction that makes
+#: them a defect where the Kangxi Radicals are not is measurable rather than stylistic:
+#:
+#:   Kangxi Radicals (U+2F00..U+2FDF)      NFKC folds them onto the ordinary ideograph
+#:                                         (U+2F00 -> U+4E00, U+2F8E -> U+8840). The reader sees
+#:                                         the right character, so there is nothing to report.
+#:   Radicals Supplement (U+2E80..U+2EFF)  NFKC leaves them **unchanged**.
+#:
+#: Measured over the served corpus (33,150 questions): 3,420 occurrences of Kangxi radicals, of
+#: which 3,341 (97.7%) fold and are harmless; and 79 occurrences of Radicals Supplement forms,
+#: of which **none** fold. So the whole block is a real defect and the block next to it is not,
+#: which is why this is a block test and not a list of characters.
+#:
+#: Confirmed against the page rather than by comparing codepoints: rendered at 300 dpi, question
+#: 40 of `1081_藥師(一)_藥劑學與生物藥劑學` prints U+9577 and the text layer stores U+2ED1.
+#: Three distinct characters occur in the whole corpus, and they are listed with the character
+#: the paper means so a reviewer is told what to look for - the reading itself is never rewritten,
+#: because a stored character is not changed by this pipeline (the rule of the sandbox, section 3).
+#:
+#: A reviewer blocked question 34 of that paper - the option `延U+2ED1藥物於黏膜之作用時間` - which
+#: is one of the questions this measures. It was blocked with a bare `block`, so the reason was not
+#: recorded; what can be said is that the reading in front of that reviewer had this character in it.
+RADICAL_SUPPLEMENT_MEANS = {
+    "\u2ed1": "\u9577",   # CJK RADICAL LONG ONE      -> the ordinary ideograph (62 occurrences)
+    "\u2ea0": "\u6c11",   # CJK RADICAL CIVILIAN      -> the ordinary ideograph ( 9 occurrences)
+    "\u2ec4": "\u897f",   # CJK RADICAL WEST TWO      -> the ordinary ideograph ( 8 occurrences)
+}
+
 #: Each kind, with the severity it carries and the one-line meaning shown to a reviewer. Keeping
 #: the meaning here rather than in the UI means there is one place to change it, and a new kind
 #: cannot be added without deciding what it means to a person.
@@ -53,6 +85,7 @@ KINDS = {
     "dangling-answer": ("blocker", "答案指到的選項不存在"),
     "option-shape": ("blocker", "選項數與紙本宣示不符"),
     "lost-glyph": ("review", "紙本有字，文字層拼不出來"),
+    "substituted-ideograph": ("review", "文字層存的是另一個字，讀者看到錯的字"),
     "unresolved-mark": ("review", "紙本定義的記號無法對照"),
     "empty-option": ("review", "選項沒有文字"),
     "engine-disagreement": ("review", "兩個引擎對題數不一致"),
@@ -168,6 +201,30 @@ def of_question(question, *, alphabet_size=None, engine_counts=None, option_imag
     if unresolved:
         out.append(_d("unresolved-mark", "記號 %s 沒有對照" % "、".join(unresolved),
                       marks=unresolved))
+
+    # 6. The paper prints one ideograph and the text layer stores a different codepoint.
+    #
+    # Different from `lost-glyph`: there the character is *absent* and the word it stands in is
+    # known. Here a character is present and is the wrong one, and NFKC does not bring it back -
+    # which is exactly what separates this block from the Kangxi Radicals next to it (see
+    # `RADICAL_SUPPLEMENT_MEANS`). The address is the character's position in the field it was
+    # found in, so a reviewer can look at the page at that word rather than search the question.
+    substituted = []
+    for field, value in (("stem", question.get("stem")),
+                         ) + tuple(("option %s" % option.get("key"), option.get("text"))
+                                   for option in options):
+        for position, char in enumerate(value or ""):
+            if char in RADICAL_SUPPLEMENT_MEANS:
+                left = (value or "")[max(0, position - 6):position]
+                right = (value or "")[position + 1:position + 7]
+                substituted.append({"char": char, "means": RADICAL_SUPPLEMENT_MEANS[char],
+                                    "field": field, "position": position,
+                                    "context": "%s%s%s" % (left, char, right)})
+    if substituted:
+        out.append(_d("substituted-ideograph",
+                      "、".join("%s 應為 %s" % (item["char"], item["means"])
+                                for item in substituted),
+                      substitutions=substituted))
 
     # 6. The two engines do not agree about the paper this question belongs to.
     if engine_counts:

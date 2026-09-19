@@ -117,6 +117,44 @@ def test_an_unresolved_private_use_mark_is_a_dispute_but_a_resolved_one_is_not()
     assert found[0]["marks"] == ["\ue001"], "只有沒對照到的那個要報"
 
 
+# --------------------------------------------------------------- substituted ideograph
+
+def test_a_radicals_supplement_character_is_reported_with_the_character_it_means():
+    """紙本印 `長`，文字層存 `⻑`（U+2ED1）—— NFKC 折不回來，所以讀者看到錯的字。
+
+    這一條是實際量到的：`1081_藥師(一)_藥劑學` Q34 的選項 `延⻑藥物…`，以 300 dpi 算圖回對
+    紙本，紙本印的是 U+9577。使用者將這題判為 block。
+    """
+    question = _q(34, stem="下列何者屬於⻑效型的胰島素注射劑？")
+    question["options"][0]["text"] = "延⻑藥物於黏膜之作⽤時間"
+    found = disputes.of_question(question)
+    kinds = [d["kind"] for d in found]
+    assert kinds == ["substituted-ideograph"], kinds
+    dispute = found[0]
+    assert dispute["severity"] == "review"
+    # 位址：哪一個欄位、第幾個字元、前後文。沒有位址就沒得查。
+    assert [item["char"] for item in dispute["substitutions"]] == ["\u2ed1", "\u2ed1"]
+    assert {item["field"] for item in dispute["substitutions"]} == {"stem", "option A"}
+    assert all(item["means"] == "\u9577" for item in dispute["substitutions"])
+    assert dispute["substitutions"][0]["context"].startswith("下列何者屬於")
+
+
+def test_kangxi_radicals_are_not_reported_because_nfkc_folds_them():
+    """負對照：Kangxi radicals（U+2F00..U+2FDF）NFKC 會折疊，讀者看到的是對的字。
+
+    全庫量測：3,420 次 Kangxi radical 有 3,341 次（97.7%）折得回普通字，而 Radicals
+    Supplement 那 79 次一次也折不回。所以判準是**區塊**，不是字表；這條測試就是釘住那個區塊。
+    """
+    question = _q(9, stem="下列何者可使⽤乾熱滅菌法？")
+    question["options"] = [{"key": k, "text": t}
+                           for k, t in zip("ABCD", ["⽢油", "⽯蠟", "⽔", "⼈"])]
+    assert "substituted-ideograph" not in _kinds(question)
+    # 而且那幾個字確實是會被 NFKC 折疊的，所以這個負對照不是空的。
+    import unicodedata
+    for char in "⽤⽢⽯⽔⼈":
+        assert unicodedata.normalize("NFKC", char) != char, char
+
+
 # --------------------------------------------------------------------- severity
 
 def test_worst_severity_ranks_blocker_above_review():
