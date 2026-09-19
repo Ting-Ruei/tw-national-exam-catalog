@@ -9,7 +9,7 @@
 以下命令使用 real staging bundle；路徑請依實際 run 替換。它不連線 AI395 PostgreSQL，也不會把 Qwen 的 advisory 直接寫成正式審核結果。
 
 ```bash
-ASSET_ROOT='/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/國考題資料夾' \
+ASSET_ROOT="$PWD/國考題資料夾" \
 REVIEW_UI_BACKEND=jsonl REVIEW_UI_ALLOW_PROJECT_FILES=0 \
 python3 scripts/serve_question_review_ui.py \
   --candidate-jsonl /private/tmp/<ui-bundle>/candidates.jsonl \
