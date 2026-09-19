@@ -1,0 +1,213 @@
+# -*- coding: utf-8 -*-
+"""Disputes: the places where the reading is uncertain, named and addressed.
+
+A pipeline has three honest outcomes, not two:
+
+    data       the reading is settled; it goes into the bank.
+    defect     the reading is settled *and* wrong; the address is reported (`lost_glyphs`).
+    dispute    the reading is **not settled** - something is known to be uncertain, and the
+               uncertainty has a location.
+
+The third was designed (`SKELETON_VS_MODEL_DECISION.md` §2) and never built: the served queue
+carried **no `disputes` field at all**, `issues.csv` was empty, and every one of the 33,150 rows
+said `quality_status: pass`. That is not the same as "there are no disputes" - it is the same as
+"nobody looked", and the two are indistinguishable from the data.
+
+What a dispute is, and what it is not
+-------------------------------------
+A dispute is raised by a **measurement on the paper**, never by a model's opinion. Each kind below
+is a condition the deterministic layers can state exactly, and each carries the address that makes
+it checkable:
+
+  * **lost-glyph** - the paper prints a character the text layer cannot spell. The position is
+    known and the word it stands in is known; the character is not guessed.
+  * **dangling-answer** - the answer sheet names a letter that is not among the options. Either
+    the options were read wrongly or the answer was; the two disagree and neither is privileged.
+  * **option-shape** - the paper's declared option count and the number read do not agree.
+  * **empty-option** - an option came out with no text. Either the paper printed nothing there, or
+    the text went somewhere else. The two look identical in the data.
+  * **unresolved-mark** - the paper defines a private-use mark and the reading cannot resolve it.
+  * **engine-disagreement** - the two engines do not agree on a paper's question count.
+
+What is deliberately NOT a dispute
+----------------------------------
+**A model saying it is unsure.** A model's uncertainty is not evidence about the paper - it is
+evidence about the model, and it is not reproducible from the source. Disputes here are computed
+from the artifacts, so re-running the pipeline reproduces the same list. A model's reading enters
+`ai_review` as a *suggestion on a dispute*, which is where it can be compared against the paper.
+
+**Nothing is decided here.** A dispute is not an acceptance and not a rejection; it is the claim
+"this needs a person", with the reason and the address attached. `GOV-05` still holds: only a human
+writes a review event.
+"""
+from __future__ import annotations
+
+#: Severity, worst first, and the ranking is what the UI sorts by. `blocker` means the question
+#: cannot be trusted as it stands; `review` means it can be shown but a person should look.
+SEVERITY_ORDER = ("blocker", "review", "info")
+
+#: Each kind, with the severity it carries and the one-line meaning shown to a reviewer. Keeping
+#: the meaning here rather than in the UI means there is one place to change it, and a new kind
+#: cannot be added without deciding what it means to a person.
+KINDS = {
+    "dangling-answer": ("blocker", "答案指到的選項不存在"),
+    "option-shape": ("blocker", "選項數與紙本宣示不符"),
+    "lost-glyph": ("review", "紙本有字，文字層拼不出來"),
+    "unresolved-mark": ("review", "紙本定義的記號無法對照"),
+    "empty-option": ("review", "選項沒有文字"),
+    "engine-disagreement": ("review", "兩個引擎對題數不一致"),
+}
+
+#: Options the paper declares. A multiple-choice national-exam question is four; a handful are
+#: five or three, so the check is "the count the paper's own alphabet implies", which the caller
+#: passes when it knows it.
+OPTIONS_MIN = 2
+OPTIONS_MAX = 6
+
+
+def _d(kind, detail, **address):
+    """One dispute. `address` is what makes it checkable, so it is never empty."""
+    return {"kind": kind, "severity": KINDS.get(kind, ("info", ""))[0],
+            "note": KINDS.get(kind, ("info", ""))[1], "detail": detail, **address}
+
+
+def summary_row(question, *, option_images=()):
+    """A compact row for the queue index: what is disputed and how badly.
+
+    The UI sorts and counts by dispute without reading every dispute in the browser, so the index
+    carries the severity and the kinds. A question with none carries `None`, which is a different
+    state from `""` - "not looked at" and "looked at, nothing found" must stay distinguishable.
+    """
+    found = of_question(question, option_images=option_images)
+    return {"severity": worst_severity(found) or None,
+            "kinds": [dispute.get("kind") for dispute in found],
+            "count": len(found)}
+
+
+def of_question(question, *, alphabet_size=None, engine_counts=None, option_images=()):
+    """Every dispute one question carries, measured from the artifacts.
+
+    `question` is a packaged question as `review_queue` sees it: it has `question_number`, `stem`,
+    `options` (each `{key, text}`), `answer_payload.accepted_values`, `lost_glyphs`,
+    `subitem_legend`. Nothing here reads the PDF - these are disputes *about the reading that was
+    made*, and reading the page again is what a reviewer or a model does afterwards.
+
+    `option_images` is the set of option keys that have a picture bound to them, and it matters more
+    than it looks: measured over the corpus, **251 of the 274 questions with an empty option are
+    correct** - the option *is* the picture - and only **23** are the real defect where the text went
+    somewhere else. Without this set the module raises 274 disputes to find 23, and a list that is
+    92% noise is a list nobody reads.
+    """
+    out = []
+    number = question.get("question_number")
+
+    # 1. The answer sheet names a letter the options do not contain.
+    #
+    # This is the strongest signal in the set and the only one that is a *contradiction* rather
+    # than an absence: two official artifacts disagree, so one of them was read wrongly. It is
+    # never auto-resolved, because choosing which one to believe is exactly the judgement being
+    # asked for. Measured over the corpus: 10 questions.
+    options = question.get("options") or []
+    keys = {str(option.get("key") or "").upper() for option in options}
+    accepted = [str(value).upper() for value in
+                ((question.get("answer_payload") or {}).get("accepted_values") or [])]
+    dangling = [value for value in accepted if value and value not in keys]
+    # `keys` may be empty - 10 questions read as having no options at all - and that is the same
+    # contradiction, not an absence of one. Measured: those 10 are exactly the questions whose
+    # answer sheet names a letter, so guarding on `keys` being non-empty hid the strongest signal
+    # in the module behind the worst instance of it.
+    if accepted and dangling:
+        out.append(_d("dangling-answer",
+                      "答案卷給 %s，但選項只有 %s" % ("、".join(dangling),
+                                                 "、".join(sorted(keys)) or "（沒有讀到選項）"),
+                      answer=dangling))
+
+    # 2. The number of options is not the number the paper's alphabet implies.
+    #
+    # `alphabet_size` is the count of distinct private-use marks the paper printed for its options,
+    # which is the paper's own statement of how many there are. When it is unknown the generic
+    # bounds are used, and the dispute is raised only for a count outside them.
+    if alphabet_size:
+        if len(keys) != int(alphabet_size):
+            out.append(_d("option-shape",
+                          "紙本的字母表有 %d 個，讀到 %d 個選項" % (alphabet_size, len(keys)),
+                          expected=int(alphabet_size), found=len(keys)))
+    elif not (OPTIONS_MIN <= len(keys) <= OPTIONS_MAX):
+        out.append(_d("option-shape", "選項數 %d 不在合理範圍" % len(keys), found=len(keys)))
+
+    # 3. An option came out with no text.
+    #
+    # An empty option is ambiguous in a way that matters: the paper may print the option as a
+    # picture (`image` set), or the text may have been attached to the stem or to a neighbour
+    # (wrong, and the `1152 Q53` drug-name leak is exactly this). The data cannot tell the two
+    # apart, which is why it is a dispute and not a defect.
+    #
+    # When **every** option is empty and none has a picture, the options were not read at all: that
+    # is not an uncertainty about one option, it is a missing question body, and it is reported once
+    # as a shape rather than four times as four empty options. Measured: 10 questions are like this
+    # and they are the same 10 as the dangling answers, so reporting both is intended - they are two
+    # statements about one breakage, and a reviewer needs both to see what happened.
+    empty = [str(option.get("key") or "") for option in options
+             if not str(option.get("text") or "").strip()
+             and not option.get("image")
+             and str(option.get("key") or "").upper() not in option_images]
+    if empty and len(empty) < len(options):
+        out.append(_d("empty-option", "選項 %s 沒有文字也沒有圖" % "、".join(empty), options=empty))
+    elif options and len(empty) == len(options):
+        out.append(_d("option-shape", "四個選項都沒有文字" , found=0, expected=len(options)))
+
+    # 4. The paper prints a character the text layer cannot spell.
+    lost = question.get("lost_glyphs") or []
+    if lost:
+        out.append(_d("lost-glyph", question.get("lost_glyph_note") or "字形遺失",
+                      glyphs=lost))
+
+    # 5. The paper defines a mark that the reading could not resolve into the paper's own words.
+    legend = question.get("subitem_legend") or {}
+    unresolved = sorted(set(question.get("unresolved_marks") or []) - set(legend))
+    if unresolved:
+        out.append(_d("unresolved-mark", "記號 %s 沒有對照" % "、".join(unresolved),
+                      marks=unresolved))
+
+    # 6. The two engines do not agree about the paper this question belongs to.
+    if engine_counts:
+        left, right = engine_counts
+        out.append(_d("engine-disagreement",
+                      "引擎 A 讀 %s 題，引擎 B 讀 %s 題" % (left, right),
+                      engine_a=left, engine_b=right))
+
+    for dispute in out:
+        dispute.setdefault("question_number", number)
+    return out
+
+
+def summarise(rows):
+    """Counts by kind and severity, for the queue index and for a report."""
+    by_kind = {}
+    by_severity = {}
+    questions = 0
+    for row in rows:
+        found = row.get("disputes") or []
+        if found:
+            questions += 1
+        for dispute in found:
+            kind = dispute.get("kind")
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+            severity = dispute.get("severity")
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+    return {"questions_with_disputes": questions,
+            "disputes": sum(by_kind.values()),
+            "by_kind": dict(sorted(by_kind.items(), key=lambda kv: -kv[1])),
+            "by_severity": {k: by_severity.get(k, 0) for k in SEVERITY_ORDER}}
+
+
+def worst_severity(found):
+    """The worst severity among a question's disputes, or `""` when there are none.
+
+    Used for the list's sort order, so a `blocker` cannot sit below a `review` and be missed on a
+    fast pass.
+    """
+    for severity in SEVERITY_ORDER:
+        if any(dispute.get("severity") == severity for dispute in found or ()):
+            return severity
+    return ""

@@ -1,0 +1,13 @@
+# The question-bank rebuild pipeline (qbr/).
+#
+# These are the direct dependencies of `qbr/src` and `qbr/scripts`. The versions are lower bounds
+# rather than an exact freeze, because every one of them is a **reader** of a PDF or an image and
+# the pipeline's own tests assert the measured invariants (dual-engine agreement, crop
+# completeness) - so a version bump that changed a reading would fail the suite rather than pass
+# silently. For an exactly reproducible run, freeze from a working environment.
+pymupdf>=1.24          # engine A: blocks, spans, fonts, size (the only engine that reports size)
+pdfminer.six>=20231228 # engine B support: word-level boxes with no font size
+pypdf>=4.0             # secondary container reader, used for cross-checks
+Pillow>=11,<13         # rendering, ink measurement, and the web-safe crop container
+pytest>=8.0            # the suite
+hanzidentifier>=1.2    # simplified-only codepoint census (never a converter)

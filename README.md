@@ -2,6 +2,18 @@
 
 這是一個開放、可機器讀取的台灣國家考試詮釋資料專案，資料來源從考選部歷年試題與解答查詢頁開始整理。
 
+本專案現在包含兩個主動維護的軌道：
+
+| 軌道 | 做什麼 | 規則 | 工作程序 |
+|---|---|---|---|
+| **`qbr/` 考題建立管線** | 官方 PDF → 平台可驗封裝（讀語料，**不寫資料庫**） | [`qbr/AGENTS.md`](qbr/AGENTS.md) | [`docs/skills/build-exam-question-bank/`](docs/skills/build-exam-question-bank/SKILL.md) |
+| **`review_ui/` 審題介面 v2** | 線性審題，人在 `/v2` 上做決定 | [`review_ui/AGENTS.md`](review_ui/AGENTS.md) | [`docs/skills/review-ui-v2/`](docs/skills/review-ui-v2/SKILL.md) |
+
+**`review_ui/v2.html`（`/v2`）是審題介面的基準線**；v1（`mobile.html`、`workflow.html`）已移到
+`review_ui/v1-reference/`，僅供參考、不再維護。舊介面為什麼不是基準線，記在
+[`docs/ROUTE_HISTORY.md`](docs/ROUTE_HISTORY.md) —— 那份文件的存在是為了不讓同一個錯誤設計
+被重新想出來。
+
 本專案目前整理的是「目錄層級」資料，包含：
 
 - 考試年度
@@ -44,6 +56,16 @@ append-only repair 與實質刪除只能由 owner 執行。完整政策見
 ## 專案結構
 
 ```text
+qbr/                    **考題建立管線**：官方 PDF → 平台可驗封裝（見下節）
+  AGENTS.md              agent 規則（這一包的信念與鐵則）
+  src/qbr/               確定性核心 + 提示詞層（19 個模組）
+  scripts/               33 支：golden_path / batch_run / batch_package / crop_run_figures …
+  tests/                 pytest；`tests/golden/` 是固定的整卷 golden
+  docs/ reports/         決策與量測報告（reports 是證據，不是規範）
+  prompts/               版本化的系統提示詞
+review_ui/              審題介面
+  v2.html                **基準線**：線性審題（`/v2`）
+  v1-reference/          舊介面，僅供參考、不再維護
 catalogs/
   moex_subject_catalog__y100-115.csv
   moex_subject_catalog__y100-115.md
@@ -163,6 +185,39 @@ catalog 會保留考選部官方原始名稱。若未來需要標準化名稱，
 
 制度演進、補辦考試、括號混用、分階段過渡期等特例集中記錄在 `docs/historical-transition-notes.md`。
 
+## 考題建立管線（`qbr/`）
+
+題目內容正式入庫前，先走可重跑的 parser 層與 append-only SQL 審核層。
+**`qbr/` 是 parser 層**：它把一卷官方 PDF 讀成結構化題目、對答案、切圖片、標爭議，
+產出一個不可變的 review queue；人類審核後才算完成。它**不寫任何資料庫**。
+
+```bash
+cd qbr
+.venv/bin/python scripts/golden_path.py run \
+    --registry-key moex:115090:308:0504:1 \
+    --year 115 --ordinal 2 --category 醫事檢驗師 --subject 生物化學與臨床生化學 \
+    --asset-root "../國考題資料夾" --out /tmp/run1 \
+    --package-version tw-national-exam-medtech-v0.0.1
+.venv/bin/python -m pytest tests/ -q          # 218 passed
+```
+
+七個階段：`S0_intake` 凍結三卷 → `S1_triage` 分類 → `S2_dual` 兩引擎抽取比對 →
+`S3_gate` 判定可否發布 → `S4_records` 一題一筆 → `S5_package` 封裝 → `S6_verify` 回讀驗證。
+
+**驗收標準是兩個引擎在同一張紙上一致，不是測試全綠。** 一個綠的測試可能只證明了一個錯的規則。
+
+- agent 規則：[`qbr/AGENTS.md`](qbr/AGENTS.md)
+- 工作程序：[`docs/skills/build-exam-question-bank/SKILL.md`](docs/skills/build-exam-question-bank/SKILL.md)
+- 方案與量測：[`qbr/PROPOSED_WORKFLOW.md`](qbr/PROPOSED_WORKFLOW.md)、[`qbr/reports/`](qbr/reports/)
+- 併入主線的過程與它抓出的三個缺陷：[`qbr/reports/merge_into_catalog.md`](qbr/reports/merge_into_catalog.md)
+- **後續最佳化的兩個方向**（通用展開 vs 科目針對性，以及如何避免過擬合）：
+  [`docs/PIPELINE_OPTIMIZATION_DIRECTIONS.md`](docs/PIPELINE_OPTIMIZATION_DIRECTIONS.md)
+
+**分工原則（這一包最重要的一條）**：腳本只保留**紙張的性質**
+（頁數、字數、字型、墨跡、區塊幾何）—— 同一張紙量兩次得到同一個答案的那些。
+凡是「讀出文字的意義」（哪一行是題幹、這個選項是哪個、這張圖是什麼）都是**提示詞**，
+不是腳本。過去把它們一條條寫成規則，就走上「規則 → 腳本 → 新問題 → 新規則」的跑步機。
+
 ## 後續資料層
 
 未來可逐步加入：
@@ -202,7 +257,37 @@ bash scripts/postgres_smoke_test.sh
 
 ## 入庫前 Review UI
 
-題目內容正式入庫前，先走可重跑的 parser 層與 append-only SQL 審核層：
+### 目前基準線：本機 v2 線性審題（`/v2`）
+
+**`review_ui/v2.html` 是審題介面的基準線。** v1（`mobile.html`、`workflow.html`）已移到
+`review_ui/v1-reference/`，**僅供參考，不再維護** —— 它仍然服務（既有書籤與已安裝的 PWA
+是契約），但只修「讓它繼續能動」的問題，不加功能。
+
+它讀的是 `qbr` 管線建出的 review queue，不需要 PostgreSQL：
+
+```bash
+cd tw-national-exam-catalog
+scripts/review_run.sh <workdir> 8774      # workdir = 已建好的 review queue
+# -> http://127.0.0.1:8774/v2
+```
+
+鍵盤全部左手：`W` 上一題、`S` 下一題、`A` 確認正常、`R` 需重看、`B` 阻擋、`E` 修正／儲存。
+**`W`/`S` 走的是左側清單**：濾鏡同時決定「畫什麼」與「走什麼」。
+
+| 路由 | 檔案 | 狀態 |
+|---|---|---|
+| `/v2` | `v2.html` | **基準線** |
+| `/mobile` | `v1-reference/mobile.html` | 參考 |
+| `/workflow`、`/mobile/workflow` | `v1-reference/workflow.html` | 參考 |
+
+工作程序見 [`docs/skills/review-ui-v2/SKILL.md`](docs/skills/review-ui-v2/SKILL.md)，
+agent 規則見 [`review_ui/AGENTS.md`](review_ui/AGENTS.md)，
+舊介面為什麼不是基準線見 [`docs/ROUTE_HISTORY.md`](docs/ROUTE_HISTORY.md)。
+
+> **重建佇列時要先暫停服務。** 重建進「正在服務」的目錄時，列表與候選檔會短暫不一致
+> （已知未解）。審核紀錄是 append-only，重建會自動承接，但**不可以靠旗標記得**。
+
+以下為既有的 AI395 SQL 審核層（production writer）與其 legacy fallback：
 
 ```text
 PDF

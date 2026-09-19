@@ -85,7 +85,7 @@ ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料�
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
-WORKFLOW_UI_PATH = MOBILE_UI_ROOT / "workflow.html"
+WORKFLOW_UI_PATH = MOBILE_UI_ROOT / "v1-reference" / "workflow.html"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
 STRUCTURED_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
 VISUAL_DEPENDENCY_RE = re.compile(
@@ -1725,7 +1725,11 @@ def html_page() -> bytes:
 
 
 def workflow_page() -> bytes:
-    """Return the revision/evidence workbench used by the new workflow."""
+    """Return the revision/evidence workbench used by the new workflow.
+
+    v1, reference-only. It is kept served so a bookmarked console and an event consumer do not break
+    when a better one arrives; see `mobile_asset_response` for why that matters more than tidiness.
+    """
     try:
         return WORKFLOW_UI_PATH.read_bytes()
     except OSError:
@@ -1734,21 +1738,40 @@ def workflow_page() -> bytes:
 
 
 def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
-    """Return a mobile Review UI asset without exposing arbitrary project files."""
+    """Return a mobile Review UI asset without exposing arbitrary project files.
+
+    v2 is the baseline; v1 is reference. That is a statement about maintenance, not about routing:
+    the v1 pages still answer at their old paths, because an existing bookmark, a PWA install and an
+    event consumer are all contracts that a rewrite does not get to break by being better. What
+    changes is where the files live (`review_ui/v1-reference/`) and that nothing here is edited any
+    more unless it is to keep v1 *working* - a fix, never a feature.
+
+    Keeping v1 served rather than deleting it is also how the two can be compared. A UI claim like
+    "the list you walk is the list you see" is worth nothing without the older console still
+    answering, on the same data, to walk it differently.
+    """
     route = path.rstrip("/") or "/"
     route_map = {
-        # Keep the established fast-triage contract at /mobile/ for existing
-        # bookmarks and event consumers.  The rebuilt responsive workflow
-        # console has an explicit phone route and is the mobile-port root.
-        "/mobile": ("mobile.html", "text/html; charset=utf-8", "no-store"),
-        "/mobile/workflow": ("workflow.html", "text/html; charset=utf-8", "no-store"),
+        # v1 (reference-only, no longer maintained). Served for compatibility; the source lives in
+        # `review_ui/v1-reference/`. The mobile fast-triage contract at `/mobile/` and its event
+        # vocabulary (`mobile_defer` / `mobile_resume`) are unchanged, because review events recorded
+        # by an installed PWA have to keep landing in the same ledger.
+        "/mobile": ("v1-reference/mobile.html", "text/html; charset=utf-8", "no-store"),
+        "/mobile/workflow": ("v1-reference/workflow.html", "text/html; charset=utf-8", "no-store"),
+        "/workflow": ("v1-reference/workflow.html", "text/html; charset=utf-8", "no-store"),
+        # The linear pass: one list, one question, four decisions. **This is the baseline.**
+        # One array is both drawn and walked (charter: 導覽與內容必須來自同一個來源); a filter
+        # narrows what is drawn *and* what is walked, because a reviewer who filters to the 12
+        # questions with figures and then presses `S` must arrive at the next one with a figure.
+        "/v2": ("v2.html", "text/html; charset=utf-8", "no-store"),
+        "/v2/": ("v2.html", "text/html; charset=utf-8", "no-store"),
         "/mobile/manifest.webmanifest": (
-            "mobile.webmanifest",
+            "v1-reference/mobile.webmanifest",
             "application/manifest+json; charset=utf-8",
             "public, max-age=3600",
         ),
         "/mobile/sw.js": (
-            "mobile-sw.js",
+            "v1-reference/mobile-sw.js",
             "text/javascript; charset=utf-8",
             "no-cache",
         ),
@@ -1762,7 +1785,8 @@ def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
             return None
     if route == "/mobile/icon.png":
         try:
-            encoded = (MOBILE_UI_ROOT / "mobile-icon.png.b64").read_text(encoding="ascii")
+            encoded = (MOBILE_UI_ROOT / "v1-reference" / "mobile-icon.png.b64").read_text(
+                encoding="ascii")
             icon = base64.b64decode("".join(encoded.split()), validate=True)
             return icon, "image/png", "public, max-age=86400"
         except (OSError, ValueError):
@@ -9013,7 +9037,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.require_authorization():
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path, head_only=True):
+        if (parsed.path.startswith("/mobile") or parsed.path.startswith("/v2")) \
+                and self.send_mobile_asset(parsed.path, head_only=True):
             return
         if parsed.path in {"/", "/workflow", "/workflow/"}:
             data = workflow_page()
@@ -9064,7 +9089,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.require_authorization():
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path):
+        if (parsed.path.startswith("/mobile") or parsed.path.startswith("/v2")) \
+                and self.send_mobile_asset(parsed.path):
             return
         if parsed.path in {"/", "/workflow", "/workflow/"}:
             data = workflow_page()
@@ -9103,6 +9129,22 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             params = {key: values[0] for key, values in query.items() if values}
             self.send_json(self.state.workflow_payload(params))
+            return
+        if parsed.path == "/api/queue_index":
+            # The taxonomy the review list is navigated by, written beside the queue by
+            # `build_review_queue.py`. Served rather than recomputed in the browser because the
+            # browser would have to read every candidate row to answer "which subjects are in this
+            # queue", and that question is asked before the first question is rendered. A queue
+            # without an index answers 404 and the UI rebuilds the tree from the questions, so an
+            # older run keeps working instead of losing its navigation.
+            index_path = self.state.candidate_path.parent / "queue_index.json"
+            if index_path.exists():
+                try:
+                    self.send_json(json.loads(index_path.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError) as exc:
+                    self.send_json({"error": f"queue_index unreadable: {exc}"}, status=500)
+            else:
+                self.send_json({"error": "no queue_index.json beside the candidates"}, status=404)
             return
         if parsed.path == "/api/candidates":
             self.state.refresh_event_logs()

@@ -27,7 +27,11 @@ class ReviewUiWorkflowConsoleTests(unittest.TestCase):
         )
 
     def test_workflow_page_is_a_queue_console_not_the_legacy_tab_shell(self) -> None:
-        page = (ROOT / "review_ui" / "workflow.html").read_text(encoding="utf-8")
+        # v1 is reference-only now and lives under `review_ui/v1-reference/`. The assertions are
+        # unchanged: they pin the console's *contract* (the lane vocabulary, the evidence and
+        # revision blocks, the advisory-only guardrail), and a demotion to reference does not
+        # change what the page promises while it is still served at /workflow. Only the path moved.
+        page = (ROOT / "review_ui" / "v1-reference" / "workflow.html").read_text(encoding="utf-8")
         for marker in (
             "互斥人工 queue",
             "五條 lane 時間線",

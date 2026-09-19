@@ -2,7 +2,11 @@ name: governance-and-tests
 
 on:
   pull_request:
-    branches: [main]
+    # No branch filter, deliberately. The filter used to be `branches: [main]`, which meant a
+    # stacked PR (one whose base is another feature branch, which is how this repository ships
+    # multi-step work) ran **no checks at all** - silently, with no error. A PR that is never
+    # tested is not a PR that passed; it is a PR nobody looked at, and the green-tick column is
+    # empty rather than red so nothing draws attention to it.
   push:
     branches: [main]
 
@@ -37,3 +41,23 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Run unit tests
         run: python3 -m unittest discover -s tests
+
+  qbr-tests:
+    # `qbr/` is a separate package with its own dependency set and its own runner, and until now
+    # nothing ran it: `unittest discover -s tests` does not look inside `qbr/tests`, which uses
+    # pytest. So `qbr` shipped with a green light over it that meant nothing.
+    #
+    # No corpus and no `data/` here, on purpose. That is the state of a fresh clone, and the suite
+    # is written to skip - with a reason naming the missing input - rather than fail or silently
+    # pass. A test that needs the corpus cannot be allowed to turn "this machine has the data"
+    # into an assertion about the code.
+    name: qbr-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install qbr dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements/qbr.txt
+      - name: Run the question-bank pipeline suite
+        run: python3 -m pytest qbr/tests -q -rs
