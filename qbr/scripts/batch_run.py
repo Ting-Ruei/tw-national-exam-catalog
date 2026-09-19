@@ -38,15 +38,10 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import answer_sheets, corrections, extract, generation, repair  # noqa: E402
+from qbr import answer_sheets, corrections, extract, generation, paths, repair  # noqa: E402
 
-CORPUS = os.path.join(os.path.dirname(PKG), "..", "tw-national-exam-catalog",
-                      "國考題資料夾", "10_official_pdf", "by_official_catalog")
-CORPUS = os.path.normpath(CORPUS)
-# `sheet_paths` expects the asset root - the folder that contains `10_official_pdf` - because
-# that is what the registry manifests and the golden path are given. `CORPUS` points two
-# levels further down, so the root is two `dirname`s up from it, not one.
-CORPUS_ROOT = os.path.dirname(os.path.dirname(CORPUS))
+CORPUS_ROOT = paths.asset_root()
+CORPUS = os.path.join(CORPUS_ROOT, "10_official_pdf", "by_official_catalog")
 
 
 def papers_for(category, *, years=None, ordinals=None):

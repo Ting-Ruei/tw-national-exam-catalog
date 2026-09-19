@@ -27,11 +27,19 @@ import time
 import urllib.error
 import urllib.request
 
+# These are the engines as they were measured, and the record matters: `docs/ENGINE_BOUNDARY_REPORT.md`
+# reports numbers produced against exactly these. So they stay written down - but they are also
+# overridable, because the charter's rule is that a port is a parameter and a machine address is not
+# part of the logic. The hard-coded home directory that used to be here was a third thing: a model
+# path that only resolves on one machine, which is neither a record nor a default.
+FLASH_NEXT_URL = os.environ.get("QBR_ENGINE_FLASH_NEXT_URL", "http://192.168.10.90:8888")
+QWEN38_URL = os.environ.get("QBR_ENGINE_QWEN38_URL", "http://127.0.0.1:8082")
+QWEN38_MODEL = os.environ.get("QBR_ENGINE_QWEN38_MODEL", "Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed")
+
 ENGINES = {
-    "flash-next": {"url": "http://192.168.10.90:8888", "name": "qwen3.8-flash-next",
+    "flash-next": {"url": FLASH_NEXT_URL, "name": "qwen3.8-flash-next",
                    "key": "mtplx", "vision": True},
-    "qwen38-27b": {"url": "http://127.0.0.1:8082",
-                   "name": "/Users/tim/models/qwen38-27b/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
+    "qwen38-27b": {"url": QWEN38_URL, "name": QWEN38_MODEL,
                    "key": None, "vision": True},
 }
 

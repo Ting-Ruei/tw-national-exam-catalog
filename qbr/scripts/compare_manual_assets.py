@@ -30,9 +30,12 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_BANK = ("/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/"
-                "國考題資料夾/40_exports/question_bank_packages/"
-                "tw-national-exam-medtech-v2026.08.04-r1")
+from qbr import paths  # noqa: E402
+
+# Found, not written down. The exported bank lives under the corpus, which is not in git, so this
+# path is only meaningful next to a corpus; `paths` says which one and the caller can report it.
+DEFAULT_BANK = os.path.join(paths.asset_root(), "40_exports", "question_bank_packages",
+                            "tw-national-exam-medtech-v2026.08.04-r1")
 
 
 def bank_questions(bank_dir):

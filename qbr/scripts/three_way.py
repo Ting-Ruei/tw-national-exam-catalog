@@ -45,11 +45,15 @@ PKG = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, _HERE)
 
-from qbr import canon, cjk, extract, repair, triage  # noqa: E402
+from qbr import canon, cjk, extract, paths, repair, triage  # noqa: E402
 import qdb  # noqa: E402
 
-REPO = os.path.dirname(os.path.dirname(PKG))
-PDF_ROOT = os.path.join(REPO, "tw-national-exam-catalog", "國考題資料夾", "10_official_pdf", "by_official_catalog")
+# The corpus is **found**, not counted to. `dirname(dirname(PKG))` was correct only while this file
+# sat at `pi_test/question_bank_rebuild/`, and correct in the merged layout only by coincidence (the
+# two locations are the same depth). A standalone clone is one level shallower and the counted path
+# leaves the repository. `qbr.paths` is the one place that decides, so all callers agree.
+REPO = paths.repo_root()
+PDF_ROOT = os.path.join(paths.asset_root(), "10_official_pdf", "by_official_catalog")
 CSV_GOLD = os.path.join(PKG, "data", "db_snapshot", "hr_candidates.csv")
 GOLD_DIR = os.path.join(PKG, "data", "gold")
 REPORTS = os.path.join(PKG, "reports")

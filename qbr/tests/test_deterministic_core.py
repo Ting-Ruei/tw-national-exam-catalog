@@ -18,9 +18,18 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
-from qbr import canon, cjk, extract, manifests, repair, triage  # noqa: E402
+from qbr import canon, cjk, extract, manifests, paths, repair, triage  # noqa: E402
 
 MANIFEST = manifests.of_package(PKG)
+
+# The corpus is not in git, so a fresh clone has none and the tests that read it must say so rather
+# than fail. Measured on a clean checkout: this reported `FileNotFoundError` on the corpus root and
+# a downstream `AssertionError` about a lost registry key, both of which read as pipeline defects.
+# The corpus is located with `qbr.paths` - found, not counted to.
+_OFFICIAL = os.path.join(paths.asset_root(), "10_official_pdf", "by_official_catalog")
+requires_corpus = pytest.mark.skipif(
+    not os.path.isdir(_OFFICIAL),
+    reason="official corpus not on disk (it is not in git); set ASSET_ROOT to point at it")
 
 
 @pytest.fixture(scope="module")
@@ -126,7 +135,21 @@ def test_dual_engine_content_agreement_is_high_on_clean_fonts():
 
 
 def __load_manifest():
-    return manifests.load(MANIFEST)
+    """The sample manifest's rows, or a skip.
+
+    `data/` is not in git (it holds 6.3 MB of official PDFs copied in so the suite can run without
+    the 267 MB corpus), so a fresh clone has no manifest. Three tests call this directly rather than
+    through the `sample` fixture, and they used to fail on the empty list - `IndexError: list index
+    out of range` from `[0]` - which reads as a broken test rather than missing input.
+
+    Skipping here rather than in each caller is deliberate: the missing thing is the manifest, this
+    is the one function that reads it, and a guard at each of three call sites is three chances to
+    forget the fourth.
+    """
+    rows = manifests.load(MANIFEST)
+    if not rows:
+        pytest.skip("sample not built: run scripts/build_sample_set.py (data/ is not in git)")
+    return rows
 
 
 def test_verdict_vocabulary_is_closed():
@@ -580,6 +603,7 @@ def test_a_stem_whose_options_were_never_divided_is_not_judged():
     assert verdict["answer"] == "agree", "the answer has its own authority, and is still judged"
 
 
+@requires_corpus
 def test_a_paper_is_named_by_the_registry_the_corpus_ships_not_guessed_at_from_its_shape():
     """Defect 13. The manifests carry the key, the year, the ordinal, the subject, the role,
     the path and the digest of every asset; the resolver was made to infer all of that out of

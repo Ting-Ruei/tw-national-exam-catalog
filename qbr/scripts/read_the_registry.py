@@ -19,11 +19,17 @@ import os
 import re
 import sys
 
-MANIFESTS = ("/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog"
-             "/國考題資料夾/Registry/asset_manifests")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "scripts"))
 sys.path.insert(0, os.path.join(HERE, "src"))
+
+from qbr import paths  # noqa: E402
+
+# Found, not written down - and this one matters more than most, because the registry manifests are
+# the authority for which paper every question came from. A hard-coded path here silently means
+# "no registry" in any other checkout, and "no registry" downgrades the resolver to guessing at file
+# names, which is the exact defect the manifests exist to prevent.
+MANIFESTS = os.path.join(paths.asset_root(), "Registry", "asset_manifests")
 
 COLUMNS = ("status", "year", "exam_ordinal", "exam_code", "category_code", "category_name",
            "subject_code", "subject_name", "document_role", "source_url", "destination",

@@ -30,10 +30,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 PKG_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(PKG_ROOT, "src"))
 
-from qbr import cjk, extract, repair, triage  # noqa: E402
+from qbr import cjk, extract, paths, repair, triage  # noqa: E402
 
-REPO = os.path.dirname(os.path.dirname(PKG_ROOT))
-ASSET_ROOT = os.path.join(REPO, "tw-national-exam-catalog", "國考題資料夾")
+# Found, not counted to - see `qbr.paths` for why the older `dirname(dirname(PKG_ROOT))` was a
+# statement about this checkout rather than about the repository.
+REPO = paths.repo_root()
+ASSET_ROOT = paths.asset_root()
 OFFICIAL = os.path.join(ASSET_ROOT, "10_official_pdf", "by_official_catalog")
 SURVEY_ROOT = os.path.join(PKG_ROOT, "data", "survey")
 SURVEY_MANIFEST = os.path.join(PKG_ROOT, "data", "survey_manifest.jsonl")

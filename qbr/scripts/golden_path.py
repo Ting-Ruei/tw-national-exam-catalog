@@ -36,8 +36,8 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import (answer_sheets, canon, corrections, extract, package, repair,  # noqa: E402
-                 review_queue, triage)
+from qbr import (answer_sheets, canon, corrections, extract, package, paths,  # noqa: E402
+                 repair, review_queue, triage)
 
 import three_way  # noqa: E402
 
@@ -572,9 +572,11 @@ def stage_verify(package_dir, platform_app, db_container, review_status):
     # pipeline that reads them alike will either hide a real break or grow a workaround that
     # certifies machine output as human-reviewed.
     review_marker = 'metadata.review_status=accepted'
-    catalog_validator = os.path.join(
-        os.path.dirname(os.path.dirname(PKG)), "tw-national-exam-catalog",
-        "scripts", "validate_question_bank_package.py")
+    # Found, not counted to: `dirname(dirname(PKG)) + "tw-national-exam-catalog"` pointed outside
+    # the repository in a standalone clone, where the validator would simply never run and the
+    # gate would silently pass. A gate that cannot find its validator must not look satisfied.
+    catalog_validator = os.path.join(paths.repo_root(), "scripts",
+                                     "validate_question_bank_package.py")
     if os.path.isfile(catalog_validator):
         proc = subprocess.run([sys.executable, catalog_validator, package_dir,
                                "--format", "json"],
@@ -912,7 +914,7 @@ def main(argv=None):
     parser.add_argument("--answer-pdf")
     parser.add_argument("--corrected-pdf")
     parser.add_argument("--platform-app",
-                        default=os.path.join(os.path.dirname(os.path.dirname(PKG)), "platform-app"))
+                        default=os.path.join(paths.workspace_root(), "platform-app"))
     parser.add_argument("--db-container", default="exam_repat_dev_db")
     parser.add_argument("--review-status", default=package.REVIEW_STATUS_MACHINE_ONLY,
                         help="metadata.review_status written into the package. The catalog "

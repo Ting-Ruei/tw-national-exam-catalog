@@ -30,10 +30,16 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)                      # .../tw-national-exam-catalog/qbr
-PROJECT = os.path.normpath(os.path.join(PKG, "..", ".."))   # ai_learning_platform
-CATALOG = os.path.join(PROJECT, "tw-national-exam-catalog", "catalogs",
+sys.path.insert(0, os.path.join(PKG, "src"))
+
+from qbr import paths  # noqa: E402
+
+# Found, not counted to. `dirname(PKG)/../..` named `ai_learning_platform` only while this lived
+# under the workspace; a standalone clone is shallower and the whole path left the repository.
+PROJECT = paths.workspace_root()
+CATALOG = os.path.join(paths.repo_root(), "catalogs",
                        "moex_subject_catalog__y100-115.csv")
-ASSET_ROOT = os.path.join(PROJECT, "tw-national-exam-catalog", "國考題資料夾")
+ASSET_ROOT = paths.asset_root()
 OUTPUT_ROOT = os.path.join(ASSET_ROOT, "10_official_pdf", "by_official_catalog")
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; tw-national-exam-catalog/0.1)"}

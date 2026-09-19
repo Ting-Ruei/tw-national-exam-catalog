@@ -38,15 +38,19 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
-PROJECT = os.path.normpath(os.path.join(PKG, "..", ".."))
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import generation  # noqa: E402
+from qbr import generation, paths  # noqa: E402
 
-CATALOG = os.path.join(PROJECT, "tw-national-exam-catalog", "catalogs",
+# `paths` must be imported before it is used, so these three lines sit after the import rather than
+# beside `PKG` where the old `os.path.join(PKG, "..", "..")` was computed. Getting this wrong is a
+# `NameError` at import time, which is loud - it is the *silent* version (a path that is wrong but
+# resolves) that this whole change is about.
+PROJECT = paths.workspace_root()
+CATALOG = os.path.join(paths.repo_root(), "catalogs",
                        "moex_subject_catalog__y100-115.csv")
-ASSET_ROOT = os.path.join(PROJECT, "tw-national-exam-catalog", "國考題資料夾")
+ASSET_ROOT = paths.asset_root()
 CORPUS = os.path.join(ASSET_ROOT, "10_official_pdf", "by_official_catalog")
 GOLDEN = os.path.join(HERE, "golden_path.py")
 

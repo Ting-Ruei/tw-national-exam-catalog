@@ -44,12 +44,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 sys.path.insert(0, HERE)
 
-from qbr import extract, repair, reflow, vision  # noqa: E402
+from qbr import extract, paths, repair, reflow, vision  # noqa: E402
 
+# An environment override stays first (an operator pointing at another corpus is the authority), but
+# the default is now **found** instead of written down. A hard-coded home directory is correct in
+# exactly one checkout, which is the one it was written in.
 CORPUS = os.environ.get(
     "QBR_CORPUS",
-    "/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/國考題資料夾"
-    "/10_official_pdf/by_official_catalog/")
+    os.path.join(paths.asset_root(), "10_official_pdf", "by_official_catalog"))
 
 #: The four private-use marks this paper family prints as its option labels. A question using them
 #: has four options whatever the text layer did with them.

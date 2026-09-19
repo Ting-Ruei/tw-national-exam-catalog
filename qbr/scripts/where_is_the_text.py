@@ -21,16 +21,17 @@ import re
 import sys
 import time
 
-# the sandbox root: this file lives one level down, in scripts/
+# the package root: this file lives one level down, in scripts/
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "src"))
 sys.path.insert(0, os.path.join(HERE, "scripts"))
 
-from qbr import canon, extract, repair                                    # noqa: E402
+from qbr import canon, extract, paths, repair                               # noqa: E402
 import three_way as tw                                                     # noqa: E402
 
-CORPUS = ("/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog"
-          "/國考題資料夾/10_official_pdf/by_official_catalog")
+# Was a hard-coded absolute path (`/Users/tim/AI workspace/...`), which the charter forbids in
+# committed work and which broke for any other checkout. Found, not written down.
+CORPUS = os.path.join(paths.asset_root(), "10_official_pdf", "by_official_catalog")
 CACHE = os.path.join(HERE, "data", "cache", "corpus_folded.jsonl")
 WINDOWS = (10, 8, 6)          # widest window first: a hit at ten is evidence, at six is a hint
 MIN_RUN_CHARS = 24            # a stem shorter than this cannot carry a distinguishable window

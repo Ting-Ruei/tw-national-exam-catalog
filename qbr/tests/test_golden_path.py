@@ -23,6 +23,21 @@ RUNS = [path for path in ("/tmp/qbr-golden-001", "/tmp/qbr-golden-002")
         if os.path.isfile(os.path.join(path, "run_manifest.json"))]
 requires_run = pytest.mark.skipif(not RUNS, reason="no golden-path run to inspect")
 
+# The corpus is not checked into git (267 MB of official PDFs), so a fresh clone has none. Four
+# tests read it, and without this marker they report a defect in the pipeline - measured on a clean
+# checkout: `AssertionError: assert ('moex:105020:305:33:1' and None)`, which reads as "the resolver
+# lost a registry key" when the real cause was that the test could not find a directory.
+#
+# A test that cannot reach its input must say so. Reporting "no corpus here" as "the pipeline is
+# broken" is worse than skipping: it sends the reader to the wrong file. The corpus is located with
+# `qbr.paths` (found, not counted to), because a hard-coded path here would only move the problem.
+from qbr import paths as _paths  # noqa: E402
+
+ASSET_ROOT = _paths.asset_root()
+requires_corpus = pytest.mark.skipif(
+    not os.path.isdir(os.path.join(ASSET_ROOT, "10_official_pdf", "by_official_catalog")),
+    reason="official corpus not on disk (it is not in git); set ASSET_ROOT to point at it")
+
 
 def _manifest(run):
     with open(os.path.join(run, "run_manifest.json"), encoding="utf-8") as handle:
@@ -224,6 +239,7 @@ def test_a_category_spelled_with_full_width_brackets_is_the_same_category():
     assert not bp._same_category("藥師(一)", "藥師")
 
 
+@requires_corpus
 def test_two_sittings_of_one_subject_are_two_papers():
     bp = _import_batch_package()
     first = {"year": 105, "ordinal": 1, "category": "藥師(一)", "subject": "藥劑學(包括生物藥劑學)"}
