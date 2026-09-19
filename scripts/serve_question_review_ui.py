@@ -60,12 +60,32 @@ except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
         group_count_from_text,
     )
 
+try:
+    from ai395_feedback import (
+        FeedbackContractError,
+        NoVisibleChange,
+        apply_correction as apply_feedback_correction,
+        build_feedback_event,
+        build_guardrail_candidate,
+        question_snapshot,
+    )
+except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
+    from scripts.ai395_feedback import (
+        FeedbackContractError,
+        NoVisibleChange,
+        apply_correction as apply_feedback_correction,
+        build_feedback_event,
+        build_guardrail_candidate,
+        question_snapshot,
+    )
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
+WORKFLOW_UI_PATH = MOBILE_UI_ROOT / "workflow.html"
 STRUCTURED_TABLE_RE = re.compile(r"<table.*?</table>", re.I | re.S)
 STRUCTURED_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
 VISUAL_DEPENDENCY_RE = re.compile(
@@ -150,6 +170,22 @@ AI_REVIEW_ACTIONS_WITH_WORK = {
     "fix_parser_rule",
     "add_manual_asset",
 }
+
+# The new console assigns every candidate to exactly one primary queue.  The
+# lane results remain visible on the detail page, but a question must not
+# appear in five different human queues at the same time.
+WORKFLOW_QUEUE_DEFINITIONS = (
+    ("source", "來源／parser", "題數、題號、選項或 MinerU/parser contract 仍有阻擋。"),
+    ("answer", "答案／MOD", "答案表、送分、多答案或答案證據需要人工核對。"),
+    ("vision", "圖片／裁切", "先判斷是否真的有圖，再核對 MinerU asset 與裁切範圍。"),
+    ("group", "題組範圍", "題組關鍵字或 range proposal 需要人工確認。"),
+    ("notation", "上下標／字形", "符號、上下標或 compatibility glyph proposal 需要驗證。"),
+    ("text", "文字三證據", "三個 PDF extractor 或來源文字仍有差異。"),
+    ("revision", "修訂／重跑", "已有修訂或 lane stale，需要確認 revision loop。"),
+    ("sample", "機器通過抽樣", "沒有開放例外；保留少量抽樣以量測漏檢。"),
+)
+WORKFLOW_QUEUE_LABELS = {key: label for key, label, _description in WORKFLOW_QUEUE_DEFINITIONS}
+WORKFLOW_QUEUE_DESCRIPTIONS = {key: description for key, _label, description in WORKFLOW_QUEUE_DEFINITIONS}
 
 
 class SqlWriteError(RuntimeError):
@@ -247,6 +283,51 @@ def load_ai_learning_events(
     return latest
 
 
+def load_correction_feedback_events(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the latest immutable before/after feedback per candidate."""
+    latest: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return latest
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or not event.get("feedback_id"):
+                    continue
+                key = str(event.get("candidate_key") or "")
+                if key:
+                    latest[key] = event
+    except OSError:
+        return {}
+    return latest
+
+
+def load_correction_feedback_rows(path: Path, *, limit: int = 100) -> list[dict[str, Any]]:
+    """Load an append-only feedback outbox for n8n or an operator export."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("feedback_id"):
+                    rows.append(event)
+    except OSError:
+        return []
+    return rows[-max(1, min(int(limit), 500)):]
+
+
 def category_matches_filter(category: str, category_filter: str) -> bool:
     normalized_category = normalize_category_name(category)
     if category_filter in CATEGORY_GROUP_FILTERS:
@@ -296,6 +377,42 @@ SQL_CANDIDATE_CATEGORY_EXPR = (
 SQL_ANSWER_CATEGORY_EXPR = (
     "COALESCE(NULLIF(c.raw_candidate_json->'metadata'->>'normalized_category_name', ''), "
     "NULLIF(c.raw_candidate_json->'metadata'->>'group_name', ''), '')"
+)
+
+# Human-review queue state is projected from the latest question event.  Keep
+# these expressions in one place so the heavy and lightweight SQL paths use
+# exactly the same mutually-exclusive buckets.  A reset/reopen event never
+# replaces the historical content correction; it only changes the queue state.
+SQL_REVIEW_PREVIOUS_ACTION_EXPR = (
+    "COALESCE(NULLIF(lq.event_json->>'previous_action', ''), "
+    "NULLIF(lq.event_json->>'preserved_action', ''), "
+    "NULLIF(lq.event_json->>'previous_review_action', ''), '')"
+)
+SQL_REVIEW_ACCEPTED_REAUDIT_EXPR = (
+    "(lq.action IN ('unreviewed', 'reset_review') AND ("
+    f"{SQL_REVIEW_PREVIOUS_ACTION_EXPR} IN ('accept', 'unblock') "
+    "OR lower(COALESCE(lq.event_json->>'approval_ref', '')) LIKE '%%accepted%%reaudit%%' "
+    "OR lower(COALESCE(lq.reviewer, '')) LIKE '%%accepted%%reaudit%%'"
+    "))"
+)
+SQL_REVIEW_REPAIR_PENDING_EXPR = (
+    "(lq.action IN ('unreviewed', 'reset_review') "
+    f"AND NOT {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AND ("
+    "COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_kind' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_type' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_action' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'repair_scope' "
+    "OR COALESCE(lq.event_json, '{}'::jsonb) ? 'source_event_id' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'repair_%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'backfill_%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'parser_global_refresh%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-repair%%' "
+    "OR COALESCE(lq.reviewer, '') LIKE 'codex-text-normalization-repair%%' "
+    "OR COALESCE(lq.notes, '') ~ '(修復|正規化|待複核|需人工複核)' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'review_block_repair', '') <> '' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'backfill_repair', '') <> '' "
+    "OR COALESCE(c.raw_candidate_json->'metadata'->>'backfill_source', '') <> ''"
+    "))"
 )
 
 AI_ANSWER_DEFER_LABELS = {"answer_pair_suspect", "needs_human_review", "pass_likely"}
@@ -520,6 +637,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-jsonl", type=Path, default=None)
     parser.add_argument("--issue-csv", type=Path, default=None)
     parser.add_argument("--review-log", type=Path, default=None)
+    parser.add_argument(
+        "--run-summary",
+        type=Path,
+        default=None,
+        help="Optional isolated staging summary.json for the workflow console.",
+    )
+    parser.add_argument(
+        "--three-source-analysis",
+        type=Path,
+        default=None,
+        help="Optional three-source analysis.json for evidence queues.",
+    )
+    parser.add_argument(
+        "--three-source-packets",
+        type=Path,
+        default=None,
+        help="Optional blind-packets.jsonl containing bounded PDF evidence.",
+    )
+    parser.add_argument(
+        "--repair-log",
+        type=Path,
+        default=None,
+        help="Optional repair log path shown as an audit reference only.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -783,6 +924,111 @@ def file_signature(path: Path) -> tuple[int, int] | None:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+def _first_event_value(event: dict[str, Any] | None, *keys: str) -> str:
+    if not isinstance(event, dict):
+        return ""
+    for key in keys:
+        value = event.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def review_projection(
+    latest_review: dict[str, Any] | None,
+    latest_reset_review: dict[str, Any] | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project append-only review events into disjoint human queue buckets.
+
+    ``unreviewed`` is reserved for candidates with no question-level human
+    event at all.  Parser/text repairs and accepted-question re-audits are
+    still open work, but they are separate buckets so a reviewer does not see
+    a repaired or already-accepted item masquerading as a brand-new question.
+    This function is deliberately read-only: it never rewrites events or
+    candidate content.
+    """
+
+    latest = latest_review if isinstance(latest_review, dict) else None
+    reset = latest_reset_review if isinstance(latest_reset_review, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    event = latest or reset or {}
+    reset_waiting = bool(reset and not latest)
+    action = _first_event_value(event, "action")
+    reset_action = _first_event_value(reset, "action")
+    previous_action = _first_event_value(
+        reset,
+        "previous_action",
+        "preserved_action",
+        "previous_review_action",
+    )
+    approval_ref = _first_event_value(reset, "approval_ref", "approval", "approval_reference")
+    reviewer = _first_event_value(reset or latest, "reviewer")
+    repair_kind = _first_event_value(
+        reset or latest,
+        "repair_kind",
+        "repair_type",
+        "repair_action",
+        "repair_scope",
+        "source_event_id",
+    )
+    notes = _first_event_value(
+        reset or latest,
+        "reset_notes",
+        "notes",
+        "previous_notes",
+    )
+    metadata_sources = [
+        str(metadata.get(key) or "")
+        for key in ("review_block_repair", "backfill_repair", "backfill_source")
+        if metadata.get(key)
+    ]
+    repair_reviewer = reviewer.startswith(REPAIR_REVIEWER_PREFIXES)
+    repair_note = bool(re.search(r"修復|正規化|待複核|需人工複核", notes))
+    repair_event = bool(repair_kind or repair_reviewer or repair_note or metadata_sources)
+    was_previously_accepted = (
+        previous_action in QUESTION_READY_ACTIONS
+        or ("accepted" in approval_ref.lower() and "reaudit" in approval_ref.lower())
+        or ("accepted" in reviewer.lower() and "reaudit" in reviewer.lower())
+    )
+    is_accepted_reaudit_pending = bool(reset_waiting and was_previously_accepted)
+    is_repair_pending = bool(reset_waiting and not is_accepted_reaudit_pending and repair_event)
+    is_reset_unreviewed = bool(reset_waiting)
+    is_never_reviewed = not latest and not reset
+    if is_never_reviewed:
+        queue_bucket = "never_reviewed"
+        display_label = "未看過"
+    elif is_accepted_reaudit_pending:
+        queue_bucket = "accepted_reaudit"
+        display_label = "已通過後待複核"
+    elif is_repair_pending:
+        queue_bucket = "repair_pending"
+        display_label = "修復後待複核"
+    elif is_reset_unreviewed:
+        queue_bucket = "reset_review"
+        display_label = "退回未審"
+    else:
+        queue_bucket = "reviewed"
+        display_label = "已看過"
+    return {
+        "has_human_event": bool(latest or reset),
+        "is_never_reviewed": is_never_reviewed,
+        "is_reset_unreviewed": is_reset_unreviewed,
+        "is_repair_pending": is_repair_pending,
+        "is_accepted_reaudit_pending": is_accepted_reaudit_pending,
+        "was_previously_accepted": was_previously_accepted,
+        "previous_action": previous_action or None,
+        "reset_action": reset_action or None,
+        "reviewer": reviewer or None,
+        "repair_kind": repair_kind or None,
+        "approval_ref": approval_ref or None,
+        "repair_event": repair_event,
+        "queue_bucket": queue_bucket,
+        "display_label": display_label,
+        "action": action or None,
+    }
+
+
 def repair_event_info(
     latest_review: dict[str, Any] | None,
     latest_reset_review: dict[str, Any] | None,
@@ -793,13 +1039,14 @@ def repair_event_info(
         return {"active": False}
 
     event = latest_review or latest_reset_review
+    projection = review_projection(latest_review, latest_reset_review, metadata)
     reviewer = str((event or {}).get("reviewer") or "")
     metadata_sources = [
         str(metadata.get(key) or "")
         for key in ("review_block_repair", "backfill_repair", "backfill_source")
         if metadata.get(key)
     ]
-    is_repair_event = reviewer.startswith(REPAIR_REVIEWER_PREFIXES)
+    is_repair_event = bool(projection.get("repair_event"))
     is_reset_waiting = bool(latest_reset_review and not latest_review)
     if not (is_repair_event or is_reset_waiting or metadata_sources):
         return {"active": False}
@@ -812,12 +1059,19 @@ def repair_event_info(
     )
     return {
         "active": True,
-        "label": "已修待複核",
+        "label": (
+            projection.get("display_label")
+            if is_reset_waiting
+            else "已修待複核"
+        ),
         "reviewer": reviewer,
         "action": latest_action or str((latest_reset_review or {}).get("action") or "reset_review"),
         "notes": notes,
         "sources": metadata_sources,
         "updated_at": (event or {}).get("created_at"),
+        "queue_bucket": projection.get("queue_bucket"),
+        "previous_action": projection.get("previous_action"),
+        "was_previously_accepted": projection.get("was_previously_accepted", False),
     }
 
 
@@ -1470,11 +1724,24 @@ def html_page() -> bytes:
     return PAGE_HTML.encode("utf-8")
 
 
+def workflow_page() -> bytes:
+    """Return the revision/evidence workbench used by the new workflow."""
+    try:
+        return WORKFLOW_UI_PATH.read_bytes()
+    except OSError:
+        # Keep the legacy page available if a source checkout is incomplete.
+        return html_page()
+
+
 def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
     """Return a mobile Review UI asset without exposing arbitrary project files."""
     route = path.rstrip("/") or "/"
     route_map = {
+        # Keep the established fast-triage contract at /mobile/ for existing
+        # bookmarks and event consumers.  The rebuilt responsive workflow
+        # console has an explicit phone route and is the mobile-port root.
         "/mobile": ("mobile.html", "text/html; charset=utf-8", "no-store"),
+        "/mobile/workflow": ("workflow.html", "text/html; charset=utf-8", "no-store"),
         "/mobile/manifest.webmanifest": (
             "mobile.webmanifest",
             "application/manifest+json; charset=utf-8",
@@ -1547,6 +1814,220 @@ def mobile_review_event(payload: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def compact_ai_lane_results(audit: Any) -> list[dict[str, Any]]:
+    """Expose lane telemetry without returning raw model responses to the UI.
+
+    The staging exporter keeps the complete model result for auditability.  A
+    browser queue only needs the decision path, latency, context guard and
+    evidence request.  In particular, never send ``raw_content`` through the
+    dashboard API; it is both noisy and easy to mistake for an approved edit.
+    """
+    if not isinstance(audit, dict):
+        return []
+    compact: list[dict[str, Any]] = []
+    for row in audit.get("lane_results") or []:
+        if not isinstance(row, dict):
+            continue
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        model_result = result.get("model_result") if isinstance(result.get("model_result"), dict) else {}
+        context_guard = model_result.get("context_guard") if isinstance(model_result.get("context_guard"), dict) else {}
+        context_policy = model_result.get("context_policy") if isinstance(model_result.get("context_policy"), dict) else {}
+        raw_trace = model_result.get("agentic_trace") if isinstance(model_result.get("agentic_trace"), list) else []
+        trace = []
+        for trace_row in raw_trace[:4]:
+            if not isinstance(trace_row, dict):
+                continue
+            trace.append(
+                {
+                    key: trace_row.get(key)
+                    for key in ("turn", "latency_ms", "latency_status", "compact_level", "adaptive_action")
+                    if key in trace_row
+                }
+            )
+        compact.append(
+            {
+                "lane": str(row.get("lane") or ""),
+                "status": str(row.get("status") or result.get("status") or "unknown"),
+                "revision_id": str(row.get("revision_id") or ""),
+                "provider": str(row.get("provider") or result.get("provider") or ""),
+                "model": str(row.get("model") or result.get("model") or ""),
+                "created_at": row.get("created_at"),
+                "checked_count": result.get("checked_count"),
+                "model_called": bool(result.get("model_called")),
+                "model_action": str(result.get("model_action") or ""),
+                "finding_codes": [str(value) for value in (result.get("finding_codes") or [])],
+                "reason": str(model_result.get("reason") or result.get("reason") or ""),
+                "requested_evidence": model_result.get("requested_evidence") or [],
+                "proposed_changes": model_result.get("proposed_changes") or [],
+                "error": str(model_result.get("error") or result.get("error") or ""),
+                "latency_ms": model_result.get("latency_ms"),
+                "latency_status": str(model_result.get("latency_status") or ""),
+                "tool_turn_count": model_result.get("tool_turn_count"),
+                "pixels_sent": model_result.get("pixels_sent"),
+                "transport": str(model_result.get("transport") or ""),
+                "context_policy": {
+                    key: context_policy.get(key)
+                    for key in ("hard_limit_tokens", "effective_limit_tokens", "context_extension_used", "slow_threshold_seconds")
+                    if key in context_policy
+                },
+                "agentic_trace": trace,
+                "context_guard": {
+                    key: context_guard.get(key)
+                    for key in (
+                        "context_limit_tokens",
+                        "safety_margin_tokens",
+                        "admitted_input_budget_tokens",
+                        "estimated_input_tokens_upper_bound",
+                        "total_upper_bound_tokens",
+                        "within_budget",
+                    )
+                    if key in context_guard
+                },
+            }
+        )
+    return compact
+
+
+def workflow_lane_map(item: dict[str, Any]) -> tuple[dict[str, str], dict[str, list[str]], list[dict[str, Any]]]:
+    ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+    checks = {
+        str(key): str(value)
+        for key, value in (ai_review.get("checks") or {}).items()
+        if str(key).strip()
+    }
+    lane_results = ai_review.get("lane_results") if isinstance(ai_review.get("lane_results"), list) else []
+    findings_by_lane: dict[str, list[str]] = {}
+    for finding in ai_review.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        lane = str(finding.get("lane") or "").strip()
+        code = str(finding.get("code") or finding.get("finding_code") or "").strip()
+        if lane:
+            findings_by_lane.setdefault(lane, [])
+        if lane and code:
+            findings_by_lane[lane].append(code)
+    for result in lane_results:
+        if not isinstance(result, dict):
+            continue
+        lane = str(result.get("lane") or "").strip()
+        if not lane:
+            continue
+        checks.setdefault(lane, str(result.get("status") or "unknown"))
+        findings_by_lane.setdefault(lane, [])
+        for code in result.get("finding_codes") or []:
+            if str(code) not in findings_by_lane[lane]:
+                findings_by_lane[lane].append(str(code))
+    return checks, findings_by_lane, lane_results
+
+
+def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Assign one candidate to one human queue using deterministic priority."""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    issues = [issue for issue in (item.get("issues") or []) if isinstance(issue, dict)]
+    answer_issues = [issue for issue in (item.get("answer_issues") or []) if isinstance(issue, dict)]
+    tags = {str(value).strip() for value in (metadata.get("ai395_scope_tags") or []) if str(value).strip()}
+    checks, findings_by_lane, lane_results = workflow_lane_map(item)
+    all_finding_codes = {
+        code
+        for values in findings_by_lane.values()
+        for code in values
+        if code
+    }
+    issue_codes = {
+        str(issue.get("issue_code") or "").strip()
+        for issue in [*issues, *answer_issues]
+        if str(issue.get("issue_code") or "").strip()
+    }
+    owner_stages = {
+        str(issue.get("owner_stage") or "").strip().lower()
+        for issue in [*issues, *answer_issues]
+        if str(issue.get("owner_stage") or "").strip()
+    }
+    review = item.get("review") if isinstance(item.get("review"), dict) else {}
+    repair_status = item.get("repair_status") if isinstance(item.get("repair_status"), dict) else {}
+    source = evidence.get("source") if isinstance(evidence, dict) else {}
+    source_status = str(source.get("status") or "")
+    source_conflict = source_status in {
+        "source_text_difference",
+        "insufficient_independent_families",
+    } or str(source.get("question_consensus") or "") == "question_text_disagreement"
+    has_parser_issue = bool(
+        metadata.get("parser_status") in {"blocked", "needs_review"}
+        or any(
+            code.startswith("parser_")
+            or code in {"question_count_mismatch", "question_number_gap", "option_anomaly", "parser_warning", "parser_blocked"}
+            for code in issue_codes | tags
+        )
+        or "parser" in owner_stages
+    )
+    has_answer_issue = bool(
+        answer_issues
+        or "answer" in owner_stages
+        or "answer" in checks and checks.get("answer") in {"finding", "failed"}
+        or findings_by_lane.get("answer")
+        or any(code.startswith("answer_") or code in {"mod_answer", "multiple_answer", "answer_special"} for code in all_finding_codes | issue_codes)
+    )
+    has_vision_issue = bool(
+        findings_by_lane.get("vision")
+        or checks.get("vision") in {"finding", "failed"}
+        or "image" in owner_stages
+        or "visual_missing" in tags
+        or item.get("visual_profile", {}).get("needs_visual_asset_review")
+        or item.get("visual_profile", {}).get("visual_review_status") == "visual_asset_problem"
+    )
+    has_group_issue = bool(
+        findings_by_lane.get("group")
+        or checks.get("group") in {"finding", "failed"}
+        or "group" in tags
+        or item.get("inferred_group_ref")
+        or item.get("group_ref")
+    )
+    has_notation_issue = bool(
+        findings_by_lane.get("notation")
+        or checks.get("notation") in {"finding", "failed"}
+        or "notation" in tags
+        or any(code in {"notation", "subscript", "superscript", "glyph", "compatibility_glyph"} for code in all_finding_codes | issue_codes)
+    )
+    has_revision_issue = bool(
+        repair_status.get("active")
+        or review.get("is_repair_pending")
+        or review.get("is_accepted_reaudit_pending")
+        or metadata.get("ai395_staging_revision_status") not in {None, "", "active"}
+    )
+    if has_revision_issue:
+        queue = "revision"
+    elif has_parser_issue:
+        queue = "source"
+    elif has_answer_issue:
+        queue = "answer"
+    elif has_vision_issue:
+        queue = "vision"
+    elif has_group_issue:
+        queue = "group"
+    elif has_notation_issue:
+        queue = "notation"
+    elif source_conflict or findings_by_lane.get("text_evidence") or checks.get("text_evidence") in {"finding", "failed"} or "text_evidence" in tags:
+        queue = "text"
+    else:
+        queue = "sample"
+
+    severities = {str(issue.get("severity") or "").lower() for issue in [*issues, *answer_issues]}
+    severity = "error" if "error" in severities or queue in {"source", "answer", "vision"} and (issues or answer_issues) else "warning" if severities & {"warning", "warn"} else "info"
+    reasons = sorted(issue_codes | all_finding_codes | tags)
+    if source_status:
+        reasons.insert(0, source_status)
+    return {
+        "id": queue,
+        "label": WORKFLOW_QUEUE_LABELS[queue],
+        "description": WORKFLOW_QUEUE_DESCRIPTIONS[queue],
+        "severity": severity,
+        "reason_codes": list(dict.fromkeys(reasons)),
+        "lane_statuses": checks,
+        "lane_findings": findings_by_lane,
+        "lane_results": lane_results,
+    }
+
+
 class ReviewState:
     def __init__(
         self,
@@ -1556,12 +2037,33 @@ class ReviewState:
         *,
         auto_reload_candidates: bool = False,
         review_backend: str = "sql",
+        run_summary_path: Path | None = None,
+        three_source_analysis_path: Path | None = None,
+        three_source_packets_path: Path | None = None,
+        repair_log_path: Path | None = None,
     ) -> None:
         self.candidate_path = candidate_path
         self.issue_path = issue_path
         self.review_log = review_log
         self.auto_reload_candidates = auto_reload_candidates
         self.review_backend = review_backend
+        self.run_summary_path = run_summary_path
+        self.three_source_analysis_path = three_source_analysis_path
+        self.three_source_packets_path = three_source_packets_path
+        self.repair_log_path = repair_log_path
+        self.workflow_summary = self._load_json_object(run_summary_path)
+        self.three_source_analysis = self._load_json_object(three_source_analysis_path)
+        self.three_source_packets = self._load_packet_map(three_source_packets_path)
+        self.three_source_cases = {
+            str(case.get("candidate_key")): case
+            for case in (self.three_source_analysis.get("cases") or [])
+            if isinstance(case, dict) and case.get("candidate_key")
+        }
+        self.evidence_root = (
+            three_source_packets_path.parent.resolve()
+            if three_source_packets_path is not None
+            else None
+        )
         self._candidate_reload_lock = threading.Lock()
         self._candidate_reload_status: dict[str, Any] = {
             "ok": True,
@@ -1609,6 +2111,7 @@ class ReviewState:
         self.ai_review_log = self.review_log.parent / "question_ai_review_events.jsonl"
         self.ai_feedback_log = self.review_log.parent / "question_ai_feedback_events.jsonl"
         self.ai_learning_log = self.review_log.parent / "question_ai_learning_events.jsonl"
+        self.correction_feedback_log = self.review_log.parent / "question_correction_feedback_events.jsonl"
         self.preference_path = self.review_log.parent / "review_ui_preferences.json"
         if self.sql_review_enabled:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = {}, {}, {}
@@ -1617,6 +2120,7 @@ class ReviewState:
             self.latest_ai_reviews, self.ai_review_counts = {}, {}
             self.latest_ai_feedbacks = {}
             self.latest_ai_learnings = {}
+            self.latest_correction_feedbacks = {}
             self._ensure_ai_feedback_schema()
         else:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = load_review_events(review_log)
@@ -1628,6 +2132,7 @@ class ReviewState:
             )
             self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
+            self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -1635,6 +2140,7 @@ class ReviewState:
         self._ai_review_log_signature = file_signature(self.ai_review_log)
         self._ai_feedback_log_signature = file_signature(self.ai_feedback_log)
         self._ai_learning_log_signature = file_signature(self.ai_learning_log)
+        self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
         if self.defer_formal_sync:
             try:
                 self._ensure_formal_sync_queue_schema()
@@ -1646,6 +2152,36 @@ class ReviewState:
                 self._formal_sync_wake.set()
         if self.sql_review_enabled:
             self._start_pipeline_cache_refresh()
+
+    @staticmethod
+    def _load_json_object(path: Path | None) -> dict[str, Any]:
+        if path is None or not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _load_packet_map(path: Path | None) -> dict[str, dict[str, Any]]:
+        if path is None or not path.exists():
+            return {}
+        packets: dict[str, dict[str, Any]] = {}
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        packet = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(packet, dict) and packet.get("candidate_key"):
+                        packets[str(packet["candidate_key"])] = packet
+        except OSError:
+            return {}
+        return packets
 
     def candidate_data_status(self) -> dict[str, Any]:
         current_candidate_signature = file_signature(self.candidate_path)
@@ -1671,6 +2207,209 @@ class ReviewState:
                 else "primary"
             ),
             "formal_sync": self.formal_sync_status(),
+        }
+
+    @staticmethod
+    def _short_text(value: Any, limit: int = 1800) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+    def workflow_evidence_payload(self, candidate_key: str) -> dict[str, Any] | None:
+        case = self.three_source_cases.get(candidate_key)
+        packet = self.three_source_packets.get(candidate_key)
+        if not case and not packet:
+            return None
+        packet = packet if isinstance(packet, dict) else {}
+        official = packet.get("official_pdf_second_source") if isinstance(packet.get("official_pdf_second_source"), dict) else {}
+        visual = packet.get("visual_evidence") if isinstance(packet.get("visual_evidence"), dict) else {}
+        question_consensus = official.get("question_consensus") if isinstance(official.get("question_consensus"), dict) else {}
+        text_by_engine = question_consensus.get("question_text_by_engine") or official.get("question_text_by_engine") or {}
+        engines: dict[str, dict[str, str]] = {}
+        for engine, value in text_by_engine.items():
+            if isinstance(value, dict):
+                engines[str(engine)] = {
+                    "source_family": str(value.get("source_family") or engine),
+                    "text": self._short_text(value.get("text"), 1600),
+                }
+            else:
+                engines[str(engine)] = {"source_family": str(engine), "text": self._short_text(value, 1600)}
+        case_source = case.get("source") if isinstance(case, dict) and isinstance(case.get("source"), dict) else {}
+        evidence: dict[str, Any] = {
+            "case_id": str(case.get("case_id") or packet.get("case_id") or ""),
+            "scope_tags": [str(value) for value in (case.get("scope_tags") or [])] if isinstance(case, dict) else [],
+            "model_finding_codes": [str(value) for value in (case.get("model_finding_codes") or [])] if isinstance(case, dict) else [],
+            "pdf_flags": [str(value) for value in (case.get("pdf_flags") or official.get("flags") or [])] if isinstance(case, dict) else [str(value) for value in (official.get("flags") or [])],
+            "source": {
+                "status": str(case_source.get("status") or ""),
+                "question_consensus": str(case_source.get("question_consensus") or question_consensus.get("status") or ""),
+                "family_count": case_source.get("family_count", question_consensus.get("family_count")),
+                "raw_support": case_source.get("raw_support"),
+                "nfkc_support": case_source.get("nfkc_support"),
+                "auto_rule_candidate": bool(case_source.get("auto_rule_candidate")),
+            },
+            "pdf": {
+                "consensus_status": str(official.get("consensus_status") or ""),
+                "families": [str(value) for value in (official.get("families") or [])],
+                "page": official.get("page"),
+                "pages": official.get("pages") or [],
+                "pdf_sha256": str(official.get("pdf_sha256") or ""),
+                "text_by_engine": engines,
+            },
+            "visual": {
+                "current_asset_count": visual.get("current_asset_count", case.get("current_asset_count") if isinstance(case, dict) else 0),
+                "old_mineru_asset_count": visual.get("old_mineru_asset_count"),
+                "official_question_crop_url": f"/evidence-file?key={urllib.parse.quote(candidate_key, safe='')}&asset=official_question_crop" if visual.get("official_question_crop") else "",
+                "contact_sheet_url": f"/evidence-file?key={urllib.parse.quote(candidate_key, safe='')}&asset=contact_sheet" if visual.get("contact_sheet") else "",
+            },
+        }
+        return evidence
+
+    def evidence_file_path(self, candidate_key: str, asset_name: str) -> Path | None:
+        if self.evidence_root is None:
+            return None
+        packet = self.three_source_packets.get(candidate_key)
+        if not isinstance(packet, dict):
+            return None
+        visual = packet.get("visual_evidence") if isinstance(packet.get("visual_evidence"), dict) else {}
+        allowed = {
+            "official_question_crop": visual.get("official_question_crop"),
+            "contact_sheet": visual.get("contact_sheet"),
+        }
+        raw_path = allowed.get(asset_name)
+        if not raw_path:
+            return None
+        try:
+            path = Path(str(raw_path)).resolve()
+            path.relative_to(self.evidence_root)
+        except (OSError, ValueError):
+            return None
+        return path if path.is_file() else None
+
+    def workflow_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
+        params = params or {}
+        self.refresh_event_logs()
+        if self.sql_review_enabled:
+            source_payload = self.filtered_candidate_payloads({**params, "reviewStatus": "", "limit": "1000"})
+            payloads = list(source_payload.get("candidates") or [])
+        else:
+            payloads = [self.candidate_payload(item) for item in self.candidates]
+        selected_key = str(params.get("candidate_key") or params.get("candidateKey") or "")
+        if selected_key and all(str(item.get("candidate_key") or "") != selected_key for item in payloads):
+            item = self.candidate_by_key.get(selected_key)
+            if item is not None:
+                payloads.append(self.candidate_payload(item))
+
+        queue_counts = {key: 0 for key, _label, _description in WORKFLOW_QUEUE_DEFINITIONS}
+        queue_items: list[dict[str, Any]] = []
+        enriched_by_key: dict[str, dict[str, Any]] = {}
+        severity_rank = {"error": 0, "warning": 1, "info": 2}
+        for item in payloads:
+            key = str(item.get("candidate_key") or "")
+            if not key:
+                continue
+            evidence = self.workflow_evidence_payload(key)
+            queue = workflow_primary_queue(item, evidence)
+            queue_counts[queue["id"]] += 1
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            review = item.get("review") if isinstance(item.get("review"), dict) else {}
+            ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+            summary = {
+                "candidate_key": key,
+                "question_number": str(item.get("question_number") or ""),
+                "stem_preview": self._short_text(item.get("stem"), 220),
+                "category": str(metadata.get("normalized_category_name") or metadata.get("group_name") or ""),
+                "subject": str(metadata.get("normalized_subject_name") or ""),
+                "year": str(metadata.get("year") or ""),
+                "ordinal": str(metadata.get("exam_ordinal") or ""),
+                "primary_queue": queue["id"],
+                "queue_label": queue["label"],
+                "severity": queue["severity"],
+                "reason_codes": queue["reason_codes"],
+                "lane_statuses": queue["lane_statuses"],
+                "lane_findings": queue["lane_findings"],
+                "ai_status": str(ai_review.get("audit_status") or "unreviewed"),
+                "human_action": str(review.get("action") or "unreviewed"),
+                "human_queue": str(review.get("queue_label") or "未看過"),
+                "revision_id": str(metadata.get("ai395_staging_revision_id") or ""),
+                "has_visual_asset": bool((item.get("visual_profile") or {}).get("has_visual_asset")),
+                "evidence_status": str((evidence or {}).get("source", {}).get("status") or ""),
+            }
+            queue_items.append(summary)
+            enriched_by_key[key] = {"candidate": item, "queue": queue, "evidence": evidence}
+
+        queue_items.sort(
+            key=lambda row: (
+                severity_rank.get(str(row.get("severity") or "info"), 9),
+                0 if str(row.get("human_action") or "") in {"unreviewed", "reset_review", "needs_review"} else 1,
+                str(row.get("primary_queue") or ""),
+                str(row.get("category") or ""),
+                int_or_zero(row.get("year")),
+                int_or_zero(row.get("question_number")),
+                str(row.get("candidate_key") or ""),
+            )
+        )
+        summary = self.workflow_summary
+        analysis = self.three_source_analysis
+        analysis_cases = analysis.get("cases") if isinstance(analysis.get("cases"), list) else []
+        source_status_counts: dict[str, int] = {}
+        consensus_counts: dict[str, int] = {}
+        pdf_flag_counts: dict[str, int] = {}
+        for case in analysis_cases:
+            source = case.get("source") if isinstance(case, dict) and isinstance(case.get("source"), dict) else {}
+            status = str(source.get("status") or "unknown")
+            source_status_counts[status] = source_status_counts.get(status, 0) + 1
+            consensus = str(source.get("question_consensus") or "unknown")
+            consensus_counts[consensus] = consensus_counts.get(consensus, 0) + 1
+            for flag in case.get("pdf_flags") or []:
+                key = str(flag)
+                pdf_flag_counts[key] = pdf_flag_counts.get(key, 0) + 1
+        lane_status_counts = summary.get("lane_status_counts") if isinstance(summary.get("lane_status_counts"), dict) else {}
+        if not lane_status_counts:
+            lane_status_counts = {}
+            for item in payloads:
+                checks = (item.get("ai_review") or {}).get("checks") or {}
+                for lane, status in checks.items():
+                    lane_status_counts.setdefault(str(lane), {})[str(status)] = lane_status_counts.setdefault(str(lane), {}).get(str(status), 0) + 1
+        queue_defs = [
+            {"id": key, "label": label, "description": description, "count": queue_counts.get(key, 0)}
+            for key, label, description in WORKFLOW_QUEUE_DEFINITIONS
+        ]
+        selected = enriched_by_key.get(selected_key) if selected_key else None
+        return {
+            "ok": True,
+            "experience": "workflow_console_v1",
+            "read_only": os.environ.get("REVIEW_UI_READ_ONLY", "0").lower() not in {"0", "false", "no"},
+            "advisory_only": bool(summary.get("production_write_count", 0) == 0) if summary else True,
+            "run": {
+                key: summary.get(key)
+                for key in (
+                    "run_id", "model_mode", "model_name", "model_provider", "model_transport",
+                    "model_profile_id", "model_prompt_version", "model_endpoint_class", "source_mode",
+                    "mineru_mode", "scope_count", "llm_calls", "llm_attempts", "llm_errors",
+                    "llm_context_rejections", "llm_context_extensions", "llm_slow_calls", "llm_tool_turns", "revisions_created",
+                    "feedback_events", "feedback_skipped", "feedback_agent_attempts", "feedback_agent_calls",
+                    "feedback_agent_errors", "guardrail_candidates", "guardrail_active", "guardrail_owner_approval_required",
+                    "production_write_count", "human_review_events_written", "config_sha256",
+                )
+                if key in summary
+            },
+            "context_policy": summary.get("model_context_policy") or {},
+            "queues": queue_defs,
+            "queue_total": len(queue_items),
+            "queue_counts": queue_counts,
+            "queue_items": queue_items[:2000],
+            "selected": selected,
+            "facets": self.facets(params),
+            "three_source": {
+                "case_count": len(analysis_cases),
+                "automation": analysis.get("automation_assessment") or {},
+                "status_counts": source_status_counts,
+                "consensus_counts": consensus_counts,
+                "pdf_flag_counts": pdf_flag_counts,
+                "analysis_path": str(self.three_source_analysis_path) if self.three_source_analysis_path else None,
+            },
+            "repair_log": str(self.repair_log_path) if self.repair_log_path else None,
+            "candidate_data": self.candidate_data_status(),
         }
 
     def reload_candidate_data(self, force: bool = False, block: bool = True) -> dict[str, Any]:
@@ -1781,6 +2520,11 @@ class ReviewState:
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
             self._ai_learning_log_signature = ai_learning_signature
 
+        correction_feedback_signature = file_signature(self.correction_feedback_log)
+        if correction_feedback_signature != self._correction_feedback_log_signature:
+            self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
+            self._correction_feedback_log_signature = correction_feedback_signature
+
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
             raise RuntimeError("SQL review backend is not available.")
@@ -1859,6 +2603,55 @@ class ReviewState:
                         ON exam.question_ai_learning_events (candidate_key, audit_scope, reviewer, created_at DESC, id DESC);
                     CREATE INDEX IF NOT EXISTS idx_question_ai_learning_created
                         ON exam.question_ai_learning_events (created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS exam.question_correction_feedback_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+                        candidate_key TEXT NOT NULL,
+                        human_review_event_id BIGINT REFERENCES exam.question_review_events(id) ON DELETE SET NULL,
+                        human_answer_review_event_id BIGINT REFERENCES exam.answer_review_events(id) ON DELETE SET NULL,
+                        feedback_id TEXT NOT NULL UNIQUE,
+                        source_kind TEXT NOT NULL CHECK (source_kind IN ('human_correction', 'three_evidence_correction')),
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        lane_key TEXT,
+                        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'deterministic_system')),
+                        reviewer TEXT,
+                        event_ref TEXT,
+                        changed_fields JSONB NOT NULL,
+                        before_json JSONB NOT NULL,
+                        after_json JSONB NOT NULL,
+                        diff_json JSONB NOT NULL,
+                        evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        ai_task_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        event_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    ALTER TABLE exam.question_correction_feedback_events
+                        ADD COLUMN IF NOT EXISTS human_answer_review_event_id BIGINT
+                        REFERENCES exam.answer_review_events(id) ON DELETE SET NULL;
+                    CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_candidate
+                        ON exam.question_correction_feedback_events (candidate_key, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_source
+                        ON exam.question_correction_feedback_events (source_kind, created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS exam.question_guardrail_candidates (
+                        id BIGSERIAL PRIMARY KEY,
+                        feedback_event_id BIGINT NOT NULL REFERENCES exam.question_correction_feedback_events(id) ON DELETE RESTRICT,
+                        feedback_id TEXT NOT NULL,
+                        candidate_key TEXT NOT NULL,
+                        audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+                        lane_key TEXT,
+                        change_class TEXT NOT NULL,
+                        guardrail_type TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('observed', 'proposed', 'no_generalization', 'ai_failed', 'rejected', 'needs_owner_approval', 'approved', 'active')),
+                        candidate_json JSONB NOT NULL,
+                        validation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_status
+                        ON exam.question_guardrail_candidates (status, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_feedback
+                        ON exam.question_guardrail_candidates (feedback_id, created_at DESC, id DESC);
 
                     """
                 )
@@ -2243,7 +3036,8 @@ class ReviewState:
                 """
                 (
                     (is_reviewed AND review_action NOT IN ('accept', 'correct', 'unblock', 'exclude'))
-                    OR review_action IN ('unreviewed', 'reset_review')
+                    OR is_never_reviewed
+                    OR is_reset_unreviewed
                 )
                 """
             )
@@ -2258,7 +3052,9 @@ class ReviewState:
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
         elif review_status == "repair_pending":
-            clauses.append("COALESCE(review_event_json->>'repair_kind', '') = 'safe_text_normalization'")
+            clauses.append("is_repair_pending")
+        elif review_status == "accepted_reaudit":
+            clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
             clauses.append(
                 """
@@ -2270,9 +3066,11 @@ class ReviewState:
                 """
             )
         elif review_status == "reset_review":
-            clauses.append("review_action IN ('unreviewed', 'reset_review')")
+            clauses.append(
+                "is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending"
+            )
         elif review_status == "unreviewed":
-            clauses.append("NOT is_reviewed")
+            clauses.append("is_never_reviewed")
         elif review_status == "reviewed":
             clauses.append("is_reviewed")
         elif review_status:
@@ -2390,6 +3188,7 @@ latest_question AS (
         e.corrected_candidate_json,
         e.event_json,
         e.notes,
+        e.reviewer,
         e.created_at,
         e.id
     FROM exam.question_review_events e
@@ -2552,8 +3351,13 @@ base AS (
         lqc.corrected_candidate_json,
         lq.event_json AS review_event_json,
         lq.notes AS review_notes,
+        lq.reviewer AS review_reviewer,
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
+        (lq.candidate_key IS NULL) AS is_never_reviewed,
+        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
+        {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         lai.action AS ai_action,
         lai.provider AS ai_provider,
         lai.model_name AS ai_model_name,
@@ -2731,8 +3535,8 @@ filtered AS (
                 """
                 (
                     (is_reviewed AND review_action NOT IN ('accept', 'correct', 'unblock', 'exclude'))
-                    OR review_action IN ('unreviewed', 'reset_review')
-                    OR review_action IS NULL
+                    OR is_never_reviewed
+                    OR is_reset_unreviewed
                 )
                 """
             )
@@ -2746,6 +3550,10 @@ filtered AS (
             clauses.append("formal_usable")
         elif review_status == "answer_stage":
             clauses.append("review_action IN ('accept', 'unblock')")
+        elif review_status == "repair_pending":
+            clauses.append("is_repair_pending")
+        elif review_status == "accepted_reaudit":
+            clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
             clauses.append(
                 """
@@ -2757,9 +3565,11 @@ filtered AS (
                 """
             )
         elif review_status == "reset_review":
-            clauses.append("review_action IN ('unreviewed', 'reset_review')")
+            clauses.append(
+                "is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending"
+            )
         elif review_status == "unreviewed":
-            clauses.append("NOT is_reviewed")
+            clauses.append("is_never_reviewed")
         elif review_status == "reviewed":
             clauses.append("is_reviewed")
         elif review_status:
@@ -2779,6 +3589,7 @@ latest_question AS (
         e.corrected_candidate_json,
         e.event_json,
         e.notes,
+        e.reviewer,
         e.created_at,
         e.id
     FROM exam.question_review_events e
@@ -2851,8 +3662,13 @@ base AS (
         lq.action AS review_action,
         lq.corrected_candidate_json,
         lq.event_json AS review_event_json,
+        lq.reviewer AS review_reviewer,
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
+        (lq.candidate_key IS NULL) AS is_never_reviewed,
+        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
+        {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         (
             COALESCE(i.has_question_issue, false)
             OR (
@@ -3525,6 +4341,193 @@ filtered AS (
                     latest.setdefault(str(key), {})[str(scope)] = event
         return latest
 
+    def _sql_correction_feedback_maps(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        """Return the latest immutable before/after feedback per candidate."""
+        latest: dict[str, dict[str, Any]] = {}
+        if not keys:
+            return latest
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (candidate_key)
+                        candidate_key,
+                        event_json,
+                        feedback_id,
+                        source_kind,
+                        audit_scope,
+                        created_at,
+                        id,
+                        (
+                            SELECT jsonb_build_object(
+                                'status', guardrail.status,
+                                'candidate', guardrail.candidate_json,
+                                'validation', guardrail.validation_json,
+                                'created_at', guardrail.created_at,
+                                'guardrail_candidate_id', guardrail.id
+                            )
+                            FROM exam.question_guardrail_candidates AS guardrail
+                            WHERE guardrail.feedback_id = feedback.feedback_id
+                            ORDER BY guardrail.id DESC
+                            LIMIT 1
+                        ) AS guardrail_candidate
+                    FROM exam.question_correction_feedback_events
+                    AS feedback
+                    WHERE candidate_key = ANY(%s)
+                    ORDER BY candidate_key, id DESC
+                    """,
+                    (keys,),
+                )
+                for key, event_json, feedback_id, source_kind, scope, created_at, event_id, guardrail_candidate in cur.fetchall():
+                    event = self._db_event_value(
+                        event_json,
+                        {
+                            "feedback_id": feedback_id,
+                            "candidate_key": key,
+                            "source_kind": source_kind,
+                            "scope": scope,
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "feedback_event_id": int(event_id),
+                        },
+                    )
+                    event.setdefault("feedback_event_id", int(event_id))
+                    if isinstance(guardrail_candidate, dict):
+                        event["guardrail_candidate"] = guardrail_candidate
+                    latest[str(key)] = event
+        return latest
+
+    def correction_feedback_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
+        """Expose the immutable correction outbox without granting activation rights."""
+        params = params or {}
+        candidate_key = str(params.get("candidate_key") or params.get("candidateKey") or "").strip()
+        try:
+            limit = max(1, min(int(params.get("limit") or "100"), 500))
+        except ValueError:
+            limit = 100
+        requested_status = str(params.get("status") or "").strip().lower()
+        if requested_status not in {"", "pending", "all"}:
+            requested_status = ""
+
+        events: list[dict[str, Any]] = []
+        if not self.sql_review_enabled:
+            events = load_correction_feedback_rows(self.correction_feedback_log, limit=500)
+        else:
+            with self._sql_connect() as conn:
+                with conn.cursor() as cur:
+                    if candidate_key:
+                        cur.execute(
+                            """
+                            SELECT id, candidate_key, feedback_id, source_kind, audit_scope,
+                                   lane_key, reviewer, event_ref, changed_fields, before_json,
+                                   after_json, diff_json, evidence_json, ai_task_json, event_json,
+                                   created_at
+                            FROM exam.question_correction_feedback_events
+                            WHERE candidate_key = %s
+                            ORDER BY id ASC
+                            LIMIT %s
+                            """,
+                            (candidate_key, limit),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT id, candidate_key, feedback_id, source_kind, audit_scope,
+                                   lane_key, reviewer, event_ref, changed_fields, before_json,
+                                   after_json, diff_json, evidence_json, ai_task_json, event_json,
+                                   created_at
+                            FROM exam.question_correction_feedback_events
+                            ORDER BY id ASC
+                            LIMIT %s
+                            """,
+                            (limit,),
+                        )
+                    rows = cur.fetchall()
+                    for (
+                        event_id,
+                        key,
+                        feedback_id,
+                        source_kind,
+                        scope,
+                        lane,
+                        reviewer,
+                        event_ref,
+                        changed_fields,
+                        before_json,
+                        after_json,
+                        diff_json,
+                        evidence_json,
+                        ai_task_json,
+                        event_json,
+                        created_at,
+                    ) in rows:
+                        fallback = {
+                            "feedback_id": feedback_id,
+                            "candidate_key": key,
+                            "source_kind": source_kind,
+                            "scope": scope,
+                            "lane": lane or "",
+                            "reviewer": reviewer or "",
+                            "event_ref": event_ref or "",
+                            "changed_fields": changed_fields or [],
+                            "before": before_json or {},
+                            "after": after_json or {},
+                            "diff": diff_json or [],
+                            "evidence": evidence_json or [],
+                            "ai_task": ai_task_json or {},
+                            "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                            "feedback_event_id": int(event_id),
+                        }
+                        events.append(self._db_event_value(event_json, fallback))
+
+        if self.sql_review_enabled and events:
+            feedback_ids = [str(event.get("feedback_id") or "") for event in events if event.get("feedback_id")]
+            if feedback_ids:
+                guardrails: dict[str, dict[str, Any]] = {}
+                with self._sql_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT ON (feedback_id)
+                                   feedback_id, status, candidate_json, validation_json, created_at, id
+                            FROM exam.question_guardrail_candidates
+                            WHERE feedback_id = ANY(%s)
+                            ORDER BY feedback_id, id DESC
+                            """,
+                            (feedback_ids,),
+                        )
+                        for feedback_id, status, candidate_json, validation_json, created_at, guardrail_id in cur.fetchall():
+                            guardrails[str(feedback_id)] = {
+                                "status": status,
+                                "candidate": candidate_json or {},
+                                "validation": validation_json or {},
+                                "created_at": created_at.isoformat(timespec="seconds") if created_at else None,
+                                "guardrail_candidate_id": int(guardrail_id),
+                            }
+                for event in events:
+                    guardrail = guardrails.get(str(event.get("feedback_id") or ""))
+                    if guardrail:
+                        event["guardrail_candidate"] = guardrail
+
+        if requested_status == "pending":
+            events = [
+                event
+                for event in events
+                if not isinstance(event.get("guardrail_candidate"), dict)
+                or not event["guardrail_candidate"].get("status")
+            ]
+        events = events[-limit:]
+        return {
+            "ok": True,
+            "experience": "correction_feedback_outbox_v1",
+            "advisory_only": True,
+            "owner_approval_required": True,
+            "direct_rule_or_skill_write": False,
+            "candidate_key": candidate_key or None,
+            "status_filter": requested_status or "all",
+            "count": len(events),
+            "events": events,
+        }
+
     def batch_accept_questions(self, candidate_keys: list[str], reviewer: str = "local", notes: str = "") -> dict[str, Any]:
         saved: list[dict[str, Any]] = []
         pending_events: list[dict[str, Any]] = []
@@ -4189,6 +5192,7 @@ filtered AS (
         latest_group_reviews: dict[str, dict[str, Any]] | None = None,
         latest_ai_feedbacks: dict[str, dict[str, dict[str, Any]]] | None = None,
         latest_ai_learnings: dict[str, dict[str, dict[str, Any]]] | None = None,
+        latest_correction_feedbacks: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         key = item["candidate_key"]
         issues_by_key = self.issues if issues_by_key is None else issues_by_key
@@ -4203,6 +5207,7 @@ filtered AS (
         latest_group_reviews = self.latest_group_reviews if latest_group_reviews is None else latest_group_reviews
         latest_ai_feedbacks = self.latest_ai_feedbacks if latest_ai_feedbacks is None else latest_ai_feedbacks
         latest_ai_learnings = getattr(self, "latest_ai_learnings", {}) if latest_ai_learnings is None else latest_ai_learnings
+        latest_correction_feedbacks = getattr(self, "latest_correction_feedbacks", {}) if latest_correction_feedbacks is None else latest_correction_feedbacks
         copy = dict(item)
         metadata = copy.get("metadata") or {}
         issues = issues_by_key.get(key, [])
@@ -4218,6 +5223,7 @@ filtered AS (
         copy["answer_issue_count"] = len(answer_issues)
         latest_review = latest_reviews.get(key)
         latest_reset_review = latest_reset_reviews.get(key)
+        review_projection_data = review_projection(latest_review, latest_reset_review, metadata)
         copy["repair_status"] = repair_event_info(latest_review, latest_reset_review, metadata)
         review_event = latest_review or latest_reset_review
         correction = normalized_correction(review_event.get("correction") if review_event else None)
@@ -4284,8 +5290,18 @@ filtered AS (
             "has_correction": bool(correction),
             "correction": correction or None,
             "reset": latest_reset_review,
-            "is_reset_unreviewed": bool(latest_reset_review and not latest_review),
+            "is_reset_unreviewed": review_projection_data["is_reset_unreviewed"],
+            "has_human_event": review_projection_data["has_human_event"],
+            "is_never_reviewed": review_projection_data["is_never_reviewed"],
+            "is_repair_pending": review_projection_data["is_repair_pending"],
+            "is_accepted_reaudit_pending": review_projection_data["is_accepted_reaudit_pending"],
+            "was_previously_accepted": review_projection_data["was_previously_accepted"],
+            "previous_action": review_projection_data["previous_action"],
+            "queue_bucket": review_projection_data["queue_bucket"],
+            "queue_label": review_projection_data["display_label"],
         }
+        correction_feedback = latest_correction_feedbacks.get(key)
+        copy["correction_feedback"] = correction_feedback
         latest_action = latest_review.get("action") if latest_review else None
         formal = dict(formal_question_map.get(key) or {"in_formal": False})
         physical_in_formal = bool(formal.get("in_formal"))
@@ -4374,6 +5390,7 @@ filtered AS (
             "findings": ai_audit.get("findings") if isinstance(ai_audit, dict) else [],
             "labels": ai_audit.get("labels") if isinstance(ai_audit, dict) else [],
             "checks": ai_audit.get("checks") if isinstance(ai_audit, dict) else {},
+            "lane_results": compact_ai_lane_results(historical_ai_audit),
             "suggested_correction": ai_suggestion,
             "suggested_changes": ai_suggestion_changes,
             "correction_coverage": ai_audit.get("correction_coverage") if isinstance(ai_audit, dict) else None,
@@ -4886,14 +5903,23 @@ filtered AS (
             key = item["candidate_key"]
             latest_review = self.latest_reviews.get(key)
             latest_reset_review = self.latest_reset_reviews.get(key)
+            metadata = item.get("metadata") or {}
+            review_projection_data = review_projection(latest_review, latest_reset_review, metadata)
             review = {
                 "status": "reviewed" if latest_review else "unreviewed",
                 "action": latest_review.get("action") if latest_review else None,
                 "notes": latest_review.get("notes") if latest_review else None,
                 "reset": latest_reset_review,
-                "is_reset_unreviewed": bool(latest_reset_review and not latest_review),
+                "is_reset_unreviewed": review_projection_data["is_reset_unreviewed"],
+                "has_human_event": review_projection_data["has_human_event"],
+                "is_never_reviewed": review_projection_data["is_never_reviewed"],
+                "is_repair_pending": review_projection_data["is_repair_pending"],
+                "is_accepted_reaudit_pending": review_projection_data["is_accepted_reaudit_pending"],
+                "was_previously_accepted": review_projection_data["was_previously_accepted"],
+                "previous_action": review_projection_data["previous_action"],
+                "queue_bucket": review_projection_data["queue_bucket"],
+                "queue_label": review_projection_data["display_label"],
             }
-            metadata = item.get("metadata") or {}
             category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
             subject = metadata.get("normalized_subject_name") or ""
             latest_ai_review = self.latest_ai_reviews.get(key)
@@ -4909,12 +5935,23 @@ filtered AS (
             if review_status == "not_accept":
                 review_match = (
                     (review["status"] == "reviewed" and review["action"] not in {"accept", "correct", "unblock", "exclude"})
-                    or bool(latest_reset_review and not latest_review)
+                    or review["is_never_reviewed"]
+                    or review["is_reset_unreviewed"]
                 )
             elif review_status == "correct":
                 review_match = bool(latest_review and normalized_correction(latest_review.get("correction")))
+            elif review_status == "repair_pending":
+                review_match = review["is_repair_pending"]
+            elif review_status == "accepted_reaudit":
+                review_match = review["is_accepted_reaudit_pending"]
             elif review_status == "reset_review":
-                review_match = bool(latest_reset_review and not latest_review)
+                review_match = (
+                    review["is_reset_unreviewed"]
+                    and not review["is_repair_pending"]
+                    and not review["is_accepted_reaudit_pending"]
+                )
+            elif review_status == "unreviewed":
+                review_match = review["is_never_reviewed"]
             elif review_status == "exclude":
                 review_match = review["action"] == "exclude"
             else:
@@ -5048,6 +6085,7 @@ filtered AS (
             keys,
             reviewer=params.get("reviewer") or "local",
         )
+        latest_correction_feedbacks = self._sql_correction_feedback_maps(keys)
 
         payloads: list[dict[str, Any]] = []
         for item in rows:
@@ -5065,6 +6103,7 @@ filtered AS (
                 latest_group_reviews=latest_group_reviews,
                 latest_ai_feedbacks=latest_ai_feedbacks,
                 latest_ai_learnings=latest_ai_learnings,
+                latest_correction_feedbacks=latest_correction_feedbacks,
             )
             payload["mobile_review"] = mobile_reviews.get(
                 str(item.get("candidate_key") or ""),
@@ -6240,6 +7279,84 @@ filtered_sheets AS (
             "event_id": event_id,
         }
 
+    def _insert_sql_correction_feedback_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self.sql_review_enabled:
+            return {"ok": True, "sql_primary": False, "table": "exam.question_correction_feedback_events"}
+        if Jsonb is None:
+            raise SqlWriteError("SQL JSONB adapter is not available.")
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO exam.question_correction_feedback_events (
+                        candidate_id,
+                        candidate_key,
+                        human_review_event_id,
+                        human_answer_review_event_id,
+                        feedback_id,
+                        source_kind,
+                        audit_scope,
+                        lane_key,
+                        actor_kind,
+                        reviewer,
+                        event_ref,
+                        changed_fields,
+                        before_json,
+                        after_json,
+                        diff_json,
+                        evidence_json,
+                        ai_task_json,
+                        event_json,
+                        created_at
+                    )
+                    SELECT id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())
+                    FROM exam.question_candidates
+                    WHERE candidate_key = %s
+                    ON CONFLICT (feedback_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        event.get("candidate_key"),
+                        event.get("human_review_event_id"),
+                        event.get("human_answer_review_event_id"),
+                        event.get("feedback_id"),
+                        event.get("source_kind"),
+                        event.get("scope"),
+                        event.get("lane") or None,
+                        event.get("actor_kind"),
+                        event.get("reviewer") or None,
+                        event.get("event_ref") or None,
+                        Jsonb(event.get("changed_fields") or []),
+                        Jsonb(event.get("before") or {}),
+                        Jsonb(event.get("after") or {}),
+                        Jsonb(event.get("diff") or []),
+                        Jsonb(event.get("evidence") or []),
+                        Jsonb(event.get("ai_task") or {}),
+                        Jsonb(event),
+                        event.get("created_at"),
+                        event.get("candidate_key"),
+                    ),
+                )
+                row = cur.fetchone()
+                if row:
+                    event_id = int(row[0])
+                else:
+                    cur.execute(
+                        "SELECT id FROM exam.question_correction_feedback_events WHERE feedback_id = %s",
+                        (event.get("feedback_id"),),
+                    )
+                    existing = cur.fetchone()
+                    if not existing:
+                        raise SqlWriteError(f"candidate_key not found in SQL: {event.get('candidate_key')}")
+                    event_id = int(existing[0])
+            conn.commit()
+        return {
+            "ok": True,
+            "sql_primary": True,
+            "table": "exam.question_correction_feedback_events",
+            "event_id": event_id,
+        }
+
     def _ensure_formal_sync_schema(self, conn: Any) -> None:
         if self._formal_sync_schema_ready:
             return
@@ -6671,9 +7788,167 @@ filtered_sheets AS (
                 "errors": [str(exc)],
             }
 
+    def _raw_candidate_for_feedback(self, candidate_key: str) -> dict[str, Any] | None:
+        if self.sql_review_enabled:
+            return self._candidate_by_key_sql(candidate_key)
+        return self.candidate_by_key.get(candidate_key)
+
+    def _feedback_before_snapshot(self, candidate_key: str) -> dict[str, Any]:
+        candidate = self._raw_candidate_for_feedback(candidate_key) or {}
+        before = question_snapshot(candidate)
+        previous = self.current_question_review(candidate_key)
+        previous_correction = normalized_correction(previous.get("correction")) if previous else {}
+        if previous_correction:
+            before = apply_feedback_correction(before, previous_correction)
+        return question_snapshot(before)
+
+    @staticmethod
+    def _event_is_human_correction(event: dict[str, Any]) -> bool:
+        source = str(event.get("source") or "").strip().lower()
+        reviewer = str(event.get("reviewer") or "").strip().lower()
+        if source in {"ai_suggestion", "ai_auto", "deterministic_rule", "parser_repair"}:
+            return False
+        if source.startswith(("ai_", "repair_", "backfill_", "parser_", "deterministic_")):
+            return False
+        if reviewer.startswith(REPAIR_REVIEWER_PREFIXES):
+            return False
+        return True
+
+    def _append_correction_feedback(
+        self,
+        *,
+        candidate_key: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        source_kind: str,
+        scope: str,
+        lane: str,
+        reviewer: str,
+        human_review_event_id: int | None,
+        event_ref: str,
+        evidence: list[dict[str, Any]],
+        created_at: str,
+    ) -> dict[str, Any] | None:
+        try:
+            feedback = build_feedback_event(
+                candidate_key=candidate_key,
+                before=before,
+                after=after,
+                source_kind=source_kind,
+                scope=scope,
+                lane=lane,
+                reviewer=reviewer,
+                event_ref=event_ref,
+                evidence=evidence,
+                question_number=after.get("question_number") or before.get("question_number"),
+                created_at=created_at,
+            )
+        except NoVisibleChange:
+            # Accepting or re-saving an unchanged candidate is not a formatting
+            # lesson.  Keep the human review event, but do not manufacture AI
+            # feedback from a no-op.
+            return None
+        except FeedbackContractError:
+            raise
+        if source_kind == "human_correction" and scope == "answer":
+            if human_review_event_id is not None:
+                feedback["human_answer_review_event_id"] = human_review_event_id
+        elif human_review_event_id is not None:
+            feedback["human_review_event_id"] = human_review_event_id
+        sql_storage = self._insert_sql_correction_feedback_event(feedback)
+        jsonl_storage = self._legacy_jsonl_storage(self.correction_feedback_log, feedback)
+        self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
+        self.latest_correction_feedbacks[candidate_key] = feedback
+        return {
+            "event": feedback,
+            "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage},
+        }
+
+    def _record_question_correction_feedback(
+        self,
+        event: dict[str, Any],
+        *,
+        before: dict[str, Any],
+        review_storage: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidate_key = str(event.get("candidate_key") or "")
+        correction = normalized_correction(event.get("correction"))
+        if not candidate_key or not correction or not self._event_is_human_correction(event):
+            return None
+        after = apply_feedback_correction(before, correction)
+        changed_scope = "visual" if any(
+            key in correction for key in ("image_refs", "stem_image", "answer_image_refs", "visual_review")
+        ) else "group" if any(key in correction for key in ("group_ref", "group_sequence_no")) else "question"
+        evidence = [{
+            "kind": "human_review",
+            "source": str(event.get("review_surface") or event.get("source") or "review_ui"),
+            "reference": str(review_storage.get("event_id") or event.get("created_at") or "human_review"),
+            "status": "human_confirmed",
+        }]
+        if isinstance(event.get("manual_asset"), dict):
+            asset = event["manual_asset"]
+            evidence.append({
+                "kind": "human_review",
+                "family": "manual_asset",
+                "reference": str(asset.get("asset_key") or "manual_asset"),
+                "sha256": str(asset.get("sha256") or ""),
+                "status": "human_confirmed",
+            })
+        for row in event.get("evidence") or []:
+            if isinstance(row, dict):
+                evidence.append(row)
+        event_id = review_storage.get("event_id")
+        return self._append_correction_feedback(
+            candidate_key=candidate_key,
+            before=before,
+            after=after,
+            source_kind="human_correction",
+            scope=changed_scope,
+            lane=str(event.get("lane") or changed_scope),
+            reviewer=str(event.get("reviewer") or "local"),
+            human_review_event_id=int(event_id) if event_id not in (None, "") else None,
+            event_ref=f"human_review:{event_id or event.get('created_at') or candidate_key}",
+            evidence=evidence,
+            created_at=str(event.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+        )
+
+    def _record_answer_correction_feedback(
+        self,
+        event: dict[str, Any],
+        *,
+        before: dict[str, Any],
+        review_storage: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidate_key = str(event.get("candidate_key") or "")
+        if not candidate_key or not self._event_is_human_correction(event):
+            return None
+        if "corrected_answer" not in event or event.get("corrected_answer") in (None, ""):
+            return None
+        after = apply_feedback_correction(before, {"answer": event.get("corrected_answer")})
+        event_id = review_storage.get("event_id")
+        return self._append_correction_feedback(
+            candidate_key=candidate_key,
+            before=before,
+            after=after,
+            source_kind="human_correction",
+            scope="answer",
+            lane="answer",
+            reviewer=str(event.get("reviewer") or "local"),
+            human_review_event_id=int(event_id) if event_id not in (None, "") else None,
+            event_ref=f"human_answer_review:{event_id or event.get('created_at') or candidate_key}",
+            evidence=[{
+                "kind": "human_review",
+                "source": "answer_review_ui",
+                "reference": str(event_id or event.get("created_at") or "human_answer_review"),
+                "status": "human_confirmed",
+            }],
+            created_at=str(event.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+        )
+
     def append_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
+        feedback_before = self._feedback_before_snapshot(str(key or "")) if event.get("correction") else None
         if event.get("action") == "correct":
             previous = self.current_question_review(str(key or ""))
             previous_action = previous.get("action") if previous else None
@@ -6684,6 +7959,17 @@ filtered_sheets AS (
         jsonl_storage = self._legacy_jsonl_storage(self.review_log, event)
         self._review_log_signature = file_signature(self.review_log)
         storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+        if feedback_before is not None:
+            try:
+                feedback_storage = self._record_question_correction_feedback(
+                    event,
+                    before=feedback_before,
+                    review_storage=sql_storage,
+                )
+            except FeedbackContractError as exc:
+                feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+            if feedback_storage is not None:
+                storage["correction_feedback"] = feedback_storage
         if key:
             if event.get("action") not in MOBILE_REVIEW_ACTIONS:
                 self.review_counts[key] = self.review_counts.get(key, 0) + 1
@@ -6713,17 +7999,31 @@ filtered_sheets AS (
         created_at = datetime.now().isoformat(timespec="seconds")
         for raw_event in events:
             event = dict(raw_event)
-            if not str(event.get("candidate_key") or ""):
+            key = str(event.get("candidate_key") or "")
+            if not key:
                 continue
+            if event.get("action") == "correct":
+                previous = self.current_question_review(key)
+                previous_action = previous.get("action") if previous else None
+                event.setdefault("correction_action", "save")
+                event["action"] = previous_action if previous_action in {
+                    "accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"
+                } else "reviewed"
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:
             return []
+        feedback_befores = [
+            self._feedback_before_snapshot(str(event.get("candidate_key") or ""))
+            if event.get("correction") and self._event_is_human_correction(event)
+            else None
+            for event in normalized_events
+        ]
         sql_storages = self._insert_sql_question_review_events(normalized_events)
         jsonl_storage = self._legacy_jsonl_storage_many(self.review_log, normalized_events)
         self._review_log_signature = file_signature(self.review_log)
         saved: list[dict[str, Any]] = []
-        for event, sql_storage in zip(normalized_events, sql_storages):
+        for event, sql_storage, feedback_before in zip(normalized_events, sql_storages, feedback_befores):
             key = str(event.get("candidate_key") or "")
             self.review_counts[key] = self.review_counts.get(key, 0) + 1
             if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -6732,7 +8032,19 @@ filtered_sheets AS (
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
-            saved.append({**event, "storage": {**sql_storage, "legacy_jsonl_backup": jsonl_storage}})
+            storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+            if feedback_before is not None:
+                try:
+                    feedback_storage = self._record_question_correction_feedback(
+                        event,
+                        before=feedback_before,
+                        review_storage=sql_storage,
+                    )
+                except FeedbackContractError as exc:
+                    feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+                if feedback_storage is not None:
+                    storage["correction_feedback"] = feedback_storage
+            saved.append({**event, "storage": storage})
         if self.defer_formal_sync:
             self._wake_formal_sync_worker()
             formal_sync = {"ok": True, "enabled": True, "queued": True}
@@ -6745,6 +8057,7 @@ filtered_sheets AS (
     def append_answer_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
+        feedback_before = self._feedback_before_snapshot(str(key or "")) if "corrected_answer" in event else None
         if event.get("action") == "correct":
             previous = self.latest_answer_reviews.get(key or "")
             previous_action = previous.get("action") if previous else None
@@ -6755,6 +8068,17 @@ filtered_sheets AS (
         jsonl_storage = self._legacy_jsonl_storage(self.answer_review_log, event)
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+        if feedback_before is not None:
+            try:
+                feedback_storage = self._record_answer_correction_feedback(
+                    event,
+                    before=feedback_before,
+                    review_storage=sql_storage,
+                )
+            except FeedbackContractError as exc:
+                feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+            if feedback_storage is not None:
+                storage["correction_feedback"] = feedback_storage
         if key:
             self.answer_review_counts[key] = self.answer_review_counts.get(key, 0) + 1
             if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -6800,6 +8124,12 @@ filtered_sheets AS (
             normalized_events.append(event)
         if not normalized_events:
             return []
+        feedback_befores = [
+            self._feedback_before_snapshot(str(event.get("candidate_key") or ""))
+            if "corrected_answer" in event and self._event_is_human_correction(event)
+            else None
+            for event in normalized_events
+        ]
         sql_storages = self._insert_sql_answer_review_events(normalized_events)
         if self.legacy_jsonl_backup_enabled or not self.sql_review_enabled:
             try:
@@ -6816,9 +8146,20 @@ filtered_sheets AS (
             jsonl_storage = {"ok": True, "enabled": False, "path": str(self.answer_review_log)}
         self._answer_review_log_signature = file_signature(self.answer_review_log)
         saved: list[dict[str, Any]] = []
-        for event, sql_storage in zip(normalized_events, sql_storages):
+        for event, sql_storage, feedback_before in zip(normalized_events, sql_storages, feedback_befores):
             key = str(event.get("candidate_key") or "")
             storage = {**sql_storage, "legacy_jsonl_backup": jsonl_storage}
+            if feedback_before is not None:
+                try:
+                    feedback_storage = self._record_answer_correction_feedback(
+                        event,
+                        before=feedback_before,
+                        review_storage=sql_storage,
+                    )
+                except FeedbackContractError as exc:
+                    feedback_storage = {"ok": False, "error": str(exc), "status": "not_recorded"}
+                if feedback_storage is not None:
+                    storage["correction_feedback"] = feedback_storage
             if key:
                 self.answer_review_counts[key] = self.answer_review_counts.get(key, 0) + 1
                 if event.get("action") in RESET_REVIEW_ACTIONS:
@@ -7674,12 +9015,33 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path, head_only=True):
             return
-        if parsed.path == "/":
+        if parsed.path in {"/", "/workflow", "/workflow/"}:
+            data = workflow_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path in {"/legacy", "/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path == "/evidence-file":
+            query = urllib.parse.parse_qs(parsed.query)
+            path = self.state.evidence_file_path(query.get("key", [""])[0], query.get("asset", [""])[0])
+            if path is None:
+                self.send_error(404, "Evidence file not found or not allowed")
+                return
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(path.stat().st_size))
             self.end_headers()
             return
         if parsed.path == "/file":
@@ -7704,7 +9066,16 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/mobile") and self.send_mobile_asset(parsed.path):
             return
-        if parsed.path == "/":
+        if parsed.path in {"/", "/workflow", "/workflow/"}:
+            data = workflow_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path in {"/legacy", "/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -7712,6 +9083,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        if parsed.path == "/evidence-file":
+            query = urllib.parse.parse_qs(parsed.query)
+            path = self.state.evidence_file_path(query.get("key", [""])[0], query.get("asset", [""])[0])
+            if path is None:
+                self.send_error(404, "Evidence file not found or not allowed")
+                return
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/api/workflow":
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            self.send_json(self.state.workflow_payload(params))
             return
         if parsed.path == "/api/candidates":
             self.state.refresh_event_logs()
@@ -7775,6 +9166,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reload-status":
             self.state.refresh_event_logs()
             self.send_json(self.state.candidate_data_status())
+            return
+        if parsed.path == "/api/correction-feedback":
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            self.send_json(self.state.correction_feedback_payload(params))
             return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
@@ -8207,7 +9603,7 @@ class MobileHandler(Handler):
     def do_HEAD(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            self.path = "/mobile/"
+            self.path = "/mobile/workflow/"
             super().do_HEAD()
             return
         if parsed.path.startswith("/mobile"):
@@ -8218,17 +9614,17 @@ class MobileHandler(Handler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            self.path = "/mobile/"
+            self.path = "/mobile/workflow/"
             super().do_GET()
             return
-        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/reload-status"}:
+        if parsed.path.startswith("/mobile") or parsed.path in {"/api/candidates", "/api/workflow", "/api/reload-status", "/api/correction-feedback", "/evidence-file", "/file", "/legacy", "/legacy/"}:
             super().do_GET()
             return
         self.send_error(404, "Not found")
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/mobile-review":
+        if parsed.path in {"/api/mobile-review", "/api/review"}:
             super().do_POST()
             return
         self.send_error(404, "Not found")
@@ -8281,6 +9677,8 @@ PAGE_HTML = r"""<!doctype html>
     .badge.reviewed { background:#dbeafe; color:var(--blue); }
     .badge.unreviewed { background:#edf0f5; color:#475467; }
     .badge.reset_review { background:#fff1cf; color:#9a5b00; border:1px solid #f2c94c; }
+    .badge.repair_pending { background:#eef4ff; color:#174ea6; border:1px solid #b9cdf8; }
+    .badge.accepted_reaudit { background:#f2ecff; color:#6941c6; border:1px solid #c7b5f6; }
     .badge.repaired { background:#e0f2fe; color:#0369a1; border:1px solid #7dd3fc; }
     .badge.formal { background:#eef4ff; color:#175cd3; border:1px solid #b2ccff; }
     .badge.formal_drift { background:#fff1cf; color:#9a5b00; border:1px solid #f2c94c; }
@@ -8439,6 +9837,7 @@ PAGE_HTML = r"""<!doctype html>
       <option value="unreviewed" selected>未看過</option>
       <option value="reset_review">退回未審</option>
       <option value="repair_pending">修復待複核</option>
+      <option value="accepted_reaudit">已通過後待複核</option>
       <option value="not_accept">未通過</option>
       <option value="exclude">非題目/已排除</option>
       <option value="formal">已入正式庫</option>
@@ -8557,6 +9956,8 @@ const STATUS_LABELS = {
   reviewed: '已看過',
   unreviewed: '未看過',
   reset_review: '退回未審',
+  repair_pending: '修復待複核',
+  accepted_reaudit: '已通過後待複核',
   formal: '已入正式庫',
   formal_drift: '正式庫待同步',
   visual: '待處理',
@@ -8599,6 +10000,8 @@ function systemListLabel(status) {
 }
 
 function humanListLabel(review) {
+  if (review?.is_accepted_reaudit_pending) return '已通過後待複核';
+  if (review?.is_repair_pending) return '修復後待複核';
   if (review?.is_reset_unreviewed) return '退回未審';
   const action = String(review?.action || '').trim();
   const labels = {
@@ -8635,6 +10038,7 @@ function workflowStageLabel(item, itemMode = mode) {
   const review = item?.review || {};
   const action = String(review.action || '');
   if (action === 'exclude') return '已排除';
+  if (review.is_accepted_reaudit_pending || review.is_repair_pending) return '題目待複核';
   if (review.is_reset_unreviewed || review.status !== 'reviewed' || ['unreviewed', 'reset_review', ''].includes(action)) return '題目待人工';
   if (['block', 'needs_review', 'correct', 'comment'].includes(action)) return '題目待處理';
   const formal = item?.formal || {};
@@ -9725,7 +11129,8 @@ function itemMatchesCurrentReviewFilter(item) {
   if (reviewStatus !== 'exclude' && action === 'exclude') return false;
   if (!reviewStatus) return true;
   if (reviewStatus === 'not_accept') {
-    return (status === 'reviewed' && !['accept', 'correct', 'unblock', 'exclude'].includes(action)) || Boolean(review.is_reset_unreviewed);
+    return (status === 'reviewed' && !['accept', 'correct', 'unblock', 'exclude'].includes(action))
+      || Boolean(review.is_never_reviewed || review.is_reset_unreviewed);
   }
   if (reviewStatus === 'exclude') {
     return action === 'exclude';
@@ -9733,8 +11138,17 @@ function itemMatchesCurrentReviewFilter(item) {
   if (reviewStatus === 'correct') {
     return Boolean(review.correction);
   }
+  if (reviewStatus === 'repair_pending') {
+    return Boolean(review.is_repair_pending);
+  }
+  if (reviewStatus === 'accepted_reaudit') {
+    return Boolean(review.is_accepted_reaudit_pending);
+  }
   if (reviewStatus === 'reset_review') {
-    return Boolean(review.is_reset_unreviewed);
+    return Boolean(review.is_reset_unreviewed && !review.is_repair_pending && !review.is_accepted_reaudit_pending);
+  }
+  if (reviewStatus === 'unreviewed') {
+    return Boolean(review.is_never_reviewed);
   }
   if (reviewStatus === 'formal') {
     return Boolean(item.formal?.in_formal);
@@ -9873,7 +11287,13 @@ function renderList() {
       </button>`;
     }
     const review = mode === 'answer' ? (item.answer_review || {}) : (item.review || {});
-    const reviewBadge = review.is_reset_unreviewed ? 'reset_review' : (review.action || review.status || 'unreviewed');
+    const reviewBadge = review.is_accepted_reaudit_pending
+      ? 'accepted_reaudit'
+      : review.is_repair_pending
+        ? 'repair_pending'
+        : review.is_reset_unreviewed
+          ? 'reset_review'
+          : (review.action || review.status || 'unreviewed');
     const reviewLabel = humanListLabel(review);
     const aiReview = item.ai_review || {};
     const aiBadge = mode !== 'visual' && aiReview.active !== false && aiReview.audit_status && aiReview.audit_status !== 'pass'
@@ -10200,8 +11620,14 @@ function renderDetail() {
   }
   const meta = current.metadata || {};
   const reviewState = current.review || {};
-  const reviewBadge = reviewState.is_reset_unreviewed ? 'reset_review' : (reviewState.action || reviewState.status || 'unreviewed');
-  const reviewLabel = reviewState.is_reset_unreviewed ? '退回未審' : statusLabel(reviewBadge);
+  const reviewBadge = reviewState.is_accepted_reaudit_pending
+    ? 'accepted_reaudit'
+    : reviewState.is_repair_pending
+      ? 'repair_pending'
+      : reviewState.is_reset_unreviewed
+        ? 'reset_review'
+        : (reviewState.action || reviewState.status || 'unreviewed');
+  const reviewLabel = reviewState.queue_label || statusLabel(reviewBadge);
   const hasCorrection = Boolean(reviewState.has_correction);
   updatePdfViewer();
   if (mode === 'answer') {
@@ -10243,10 +11669,12 @@ function renderDetail() {
     </div>` : '';
   const reset = reviewState.reset || {};
   const repairStatus = current.repair_status || {};
-  const repairBadge = repairStatus.active ? '<span class="badge repaired">已修待複核</span>' : '';
+  const repairBadge = repairStatus.active
+    ? `<span class="badge ${esc(reviewBadge)}">${esc(reviewState.queue_label || repairStatus.label || '待複核')}</span>`
+    : '';
   const repairNote = repairStatus.active ? `
     <div class="issue info">
-      <b>已修待複核</b><br>
+      <b>${esc(reviewState.queue_label || repairStatus.label || '待複核')}</b><br>
       <span class="meta">來源：${esc(repairStatus.reviewer || (repairStatus.sources || []).join(', ') || '系統修整')} ${esc(repairStatus.updated_at || '')}</span>
       ${repairStatus.notes ? `<div class="stem">${renderText(repairStatus.notes)}</div>` : ''}
     </div>` : '';
@@ -10254,7 +11682,7 @@ function renderDetail() {
   const resetNotes = reset.reset_notes || reset.notes || '';
   const resetNote = reviewState.is_reset_unreviewed ? `
     <div class="issue warning">
-      <b>退回未審</b><br>
+      <b>${esc(reviewState.queue_label || '退回未審')}</b><br>
       <span class="meta">上一個狀態：${esc(reset.previous_action || '未知')} ${esc(reset.previous_reviewed_at || '')}</span>
       ${previousNotes ? `<hr><b>原人工註記</b><div class="stem">${renderText(previousNotes)}</div>` : ''}
       ${resetNotes ? `<hr><b>本次修整說明</b><div class="stem">${renderText(resetNotes)}</div>` : ''}
@@ -11660,6 +13088,10 @@ def main() -> None:
         review_log,
         auto_reload_candidates=args.auto_reload_candidates,
         review_backend=args.review_backend,
+        run_summary_path=args.run_summary,
+        three_source_analysis_path=args.three_source_analysis,
+        three_source_packets_path=args.three_source_packets,
+        repair_log_path=args.repair_log,
     )
     if args.mobile_port == args.port:
         raise SystemExit("--mobile-port must differ from --port")

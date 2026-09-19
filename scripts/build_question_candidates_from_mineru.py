@@ -275,6 +275,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Limit paired documents for smoke tests. 0 means no limit.")
     parser.add_argument("--registry-key", action="append", default=[], help="Only process selected question registry key(s).")
     parser.add_argument("--group-name", action="append", default=[], help="Only process selected group_name values.")
+    parser.add_argument("--year", action="append", default=[], help="Only process selected ROC year value(s).")
     parser.add_argument("--include-needs-review", action="store_true", help="Keep candidates even when they have warning issues.")
     return parser.parse_args()
 
@@ -294,6 +295,16 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 def project_path(value: str) -> Path:
     path = Path(value)
     if path.is_absolute():
+        if path.exists():
+            return path
+        # Historical pair indexes were generated before the repository moved
+        # into the AI workspace and retain the old absolute prefix. Rebase
+        # only the known immutable asset-root suffix; never guess a path that
+        # does not contain the catalog root marker.
+        parts = path.parts
+        if "國考題資料夾" in parts:
+            marker = parts.index("國考題資料夾")
+            return ASSET_ROOT.joinpath(*parts[marker + 1 :])
         return path
     if value.startswith("國考題資料夾/"):
         return PROJECT_ROOT / value
@@ -1753,6 +1764,9 @@ def main() -> None:
     if args.group_name:
         wanted_groups = set(args.group_name)
         rows = [row for row in rows if row.get("group_name") in wanted_groups]
+    if args.year:
+        wanted_years = set(args.year)
+        rows = [row for row in rows if row.get("year") in wanted_years]
     rows = [row for row in rows if row.get("pair_status") in {"paired_ans_only", "paired_mod_primary"}]
     if args.limit > 0:
         rows = rows[: args.limit]

@@ -490,6 +490,23 @@ def old_asset_values(
     return found
 
 
+def official_pdf_reference(candidate: dict[str, Any]) -> str:
+    """Resolve the official PDF reference from either bundle contract."""
+
+    source_files = candidate.get("source_files")
+    if isinstance(source_files, dict):
+        reference = source_files.get("official_pdf")
+        if reference:
+            return str(reference)
+    metadata = candidate.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("question_pdf", "question_pdf_relative"):
+            reference = metadata.get(key)
+            if reference:
+                return str(reference)
+    return ""
+
+
 def make_contact_sheet(items: list[tuple[str, Path]], output: Path) -> Path:
     from PIL import Image, ImageDraw, ImageOps
 
@@ -553,10 +570,11 @@ def build_case(
     timeout: float,
     dpi: int,
 ) -> dict[str, Any]:
-    source_files = candidate.get("source_files") if isinstance(candidate.get("source_files"), dict) else {}
-    pdf = local_path(source_files.get("official_pdf"))
+    pdf = local_path(official_pdf_reference(candidate))
     if not pdf or not pdf.is_file():
-        raise FileNotFoundError(f"official PDF is unavailable for {candidate['candidate_key']}: {source_files.get('official_pdf')}")
+        raise FileNotFoundError(
+            f"official PDF is unavailable for {candidate['candidate_key']}: {official_pdf_reference(candidate)}"
+        )
     if pdf not in pdf_cache:
         digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
         reference_dir = output_dir / "pdf-reference" / digest[:16]
@@ -699,8 +717,10 @@ def main() -> int:
         if not key:
             raise RuntimeError(f"case has no candidate_key: {case}")
         if key not in by_key:
-            prefix = str(case.get("id") or "").split("_", 1)[0]
-            category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
+            category_scope = str(case.get("category_scope") or "")
+            if not category_scope:
+                prefix = str(case.get("id") or "").split("_", 1)[0]
+                category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
             missing.append((case, key, category_scope))
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(missing)))) as executor:
         futures = {

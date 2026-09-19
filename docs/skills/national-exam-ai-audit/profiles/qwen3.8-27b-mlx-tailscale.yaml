@@ -1,0 +1,53 @@
+{
+  "schema_version": "national_exam_model_profile_v1",
+  "profile_id": "qwen3.8-27b-mlx-tailscale",
+  "model": "${QWEN_MLX_MODEL}",
+  "model_default": "qwen3.8:27b-mlx",
+  "model_env": "QWEN_MLX_MODEL",
+  "provider": "local_qwen_mlx",
+  "adapter": "ollama",
+  "endpoint_env": "QWEN_MLX_BASE_URL",
+  "transport": {
+    "protocol": "ollama_native_chat",
+    "health_path": "/models",
+    "completion_path": "/api/chat",
+    "api_key_mode": "ollama_placeholder",
+    "stream": false
+  },
+  "certification": "disabled",
+  "certification_scope": "shadow_only_after_probe",
+  "allowed_lanes": [
+    "ocr_text",
+    "semantic_transcription",
+    "group",
+    "visual"
+  ],
+  "vision_mode": "candidate_pending_pixel_probe",
+  "default_batch_size": 1,
+  "max_batch_size": 4,
+  "output_mode": "sparse_batch_json",
+  "thinking": false,
+  "role": "tailnet_local_shadow_challenger",
+  "may_propose_rules": true,
+  "may_materialize_without_active_rule": false,
+  "network_policy": {
+    "tailnet_only": true,
+    "access_scope": "tailnet",
+    "authorized_consumers": "tailnet_members_subject_to_acl",
+    "allow_local_http_hosts": ["127.0.0.1", "localhost"],
+    "allow_tailnet_https_suffix": ".ts.net",
+    "require_https_for_tailnet": true,
+    "funnel_allowed": false
+  },
+  "cost_policy": {
+    "billing": "local_compute",
+    "ollama_cloud_usage": false,
+    "opencode_go_usage": false
+  },
+  "known_limits": [
+    "The exact Ollama model tag must be confirmed with ollama list on the Mac host.",
+    "The Wi-Fi host is a test/shadow provider, not a production availability dependency.",
+    "Vision certification requires an explicit pixel-transport probe and human gold comparison.",
+    "Do not expose the Ollama port directly or use a public tunnel."
+  ]
+}

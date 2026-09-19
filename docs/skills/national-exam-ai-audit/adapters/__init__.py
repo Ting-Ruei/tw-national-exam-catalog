@@ -11,7 +11,7 @@ import importlib
 from typing import Any
 
 
-ALLOWED_ADAPTERS = {"codex_agent", "antigravity", "ollama", "llmshare"}
+ALLOWED_ADAPTERS = {"codex_agent", "antigravity", "ollama", "llmshare", "openai_compatible"}
 
 
 def build_request(

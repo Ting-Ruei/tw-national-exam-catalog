@@ -1,0 +1,14 @@
+{
+  "schema_version": "ai395_review_invalidation_matrix_v1",
+  "fields": {
+    "source_pdf_sha256": ["parser", "text_evidence", "notation", "group", "vision", "answer"],
+    "mineru_output_sha256": ["parser", "text_evidence", "notation", "group", "vision", "answer"],
+    "question_number": ["group", "answer"],
+    "stem": ["text_evidence", "notation", "group", "vision"],
+    "options": ["text_evidence", "notation", "group", "vision", "answer"],
+    "image_refs": ["vision", "group"],
+    "answer": ["answer"]
+  },
+  "max_automatic_reruns_per_run": 2,
+  "oscillation_action": "human_exception"
+}

@@ -1,0 +1,96 @@
+name: ${AI395_STAGING_PROJECT_NAME:-ai395-review-staging}
+
+services:
+  review-staging-db:
+    image: ${AI395_STAGING_POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18}
+    restart: "no"
+    ports:
+      - "${AI395_STAGING_DB_BIND:-127.0.0.1}:${AI395_STAGING_DB_PORT:-55439}:5432"
+    environment:
+      POSTGRES_DB: ${AI395_STAGING_POSTGRES_DB:-ai395_review_staging}
+      POSTGRES_USER: ${AI395_STAGING_POSTGRES_USER:-ai395_staging}
+      POSTGRES_PASSWORD: ${AI395_STAGING_POSTGRES_PASSWORD:?Set AI395_STAGING_POSTGRES_PASSWORD in a local env file}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - review_staging_pgdata:/var/lib/postgresql
+      - ./sql/001_review_staging.sql:/docker-entrypoint-initdb.d/001_review_staging.sql:ro
+
+  pipeline-worker:
+    build:
+      context: ../..
+      dockerfile: docker/ai395-review-staging/Dockerfile
+    restart: "no"
+    working_dir: /workspace
+    environment:
+      AI395_STAGING_DATABASE_URL: postgresql://${AI395_STAGING_POSTGRES_USER:-ai395_staging}:${AI395_STAGING_POSTGRES_PASSWORD}@review-staging-db:5432/${AI395_STAGING_POSTGRES_DB:-ai395_review_staging}
+      AI395_STAGING_ARTIFACT_ROOT: /var/lib/ai395-review-staging
+      PYTHONUNBUFFERED: "1"
+      QWEN_MLX_ENABLED: ${QWEN_MLX_ENABLED:-0}
+      QWEN_MLX_BASE_URL: ${QWEN_MLX_BASE_URL:-}
+      QWEN_MLX_MODEL: ${QWEN_MLX_MODEL:-qwen3.8:27b-mlx}
+      LITELLM_GLM_ENABLED: ${LITELLM_GLM_ENABLED:-0}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      LITELLM_MODEL: ${LITELLM_MODEL:-glm-5.3-flash}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_REASONING_EFFORT: ${LITELLM_REASONING_EFFORT:-low}
+      LITELLM_SEND_THINKING: ${LITELLM_SEND_THINKING:-1}
+      LITELLM_CLEAR_THINKING: ${LITELLM_CLEAR_THINKING:-0}
+      AI395_STAGING_CONTEXT_LIMIT_TOKENS: ${AI395_STAGING_CONTEXT_LIMIT_TOKENS:-}
+      AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS: ${AI395_STAGING_CONTEXT_SAFETY_MARGIN_TOKENS:-}
+      AI395_STAGING_MAX_TOOL_TURNS: ${AI395_STAGING_MAX_TOOL_TURNS:-1}
+      AI395_STAGING_MODEL_SLOW_THRESHOLD: ${AI395_STAGING_MODEL_SLOW_THRESHOLD:-30}
+      AI395_STAGING_ALLOW_LIVE_LLM: ${AI395_STAGING_ALLOW_LIVE_LLM:-0}
+      AI395_STAGING_MODEL_MODE: ${AI395_STAGING_MODEL_MODE:-mock}
+      AI395_STAGING_LLM_LANE_POLICY: ${AI395_STAGING_LLM_LANE_POLICY:-residual}
+      AI395_STAGING_LLM_MAX_CALLS: ${AI395_STAGING_LLM_MAX_CALLS:-20}
+      AI395_STAGING_MODEL_TIMEOUT: ${AI395_STAGING_MODEL_TIMEOUT:-120}
+      AI395_STAGING_MODEL_MAX_TOKENS: ${AI395_STAGING_MODEL_MAX_TOKENS:-4096}
+    ports:
+      - "${AI395_STAGING_WORKER_BIND:-127.0.0.1}:${AI395_STAGING_WORKER_PORT:-58080}:8080"
+    volumes:
+      - ../..:/workspace:ro
+      - review_staging_artifacts:/var/lib/ai395-review-staging
+    command: ["python3", "scripts/ai395_review_staging_http.py", "--host", "0.0.0.0", "--port", "8080"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      review-staging-db:
+        condition: service_healthy
+
+  n8n-review-staging:
+    image: ${AI395_STAGING_N8N_IMAGE:-n8nio/n8n:latest}
+    restart: "no"
+    ports:
+      - "${AI395_STAGING_N8N_BIND:-127.0.0.1}:${AI395_STAGING_N8N_PORT:-5680}:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: review-staging-db
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${AI395_STAGING_POSTGRES_DB:-ai395_review_staging}
+      DB_POSTGRESDB_USER: ${AI395_STAGING_POSTGRES_USER:-ai395_staging}
+      DB_POSTGRESDB_PASSWORD: ${AI395_STAGING_POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${AI395_STAGING_N8N_ENCRYPTION_KEY:?Set AI395_STAGING_N8N_ENCRYPTION_KEY in a local env file}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false"
+      AI395_STAGING_WORKER_URL: http://pipeline-worker:8080
+    volumes:
+      - review_staging_n8n_data:/home/node/.n8n
+      - ./n8n:/workflows:ro
+    depends_on:
+      review-staging-db:
+        condition: service_healthy
+      pipeline-worker:
+        condition: service_healthy
+
+volumes:
+  review_staging_pgdata:
+  review_staging_artifacts:
+  review_staging_n8n_data:

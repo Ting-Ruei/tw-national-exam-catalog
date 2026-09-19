@@ -318,6 +318,61 @@ CREATE INDEX IF NOT EXISTS idx_question_ai_learning_candidate
 CREATE INDEX IF NOT EXISTS idx_question_ai_learning_created
     ON exam.question_ai_learning_events (created_at DESC);
 
+-- Immutable before/after correction examples for the guardrail feedback loop.
+-- A thumbs-up/down event is not enough to teach formatting.  These rows keep
+-- the visible change, evidence references, and the bounded AI task separate
+-- from the authoritative human review decision.
+CREATE TABLE IF NOT EXISTS exam.question_correction_feedback_events (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT REFERENCES exam.question_candidates(id) ON DELETE SET NULL,
+    candidate_key TEXT NOT NULL,
+    human_review_event_id BIGINT REFERENCES exam.question_review_events(id) ON DELETE SET NULL,
+    human_answer_review_event_id BIGINT REFERENCES exam.answer_review_events(id) ON DELETE SET NULL,
+    feedback_id TEXT NOT NULL UNIQUE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('human_correction', 'three_evidence_correction')),
+    audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'deterministic_system')),
+    reviewer TEXT,
+    event_ref TEXT,
+    changed_fields JSONB NOT NULL,
+    before_json JSONB NOT NULL,
+    after_json JSONB NOT NULL,
+    diff_json JSONB NOT NULL,
+    evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ai_task_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    event_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_candidate
+    ON exam.question_correction_feedback_events (candidate_key, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_correction_feedback_source
+    ON exam.question_correction_feedback_events (source_kind, created_at DESC);
+
+-- Model output is a candidate only.  No row in this table authorizes a rule,
+-- checklist, Skill file, or question revision to be changed automatically.
+CREATE TABLE IF NOT EXISTS exam.question_guardrail_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    feedback_event_id BIGINT NOT NULL REFERENCES exam.question_correction_feedback_events(id) ON DELETE RESTRICT,
+    feedback_id TEXT NOT NULL,
+    candidate_key TEXT NOT NULL,
+    audit_scope TEXT NOT NULL CHECK (audit_scope IN ('question', 'group', 'visual', 'answer')),
+    lane_key TEXT,
+    change_class TEXT NOT NULL,
+    guardrail_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('observed', 'proposed', 'no_generalization', 'ai_failed', 'rejected', 'needs_owner_approval', 'approved', 'active')),
+    candidate_json JSONB NOT NULL,
+    validation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (feedback_id, created_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_status
+    ON exam.question_guardrail_candidates (status, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_question_guardrail_candidates_feedback
+    ON exam.question_guardrail_candidates (feedback_id, created_at DESC, id DESC);
+
 -- Curriculum classification is an auxiliary, versioned knowledge layer.
 -- It never replaces or mutates formal question/answer content.
 CREATE TABLE IF NOT EXISTS exam.curriculum_taxonomies (
@@ -459,6 +514,10 @@ ALTER TABLE exam.question_review_events ADD COLUMN IF NOT EXISTS event_json JSON
 ALTER TABLE exam.answer_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
 ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'ai_audit';
 ALTER TABLE exam.question_ai_review_events ADD COLUMN IF NOT EXISTS event_json JSONB;
+ALTER TABLE exam.question_correction_feedback_events
+    ADD COLUMN IF NOT EXISTS human_answer_review_event_id BIGINT
+    REFERENCES exam.answer_review_events(id) ON DELETE SET NULL;
+ALTER TABLE exam.question_correction_feedback_events ADD COLUMN IF NOT EXISTS event_json JSONB;
 
 ALTER TABLE exam.model_runs DROP CONSTRAINT IF EXISTS model_runs_task_type_check;
 ALTER TABLE exam.model_runs

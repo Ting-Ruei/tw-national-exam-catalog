@@ -1,0 +1,2 @@
+candidate_key,source_registry_key,issue_code,severity,message,issue_json
+fixture:mini20:Q012,fixture:mini20:question:012,question_count_mismatch,blocked,fixture parser expected 20 questions but observed 19,"{\"expected\":20,\"actual\":19}"

@@ -1,0 +1,11 @@
+{
+  "schema_version": "ai395_review_resource_policy_v1",
+  "classes": {
+    "deterministic_cpu": {"max_concurrency": 2},
+    "external_llm": {"max_concurrency": 3},
+    "gpu_mineru": {"max_concurrency": 1},
+    "local_llm_gpu": {"max_concurrency": 1}
+  },
+  "mutual_exclusion": [["gpu_mineru", "local_llm_gpu"]],
+  "staging_default": "deterministic_cpu"
+}

@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <title>ReviewUI · 例外工作台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #102a43;
+      --muted: #627d98;
+      --canvas: #f5f7fa;
+      --paper: #ffffff;
+      --line: #d9e2ec;
+      --line-strong: #bcccdc;
+      --navy: #102a43;
+      --blue: #1976d2;
+      --blue-soft: #e8f1fb;
+      --green: #087f5b;
+      --green-soft: #e6f6f0;
+      --amber: #a15c00;
+      --amber-soft: #fff3d6;
+      --red: #b42318;
+      --red-soft: #ffebe9;
+      --purple: #6941c6;
+      --purple-soft: #f2eaff;
+      --shadow: 0 12px 32px rgba(16, 42, 67, .07);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body {
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .48; }
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      min-height: 66px; padding: 10px 18px;
+      border-bottom: 1px solid var(--line); background: rgba(255,255,255,.94);
+      backdrop-filter: blur(16px);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--navy); color: white; font-size: 17px; font-weight: 900; }
+    .brand-title { font-size: 16px; font-weight: 860; letter-spacing: -.02em; }
+    .brand-subtitle { color: var(--muted); font-size: 11px; }
+    .top-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+    .pill, .tag { display: inline-flex; align-items: center; min-height: 24px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; background: #f8fafc; white-space: nowrap; }
+    .pill.staging { border-color: #b7d8cc; background: var(--green-soft); color: var(--green); font-weight: 800; }
+    .pill.advisory { border-color: #e6c977; background: var(--amber-soft); color: var(--amber); font-weight: 800; }
+    .pill.model { border-color: #b9cdf8; background: var(--blue-soft); color: #175cd3; }
+    .top-actions { display: flex; gap: 7px; }
+    .top-actions a, .top-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); text-decoration: none; font-size: 12px; font-weight: 750; }
+    .top-actions button.primary { border-color: var(--navy); background: var(--navy); color: white; }
+    .run-strip { width: 100%; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .run-strip code { color: var(--ink); }
+
+    .metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; padding: 14px 18px 0; }
+    .metric { min-height: 82px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
+    .metric-label { color: var(--muted); font-size: 11px; font-weight: 750; }
+    .metric-value { margin-top: 5px; font-size: 24px; font-weight: 880; letter-spacing: -.04em; }
+    .metric-note { margin-top: 2px; color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metric.warning .metric-value { color: var(--amber); }
+    .metric.danger .metric-value { color: var(--red); }
+    .metric.good .metric-value { color: var(--green); }
+
+    .app { display: grid; grid-template-columns: 262px minmax(500px, 1fr) 390px; gap: 12px; min-height: calc(100vh - 178px); padding: 14px 18px 22px; }
+    .rail, .detail, .evidence-panel { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
+    .rail { display: flex; flex-direction: column; min-height: 680px; overflow: hidden; }
+    .rail-head { padding: 14px; border-bottom: 1px solid var(--line); }
+    .rail-head h2 { margin: 0; font-size: 14px; }
+    .rail-head p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .search { width: 100%; height: 34px; margin-top: 11px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; outline: none; }
+    .search:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(25,118,210,.12); outline: none; }
+    .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 8px; }
+    select { min-width: 0; height: 31px; padding: 0 6px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); font-size: 11px; }
+    .queue-nav { padding: 9px; overflow: auto; }
+    .queue-button { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 8px; align-items: center; width: 100%; min-height: 50px; margin-bottom: 5px; padding: 8px 9px; border: 1px solid transparent; border-radius: 10px; background: white; color: var(--ink); text-align: left; }
+    .queue-button:hover { background: #f7faff; border-color: var(--line); }
+    .queue-button.active { border-color: #8fb5e8; background: var(--blue-soft); }
+    .queue-icon { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: #edf2f7; color: var(--muted); font-size: 12px; font-weight: 900; }
+    .queue-button.active .queue-icon { background: var(--blue); color: white; }
+    .queue-name { overflow: hidden; font-size: 12px; font-weight: 820; text-overflow: ellipsis; white-space: nowrap; }
+    .queue-description { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.25; }
+    .queue-count { min-width: 26px; padding: 3px 6px; border-radius: 999px; background: #edf2f7; color: var(--ink); font-size: 11px; font-weight: 850; text-align: center; }
+    .queue-button.active .queue-count { background: white; color: var(--blue); }
+    .queue-total { margin: 0 14px 11px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .queue-items { flex: 1; overflow: auto; border-top: 1px solid var(--line); }
+    .item-button { display: block; width: 100%; padding: 10px 12px; border: 0; border-bottom: 1px solid #edf2f7; background: white; color: var(--ink); text-align: left; }
+    .item-button:hover { background: #f8fbff; }
+    .item-button.active { background: #eef5ff; box-shadow: inset 3px 0 0 var(--blue); }
+    .item-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .item-title { overflow: hidden; font-size: 12px; font-weight: 820; text-overflow: ellipsis; white-space: nowrap; }
+    .item-meta { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .item-reason { margin-top: 4px; color: var(--amber); font-size: 10px; line-height: 1.35; }
+
+    .detail { min-height: 680px; padding: 0; overflow: hidden; }
+    .detail-scroll { height: 100%; overflow: auto; padding: 16px; }
+    .empty { display: grid; place-items: center; min-height: 600px; padding: 30px; color: var(--muted); text-align: center; }
+    .empty strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 17px; }
+    .detail-head { display: flex; align-items: flex-start; gap: 10px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+    .detail-title { min-width: 0; margin-right: auto; }
+    .detail-title h1 { margin: 0; font-size: 20px; letter-spacing: -.03em; }
+    .detail-title p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+    .decision { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); font-size: 11px; font-weight: 820; }
+    .decision.accept { border-color: #91d5bd; background: var(--green-soft); color: var(--green); }
+    .decision.hold { border-color: #e6c977; background: var(--amber-soft); color: var(--amber); }
+    .decision.block { border-color: #efaaa4; background: var(--red-soft); color: var(--red); }
+    .decision.exclude { color: var(--muted); }
+    .section { margin-top: 14px; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+    .section-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fbfcfe; }
+    .section-head h2 { margin: 0; font-size: 13px; }
+    .section-head .meta { margin-left: auto; color: var(--muted); font-size: 10px; }
+    .section-body { padding: 12px; }
+    .question-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 16px; font-weight: 650; line-height: 1.6; }
+    .option-row { display: grid; grid-template-columns: 31px minmax(0, 1fr); gap: 8px; margin-top: 9px; line-height: 1.5; }
+    .option-key { color: var(--blue); font-weight: 900; }
+    .option-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+    .answer-line { margin-top: 12px; padding-top: 9px; border-top: 1px dashed var(--line-strong); color: var(--green); font-size: 12px; font-weight: 800; }
+    .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+    .tag.queue { border-color: #a9c8ee; background: var(--blue-soft); color: #175cd3; font-weight: 800; }
+    .tag.error { border-color: #efaaa4; background: var(--red-soft); color: var(--red); }
+    .tag.warning { border-color: #e6c977; background: var(--amber-soft); color: var(--amber); }
+    .tag.good { border-color: #a9ddc9; background: var(--green-soft); color: var(--green); }
+    .tag.neutral { color: var(--muted); }
+    .lane-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+    .lane-card { min-width: 0; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; }
+    .lane-card.finding, .lane-card.failed { border-color: #efaaa4; background: #fffafa; }
+    .lane-card.machine_pass { border-color: #a9ddc9; background: #fbfffd; }
+    .lane-card.skipped { background: #f8fafc; }
+    .lane-name { font-size: 11px; font-weight: 850; }
+    .lane-status { margin-top: 5px; font-size: 11px; font-weight: 800; }
+    .lane-card.finding .lane-status, .lane-card.failed .lane-status { color: var(--red); }
+    .lane-card.machine_pass .lane-status { color: var(--green); }
+    .lane-meta { margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+    .lane-detail { margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .lane-detail code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; color: var(--ink); }
+    .finding { margin-top: 7px; padding: 9px; border: 1px solid #f0c8c4; border-radius: 8px; background: #fffafa; }
+    .finding strong { color: var(--red); font-size: 11px; }
+    .finding p { margin: 4px 0 0; font-size: 11px; line-height: 1.45; }
+    .finding .finding-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .revision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .kv { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; }
+    .kv-label { color: var(--muted); font-size: 10px; }
+    .kv-value { margin-top: 4px; overflow-wrap: anywhere; color: var(--ink); font-size: 11px; font-weight: 750; }
+    .diff { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
+    .diff-box { min-width: 0; padding: 9px; border-radius: 8px; font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .diff-box.before { border: 1px solid #efaaa4; background: var(--red-soft); }
+    .diff-box.after { border: 1px solid #a9ddc9; background: var(--green-soft); }
+    .diff-label { margin-bottom: 5px; font-size: 10px; font-weight: 850; }
+    .notes { width: 100%; min-height: 75px; resize: vertical; padding: 9px; border: 1px solid var(--line-strong); border-radius: 8px; line-height: 1.45; }
+    .edit-grid { display: grid; gap: 9px; }
+    .edit-field { display: grid; gap: 5px; }
+    .edit-field label { color: var(--muted); font-size: 10px; font-weight: 820; }
+    .edit-field input, .edit-field textarea { width: 100%; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: white; color: var(--ink); line-height: 1.45; }
+    .edit-field textarea { min-height: 86px; resize: vertical; }
+    .edit-field textarea.options-editor { min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .edit-help { color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .feedback-card { margin-top: 9px; padding: 9px; border: 1px solid #cdb8f5; border-radius: 8px; background: var(--purple-soft); }
+    .feedback-card strong { color: var(--purple); font-size: 11px; }
+    .feedback-card p { margin: 5px 0 0; color: var(--ink); font-size: 10px; line-height: 1.45; }
+    .feedback-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
+    .feedback-diff .diff-box { font-size: 10px; }
+    .decision-note { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+    .evidence-panel { min-height: 680px; overflow: hidden; }
+    .evidence-scroll { height: 100%; overflow: auto; padding: 14px; }
+    .evidence-scroll h2 { margin: 0; font-size: 14px; }
+    .evidence-scroll > p { margin: 5px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .evidence-state { padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fbfcfe; }
+    .evidence-state strong { font-size: 12px; }
+    .evidence-state p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .evidence-state.auto { border-color: #a9ddc9; background: var(--green-soft); }
+    .evidence-state.conflict { border-color: #e6c977; background: var(--amber-soft); }
+    .engine-list { display: grid; gap: 7px; margin-top: 10px; }
+    .engine { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+    .engine-head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 800; }
+    .engine-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
+    .visual-preview { display: grid; gap: 7px; margin-top: 10px; }
+    .visual-preview img { display: block; width: 100%; max-height: 230px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
+    .visual-caption { color: var(--muted); font-size: 10px; }
+    .visual-missing { margin-top: 10px; padding: 9px; border: 1px dashed #e6c977; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font-size: 10px; line-height: 1.45; }
+    .pdf-source { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+    .pdf-source button { min-height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); font-size: 10px; font-weight: 750; }
+    .pdf-frame { width: 100%; height: 260px; margin-top: 9px; border: 1px solid var(--line); border-radius: 8px; background: #eef2f6; }
+    .path { margin-top: 5px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+    .path code { color: var(--ink); }
+    .hidden { display: none !important; }
+    .loading { padding: 40px; color: var(--muted); text-align: center; }
+    .toast { position: fixed; right: 18px; bottom: 18px; z-index: 30; max-width: min(420px, calc(100vw - 36px)); padding: 11px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--navy); color: white; box-shadow: var(--shadow); font-size: 12px; }
+    .toast.error { background: var(--red); }
+    @media (max-width: 1260px) {
+      .app { grid-template-columns: 242px minmax(470px, 1fr); }
+      .evidence-panel { grid-column: 1 / -1; min-height: 360px; }
+      .evidence-scroll { height: auto; }
+      .evidence-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    }
+    @media (max-width: 820px) {
+      .topbar { padding: 9px 11px; }
+      .brand { width: 100%; }
+      .top-actions { margin-left: auto; }
+      .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 10px 11px 0; }
+      .metric { min-height: 72px; padding: 9px; }
+      .metric-value { font-size: 20px; }
+      .app { display: block; padding: 10px 11px 18px; }
+      .rail { min-height: auto; margin-bottom: 10px; }
+      .queue-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 245px; }
+      .queue-items { max-height: 260px; }
+      .detail, .evidence-panel { min-height: auto; margin-bottom: 10px; }
+      .detail-scroll, .evidence-scroll { height: auto; }
+      .lane-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .detail-head { display: block; }
+      .detail-actions { justify-content: flex-start; margin-top: 10px; }
+      .evidence-layout { display: block; }
+    }
+    @media (max-width: 500px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .queue-nav { grid-template-columns: 1fr; }
+      .revision-grid, .diff, .feedback-diff { grid-template-columns: 1fr; }
+      .question-text { font-size: 15px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">審</div>
+      <div><div class="brand-title">ReviewUI · 例外工作台</div><div class="brand-subtitle">revision / lane / evidence console</div></div>
+    </div>
+    <div id="runBadges" class="top-meta"></div>
+    <div class="top-actions">
+      <a href="/mobile/workflow/">手機快審</a>
+      <a href="/legacy/">舊版退路</a>
+      <button onclick="refreshFeedbackOutbox()">護欄 outbox</button>
+      <button class="primary" onclick="reloadWorkflow()">重新讀取</button>
+    </div>
+    <div id="runStrip" class="run-strip">載入 staging run…</div>
+  </header>
+  <section id="metrics" class="metrics"></section>
+  <main class="app">
+    <aside class="rail">
+      <div class="rail-head">
+        <h2>互斥人工 queue</h2>
+        <p>每題只進一個主要 queue；其他 lane 留在題目時間線，不重複佔用人工清單。</p>
+        <input id="search" class="search" placeholder="搜尋題號、題幹、原因或 key" autocomplete="off">
+        <div class="filters">
+          <select id="categoryFilter" aria-label="考別"><option value="">全部考別</option></select>
+          <select id="yearFilter" aria-label="年份"><option value="">全部年份</option></select>
+          <select id="subjectFilter" aria-label="科目"><option value="">全部科目</option></select>
+          <select id="severityFilter" aria-label="嚴重度"><option value="">全部嚴重度</option><option value="error">阻擋／錯誤</option><option value="warning">提醒</option><option value="info">抽樣</option></select>
+        </div>
+      </div>
+      <nav id="queueNav" class="queue-nav"></nav>
+      <div id="queueTotal" class="queue-total"></div>
+      <div id="queueItems" class="queue-items"></div>
+    </aside>
+    <section id="detail" class="detail"><div class="loading">讀取工作流資料…</div></section>
+    <aside id="evidencePanel" class="evidence-panel"><div class="evidence-scroll"><div class="loading">等待題目</div></div></aside>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+<script>
+  const LANES = ['answer', 'group', 'notation', 'text_evidence', 'vision'];
+  const LANE_LABELS = {answer:'答案', group:'題組', notation:'上下標／字形', text_evidence:'文字三證據', vision:'圖片'};
+  const STATUS_LABELS = {finding:'發現疑點', failed:'執行失敗', machine_pass:'機器通過', skipped:'不適用', pass:'通過', needs_review:'需人工', block:'阻擋', unknown:'未知'};
+  const QUEUE_ICONS = {source:'S', answer:'A', vision:'V', group:'G', notation:'N', text:'T', revision:'R', sample:'✓'};
+  const state = {data:null, selectedKey:'', activeQueue:'source', search:'', category:'', year:'', subject:'', severity:'', feedbackOutbox:null};
+  let toastTimer = null;
+
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  // Inline handlers live inside a double-quoted HTML attribute.  Encode the
+  // JSON string for the attribute, then the browser decodes it back to valid
+  // JavaScript before dispatching the click.
+  const jsArg = value => JSON.stringify(String(value ?? '')).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const fmt = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString('zh-TW') : esc(value || '—');
+  const statusLabel = value => STATUS_LABELS[String(value || '')] || String(value || '—');
+  const fileUrl = path => path ? `/file?path=${encodeURIComponent(path)}` : '';
+  const editorJson = value => JSON.stringify(value ?? [], null, 2);
+  const prettyValue = value => {
+    if (value === undefined) return '（未提供）';
+    if (value === null) return 'null';
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+  };
+  const visibleQueueItems = () => {
+    const data = state.data || {};
+    const query = state.search.trim().toLowerCase();
+    return (data.queue_items || []).filter(item => {
+      if (item.primary_queue !== state.activeQueue) return false;
+      if (state.category && item.category !== state.category) return false;
+      if (state.year && item.year !== state.year) return false;
+      if (state.subject && item.subject !== state.subject) return false;
+      if (state.severity && item.severity !== state.severity) return false;
+      if (!query) return true;
+      return [item.candidate_key, item.question_number, item.category, item.subject, item.stem_preview, ...(item.reason_codes || [])].join(' ').toLowerCase().includes(query);
+    });
+  };
+  function showToast(message, error = false) {
+    const node = document.getElementById('toast');
+    node.textContent = message;
+    node.className = `toast${error ? ' error' : ''}`;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => node.className = 'toast hidden', 3600);
+  }
+  function renderBadges() {
+    const data = state.data || {};
+    const run = data.run || {};
+    document.getElementById('runBadges').innerHTML = `
+      <span class="pill staging">隔離 staging</span>
+      <span class="pill advisory">advisory-only · production writes ${fmt(run.production_write_count || 0)}</span>
+      <span class="pill advisory">待護欄 ${fmt(state.feedbackOutbox?.count || 0)}</span>
+      <span class="pill model">${esc(run.model_name || 'model 未提供')}</span>`;
+    document.getElementById('runStrip').innerHTML = `run <code>${esc(run.run_id || '未提供')}</code> · endpoint ${esc(run.model_endpoint_class || '未提供')} · transport ${esc(run.model_transport || '未提供')} · prompt <code>${esc(run.model_prompt_version || '未提供')}</code>`;
+  }
+  function renderMetrics() {
+    const data = state.data || {};
+    const run = data.run || {};
+    const source = data.three_source || {};
+    const auto = (source.automation || {}).auto_rule_candidate_count || 0;
+    const open = Math.max(0, (data.queue_total || 0) - ((data.queue_counts || {}).sample || 0));
+    const context = data.context_policy || {};
+    const cards = [
+      ['候選題', data.queue_total || 0, `${fmt(run.scope_count || data.queue_total || 0)} 題進入工作台`, ''],
+      ['開放例外', open, '互斥 queue 總數', open ? 'warning' : 'good'],
+      ['三證據修正候選', auto, `${fmt(source.case_count || 0)} 題有 PDF evidence`, auto ? 'warning' : 'good'],
+      ['模型錯誤', run.llm_errors || 0, `${fmt(run.llm_slow_calls || 0)} 次慢呼叫`, run.llm_errors ? 'danger' : ''],
+      ['Context guard', run.llm_context_rejections || 0, `${fmt(context.hard_limit_tokens || 0)} hard limit`, run.llm_context_rejections ? 'warning' : 'good'],
+      ['Context extension', run.llm_context_extensions || 0, `${fmt(context.one_time_extension_limit_tokens || 0)} one-time ceiling`, run.llm_context_extensions ? 'warning' : 'good'],
+      ['護欄候選', run.guardrail_candidates || 0, `${fmt(run.feedback_events || 0)} 筆前後修正`, run.guardrail_candidates ? 'warning' : 'good'],
+      ['正式寫入', run.production_write_count || 0, '本次 staging 應為 0', run.production_write_count ? 'danger' : 'good']
+    ];
+    document.getElementById('metrics').innerHTML = cards.map(([label,value,note,klass]) => `<div class="metric ${klass}"><div class="metric-label">${esc(label)}</div><div class="metric-value">${fmt(value)}</div><div class="metric-note">${esc(note)}</div></div>`).join('');
+  }
+  function setOptions(id, values, selected, first) {
+    const node = document.getElementById(id);
+    node.innerHTML = `<option value="">${esc(first)}</option>` + [...new Set((values || []).filter(Boolean))].sort((a,b) => String(a).localeCompare(String(b), 'zh-Hant', {numeric:true})).map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+    node.value = selected || '';
+  }
+  function renderFilters() {
+    const facets = state.data?.facets || {};
+    setOptions('categoryFilter', facets.categories, state.category, '全部考別');
+    setOptions('yearFilter', facets.years, state.year, '全部年份');
+    setOptions('subjectFilter', facets.subjects, state.subject, '全部科目');
+    document.getElementById('severityFilter').value = state.severity;
+    document.getElementById('search').value = state.search;
+  }
+  function renderQueueNav() {
+    const data = state.data || {};
+    document.getElementById('queueNav').innerHTML = (data.queues || []).map(queue => `
+      <button class="queue-button ${queue.id === state.activeQueue ? 'active' : ''}" onclick="chooseQueue(${jsArg(queue.id)})">
+        <span class="queue-icon">${esc(QUEUE_ICONS[queue.id] || '•')}</span>
+        <span><span class="queue-name">${esc(queue.label)}</span><span class="queue-description">${esc(queue.description)}</span></span>
+        <span class="queue-count">${fmt(queue.count || 0)}</span>
+      </button>`).join('');
+    const visible = visibleQueueItems();
+    document.getElementById('queueTotal').textContent = `目前 ${fmt(visible.length)} 題；全部 ${fmt(data.queue_total || 0)} 題。點題後右側看證據與來源。`;
+    document.getElementById('queueItems').innerHTML = visible.length ? visible.map(item => `
+      <button class="item-button ${item.candidate_key === state.selectedKey ? 'active' : ''}" onclick="selectItem(${jsArg(item.candidate_key)})">
+        <div class="item-line"><span class="tag ${item.severity === 'error' ? 'error' : item.severity === 'warning' ? 'warning' : 'neutral'}">${esc(item.severity)}</span><span class="item-title">第 ${esc(item.question_number || '?')} 題</span></div>
+        <div class="item-meta">${esc(item.category)} · ${esc(item.year)}-${esc(item.ordinal)} · ${esc(item.subject)}</div>
+        <div class="item-meta">${esc(item.stem_preview || '')}</div>
+        <div class="item-reason">${esc((item.reason_codes || []).slice(0, 3).join(' · ') || item.human_queue || '')}</div>
+      </button>`).join('') : '<div class="empty"><div><strong>此 queue 暫時沒有題目</strong><span>可切換其他 queue 或清除篩選。</span></div></div>';
+  }
+  function laneByName(candidate) {
+    const ai = candidate?.ai_review || {};
+    const rows = Array.isArray(ai.lane_results) ? ai.lane_results : [];
+    const by = new Map(rows.map(row => [String(row.lane || ''), row]));
+    return LANES.map(lane => by.get(lane) || {lane, status: (ai.checks || {})[lane] || 'skipped', finding_codes: []});
+  }
+  function renderLaneTimeline(candidate) {
+    return laneByName(candidate).map(row => {
+      const status = String(row.status || 'unknown');
+      const findings = row.finding_codes || [];
+      const context = row.context_guard || {};
+      const contextPolicy = row.context_policy || {};
+      const traceActions = (row.agentic_trace || []).map(trace => trace.adaptive_action).filter(Boolean);
+      const detail = [
+        row.model ? `${row.provider || ''} / ${row.model}` : '',
+        row.latency_ms ? `${Math.round(Number(row.latency_ms))} ms${row.latency_status ? ` · ${row.latency_status}` : ''}` : '',
+        row.model_called ? '模型已呼叫' : 'deterministic / skipped',
+        findings.length ? `finding: ${findings.join(', ')}` : '',
+        row.error ? `error: ${row.error}` : '',
+        row.requested_evidence?.length ? `要求證據：${row.requested_evidence.map(x => x.kind || x).join(', ')}` : '',
+        context.total_upper_bound_tokens ? `context upper bound ${fmt(context.total_upper_bound_tokens)} / ${fmt(context.context_limit_tokens)}` : '',
+        contextPolicy.context_extension_used ? `曾使用單次 context extension 至 ${fmt(contextPolicy.effective_limit_tokens || 0)}` : '',
+        traceActions.length ? `adaptive: ${traceActions.join(', ')}` : ''
+      ].filter(Boolean).join(' · ');
+      return `<div class="lane-card ${esc(status)}"><div class="lane-name">${esc(LANE_LABELS[row.lane] || row.lane)}</div><div class="lane-status">${esc(statusLabel(status))}</div><div class="lane-meta">${esc(findings.join(' · ') || (row.model_action || '—'))}</div>${detail ? `<div class="lane-detail">${esc(detail)}</div>` : ''}</div>`;
+    }).join('');
+  }
+  function candidateImageRefs(candidate) {
+    const refs = [];
+    const seen = new Set();
+    const add = (ref, role) => {
+      if (!ref || typeof ref !== 'object') return;
+      const path = String(ref.path || ref.path_relative || ref.relative_path || ref.resolved_path || '').trim();
+      if (!path) return;
+      const identity = String(ref.sha256 || path);
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      refs.push({ref, path, role: role || ref.asset_role || ref.role || '題目圖片'});
+    };
+    (candidate.non_option_image_refs || []).forEach(ref => add(ref, ref?.asset_role || '題目圖片'));
+    (candidate.image_refs || []).forEach(ref => add(ref, ref?.asset_role || '題目圖片'));
+    add(candidate.stem_image, '題幹圖片');
+    (candidate.answer_image_refs || []).forEach(ref => add(ref, '答案圖片'));
+    (candidate.options || []).forEach(option => add(option?.image, `選項 ${option?.key || '?'} 圖片`));
+    return refs;
+  }
+  function renderCurrentImages(candidate) {
+    const refs = candidateImageRefs(candidate);
+    const available = refs.filter(item => item.ref.exists !== false);
+    const profile = candidate.visual_profile || {};
+    const vision = laneByName(candidate).find(row => row.lane === 'vision') || {};
+    const visualExpected = refs.length > 0
+      || profile.has_visual_asset
+      || profile.has_visual_dependency
+      || profile.has_structured_table
+      || ['finding', 'failed'].includes(String(vision.status || ''))
+      || Boolean(vision.model_called && !available.length);
+    if (!visualExpected) return '';
+    if (!available.length) {
+      return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>目前 MinerU 圖片／裁切</h2><span class="meta">無可展示 asset</span></div><div class="section-body"><div class="visual-missing"><strong>目前沒有可展示的圖片 asset。</strong><br>這不是自動判定「沒有圖片」；請人工確認 PDF 是否有圖、表格或被遺失的像素。${vision.error ? `<br>vision lane：${esc(vision.error)}` : ''}</div></div></div>`;
+    }
+    return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>目前 MinerU 圖片／裁切</h2><span class="meta">${fmt(available.length)} asset</span></div><div class="section-body"><div class="visual-preview">${available.map((item, index) => `<div><img src="${esc(fileUrl(item.path))}" alt="${esc(item.role || `題目圖片 ${index + 1}`)}"><div class="visual-caption">${esc(item.role || `圖片 ${index + 1}`)} · ${esc(item.ref.raw_ref || item.path)}</div></div>`).join('')}</div><div class="path">目前顯示的是 staging candidate 所引用的 PNG；人工修正前後仍須保留原始 asset 與 revision。</div></div></div>`;
+  }
+  function renderQuestion(candidate) {
+    const options = Array.isArray(candidate.options) ? candidate.options : [];
+    return `<div class="section"><div class="section-head"><h2>目前 revision 的題目內容</h2><span class="meta">原始題文只讀；人工修正另建 event／revision</span></div><div class="section-body">
+      <div class="question-text">${esc(candidate.stem || '（題幹空白）')}</div>
+      ${options.map(option => `<div class="option-row"><div class="option-key">(${esc(option.key || '?')})</div><div class="option-text">${esc(option.text || '（圖片或文字缺漏）')}${option.image?.exists ? `<div class="tags"><span class="tag good">選項有 MinerU 圖片</span></div>` : ''}</div></div>`).join('')}
+      ${renderCurrentImages(candidate)}
+      <div class="answer-line">目前答案：${esc(candidate.answer || '未提供；答案 lane 另行核對')}</div>
+    </div></div>`;
+  }
+  function renderFindings(candidate) {
+    const findings = candidate?.ai_review?.findings || [];
+    const issues = candidate?.issues || [];
+    if (!findings.length && !issues.length) return '<div class="finding"><strong>目前沒有開放 finding</strong><p>此題仍可能進入抽樣 queue；機器通過不等於正式人工接受。</p></div>';
+    const laneRows = laneByName(candidate);
+    const enrich = finding => {
+      const code = String(finding.issue_code || finding.code || '');
+      const lane = laneRows.find(row => row.lane === finding.lane && (row.finding_codes || []).includes(code))
+        || laneRows.find(row => (row.finding_codes || []).includes(code));
+      const laneReason = lane?.reason || (lane?.error ? `模型／provider error：${lane.error}` : '');
+      return {...finding, reason: finding.reason || laneReason, laneResult: lane};
+    };
+    return [...issues.map(issue => ({...issue, source:'deterministic'})), ...findings.map(finding => ({...enrich(finding), source:'AI lane'}))].map(item => {
+      const lane = item.laneResult || {};
+      const requested = (lane.requested_evidence || []).map(evidence => evidence.kind || evidence).join(', ');
+      const meta = [item.owner_stage || item.lane || '', item.evidence ? `evidence ${JSON.stringify(item.evidence)}` : '', requested ? `要求證據 ${requested}` : ''].filter(Boolean).join(' · ');
+      return `<div class="finding"><strong>${esc(item.source)} · ${esc(item.issue_code || item.code || 'finding')} · ${esc(item.severity || 'info')}</strong><p>${esc(item.message || item.reason || item.observed || '未提供說明')}</p><div class="finding-meta">${esc(meta)}</div></div>`;
+    }).join('');
+  }
+  function renderRevision(candidate) {
+    const metadata = candidate.metadata || {};
+    const review = candidate.review || {};
+    const original = candidate.parser_original;
+    const correction = review.correction;
+    const feedback = candidate.correction_feedback;
+    let diff = '';
+    if (feedback && Array.isArray(feedback.diff) && feedback.diff.length) {
+      diff = feedback.diff.map(row => `<div class="feedback-diff"><div class="diff-box before"><div class="diff-label">before · ${esc(row.field || 'field')}</div>${esc(prettyValue(row.before))}</div><div class="diff-box after"><div class="diff-label">after · ${esc(row.field || 'field')}</div>${esc(prettyValue(row.after))}</div></div>`).join('');
+    } else if (original && correction) {
+      diff = `<div class="diff"><div class="diff-box before"><div class="diff-label">before · parser/original</div>${esc(original.stem || '')}</div><div class="diff-box after"><div class="diff-label">after · human correction</div>${esc(correction.stem || candidate.stem || '')}</div></div>`;
+    } else {
+      diff = '<div class="finding"><strong>本題尚未有人工修訂 diff</strong><p>AI staging 只提出 advisory；沒有自動覆寫 candidate。若人工修正，這裡會顯示 before／after 以及需要重跑的 lane。</p></div>';
+    }
+    const feedbackMeta = feedback ? `<div class="feedback-card"><strong>護欄回饋已建立</strong><p>feedback <code>${esc(feedback.feedback_id || '—')}</code> · ${esc(feedback.source_kind || '—')} · scope ${esc(feedback.scope || '—')} · changed ${esc((feedback.changed_fields || []).join(', ') || '—')}</p><p>這筆前後差異會送入 n8n 的 GLM curator；模型只能提出 rule／checklist／Skill 草稿，仍需 owner approval，不會直接啟用。</p></div>` : '';
+    return `<div class="section"><div class="section-head"><h2>Revision / invalidation</h2><span class="meta">${esc(review.queue_label || '未看過')}</span></div><div class="section-body"><div class="revision-grid">
+      <div class="kv"><div class="kv-label">active revision</div><div class="kv-value"><code>${esc(metadata.ai395_staging_revision_id || 'candidate 原始 revision')}</code></div></div>
+      <div class="kv"><div class="kv-label">parser / source</div><div class="kv-value">${esc(metadata.parser_version || '未提供')} · ${esc(metadata.parser_status || '未提供')}</div></div>
+      <div class="kv"><div class="kv-label">人工事件</div><div class="kv-value">${fmt(review.event_count || 0)} 筆；AI 不可冒充</div></div>
+      <div class="kv"><div class="kv-label">formal gate</div><div class="kv-value">${candidate.formal?.ready_for_formal ? 'question＋answer ready' : '尚未達正式入庫 gate'}</div></div>
+    </div>${diff}${feedbackMeta}</div></div>`;
+  }
+  function renderCorrectionEditor(candidate) {
+    const disabled = Boolean(state.data?.read_only);
+    const options = Array.isArray(candidate.options) ? candidate.options : [];
+    const answer = candidate.answer === undefined || candidate.answer === null ? '' : (typeof candidate.answer === 'string' ? candidate.answer : editorJson(candidate.answer));
+    return `<div class="section"><div class="section-head"><h2>人工修正／回饋</h2><span class="meta">${disabled ? '目前 read-only' : '保存 before／after，交給護欄 curator'}</span></div><div class="section-body">
+      <div class="edit-help">只在你真的改了題幹、選項、答案或題組欄位時按保存。單純按「人工通過」不會製造格式學習案例；保存後會追加 human correction event 與 immutable feedback event。</div>
+      <div class="edit-grid" style="margin-top:9px">
+        <div class="edit-field"><label for="correctionStem">題幹（可含 markup）</label><textarea id="correctionStem" ${disabled ? 'disabled' : ''}>${esc(candidate.stem || '')}</textarea></div>
+        <div class="edit-field"><label for="correctionOptions">選項 JSON</label><textarea id="correctionOptions" class="options-editor" ${disabled ? 'disabled' : ''}>${esc(editorJson(options))}</textarea></div>
+        <div class="edit-field"><label for="correctionAnswer">答案／MOD 標記</label><input id="correctionAnswer" value="${esc(answer)}" ${disabled ? 'disabled' : ''}></div>
+        <div class="edit-field"><label for="correctionGroupRef">題組 reference（可留空）</label><input id="correctionGroupRef" value="${esc(candidate.group_ref || '')}" ${disabled ? 'disabled' : ''}></div>
+        <div class="edit-field"><label for="correctionNotes">這次修改的理由／PDF 頁碼</label><textarea id="correctionNotes" ${disabled ? 'disabled' : ''} placeholder="例如：官方 PDF p.3 顯示『莢膜』；MinerU 把字形讀成『荧膜』。">${esc('')}</textarea></div>
+      </div>
+      <div class="top-actions" style="margin-top:9px;justify-content:flex-start"><button class="decision accept" ${disabled ? 'disabled' : ''} onclick="saveCorrection()">儲存人工修正並送護欄回饋</button></div>
+      <div class="decision-note">修正不會覆寫原始 PDF／MinerU；伺服器會建立新的 append-only event。若內容沒有實際變化，會保留審核 event 但不建立空的 feedback。</div>
+    </div></div>`;
+  }
+  function renderDecision(candidate) {
+    const disabled = Boolean(state.data?.read_only);
+    const action = candidate.review?.action || 'unreviewed';
+    return `<div class="section"><div class="section-head"><h2>人工決策</h2><span class="meta">${disabled ? '目前 read-only' : '寫入 staging append-only event'}</span></div><div class="section-body">
+      <textarea id="decisionNotes" class="notes" placeholder="結構化前的人工註記：錯誤原因、PDF 頁、接受／拒絕 proposal 的理由"></textarea>
+      <div class="tags"><span class="tag neutral">目前：${esc(action)}</span><span class="tag neutral">人工 event 不會改寫原始 PDF／MinerU</span></div>
+      <div class="top-actions" style="margin-top:9px;justify-content:flex-start">
+        <button class="decision accept" ${disabled ? 'disabled' : ''} onclick="saveDecision('accept')">人工通過</button>
+        <button class="decision hold" ${disabled ? 'disabled' : ''} onclick="saveDecision('needs_review')">保留疑問／待 PDF</button>
+        <button class="decision block" ${disabled ? 'disabled' : ''} onclick="saveDecision('block')">阻擋入庫</button>
+        <button class="decision exclude" ${disabled ? 'disabled' : ''} onclick="saveDecision('exclude')">非題目</button>
+      </div>
+      <div class="decision-note">「人工通過」只表示這次 staging review event；答案、圖片、題組仍各有自己的 lane gate。正式庫寫入仍需另一次受控 preflight。</div>
+    </div></div>`;
+  }
+  function renderDetail() {
+    const selected = state.data?.selected;
+    const node = document.getElementById('detail');
+    if (!selected) { node.innerHTML = '<div class="empty"><div><strong>請從左側 queue 選一題</strong><span>右側會顯示三證據、PDF crop、lane 與 revision。</span></div></div>'; return; }
+    const candidate = selected.candidate || {};
+    const queue = selected.queue || {};
+    const metadata = candidate.metadata || {};
+    const reasons = queue.reason_codes || [];
+    node.innerHTML = `<div class="detail-scroll">
+      <div class="detail-head"><div class="detail-title"><h1>第 ${esc(candidate.question_number || '?')} 題 · ${esc(queue.label || '')}</h1><p>${esc(metadata.normalized_category_name || metadata.group_name || '')} · ${esc(metadata.year || '')}-${esc(metadata.exam_ordinal || '')} · ${esc(metadata.normalized_subject_name || '')}<br><code>${esc(candidate.candidate_key || '')}</code></p><div class="tags"><span class="tag queue">primary queue：${esc(queue.id || '')}</span><span class="tag ${queue.severity === 'error' ? 'error' : queue.severity === 'warning' ? 'warning' : 'neutral'}">${esc(queue.severity || 'info')}</span>${reasons.slice(0,6).map(reason => `<span class="tag neutral">${esc(reason)}</span>`).join('')}</div></div><div class="detail-actions"><button class="decision" onclick="focusEvidence()">看三證據</button><button class="decision" onclick="openPdf('official_pdf')">看官方 PDF</button></div></div>
+      ${renderQuestion(candidate)}
+      <div class="section"><div class="section-head"><h2>五條 lane 時間線</h2><span class="meta">同一 revision · advisory only</span></div><div class="section-body"><div class="lane-grid">${renderLaneTimeline(candidate)}</div>${renderFindings(candidate)}</div></div>
+      ${renderRevision(candidate)}
+      ${renderCorrectionEditor(candidate)}
+      ${renderDecision(candidate)}
+    </div>`;
+  }
+  function renderEvidence() {
+    const selected = state.data?.selected;
+    const node = document.getElementById('evidencePanel');
+    if (!selected) { node.innerHTML = '<div class="evidence-scroll"><div class="loading">選題後顯示三證據與 PDF</div></div>'; return; }
+    const evidence = selected.evidence;
+    const candidate = selected.candidate || {};
+    if (!evidence) { node.innerHTML = '<div class="evidence-scroll"><h2>Evidence</h2><p>本題沒有獨立三證據 packet；請以 candidate source PDF 追溯。</p>' + renderPdfBox(candidate) + '</div>'; return; }
+    const source = evidence.source || {};
+    const pdf = evidence.pdf || {};
+    const isAuto = source.auto_rule_candidate;
+    const engineEntries = Object.entries(pdf.text_by_engine || {});
+    node.innerHTML = `<div class="evidence-scroll"><h2>三證據／PDF evidence</h2><p>這裡只呈現「比對證據」，不替人工接受修正。三個 extractor 一致且只有 compatibility glyph 差異，仍是 shadow proposal。</p>
+      <div class="evidence-state ${isAuto ? 'auto' : source.status === 'source_text_difference' || source.status === 'insufficient_independent_families' ? 'conflict' : ''}"><strong>${esc(source.status || '尚無分析狀態')}</strong><p>consensus：${esc(source.question_consensus || '—')} · families：${fmt(source.family_count || 0)} · raw support：${fmt(source.raw_support || 0)} · NFKC support：${fmt(source.nfkc_support || 0)}</p>${isAuto ? '<p><b>修正候選：</b>至少兩個 extractor family 支持；必須人工看 PDF／glyph 才能建立新 revision。</p>' : ''}</div>
+      <div class="tags">${(pdf.families || []).map(f => `<span class="tag neutral">${esc(f)}</span>`).join('')}${(evidence.pdf_flags || []).map(f => `<span class="tag warning">PDF：${esc(f)}</span>`).join('')}</div>
+      <div class="engine-list"><div class="kv"><div class="kv-label">candidate text</div><div class="engine-text">${esc(candidate.stem || '')}</div></div>${engineEntries.map(([name,value]) => `<div class="engine"><div class="engine-head">${esc(value.source_family || name)} <span class="tag neutral">${esc(name)}</span></div><div class="engine-text">${esc(value.text || '')}</div></div>`).join('')}</div>
+      ${renderEvidenceVisual(evidence)}
+      ${renderPdfBox(candidate, evidence)}
+    </div>`;
+  }
+  function renderEvidenceVisual(evidence) {
+    const visual = evidence.visual || {};
+    if (!visual.official_question_crop_url && !visual.contact_sheet_url) return '';
+    return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>官方 PDF crop／舊 asset 對照</h2><span class="meta">current assets ${fmt(visual.current_asset_count || 0)}</span></div><div class="section-body"><div class="visual-preview">${visual.official_question_crop_url ? `<div><img src="${esc(visual.official_question_crop_url)}" alt="official question crop"><div class="visual-caption">官方題目區域（可用來判斷 MinerU 是否裁切錯誤）</div></div>` : ''}${visual.contact_sheet_url ? `<div><img src="${esc(visual.contact_sheet_url)}" alt="evidence contact sheet"><div class="visual-caption">三證據 contact sheet</div></div>` : ''}</div></div></div>`;
+  }
+  function renderPdfBox(candidate, evidence) {
+    const files = candidate.source_files || {};
+    const available = [['official_pdf','官方 PDF'],['mineru_layout_pdf','MinerU layout'],['mineru_origin_pdf','MinerU origin']].filter(([key]) => files[key]);
+    const first = available[0]?.[0] || '';
+    const page = evidence?.pdf?.page ? ` · PDF page ${esc(evidence.pdf.page)}` : '';
+    return `<div class="section" style="margin-top:10px"><div class="section-head"><h2>來源追溯</h2><span class="meta">${page}</span></div><div class="section-body"><div class="pdf-source">${available.map(([key,label]) => `<button onclick="openPdf(${jsArg(key)})">${esc(label)}</button>`).join('') || '<span class="tag warning">找不到來源 PDF</span>'}</div><iframe id="pdfFrame" class="pdf-frame" src="${first ? fileUrl(files[first]) : ''}" title="PDF source viewer"></iframe><div id="pdfPath" class="path"><code>${esc(first ? files[first] : '尚無可顯示來源')}</code></div></div></div>`;
+  }
+  function renderAll() { renderBadges(); renderMetrics(); renderFilters(); renderQueueNav(); renderDetail(); renderEvidence(); }
+  async function fetchWorkflow(candidateKey = '') {
+    const params = new URLSearchParams();
+    if (candidateKey) params.set('candidate_key', candidateKey);
+    const response = await fetch(`/api/workflow?${params.toString()}`, {cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  }
+  async function loadWorkflow(candidateKey = '') {
+    try {
+      const data = await fetchWorkflow(candidateKey);
+      state.data = data;
+      await fetchCorrectionFeedback();
+      if (!state.selectedKey) {
+        const first = visibleQueueItems()[0] || data.queue_items?.[0];
+        state.selectedKey = first?.candidate_key || '';
+      }
+      if (state.selectedKey && !data.selected) {
+        state.data = await fetchWorkflow(state.selectedKey);
+      }
+      renderAll();
+    } catch (error) {
+      document.getElementById('detail').innerHTML = `<div class="empty"><div><strong>工作流資料讀取失敗</strong><span>${esc(error.message || error)}</span></div></div>`;
+      showToast(`讀取失敗：${error.message || error}`, true);
+    }
+  }
+  async function fetchCorrectionFeedback() {
+    try {
+      const response = await fetch('/api/correction-feedback?status=pending&limit=100', {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+      state.feedbackOutbox = data;
+    } catch (error) {
+      // The workflow remains usable if an older read-only server has not yet
+      // exposed the feedback outbox endpoint.
+      state.feedbackOutbox = null;
+    }
+  }
+  async function refreshFeedbackOutbox() {
+    await fetchCorrectionFeedback();
+    renderBadges();
+    const count = state.feedbackOutbox?.count || 0;
+    showToast(`護欄 outbox：${fmt(count)} 筆待 GLM curator；仍需 owner approval`);
+  }
+  async function reloadWorkflow() { await loadWorkflow(state.selectedKey); showToast('已重新讀取 queue、lane 與 evidence'); }
+  function chooseQueue(queue) {
+    state.activeQueue = queue;
+    const item = visibleQueueItems()[0];
+    state.selectedKey = item?.candidate_key || '';
+    loadWorkflow(state.selectedKey);
+  }
+  async function selectItem(key) { state.selectedKey = key; await loadWorkflow(key); }
+  function focusEvidence() { document.getElementById('evidencePanel')?.scrollIntoView({behavior:'smooth', block:'start'}); }
+  function openPdf(kind) {
+    const candidate = state.data?.selected?.candidate;
+    const path = candidate?.source_files?.[kind];
+    if (!path) { showToast('本題沒有這個來源 PDF', true); return; }
+    const frame = document.getElementById('pdfFrame');
+    if (frame) frame.src = fileUrl(path);
+    const label = document.getElementById('pdfPath');
+    if (label) label.innerHTML = `<code>${esc(path)}</code>`;
+  }
+  async function saveDecision(action) {
+    const candidate = state.data?.selected?.candidate;
+    if (!candidate) return;
+    const notes = document.getElementById('decisionNotes')?.value?.trim() || '';
+    if (action !== 'accept' && !notes) { showToast('保留疑問／阻擋／排除請留下原因，方便後續修 rule', true); return; }
+    try {
+      const response = await fetch('/api/review', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({candidate_key:candidate.candidate_key, action, notes, reviewer:'local', source:'workflow_console'})});
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      showToast(`已寫入 ${action}；保留 append-only event，重新排序 queue`);
+      await loadWorkflow(candidate.candidate_key);
+    } catch (error) { showToast(`寫入失敗：${error.message || error}`, true); }
+  }
+  async function saveCorrection() {
+    const candidate = state.data?.selected?.candidate;
+    if (!candidate) return;
+    const stem = document.getElementById('correctionStem')?.value ?? '';
+    const optionsText = document.getElementById('correctionOptions')?.value ?? '[]';
+    const answerText = document.getElementById('correctionAnswer')?.value ?? '';
+    const groupRef = document.getElementById('correctionGroupRef')?.value ?? '';
+    const notes = document.getElementById('correctionNotes')?.value?.trim() || '';
+    let options;
+    try {
+      options = JSON.parse(optionsText);
+    } catch (error) {
+      showToast(`選項 JSON 格式錯誤：${error.message || error}`, true);
+      return;
+    }
+    if (!Array.isArray(options)) { showToast('選項 JSON 必須是陣列', true); return; }
+    const correction = {stem, options, answer: answerText, group_ref: groupRef};
+    try {
+      const response = await fetch('/api/review', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          candidate_key: candidate.candidate_key,
+          action: 'correct',
+          correction,
+          notes,
+          reviewer: 'local',
+          source: 'workflow_console',
+          review_surface: 'desktop_workflow',
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      const feedbackId = data.event?.storage?.correction_feedback?.event?.feedback_id;
+      showToast(feedbackId ? `修正已保存，feedback ${feedbackId}` : '修正已保存；沒有可建立的可見差異 feedback');
+      await loadWorkflow(candidate.candidate_key);
+    } catch (error) { showToast(`修正保存失敗：${error.message || error}`, true); }
+  }
+  function installEvents() {
+    for (const id of ['categoryFilter','yearFilter','subjectFilter','severityFilter']) document.getElementById(id).addEventListener('change', event => { state[id.replace('Filter','')] = event.target.value; renderQueueNav(); });
+    let searchTimer;
+    document.getElementById('search').addEventListener('input', event => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = event.target.value; renderQueueNav(); }, 160); });
+  }
+  installEvents();
+  loadWorkflow();
+</script>
+</body>
+</html>

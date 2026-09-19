@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/ai395_review/mineru-artifact.schema.json",
+  "title": "AI395 MinerU Artifact Contract",
+  "type": "object",
+  "required": ["mineru_run_id", "source_artifact_id", "status", "input_sha256", "output_root", "read_only"],
+  "properties": {
+    "mineru_run_id": {"type": "string", "minLength": 1},
+    "source_artifact_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["existing_artifact", "validated", "provisional", "failed", "disabled"]},
+    "mode": {"enum": ["existing_artifact", "run_mineru"]},
+    "mineru_version": {"type": "string"},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "output_root": {"type": "string", "minLength": 1},
+    "markdown_path": {"type": ["string", "null"]},
+    "layout_path": {"type": ["string", "null"]},
+    "image_root": {"type": ["string", "null"]},
+    "output_manifest": {"type": "object"},
+    "read_only": {"const": true}
+  },
+  "additionalProperties": true
+}

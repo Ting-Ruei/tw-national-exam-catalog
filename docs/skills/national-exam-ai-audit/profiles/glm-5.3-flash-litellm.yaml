@@ -1,0 +1,63 @@
+{
+  "schema_version": "national_exam_model_profile_v1",
+  "profile_id": "glm-5.3-flash-litellm",
+  "model": "${LITELLM_MODEL}",
+  "model_default": "glm-5.3-flash",
+  "model_env": "LITELLM_MODEL",
+  "provider": "litellm_glm",
+  "adapter": "openai_compatible",
+  "endpoint_env": "LITELLM_BASE_URL",
+  "api_key_env": "LITELLM_API_KEY",
+  "transport": {
+    "protocol": "openai_chat_completions",
+    "health_path": "/models",
+    "completion_path": "/chat/completions",
+    "api_key_mode": "bearer_env",
+    "stream": false
+  },
+  "certification": "pending_transport_probe",
+  "certification_scope": "all_lanes_after_transport_pixel_and_gold_probe",
+  "allowed_lanes": [
+    "ocr_text",
+    "semantic_transcription",
+    "group",
+    "visual"
+  ],
+  "vision_mode": "native_multimodal_requires_pixel_probe",
+  "default_batch_size": 1,
+  "max_batch_size": 1,
+  "output_mode": "sparse_json_object",
+  "reasoning_effort": "low",
+  "clear_thinking": false,
+  "send_reasoning_effort_env": "LITELLM_SEND_REASONING_EFFORT",
+  "send_reasoning_effort_default": false,
+  "send_thinking_env": "LITELLM_SEND_THINKING",
+  "send_thinking_default": false,
+  "clear_thinking_env": "LITELLM_CLEAR_THINKING",
+  "advertised_context_limit_tokens": 1000000,
+  "advertised_max_output_tokens": 131072,
+  "workflow_context_admission_default_tokens": 262144,
+  "workflow_context_one_time_extension_tokens": 393216,
+  "workflow_context_max_extensions_per_lane": 1,
+  "role": "primary_staging_residual_auditor",
+  "may_propose_rules": true,
+  "may_materialize_without_active_rule": false,
+  "network_policy": {
+    "https_required_for_remote": true,
+    "allow_local_http_hosts": ["127.0.0.1", "localhost", "::1"],
+    "public_exposure": false,
+    "api_key_source": "runtime_environment_only"
+  },
+  "cost_policy": {
+    "billing": "owner_litellm_test_key",
+    "auto_subscribe": false,
+    "key_name": "tw-national-exam-catalog-v1",
+    "secret_in_repository": false
+  },
+  "known_limits": [
+    "Transport and model availability must be proved with the read-only /models probe before live staging.",
+    "Vision certification requires a real raster pixel probe and human gold comparison.",
+    "The 192K workflow cap is an operational latency and cost guard, not the provider's advertised context limit.",
+    "Model output remains advisory; it cannot accept, block, reset, patch, or write a human review event."
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "ai395_review_route_registry_v1",
+  "routes": {
+    "text_evidence": {
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
+      "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
+      "outage_fallbacks": []
+    },
+    "notation": {
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
+      "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
+      "outage_fallbacks": []
+    },
+    "group": {
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
+      "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
+      "outage_fallbacks": []
+    },
+    "vision": {
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
+      "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
+      "outage_fallbacks": []
+    },
+    "answer": {
+      "primary": "glm-5.3-flash-litellm",
+      "challengers": [],
+      "optional_local": ["qwen3.8-27b-local", "qwen3.8-27b-mlx-tailscale"],
+      "outage_fallbacks": []
+    }
+  }
+}
