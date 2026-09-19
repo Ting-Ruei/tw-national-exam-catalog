@@ -1,0 +1,17 @@
+{
+  "version": "moex-cjk-numerals/2026-09-12.1",
+  "provenance": "code points fixed by hand from the CJK Unified block; validated at runtime by requiring the resulting sequence to be monotone with full coverage. A wrong entry makes the style score collapse, it cannot silently pass.",
+  "digit_values": {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10
+  },
+  "ten_value": 10
+}

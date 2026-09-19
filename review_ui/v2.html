@@ -1,0 +1,1370 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>審題 · 對照紙本</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ink:#102a43; --muted:#627d98; --faint:#9fb3c8; --canvas:#f5f7fa; --paper:#fff;
+    --line:#d9e2ec; --line-strong:#bcccdc; --navy:#102a43;
+    --blue:#1976d2; --green:#087f5b; --amber:#a15c00; --red:#b42318;
+    --shadow:0 2px 10px rgba(16,42,67,.06);
+    --radius:10px;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body {
+    color:var(--ink); background:var(--canvas);
+    font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC","Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased; font-size:15px;
+  }
+  button,input,textarea { font:inherit; }
+  button { cursor:pointer; }
+  button:disabled { cursor:not-allowed; opacity:.45; }
+
+  /* --- one narrow list, then the comparison: text | paper --- */
+  .app { display:grid; grid-template-columns:238px minmax(0,1fr); height:100vh; }
+  .list { display:flex; flex-direction:column; border-right:1px solid var(--line); background:var(--paper); min-height:0; }
+  .list-head { padding:11px 13px; border-bottom:1px solid var(--line); }
+  .progress { display:flex; align-items:baseline; gap:5px; }
+  .progress b { font-size:18px; font-weight:800; letter-spacing:-.02em; }
+  .progress span { color:var(--muted); font-size:11.5px; }
+  .bar { height:4px; margin-top:7px; border-radius:2px; background:var(--line); overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--green); transition:width .2s; }
+  .list-body { flex:1; overflow-y:auto; padding:5px; }
+  .row {
+    display:flex; align-items:center; gap:7px; width:100%; padding:6px 8px;
+    border:1px solid transparent; border-radius:7px; background:none; text-align:left;
+    color:var(--ink); font-size:12.5px;
+  }
+  .row:hover { background:var(--canvas); }
+  .row.active { border-color:var(--navy); background:var(--paper); box-shadow:var(--shadow); }
+  .row .num { min-width:24px; color:var(--muted); font-variant-numeric:tabular-nums; font-size:11.5px; }
+  .row .mark { width:7px; height:7px; border-radius:50%; background:var(--line-strong); flex:none; }
+  .row.done .mark { background:var(--green); }
+  .row.flag .mark { background:var(--amber); }
+  .row.active .num { color:var(--ink); font-weight:700; }
+
+  /* --- the crops: shown under the options, never instead of them --- */
+  .crops { margin-top:16px; border-top:1px solid var(--line); padding-top:10px; }
+  .crops-head { display:flex; align-items:baseline; gap:8px; font-size:12px; color:var(--muted); margin-bottom:8px; }
+  .crop { margin:0 0 12px; }
+  .crop img { display:block; max-width:100%; border:1px solid var(--line); border-radius:6px; background:var(--paper); }
+  .crop figcaption { margin-top:5px; font-size:11.5px; color:var(--muted); }
+
+  /* --- the scope: what is being reviewed, and what is in this queue --- */
+  .scope { padding:9px 13px; border-bottom:1px solid var(--line); background:var(--canvas); }
+  .scope select { width:100%; margin-bottom:5px; padding:4px 6px; font-size:12px;
+    border:1px solid var(--line); border-radius:6px; background:var(--paper); color:var(--ink); }
+  .scope .count { font-size:11px; color:var(--muted); }
+  .scope .only-figures { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--muted); cursor:pointer; }
+  .scope .only-figures input { accent-color:var(--accent); }
+  /* The chip row and the figure toggle are two answers to the same question - "which rows do I want
+     to see" - so they sit together and read as one control. The chips are mutually exclusive (a row
+     cannot be both `未看` and `需重看`), which is why they are radios wearing button styling rather
+     than checkboxes: a checkbox set would let a reviewer select two states and silently get the
+     union, and the count above the list would then mean something nobody asked for. */
+  .scope .chips { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+  .chip { font-size:11px; padding:3px 9px; border:1px solid var(--line); border-radius:99px;
+    background:var(--paper); color:var(--muted); cursor:pointer; user-select:none; }
+  .chip input { display:none; }
+  .chip.on { border-color:var(--navy); color:var(--paper); background:var(--navy); }
+  .chip .n { opacity:.7; margin-left:4px; font-variant-numeric:tabular-nums; }
+  /* A figure question is marked in the list so it can be found by eye, and the mark is a fixed
+     width so the numbers stay in a column whether the mark is there or not. */
+  .row .fig { min-width:10px; color:var(--accent); font-size:10px; }
+  /* 題組: two or more questions share one printed stem, and the mark is what makes them findable as
+     a set rather than one at a time. */
+  .row .grp { min-width:12px; color:var(--violet, #6b4fbb); font-size:10px; }
+  .crumbs { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+  .crumb { font-size:11px; padding:2px 7px; border:1px solid var(--line); border-radius:99px;
+    background:var(--paper); color:var(--muted); }
+  .crumb.on { border-color:var(--navy); color:var(--paper); background:var(--navy); }
+
+  .pane { display:flex; flex-direction:column; min-height:0; }
+  .pane-head {
+    display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+    padding:9px 16px; border-bottom:1px solid var(--line); background:var(--paper);
+  }
+  .where { font-size:12px; color:var(--muted); }
+  .where b { color:var(--ink); font-weight:700; }
+  .spacer { margin-left:auto; }
+  .ghost {
+    display:inline-flex; align-items:center; gap:5px; height:30px; padding:0 9px;
+    border:1px solid var(--line); border-radius:7px; background:var(--paper);
+    color:var(--ink); font-size:12.5px;
+  }
+  .ghost:hover { border-color:var(--line-strong); }
+  .ghost .k { color:var(--faint); font-size:10.5px; }
+
+  /* --- the comparison: extracted text left, the paper itself right --- */
+  .compare { flex:1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); min-height:0; }
+  .side { min-width:0; overflow-y:auto; padding:20px 18px 120px; }
+  .side + .side { border-left:1px solid var(--line); background:#fbfcfd; padding:0; overflow:hidden; display:flex; flex-direction:column; }
+  .side-head {
+    position:sticky; top:-20px; z-index:2; margin:-20px -18px 14px; padding:9px 18px;
+    border-bottom:1px solid var(--line); background:rgba(255,255,255,.94);
+    backdrop-filter:blur(8px);
+    color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.05em;
+  }
+  .side-head .hint { float:right; font-weight:400; letter-spacing:0; }
+  .side + .side .side-head { position:static; margin:0; top:auto; }
+  /* The paper pane is a real PDF viewport: scroll it like a document. The reviewer finds
+     the question with their eyes, which is faster and more accurate than any region the
+     machine could have guessed at. */
+  .paper-frame { flex:1; width:100%; min-height:0; border:0; display:block; background:#eef2f6; }
+  .paper-missing {
+    padding:26px 18px; color:var(--muted); font-size:13px; text-align:center; line-height:1.7;
+  }
+  .paper-link { display:inline-block; margin-top:10px; color:var(--blue); font-size:12.5px; }
+
+  .qnum { color:var(--muted); font-size:11.5px; font-weight:700; letter-spacing:.06em; }
+  .stem { margin:9px 0 18px; font-size:16px; line-height:1.75; white-space:pre-wrap; }
+  /* The shared stem of a question group, drawn above the member's own stem and visually marked as
+     the part the paper printed once for several questions. */
+  .shared-stem { margin:10px 0 14px; border-left:3px solid var(--blue,#2b6cb0);
+    background:#f7fafc; border-radius:0 5px 5px 0; padding:9px 12px; }
+  /* The head's note has no shared body under it, so it is a single line and the bottom margin is
+     what separates it from the question's own stem. */
+  .shared-stem.head .shared-head { margin-bottom:0; }
+  .shared-head { font-size:11.5px; font-weight:700; color:var(--blue,#2b6cb0);
+    display:flex; justify-content:space-between; gap:10px; margin-bottom:5px; }
+  .shared-body { font-size:14px; line-height:1.7; white-space:pre-wrap; color:#243b53; }
+  /* Disputes. The border and the tint are the severity, and the word is written out as well - a
+     colour alone is not readable by everyone, and `阻擋級` is the thing that must not be missed. */
+  .disputes { margin:0 0 14px; border:1px solid #f0b429; background:#fffaf0; border-radius:6px;
+    padding:9px 12px; }
+  .disputes-head { font-size:11.5px; font-weight:700; color:#8a5a00; display:flex;
+    justify-content:space-between; gap:10px; margin-bottom:6px; }
+  .dispute { display:flex; flex-wrap:wrap; gap:6px; align-items:baseline; font-size:12.5px;
+    padding:3px 0; color:#4a3400; }
+  .dispute.b .what, .dispute .why { color:#6b5200; }
+  .dispute .why { flex:1 1 auto; }
+  .dispute .where { font-size:10.5px; background:rgba(0,0,0,.05); border-radius:3px;
+    padding:1px 5px; color:#6b5200; }
+  .dispute.blocker { border-left:3px solid #c53030; padding-left:8px; margin-left:-8px; }
+  .dispute.blocker b { color:#9b2c2c; }
+  .disputes:has(.dispute.blocker) { border-color:#c53030; background:#fff5f5; }
+  .disputes:has(.dispute.blocker) .disputes-head { color:#9b2c2c; }
+  .opts { display:flex; flex-direction:column; gap:8px; }
+  .opt { display:flex; gap:10px; padding:10px 13px; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); }
+  .opt.is-answer { border-color:var(--green); background:#f2fbf7; }
+  .opt .k { width:16px; flex:none; color:var(--muted); font-weight:800; }
+  .opt.is-answer .k { color:var(--green); }
+  .opt .t { line-height:1.65; white-space:pre-wrap; }
+  /* An option that IS a picture. Aligned with the marker and the text, given a white ground so a
+     transparent structure is still legible, and capped so four of them cannot push the answer
+     buttons off the screen. */
+  /* An option's picture is the option. At 220x200 it was a thumbnail of a chemical structure -
+     the bonds and the subscripts are the answer, and shrinking them made the crop unreadable while
+     the reviewer was being asked to check exactly that. It is allowed its natural size up to a
+     bound, and clicking opens it full size in a new tab. */
+  .opt .opt-img { flex:none; max-width:320px; max-height:280px; object-fit:contain;
+    background:#fff; border:1px solid var(--line); border-radius:4px; padding:2px; cursor:zoom-in; }
+  .opt .t:empty { display:none; }
+
+  /* The legend for the paper's own marks, and the address of a lost glyph. `\ue000` has no glyph
+     in any browser font, so a legend is the only way a reader can see what an option means; and a
+     lost glyph is a defect that must be visible rather than silently drawn as an empty box. */
+  .gloss { margin:8px 0; padding:8px 11px; border-radius:var(--radius); font-size:12.5px;
+           line-height:1.7; background:#f4f7fb; color:#33475e; }
+  .gloss b { margin-right:8px; }
+  .gloss code { padding:1px 4px; border-radius:3px; background:#dfe7f1; font-size:12px; }
+  .gloss.missing { background:#fff6f6; color:#8a2b2b; border:1px solid #f0cccc; }
+
+  /* --- editing, only when 修正 is chosen --- */
+  .edit { display:none; }
+  .edit.on { display:block; }
+  .edit label { display:block; margin:14px 0 5px; color:var(--muted); font-size:11.5px; font-weight:700; }
+  .edit textarea, .edit input {
+    width:100%; padding:9px 11px; border:1px solid var(--line-strong); border-radius:8px;
+    background:var(--paper); line-height:1.65; resize:vertical; outline:none;
+  }
+  .edit textarea:focus, .edit input:focus { border-color:var(--blue); }
+  .edit textarea { min-height:88px; }
+  .edit .opt-edit { display:flex; gap:9px; align-items:flex-start; margin-bottom:7px; }
+  .edit .opt-edit .k { width:16px; flex:none; padding-top:10px; color:var(--muted); font-weight:800; }
+  .dirty { margin-top:12px; padding:9px 12px; border-radius:8px; background:#fff8e8; color:var(--amber); font-size:12.5px; }
+
+  /* --- decision bar --- */
+  .actions {
+    position:fixed; left:190px; right:0; bottom:0;
+    display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+    padding:11px 16px; border-top:1px solid var(--line);
+    background:rgba(255,255,255,.96); backdrop-filter:blur(12px);
+  }
+  .act {
+    display:inline-flex; align-items:center; gap:7px; height:37px; padding:0 15px;
+    border:1px solid var(--line); border-radius:9px; background:var(--paper);
+    color:var(--ink); font-size:14px; font-weight:650;
+  }
+  .act .kbd { color:var(--muted); font-size:11px; font-weight:400; }
+  .act.accept { border-color:var(--green); color:var(--green); }
+  .act.accept:hover { background:#f2fbf7; }
+  .act.fix { border-color:var(--blue); color:var(--blue); }
+  .act.fix:hover, .act.fix.on { background:#eef5fd; }
+  .act.hold:hover { background:#fff8e8; border-color:var(--amber); color:var(--amber); }
+  .act.block:hover { background:#fdf0ef; border-color:var(--red); color:var(--red); }
+  .act.save { border-color:var(--blue); background:var(--blue); color:#fff; }
+  .act:disabled { background:var(--canvas); }
+  .hint { color:var(--muted); font-size:12px; }
+  .reason { display:none; width:100%; }
+  .reason.on { display:block; }
+  .reason textarea {
+    width:100%; min-height:52px; padding:9px 11px;
+    border:1px solid var(--amber); border-radius:8px; resize:vertical; outline:none;
+  }
+
+  .empty { display:grid; place-items:center; height:100%; color:var(--muted); font-size:14px; text-align:center; }
+  .toast {
+    position:fixed; left:50%; bottom:72px; transform:translateX(-50%);
+    padding:9px 15px; border-radius:9px; background:var(--navy); color:#fff;
+    font-size:13px; box-shadow:0 8px 24px rgba(16,42,67,.22); z-index:20;
+  }
+  .toast.bad { background:var(--red); }
+  .toast.off { display:none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="list">
+    <div class="list-head">
+      <div class="progress"><b id="doneCount">0</b><span id="totalCount">／0 已過目</span></div>
+      <div class="bar"><i id="doneBar" style="width:0"></i></div>
+    </div>
+    <div class="scope">
+      <select id="pickCategory" title="類科"></select>
+      <select id="pickYear" title="年度"></select>
+      <select id="pickSitting" title="考次"></select>
+      <select id="pickSubject" title="科目"></select>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="count" id="scopeCount"></div>
+      <label class="only-figures"><input type="checkbox" id="figuresOnly"> 有圖</label>
+      <div class="chips" id="chips">
+        <label class="chip" data-view="all"><input type="radio" name="view" value="all">全部<span class="n" id="nAll"></span></label>
+        <label class="chip" data-view="group"><input type="radio" name="view" value="group">題組<span class="n" id="nGroup"></span></label>
+        <label class="chip" data-view="unseen"><input type="radio" name="view" value="unseen">未看<span class="n" id="nUnseen"></span></label>
+        <label class="chip" data-view="flagged"><input type="radio" name="view" value="flagged">需重看・阻擋<span class="n" id="nFlagged"></span></label>
+        <label class="chip" data-view="disputed"><input type="radio" name="view" value="disputed">爭議<span class="n" id="nDisputed"></span></label>
+      </div>
+    </div>
+    <div class="list-body" id="listBody"><div class="empty">載入中…</div></div>
+  </aside>
+
+  <main class="pane">
+    <div class="pane-head">
+      <span class="where" id="where">—</span>
+      <span class="spacer"></span>
+      <button class="ghost" id="btnFirst">⇤ 第一題</button>
+      <button class="ghost" id="btnPrev">W 上一題</button>
+      <button class="ghost" id="btnNext">S 下一題</button>
+      <button class="ghost" id="btnLast">最後一題 ⇥</button>
+    </div>
+
+    <div class="compare">
+      <div class="side" id="textSide"><div class="empty">載入中…</div></div>
+      <div class="side" id="paperSide"><div class="empty">載入中…</div></div>
+    </div>
+
+    <div class="actions">
+      <button class="act accept" id="actAccept">確認正常 <span class="kbd">A</span></button>
+      <button class="act fix"    id="actFix">修正 <span class="kbd">E</span></button>
+      <button class="act hold"   id="actHold">需重看 <span class="kbd">R</span></button>
+      <button class="act block"  id="actBlock">阻擋 <span class="kbd">B</span></button>
+      <span class="hint" id="stateHint"></span>
+      <button class="act save" id="actSave" style="display:none">儲存修正 <span class="kbd">E</span></button>
+      <div class="reason" id="reasonBox">
+        <textarea id="reasonText" placeholder="請寫原因（會存進 append-only 紀錄；例如：紙本第 3 頁為『莢膜』，抽出成『莢膜』）"></textarea>
+      </div>
+    </div>
+  </main>
+</div>
+<div class="toast off" id="toast"></div>
+
+<script>
+const S = {
+  items: [],           // every question in the queue, in paper order
+  view: [],            // the questions of the current scope, before the chips narrow them
+  rows: [],            // what the list DRAWS and what W/S WALK - always the same array
+  viewPos: new Map(),  // candidate_key -> position in `view`, so the nearest row is O(1)
+  byKey: new Map(), data: null, index: 0, verdict: new Map(),
+  editing: false, draft: null, paperPath: null,
+  // `null` is "not chosen yet" and `''` is "all, chosen deliberately". They are different states
+  // and conflating them made every 全部 option unreachable: `refreshScope` saw `''` was not among
+  // the values and replaced it with the first one, so choosing 全部年度 snapped back to the newest
+  // year on the next redraw.
+  scope: { category: null, year: null, sitting: null, subject: null },
+  scopeTotal: 0,
+  tree: null,
+};
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
+
+function toast(message, bad) {
+  const el = $('toast');
+  el.textContent = message;
+  el.className = 'toast' + (bad ? ' bad' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'toast off'; }, bad ? 4200 : 2000);
+}
+
+const verdictOf = (key) => S.verdict.get(key) || '';
+const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正' };
+
+/* ------------------------------------------------------------------- list */
+/* --------------------------------------------------------------- the scope
+   A queue of 21,150 questions across five categories is not reviewable as one list: the reviewer
+   reads a paper, and a paper is one subject of one sitting. The three pickers narrow the list to
+   the paper being read, and they are a *tree* rather than three independent filters, because the
+   facets are not independent - choosing 115 for 醫事檢驗師 and then a 藥師(一) subject would give
+   an empty list, and a control that leads nowhere is worse than no control.
+
+   The taxonomy is computed by the queue builder and served from `/api/queue_index`, so the
+   browser never has to read 21,150 rows to answer "what subjects are in here". */
+/* One candidate row, in the shape the list and the panes read.
+   Built in one place because two callers need it - the first load and every scope change - and two
+   copies of this would drift. The paper is the unit a reviewer reads, and it is named by its PDF:
+   two subjects of one sitting are two papers, and one subject of two sittings is two papers. */
+function toItem(candidate) {
+  const metadata = candidate.metadata || {};
+  const queued = (S.queued || new Map()).get(candidate.candidate_key) || {};
+  return {
+    candidate_key: candidate.candidate_key,
+    question_number: candidate.question_number,
+    stem_preview: candidate.stem,
+    paper: paperOf(candidate),
+    category: queued.category || metadata.category_name || metadata.normalized_category_name || '',
+    subject: queued.subject || metadata.canonical_subject_name || metadata.normalized_subject_name || '',
+    // Whether the question carries a machine crop. Read from the row the server sent, because a
+    // crop that exists on disk but is not on the row cannot be shown, and "is there a figure"
+    // has to be answered by the data rather than by a second guess at the text.
+    has_figure: (candidate.image_refs || []).some(
+      (ref) => ref && typeof ref === 'object' && ref.exists !== false),
+    // A 題組 is several questions under one printed stem. `group_size` is written by the queue
+    // builder (`qbr.groups`) and carried on the row, so the list reads the paper's own structure
+    // rather than re-deriving it from text - a second derivation would be a second opinion about
+    // where the group starts, which is the one thing that must not differ from the queue.
+    group_size: Number(candidate.group_size || 1),
+    group_position: candidate.group_position,
+    group_ref: candidate.group_ref || '',
+    year: queued.year || metadata.exam_year || metadata.year || yearOf(candidate),
+    ordinal: queued.ordinal || metadata.exam_ordinal,
+    human_action: queued.human_action || 'unreviewed',
+    reason_codes: queued.reason_codes || [],
+    candidate,
+  };
+}
+
+/* The paper's identity: the official PDF's file name without its extension. */
+function paperOf(candidate) {
+  const pdf = (candidate.source_files || {}).official_pdf
+    || (candidate.metadata || {}).question_pdf_relative || '';
+  const name = String(pdf).split('/').pop() || '';
+  return name.replace(/\.pdf$/i, '');
+}
+
+/* `115090` is year 115, sitting 2 - the exam code carries both. */
+function yearOf(candidate) {
+  const code = String((candidate.metadata || {}).exam_code || '');
+  return /^\d{5}/.test(code) ? Number(code.slice(0, 3)) : '';
+}
+
+/* The same tree the queue builder computes, rebuilt in the browser. Only reached when the index
+   is unavailable; the two must agree, and a disagreement is a reason to look at the index. */
+function treeFrom(items) {
+  const tree = {};
+  items.forEach((item) => {
+    const category = item.category || '(未分類)';
+    const year = String(item.year || '(未知)');
+    const subject = item.subject || item.paper || '(未知)';
+    const bucket = (tree[category] = tree[category] || { years: {}, papers: 0, questions: 0 });
+    bucket.papers += 1; bucket.questions += 1;
+    const yearBucket = (bucket.years[year] = bucket.years[year] || { sittings: {}, papers: 0, questions: 0 });
+    yearBucket.papers += 1; yearBucket.questions += 1;
+    const sitting = String(item.ordinal || '');
+    const sittingBucket = (yearBucket.sittings[sitting] = yearBucket.sittings[sitting]
+      || { subjects: {}, papers: 0, questions: 0 });
+    sittingBucket.papers += 1; sittingBucket.questions += 1;
+    const subjectBucket = (sittingBucket.subjects[subject] = sittingBucket.subjects[subject]
+      || { papers: [], questions: 0 });
+    if (!subjectBucket.papers.includes(item.paper)) subjectBucket.papers.push(item.paper);
+    subjectBucket.questions += 1;
+  });
+  return tree;
+}
+
+/* The scope in the address bar, so a paper can be linked to and reopened.
+
+   `#類科/年/次/科目` - the same four things the pickers set. This is not a convenience: a review
+   session is about one paper, and a reviewer who has to find the same paper again by hand every
+   time will not come back to it. It also makes a scope reproducible, which is what an audit of a
+   decision needs. */
+function scopeFromHash() {
+  const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  if (!raw) return null;
+  const [category, year, sitting, ...rest] = raw.split('/');
+  if (!category) return null;
+  // A trailing `q41` names a question, so a link can point at one question of one paper. It is
+  // the unit an argument about a question is conducted in.
+  let subject = rest.join('/');
+  let question = '';
+  const hit = subject.match(/\/(q\d+)$/);
+  if (hit) { question = hit[1]; subject = subject.slice(0, -hit[0].length); }
+  return { category, year: year || '', sitting: sitting || '', subject, question };
+}
+
+function scopeToHash() {
+  const { category, year, sitting, subject } = S.scope;
+  const number = S.rows[S.index] ? `q${S.rows[S.index].question_number}` : '';
+  const parts = [category, year, sitting, subject].map((v) => encodeURIComponent(v || ''));
+  history.replaceState(null, '', `#${parts.join('/')}${number ? '/' + number : ''}`);
+}
+
+function buildScope(tree) {
+  S.tree = tree || null;
+  const category = $('pickCategory');
+  const categories = Object.keys(tree || {}).sort();
+  // A scope in the address bar wins over the default, and an unusable one is ignored rather than
+  // applied - a stale link must land on a paper, not on an empty list.
+  // An empty category in a link means 全部類科, which is a real choice the pickers offer, so it is
+  // accepted here; only a category the queue does not hold is refused. Validating with
+  // `categories.includes()` refused the empty one too and discarded the whole link, which is why
+  // every wide scope opened on the default paper instead of the one the link named.
+  const wanted = scopeFromHash();
+  if (wanted && (wanted.category === '' || categories.includes(wanted.category))) {
+    S.openQuestion = wanted.question || '';
+    S.scope = { ...S.scope, ...wanted };
+  }
+  category.innerHTML = categories.length > 1
+    ? '<option value="">全部類科</option>' + categories.map((c) => `<option value="${esc(c)}">${esc(c)}（${tree[c].papers} 卷）</option>`).join('')
+    : categories.map((c) => `<option value="${esc(c)}">${esc(c)}（${tree[c].papers} 卷）</option>`).join('');
+  // A queue that holds one category should open on it rather than on "all", because "all" is a
+  // choice the reviewer would only ever make by accident.
+  S.scope.category = resolveLevel(S.scope.category, categories);
+  category.value = S.scope.category;
+  category.onchange = () => {
+    S.scope.category = category.value;
+    S.scope.year = null; S.scope.sitting = null; S.scope.subject = null;
+    refreshScope();
+  };
+  refreshScope();
+}
+
+/* The years of the chosen category, and the sittings of the chosen year.
+   The sitting is its own level and not part of the year, because the same subject is set twice a
+   year and the two settings are two different papers: 1151 and 1152 of 藥師(一) 藥學(二) share a
+   subject name and share nothing else. A reviewer comparing a question against the paper it came
+   from needs to be able to say *which sitting*, and before this there was no way to say it. */
+function refreshScope() {
+  const tree = S.tree || {};
+  const bucket = tree[S.scope.category];
+  const year = $('pickYear'), sitting = $('pickSitting'), subject = $('pickSubject');
+
+  const years = bucket ? Object.keys(bucket.years).filter((y) => /^\d+$/.test(y))
+    .sort((a, b) => Number(b) - Number(a)) : [];
+  year.innerHTML = (years.length ? '<option value="">全部年度</option>' : '<option value="">—</option>')
+    + years.map((y) => `<option value="${y}">${y} 年（${bucket.years[y].papers} 卷）</option>`).join('');
+  S.scope.year = resolveLevel(S.scope.year, years);
+  year.value = S.scope.year;
+  year.onchange = () => {
+    S.scope.year = year.value; S.scope.sitting = null; S.scope.subject = null;
+    refreshScope();
+  };
+
+  const sittings = availableSittings(bucket, S.scope.year);
+  sitting.innerHTML = (sittings.length > 1 ? '<option value="">全部考次</option>' : '<option value="">—</option>')
+    + sittings.map((n) => `<option value="${esc(n)}">第 ${esc(n)} 次（${countPapers(bucket, S.scope.year, n, '')} 卷）</option>`).join('');
+  S.scope.sitting = resolveLevel(S.scope.sitting, sittings);
+  sitting.value = S.scope.sitting;
+  sitting.onchange = () => { S.scope.sitting = sitting.value; S.scope.subject = null; refreshScope(); };
+
+  const subjects = availableSubjects(bucket, S.scope.year, S.scope.sitting);
+  subject.innerHTML = (subjects.length > 1 ? '<option value="">全部科目</option>' : '<option value="">—</option>')
+    + subjects.map((name) => `<option value="${esc(name)}">${esc(name)}（${countQuestions(bucket, S.scope.year, S.scope.sitting, name)} 題）</option>`).join('');
+  S.scope.subject = resolveLevel(S.scope.subject, subjects);
+  subject.value = S.scope.subject;
+  subject.onchange = () => { S.scope.subject = subject.value; applyScope(); };
+  // Re-drawing the list is all the toggle does - it must not reload the scope. The anchor is the
+  // open question, so switching a filter off returns to the same question rather than to a re-fetched
+  // one, and switching it on opens on the nearest row it keeps.
+  //
+  // The panels are re-rendered as well, because `rebuildRows` can move `S.index` - a question that
+  // the new filter excludes is not the question shown beside the list - and a cursor that says one
+  // thing while the panel says another is the tracking error this whole change removes.
+  const refilter = () => {
+    rebuildRows();
+    renderList();
+    renderTextSide();
+    renderPaperSide();
+    scopeToHash();
+  };
+  $('figuresOnly').onchange = refilter;
+  document.querySelectorAll('#chips .chip').forEach((chip) => {
+    chip.onclick = () => {
+      const radio = chip.querySelector('input');
+      if (radio) radio.checked = true;
+      refilter();
+    };
+  });
+
+  applyScope();
+}
+
+/* Where a paper sits in the tree: its category, year, sitting and subject, all four of them.
+   Read from the taxonomy rather than taken from the current scope, because the scope may be wider
+   than one paper ("all subjects", "all sittings") and a request has to be narrower than the scope,
+   not equal to it. Returns null for a paper the tree does not hold, which is a paper that cannot
+   be requested at all. */
+function whereOfPaper(paper) {
+  const tree = S.tree || {};
+  for (const [category, bucket] of Object.entries(tree)) {
+    for (const [year, yearBucket] of Object.entries(bucket.years || {})) {
+      for (const [sitting, sittingBucket] of Object.entries(yearBucket.sittings || {})) {
+        for (const [subject, entry] of Object.entries(sittingBucket.subjects || {})) {
+          if (entry.papers.includes(paper)) return { category, year, ordinal: sitting, subject };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/* The values a level offers, gathered from the whole subtree the levels above it select.
+
+   A level with "all" chosen above it has no single bucket to read, and reading from one bucket
+   anyway is why choosing 全部年度 emptied the 考次 picker and choosing 全部考次 emptied the 科目
+   one: the code asked `years['']` for its sittings, got nothing, and offered nothing. The values
+   below an "all" are the union of the values below every branch of it. */
+function walkSittings(bucket, year) {
+  const years = year ? [year] : Object.keys((bucket && bucket.years) || {});
+  const out = [];
+  for (const name of years) {
+    const yearBucket = bucket.years[name];
+    if (!yearBucket) continue;
+    for (const [sitting, sittingBucket] of Object.entries(yearBucket.sittings || {})) {
+      out.push({ year: name, sitting, sittingBucket });
+    }
+  }
+  return out;
+}
+
+function availableSittings(bucket, year) {
+  if (!bucket) return [];
+  return [...new Set(walkSittings(bucket, year).map((entry) => entry.sitting))].sort();
+}
+
+function availableSubjects(bucket, year, sitting) {
+  if (!bucket) return [];
+  const names = [];
+  for (const entry of walkSittings(bucket, year)) {
+    if (sitting && entry.sitting !== sitting) continue;
+    names.push(...Object.keys(entry.sittingBucket.subjects || {}));
+  }
+  return [...new Set(names)].sort();
+}
+
+/* A value's size within the subtree the levels above it select. Shown beside each option so a
+   reviewer can see how big a choice is before making it - and so a level whose list is empty is
+   visibly empty rather than silently empty. */
+function countPapers(bucket, year, sitting, subject) {
+  let total = 0;
+  for (const entry of walkSittings(bucket, year)) {
+    if (sitting && entry.sitting !== sitting) continue;
+    for (const [name, subjectBucket] of Object.entries(entry.sittingBucket.subjects || {})) {
+      if (subject && name !== subject) continue;
+      total += subjectBucket.papers.length;
+    }
+  }
+  return total;
+}
+
+function countQuestions(bucket, year, sitting, subject) {
+  let total = 0;
+  for (const entry of walkSittings(bucket, year)) {
+    if (sitting && entry.sitting !== sitting) continue;
+    for (const [name, subjectBucket] of Object.entries(entry.sittingBucket.subjects || {})) {
+      if (subject && name !== subject) continue;
+      total += subjectBucket.questions;
+    }
+  }
+  return total;
+}
+
+/* What a level's value should be, given the values it offers.
+
+   Three states, and they are genuinely different:
+     `null`  - not chosen yet, so take the first offered value (the newest year, the first subject)
+     `''`    - "all", chosen deliberately; the pickers offer it and it must survive a redraw
+     a value - kept if the level offers it, replaced if not, so a stale link lands somewhere real
+
+   Collapsing `''` into "invalid" is what made every 全部 option unreachable: choosing 全部年度 set
+   the picker to `''`, the next redraw saw `''` was not among the years and replaced it with the
+   newest one, and the same thing happened to a link that named only a category. */
+function resolveLevel(value, offered) {
+  if (value === null || value === undefined) return offered[0] ?? '';
+  if (value === '') return offered.length > 1 ? '' : (offered[0] ?? '');
+  return offered.includes(value) ? value : (offered[0] ?? '');
+}
+
+/* Every paper the scope names, honouring "all" at each level.
+
+   The levels are a tree - category, year, sitting, subject - and `''` at a level means that level
+   was left on 全部. Walking the tree with that meaning is the only way 全部 can work: the pickers
+   offer it, and a scope that names it must resolve to every paper below it rather than to none. */
+function scopePapers() {
+  const tree = S.tree || {};
+  const papers = [];
+  const categories = S.scope.category ? [S.scope.category] : Object.keys(tree);
+  for (const category of categories) {
+    const bucket = tree[category];
+    if (!bucket) continue;
+    const years = S.scope.year ? [S.scope.year] : Object.keys(bucket.years);
+    for (const year of years) {
+      const yearBucket = bucket.years[year];
+      if (!yearBucket) continue;
+      const sittings = S.scope.sitting ? [S.scope.sitting]
+        : Object.keys(yearBucket.sittings || {});
+      for (const sitting of sittings) {
+        const sittingBucket = (yearBucket.sittings || {})[sitting];
+        if (!sittingBucket) continue;
+        const subjects = S.scope.subject === '' ? Object.keys(sittingBucket.subjects || {})
+          : [S.scope.subject];
+        for (const subject of subjects) {
+          const entry = (sittingBucket.subjects || {})[subject];
+          if (entry) papers.push(...entry.papers);
+        }
+      }
+    }
+  }
+  return papers.length ? papers : null;
+}
+
+/* Load the questions of the current scope from the server, one scope at a time.
+
+   The whole queue is 32,350 questions and the endpoint refuses to return more than a thousand of
+   them in one response, so "load everything, then filter in the browser" cannot work: the browser
+   held the first thousand questions of the queue - which are 1152 藥師(一) and 1152 醫事檢驗師 -
+   while the scope opened on 107 年 藥師 藥事行政與法規, which is not among them. The list showed
+   "這個範圍沒有題目" for a paper that is in the queue, and the twelve crops in the loaded thousand
+   were unreachable because the questions carrying them were never on screen.
+
+   So the filter is the server's, which is where the whole queue is, and the browser asks for the
+   scope it is showing. The response also carries `filtered_count`, which is the number the scope
+   really holds - not the number that happened to fit. */
+async function applyScope() {
+  S.index = 0;
+  S.editing = false;
+  scopeToHash();
+  renderCrumbs();
+  const papers = scopePapers();
+  if (!papers || !papers.length) {
+    S.view = [];
+    // `S.rows` is cleared with it. It is a separate array now, so emptying only `S.view` would leave
+    // the previous scope's rows drawn and walkable - the list would show one paper while the crumbs
+    // named another, which is the class of defect this whole change is about.
+    S.rows = [];
+    S.index = 0;
+    renderList();
+    $('textSide').innerHTML = '<div class="empty">這個範圍沒有題目</div>';
+    return;
+  }
+  $('listBody').innerHTML = '<div class="empty">載入中…</div>';
+  const wanted = new Set(papers);
+  try {
+    // The fetch is per sitting, not per scope and not per paper.
+    //
+    // Per scope is wrong: the endpoint caps a response at a thousand rows and the widest scopes are
+    // far past that - 藥師(一) is 6,000 questions and 醫事檢驗師 is 15,120 - so "全部類科" would
+    // silently show a fraction of itself.
+    //
+    // Per paper is also wrong, and it is what the previous version did: 419 requests to read one
+    // category, each a separate round trip, when the data is already grouped.
+    //
+    // A sitting is the natural unit. Measured over the whole queue, the 96 (category, year,
+    // sitting) groups hold at most 480 questions - 醫事檢驗師 115 第2次, six papers - which is
+    // comfortably inside the cap, and 96 requests replace 419.
+    const seen = new Set();
+    const rows = [];
+    for (const paper of papers) {
+      const where = whereOfPaper(paper);
+      if (!where) continue;
+      const key = `${where.category}\u0000${where.year}\u0000${where.ordinal}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const query = new URLSearchParams({
+        category: where.category, year: where.year, ordinal: where.ordinal, limit: '1000',
+      });
+      const response = await fetch(`/api/candidates?${query}`, { cache: 'no-store' });
+      const data = await response.json();
+      if (!data.candidates) throw new Error(data.error || `HTTP ${response.status}`);
+      // The server says how many rows matched and how many it sent. If they differ, the answer was
+      // truncated, and a truncated answer that looks complete is exactly the defect this rewrote
+      // away - so it is reported rather than swallowed. Measured: the largest sitting is 480
+      // questions against a cap of 1,000, so this must never fire; if it ever does, the cap has
+      // moved and the paging has to come back.
+      if (data.filtered_count > data.candidates.length) {
+        throw new Error(`考次 ${where.year} 第${where.ordinal}次 有 ${data.filtered_count} 題，`
+          + `伺服器只回了 ${data.candidates.length} 題（上限 ${1000}）。`);
+      }
+      // Keep only the papers this scope names; the sitting may hold others (a subject filter
+      // narrows within one sitting of one year).
+      for (const candidate of data.candidates) {
+        if (wanted.has(paperOf(candidate))) rows.push(candidate);
+      }
+    }
+    // Order by paper, then by question number. Sorting by number alone interleaves the six papers
+    // of a sitting - question 1 of each, then question 2 of each - and a reviewer reads one paper
+    // from its first question to its last, so the paper has to be the primary key.
+    S.view = rows.map(toItem).sort((a, b) => (
+      a.paper < b.paper ? -1 : a.paper > b.paper ? 1
+        : Number(a.question_number) - Number(b.question_number)
+    ));
+    S.scopeTotal = S.view.length;
+  } catch (error) {
+    S.view = [];
+    $('textSide').innerHTML = `<div class="empty">無法讀取這個範圍：${esc(error.message || error)}</div>`;
+  }
+  renderCrumbs();
+  // `S.rows` is built here, once per scope, and every later filter change rebuilds it from `S.view`
+  // with `rebuildRows()`. Building it before the first `go()` matters: `go()` indexes `S.rows`, so a
+  // scope that rendered the list without it would draw nothing and be unable to move.
+  if (!rebuildRows(null)) {
+    renderList();
+    $('textSide').innerHTML = '<div class="empty">這個範圍沒有題目</div>';
+    return;
+  }
+  renderList();
+  // Open on the question the link named, else on the first one not yet reviewed, so a second
+  // session resumes where the first stopped instead of at question 1. The search runs over `S.rows`,
+  // which is what the reviewer will actually see, so a link to a question the active filter hides
+  // opens on the nearest visible row instead of opening on nothing.
+  const named = S.openQuestion
+    ? S.rows.findIndex((item) => `q${item.question_number}` === S.openQuestion) : -1;
+  S.openQuestion = '';
+  const firstOpen = S.rows.findIndex((item) => !verdictOf(item.candidate_key));
+  await go(named >= 0 ? named : (firstOpen >= 0 ? firstOpen : 0));
+}
+
+function renderCrumbs() {
+  const parts = [S.scope.category, S.scope.year && `${S.scope.year} 年`,
+                 S.scope.sitting && `第 ${S.scope.sitting} 次`, S.scope.subject].filter(Boolean);
+  $('crumbs').innerHTML = parts.map((part, i) => `<span class="crumb${i === parts.length - 1 ? ' on' : ''}">${esc(part)}</span>`).join('')
+    || '<span class="crumb">全部</span>';
+  const papers = new Set(S.view.map((item) => item.paper)).size;
+  const done = S.view.filter((item) => verdictOf(item.candidate_key)).length;
+  const shown = S.view.length && S.scopeTotal > S.view.length
+    ? `${S.view.length} / ${S.scopeTotal} 題` : `${S.view.length} 題`;
+  $('scopeCount').textContent = `${papers} 卷 · ${shown} · 已過目 ${done}`;
+}
+
+/* How many rows the list draws at once. A scope can be 15,120 questions - "全部類科" of
+   醫事檢驗師 - and a list of 15,120 buttons is 15,120 nodes the browser builds before it can paint
+   anything. The window follows the cursor, so the rows around the open question are always there
+   and the count above the list is the whole scope, not the window. */
+const LIST_WINDOW = 400;
+
+/* Which of the four states a question is in, and which one the reviewer is looking at.
+
+   These are **states of the question**, not of the reviewer's session: 未看 means "no decision
+   recorded", 需重看・阻擋 means "a decision was recorded that says this needs another look". The
+   two are disjoint and together with 確認正常 they cover every row, so the chips partition the
+   scope and the counts add up - which is what makes the number beside a chip trustworthy.
+
+   需重看 and 阻擋 are **one** chip deliberately. They are the two ways of saying "do not ship this as
+   it stands" and they are reviewed the same way - by reading them again - so splitting them made
+   the reviewer choose a category before they had decided what was wrong. The recorded action still
+   distinguishes them; only the filter merges them. */
+function stateOf(item) {
+  const v = verdictOf(item.candidate_key);
+  if (v === 'needs_review' || v === 'block') return 'flagged';
+  if (v) return 'done';
+  return 'unseen';
+}
+
+/* 題組 is a property of the question, not of the reviewer: two or more questions printed under one
+   stem. It is a *scope*, so it intersects the state chips rather than competing with them - a
+   reviewer may want "the 題組 I have not looked at yet". */
+const isGrouped = (item) => Number(item.group_size || 1) > 1;
+
+/* Whether the pipeline left something unsettled about this question.
+   Read from the row the server sent (`disputes`), not re-derived in the browser: the disputes are
+   a measurement of the paper and a second implementation would be a second opinion about what is
+   uncertain, which is the one thing that must agree with the queue. `null` is "none were computed"
+   and `[]` never occurs - the builder writes `null` rather than an empty list so that "not looked
+   at" stays distinguishable from "looked at, nothing found". */
+const hasDispute = (item) => Array.isArray(item.candidate.disputes) && item.candidate.disputes.length > 0;
+
+function viewMode() {
+  const chosen = document.querySelector('input[name="view"]:checked');
+  return (chosen && chosen.value) || 'all';
+}
+
+/* The rows the reviewer is looking at: what is drawn AND what is walked.
+
+   These used to be two different sets, and that was a defect. The chips narrowed what was *drawn*
+   while W/S stepped through the whole paper scope, justified by "a filter must not rearrange the list
+   under the cursor". The justification was wrong in the way that matters: it kept the list from
+   rearranging by making navigation ignore the list. Measured on the real queue, with 題組 selected
+   and a group running 78-80, pressing S on 80 went to question 1 of the *next paper*, because the
+   paper order said 80 is followed by the next paper while the list the reviewer was reading said 80
+   is followed by the next group. The same happened under 有圖, so a reviewer stepping through the
+   pictures was silently teleported out of the filter and could not tell which questions they had
+   actually seen.
+
+   The rule is the charter's: **導覽與內容必須來自同一個來源**. One array, `S.rows`, is both what the
+   list renders and what `go()` indexes, so "the next question" is always "the next row on screen".
+
+   `S.view` keeps the whole scope, because the counts above the chips and the taxonomy crumbs are
+   statements about the scope rather than about the filter, and a chip whose number changed when
+   another chip was selected would be unreadable.
+
+   `anchor` is the candidate_key to keep under the cursor after the filter changes. `go()` passes the
+   open question, so toggling a chip leaves the reviewer on the question they were reading whenever
+   that question is still in the narrowed set, and otherwise the list opens at the nearest surviving
+   row rather than at the top. */
+function rebuildRows(anchor) {
+  S.rows = visibleRows();
+  S.viewPos = new Map(S.view.map((item, i) => [item.candidate_key, i]));
+  const key = anchor !== undefined ? anchor
+    : (S.rows[S.index] || {}).candidate_key;
+  let at = key ? S.rows.findIndex((item) => item.candidate_key === key) : -1;
+  if (at < 0 && key) {
+    // The anchored question is not in the narrowed set. Open at the first row that follows it in
+    // the paper, which keeps the reviewer's place in the scope instead of jumping them to the start.
+    const was = S.viewPos.has(key) ? S.viewPos.get(key) : -1;
+    at = was >= 0
+      ? S.rows.findIndex((item) => (S.viewPos.get(item.candidate_key) ?? -1) > was)
+      : 0;
+    if (at < 0) at = Math.max(0, S.rows.length - 1);
+  }
+  S.index = S.rows.length ? Math.min(Math.max(at, 0), S.rows.length - 1) : 0;
+  return S.rows.length > 0;
+}
+
+function visibleRows() {
+  const mode = viewMode();
+  const figures = $('figuresOnly').checked;
+  return S.view.filter((item) => {
+    if (figures && !item.has_figure) return false;
+    // 題組 is checked *before* the state chips and is exclusive: selecting it asks for the grouped
+    // questions whatever their state, because "show me the 題組" is a question about structure.
+    if (mode === 'group') return isGrouped(item);
+    if (mode === 'unseen') return stateOf(item) === 'unseen';
+    if (mode === 'flagged') return stateOf(item) === 'flagged';
+    // 爭議 is what the *pipeline* could not settle, not what the reviewer decided. It is a separate
+    // axis from the state chips and deliberately so: a question can be a settled `確認正常` and still
+    // carry a dispute the pipeline raised, and collapsing them would hide the machine's uncertainty
+    // behind the human's decision.
+    if (mode === 'disputed') return hasDispute(item);
+    return true;
+  });
+}
+
+/* The counts beside the chips, computed over the same set the list draws from, so a chip can never
+   promise rows the list will not show. The figure toggle is part of that set, which is why the
+   numbers follow it. */
+function renderChips() {
+  const figures = $('figuresOnly').checked;
+  const base = figures ? S.view.filter((item) => item.has_figure) : S.view;
+  const n = (predicate) => base.filter(predicate).length;
+  $('nAll').textContent = n(() => true);
+  $('nGroup').textContent = n(isGrouped);
+  $('nUnseen').textContent = n((item) => stateOf(item) === 'unseen');
+  $('nFlagged').textContent = n((item) => stateOf(item) === 'flagged');
+  $('nDisputed').textContent = n(hasDispute);
+  document.querySelectorAll('#chips .chip').forEach((chip) => {
+    chip.classList.toggle('on', chip.dataset.view === viewMode());
+  });
+}
+
+function renderList() {
+  const body = $('listBody');
+  renderChips();
+  // Draw `S.rows`, which is what `go()` walks. There is no index translation here any more: a
+  // filtered row's position in the drawn array IS its position in the walked array, because they are
+  // the same array. The previous version kept `S.view` as the walked set and mapped each drawn row
+  // back to a position in it, which is precisely the seam the 78-80 defect lived in.
+  const rows_ = S.rows;
+  if (!rows_.length) { body.innerHTML = '<div class="empty">這個範圍沒有題目</div>'; return; }
+  // Centre the window on the open question, so moving with W/S never walks off the drawn part.
+  const half = Math.floor(LIST_WINDOW / 2);
+  const from = Math.max(0, Math.min(S.index - half, Math.max(0, rows_.length - LIST_WINDOW)));
+  const to = Math.min(rows_.length, from + LIST_WINDOW);
+  const window_ = rows_.slice(from, to);
+  body.innerHTML = (from > 0 ? `<div class="empty">… 上面還有 ${from} 題</div>` : '')
+    + window_.map((item, offset) => {
+    const position = from + offset;
+    const v = verdictOf(item.candidate_key);
+    const cls = ['row'];
+    if (position === S.index) cls.push('active');
+    if (v) cls.push('done');
+    if (v === 'needs_review' || v === 'block') cls.push('flag');
+    return `<button class="${cls.join(' ')}" data-pos="${position}">
+      <span class="mark"></span><span class="num">${esc(item.question_number)}</span>
+      <span class="fig">${item.has_figure ? '▣' : ''}</span>
+      <span class="grp">${isGrouped(item) ? '組' : ''}</span>
+      <span>${esc((item.stem_preview || '').slice(0, 12))}</span></button>`;
+  }).join('')
+    + (to < rows_.length ? `<div class="empty">… 下面還有 ${rows_.length - to} 題</div>` : '');
+  body.querySelectorAll('.row').forEach((node) => { node.onclick = () => go(Number(node.dataset.pos)); });
+  const active = body.querySelector('.row.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+  // The progress bar counts the scope, not the queue: "how much of the paper I am reading is
+  // done" is the question a reviewer asks, and 21,150 would make every session look like zero.
+  const done = S.view.filter((i) => verdictOf(i.candidate_key)).length;
+  $('doneCount').textContent = done;
+  $('totalCount').textContent = `／${S.view.length} 已過目`;
+  $('doneBar').style.width = `${S.view.length ? (done / S.view.length) * 100 : 0}%`;
+}
+
+/* --------------------------------------------------- left: the extracted text */
+/* The marks the paper defines, and the marks that are defects.
+
+   A question may print its answer choices as *sets of its own sub-items*: the stem says
+   `\ue000砂粒病毒（Arenavirus） \ue001漢他病毒（Hantavirus） …` and the options are `\ue18c\ue000\ue001`.
+   The queue builder resolves those marks into the words the paper gives them, and this note
+   shows the legend beside the question so a reviewer can check the substitution rather than
+   trust it. Without the legend the reviewer sees words in the options with nothing on screen
+   saying where they came from.
+
+   A mark standing *inside a word* is a different thing: `轉氨\ue2c6` is 轉氨酶 and the text layer
+   cannot spell it. That is a real defect at a known position, so it is reported as a defect -
+   with its position and the word it stands in - and never guessed at. Showing nothing would let
+   a reviewer approve a question that has an unreadable character in it. */
+function lostGlyphHtml(candidate) {
+  const note = candidate.lost_glyph_note;
+  const legend = candidate.subitem_legend;
+  if (!note && !legend) return '';
+  const rows = [];
+  if (legend) {
+    const pairs = Object.keys(legend).map((mark) =>
+      `<code>${esc(mark)}</code> = ${esc(legend[mark])}`).join('　');
+    rows.push(`<div class="gloss"><b>紙本自訂符號</b>${pairs}</div>`);
+  }
+  if (note) {
+    rows.push(`<div class="gloss missing"><b>字形遺失（需對照紙本修正）</b>${esc(note)}</div>`);
+  }
+  return rows.join('');
+}
+
+/* The disputes: what the pipeline could not settle.
+
+   Drawn **above** the stem, because it changes how everything below it should be read - a reviewer
+   who reads the question first and the warning afterwards has already formed a judgement. Each
+   dispute carries the reason and the address that makes it checkable, so the reviewer can go to
+   the page and decide rather than trust the label.
+
+   Nothing here is a decision. A dispute is the claim "this needs a person"; the person is the
+   reviewer, and only their `確認正常` / `需重看` / `阻擋` writes a review event. */
+function disputeHtml(candidate) {
+  const found = candidate.disputes;
+  if (!Array.isArray(found) || !found.length) return '';
+  const order = { blocker: 0, review: 1, info: 2 };
+  const sorted = found.slice().sort((a, b) =>
+    (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+  const rows = sorted.map((d) => {
+    const badge = d.severity === 'blocker' ? 'blocker' : 'review';
+    const label = d.severity === 'blocker' ? '阻擋級' : '需確認';
+    return `<div class="dispute ${badge}"><b>${esc(label)}｜${esc(d.note || d.kind)}</b>`
+      + `<span class="why">${esc(d.detail || '')}</span>`
+      + `<code class="where">${esc(d.kind)}</code></div>`;
+  }).join('');
+  return `<div class="disputes"><div class="disputes-head">系統無法判定（${sorted.length}）`
+    + `<span class="hint">以下由紙本量測，不是模型的意見</span></div>${rows}</div>`;
+}
+
+function renderTextSide() {
+  const item = S.rows[S.index];
+  // The question itself comes from `/api/candidates`, which is the endpoint that returns
+  // `stem`, `options` and `answer`. `/api/workflow` returns only the queue's metadata - a
+  // `stem_preview` of about twelve characters and no options at all - and its `selected`
+  // field is null unless a single candidate was asked for. Reading the text from there left
+  // every question looking like an empty stem, which is what the reviewer saw: the text pane
+  // was never carrying the paper's text in the first place.
+  const candidate = item.candidate || {};
+  const metadata = candidate.metadata || {};
+  // Which options are correct, read from `accepted_values` rather than split out of the answer
+  // string.
+  //
+  // A corrections sheet re-issues a table, and it writes `答Ｂ或Ｃ或BC者均給分` - so an accepted
+  // answer is joined with 「或」 and may name a combination. Splitting the printed answer on commas
+  // therefore finds nothing, and for those questions NO option was highlighted at all: the reviewer
+  // saw four identical rows and no key, which is indistinguishable from a missing answer. Measured
+  // on the served queue: 393 questions carry a non-single answer, 266 of them name more than one
+  // thing, and every one of the 32,350 rows carries `accepted_values` - so the field to read was
+  // there the whole time and the display was parsing a sentence instead of reading a list.
+  const accepted = new Set(
+    ((candidate.answer_payload || {}).accepted_values || [])
+      .map((v) => String(v).trim().toUpperCase()).filter(Boolean));
+  // Fall back to the answer string only when the payload is absent, and accept BOTH separators:
+  // a comma from a plain multi-answer sheet, 「或」 from a corrections sheet.
+  if (!accepted.size) {
+    String(candidate.answer || '').split(/[,，或]/)
+      .map((v) => v.trim().toUpperCase()).filter(Boolean).forEach((v) => accepted.add(v));
+  }
+  const answer = accepted;
+  const options = candidate.options || [];
+  const v = verdictOf(item.candidate_key);
+  const flags = (item.reason_codes || []).filter(Boolean);
+
+  $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)}`;
+  $('stateHint').textContent = v ? `已標記：${LABEL[v] || v}` : '';
+
+  const edited = metadata.review_status === 'human_corrected' || (candidate.review?.has_correction);
+  const editor = S.editing ? `<div class="edit on" id="editor">${editorHtml(candidate, options)}</div>` : '';
+
+  $('textSide').innerHTML = `
+    <div class="side-head">抽出文字${edited ? '（已人工修正）' : ''}<span class="hint">${flags.length ? flags.map(esc).join(' · ') : '與右側紙本對照'}</span></div>
+    <div class="qnum">第 ${esc(item.question_number)} 題</div>
+    ${disputeHtml(candidate)}
+    ${groupHtml(candidate)}
+    <div class="stem" id="viewStem">${esc(candidate.stem || '（題幹空白）')}</div>
+    ${lostGlyphHtml(candidate)}
+    <div class="opts" id="viewOpts">${options.map((option) => `
+      <div class="opt${answer.has(option.key) ? ' is-answer' : ''}">
+        <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${esc(option.text)}</span>
+      </div>`).join('')}</div>
+    ${figureHtml(candidate)}
+    ${editor}
+    ${S.editing ? '' : evidenceHtml(candidate, metadata)}`;
+
+  if (S.editing) {
+    $('editStem').value = candidate.stem || '';
+    options.forEach((option) => {
+      const node = document.getElementById(`editOpt_${option.key}`);
+      if (node) node.value = option.text || '';
+    });
+    ['editStem', ...options.map((o) => `editOpt_${o.key}`)].forEach((id) => {
+      const node = document.getElementById(id);
+      if (node) node.oninput = markDirty;
+    });
+  }
+}
+
+/* The figure crops, shown beside the text they were cut for.
+   An image question extracts as four empty options, and until now that is all the reviewer saw:
+   a stem and four blank rows, with no way to tell "the extraction lost the options" from "the
+   options are pictures". The crop is the measurement that tells them apart, and it was being
+   written to disk and never displayed - so the reviewer could not check the one stage that
+   claims to have read the picture. Showing it is not a convenience; without it the claim is
+   unverifiable. */
+/* One option's picture, placed in the option's own row.
+   The reference bank files these as `option_image` with an `option_key`, and the answer slot shows
+   the picture, because for these questions the option *is* a picture - four chemical structures
+   with empty bodies, where the answer cannot be checked without seeing which structure the key
+   names. A crop of the whole question cannot do that: it puts all four structures in one image and
+   the reviewer has to work out which quarter the answer refers to. Each option's crop is bound to
+   its key by measurement, so this row shows the structure the key names and nothing else. */
+function optionCropHtml(candidate, option) {
+  const refs = (candidate.image_refs || []).filter((ref) => ref && typeof ref === 'object'
+    && ref.exists !== false && ref.asset_role === 'option-image' && ref.option_key === option.key);
+  if (!refs.length) return '';
+  return refs.map((ref) => `<img class="opt-img" src="${esc(fileUrl(ref.path))}"
+    onclick="window.open(this.src,'_blank')"
+    alt="${esc(ref.description || ('選項 ' + option.key + ' 的圖'))}"
+    title="${esc(ref.source === 'image-object' ? '取自圖物件本身' : '取自頁面區域')}" loading="lazy">`).join('');
+}
+
+function figureHtml(candidate) {
+  const refs = (candidate.image_refs || []).filter((ref) => ref && typeof ref === 'object'
+    && ref.exists !== false && ref.asset_role !== 'option-image');
+  const optionImages = (candidate.options || []).filter((o) => o && o.image && typeof o.image === 'object' && o.image.exists !== false);
+  const all = refs.concat(optionImages.map((o) => o.image));
+  if (!all.length) return '';
+  return `<div class="crops"><div class="crops-head">圖片（機器裁切，僅供對照）<span class="hint">${all.length} 張</span></div>
+    ${all.map((ref) => `<figure class="crop">
+      <img src="${esc(fileUrl(ref.path))}" alt="${esc(ref.description || ref.raw_ref || '裁切圖')}" loading="lazy">
+      <figcaption>${esc(ref.description || ref.label || '')}</figcaption>
+    </figure>`).join('')}</div>`;
+}
+
+/* The shared stem of a question group.
+   A paper prints one setup paragraph and then two or more questions that all ask about it, and the
+   later ones say so only as 「承上題」 or as the paper's own 「依序回答下列三題」. Showing such a question
+   on its own is showing a question that cannot be read: `承上題，達穩定狀態之平均血中濃度約為多少mg/L？`
+   needs the paragraph above it. So the group's head stem is carried onto every member and drawn
+   above the member's own stem, marked as the shared part rather than pasted into the question and
+   pretending the paper printed it there.
+
+   The head gets a header too, and it does not repeat its own stem. It used to get nothing at all,
+   which left the reviewer unable to tell that the question they were reading was the start of a
+   group - so they would judge it, move on, and never see that two more questions depended on it.
+   The header is the smallest thing that says so. */
+function groupHtml(candidate) {
+  const size = Number(candidate.group_size || 1);
+  if (size < 2) return '';
+  const shared = candidate.shared_stem;
+  const position = candidate.group_position;
+  const where = (position === undefined || position === null)
+    ? `題組 ${size} 題` : `題組 ${Number(position) + 1}／${size}`;
+  if (!shared) {
+    // The head: it holds the shared stem, so the note points forward instead of repeating it.
+    return `<div class="shared-stem head"><div class="shared-head">${esc(where)}`
+      + `<span class="hint">本題以下是同一題組，共同題幹就是本題題幹</span></div></div>`;
+  }
+  return `<div class="shared-stem"><div class="shared-head">共用題幹（${esc(where)}）`
+    + `<span class="hint">本題延續上方題組</span></div>`
+    + `<div class="shared-body">${esc(shared)}</div></div>`;
+}
+
+function editorHtml(candidate, options) {
+  return `
+    <label>題幹（直接照紙本打，錯字才改）</label>
+    <textarea id="editStem"></textarea>
+    <label>選項</label>
+    ${options.map((option) => `<div class="opt-edit"><span class="k">${esc(option.key)}</span><textarea id="editOpt_${esc(option.key)}" style="min-height:52px"></textarea></div>`).join('')}
+    <div class="dirty" id="dirtyBox" style="display:none">已改動，按「儲存修正」寫入。</div>`;
+}
+
+function evidenceHtml(candidate, metadata) {
+  const rows = [
+    ['答案', candidate.answer || '—'],
+    ['可給分的選項', ((candidate.answer_payload || {}).accepted_values || []).join('、') || '—'],
+    ['答案來源', metadata.answer_authority_source === 'answer' ? '官方答案卷' : metadata.answer_authority_source === 'corrected' ? '官方更正答案卷' : (metadata.answer_authority_source || '—')],
+    ['parser 狀態', metadata.parser_status || '—'],
+    ['審核狀態', metadata.review_status === 'human_corrected' ? '已人工修正' : (metadata.review_status || '—')],
+  ];
+  return `<details class="evidence" style="margin-top:24px;border-top:1px solid var(--line);padding-top:12px">
+    <summary style="cursor:pointer;color:var(--muted);font-size:12.5px">來源與血統</summary>
+    <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+      ${rows.map(([k, v]) => `<div style="display:flex;gap:10px;font-size:12.5px"><span style="flex:none;width:88px;color:var(--muted)">${esc(k)}</span><span style="word-break:break-word">${esc(v)}</span></div>`).join('')}
+    </div></details>`;
+}
+
+/* ------------------------------------------- right: the paper, as a document to read */
+/* The reviewer scrolls this and finds the question by eye. Locating a question in a
+   printed paper is exactly what a person does instantly and a machine does badly.
+
+   The pane is deliberately *disconnected* from the question list. Switching questions must
+   not touch it: the reviewer scrolls the paper once, to where the questions are, and keeps
+   it there while moving through them. Re-assigning the iframe's src - even to the same file
+   - reloads the document and throws the scroll position away, which is what made an earlier
+   version jump back to page 1 on every keypress. So the src is set only when the document
+   itself changes, and otherwise left alone entirely. */
+function renderPaperSide() {
+  const candidate = (S.rows[S.index] || {}).candidate || {};
+  const pdf = (candidate.source_files || {}).official_pdf || (candidate.metadata || {}).question_pdf_relative;
+
+  if (!pdf) {
+    S.paperPath = null;
+    $('paperSide').innerHTML = `<div class="side-head">紙本原卷</div>
+      <div class="paper-missing">這一題沒有對應的官方 PDF 路徑，無法對照。<br>請不要憑抽出文字判斷。</div>`;
+    return;
+  }
+  if (pdf === S.paperPath && $('paperFrame')) {
+    // Same paper as the previous question: leave the viewer exactly where it is.
+    const hint = $('paperHint');
+    if (hint) hint.textContent = `用滾輪找第 ${candidate.question_number || '?'} 題`;
+    return;
+  }
+  S.paperPath = pdf;
+  $('paperSide').innerHTML = `<div class="side-head">紙本原卷<span class="hint" id="paperHint">用滾輪找第 ${esc(candidate.question_number || '?')} 題</span></div>
+    <iframe id="paperFrame" class="paper-frame" src="${esc(fileUrl(pdf))}#view=FitH" title="官方題目 PDF"></iframe>`;
+}
+
+/* ---------------------------------------------------------------- navigation */
+async function go(index) {
+  // Bound by `S.rows`, not by `S.view`: the question the reviewer can reach is the question they can
+  // see, and with a chip on those are different sets. This is the other half of the 78-80 fix - the
+  // bounds, the drawing and the stepping all read the same array.
+  if (index < 0 || index >= S.rows.length) return;
+  S.index = index;
+  scopeToHash();
+  S.editing = false;
+  S.draft = null;
+  renderList();
+  renderTextSide();
+  renderPaperSide();
+  setEditMode(false);
+  $('textSide').scrollTop = 0;
+  // Nothing is fetched here, and that is the fix.
+  //
+  // This used to ask `/api/workflow?candidate_key=...` on every step and re-render the panel with
+  // the result. Measured, that endpoint returns **1.2 MB and takes 0.7 s** per call, because it
+  // ships the whole queue index (2,000 `queue_items`) to describe one question - and the field it
+  // set, `S.data`, was never read by anything. So every W/S press paid three costs for nothing:
+  // a 1.2 MB download, a 0.7 s wait, and a re-render that replaced the panel's innerHTML and
+  // therefore re-created its `<img>` elements, which throws away the browser's decoded copy and
+  // re-fetches every crop. On a chemical-structure paper - four option pictures per question plus
+  // the question figure - that is the delay that was reported.
+  //
+  // Everything the panel draws already arrived with `/api/candidates`: stem, options, answer,
+  // `image_refs`. The queue's per-question decoration (`reason_codes`, `human_action`) is read from
+  // `S.queued`, which `boot()` loads once. Nothing here needs a per-question request.
+}
+
+function setEditMode(on) {
+  S.editing = on;
+  $('actFix').classList.toggle('on', on);
+  $('actSave').style.display = on ? '' : 'none';
+  $('actAccept').style.display = on ? 'none' : '';
+  if (!on) $('reasonBox').classList.remove('on');
+  renderTextSide();
+}
+
+function markDirty() {
+  const box = $('dirtyBox');
+  if (box) box.style.display = '';
+}
+
+/* ---------------------------------------------------------------- decisions */
+async function decide(action) {
+  const item = S.rows[S.index];
+  if (!item) return;
+  // `需重看` and `阻擋` are recorded **without** a reason. Requiring one made the reviewer stop and
+  // type before every flag, and a fast first pass is the whole point of the linear walk: the reason
+  // is written when the reviewer knows it, not as a toll on the way past. The textarea stays open
+  // and whatever is typed is saved, so a reason can still be given at any time - it is simply no
+  // longer a precondition for recording the decision.
+  const notes = $('reasonText').value.trim();
+  const body = { candidate_key: item.candidate_key, action, notes, reviewer: 'local', source: 'linear_v2' };
+  try {
+    const response = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    S.verdict.set(item.candidate_key, action);
+    $('reasonText').value = '';
+    $('reasonBox').classList.remove('on');
+    toast(`第 ${item.question_number} 題：${LABEL[action]}`);
+    await next();
+  } catch (error) {
+    toast(`寫入失敗：${error.message || error}`, true);
+  }
+}
+
+/* Save the correction. It is stored as an append-only `correct` event carrying the edited
+   text, so what the reviewer typed can be diffed against what the parser produced; the
+   decision itself stays `reviewed`, waiting for an explicit accept. */
+async function saveCorrection() {
+  const item = S.rows[S.index];
+  const candidate = (item || {}).candidate || {};
+  if (!item) return;
+  const stem = $('editStem').value;
+  const options = (candidate.options || []).map((option) => ({
+    key: option.key,
+    text: document.getElementById(`editOpt_${option.key}`)?.value ?? option.text,
+    image: option.image ?? null,
+  }));
+  const notes = $('reasonText').value.trim();
+  if (stem === (candidate.stem || '') && options.every((o, i) =>
+      o.text === ((candidate.options || [])[i] || {}).text)) {
+    toast('沒有改動', true);
+    return;
+  }
+  try {
+    const response = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_key: item.candidate_key, action: 'correct',
+        correction: { stem, options, answer: candidate.answer || '' },
+        notes: notes || '人工依紙本修正抽出文字。',
+        reviewer: 'local', source: 'linear_v2',
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    S.verdict.set(item.candidate_key, 'correct');
+    $('reasonText').value = '';
+    toast(`第 ${item.question_number} 題：修正已儲存`);
+    setEditMode(false);
+    await next();
+  } catch (error) {
+    toast(`修正儲存失敗：${error.message || error}`, true);
+  }
+}
+
+/* Step one row forward **in the list**, not in the paper.
+
+   The two are different as soon as a chip is on, and that difference is the defect this replaces:
+   with 題組 selected and a group running 78-80, pressing S on 80 used to jump to question 1 of the
+   next paper, because the paper order said "80 is followed by the next paper's question 1" while the
+   list the reviewer was reading said "80 is followed by the next group". The reviewer navigates the
+   list they are looking at, so the list is what is walked.
+
+   A decision can also change the list, and this is the case the old design was trying to avoid: under
+   未看, judging a question removes it from 未看. Rather than refusing to rearrange - which is what made
+   navigation ignore the filter - the list is rebuilt and the cursor is kept on **the row that took the
+   judged question's place**. That is the correct next stop: the judged row is gone, so what is now
+   under the cursor is the next question of this filter. Stepping past it instead would skip one
+   question on every decision, which is the opposite failure and just as silent. */
+async function next() {
+  const currentKey = (S.rows[S.index] || {}).candidate_key;
+  const was = currentKey ? S.rows.findIndex((i) => i.candidate_key === currentKey) : -1;
+  rebuildRows(currentKey);
+  // If the judged question is still in the list, this decision did not remove it, so step past it.
+  // If it is gone, `rebuildRows` has already put its replacement under the cursor.
+  const survived = was >= 0 && (S.rows[was] || {}).candidate_key === currentKey;
+  const target = survived ? was + 1 : S.index;
+  if (target < S.rows.length) { await go(target); return; }
+  renderList();
+  renderTextSide();
+}
+
+/* ---------------------------------------------------------------- boot */
+async function boot() {
+  try {
+    // The queue's opinion of the questions is fetched once and is small - it carries no stems and
+    // no options. The questions themselves are *not* fetched here: there are 32,350 of them and the
+    // endpoint returns at most a thousand, so loading them all is not possible and pretending
+    // otherwise left the list empty for every scope outside the first thousand. `applyScope()`
+    // asks the server for the scope being shown, which is the only way the count can be right.
+    const workflowResponse = await fetch('/api/workflow', { cache: 'no-store' }).catch(() => null);
+    let workflow = null;
+    if (workflowResponse && workflowResponse.ok) {
+      try { workflow = await workflowResponse.json(); } catch (error) { workflow = null; }
+    }
+    S.queued = new Map(((workflow && workflow.queue_items) || []).map((i) => [i.candidate_key, i]));
+    // The taxonomy comes from the queue builder, and it is built from the queue's own index rather
+    // than from the loaded questions, because the loaded questions are one scope and the navigation
+    // has to describe them all.
+    let tree = null;
+    try {
+      const indexResponse = await fetch('/api/queue_index', { cache: 'no-store' });
+      if (indexResponse.ok) tree = (await indexResponse.json()).taxonomy || null;
+    } catch (error) { tree = null; }
+    if (!tree) throw new Error('這個佇列沒有 queue_index.json，無法建立分類');
+    buildScope(tree);
+  } catch (error) {
+    $('textSide').innerHTML = `<div class="empty">無法讀取佇列：${esc(error.message || error)}</div>`;
+  }
+}
+
+$('actAccept').onclick = () => decide('accept');
+$('actFix').onclick = () => setEditMode(!S.editing);
+$('actSave').onclick = () => saveCorrection();
+$('actHold').onclick = () => decide('needs_review');
+$('actBlock').onclick = () => decide('block');
+$('btnFirst').onclick = () => go(0);
+$('btnPrev').onclick = () => go(S.index - 1);
+$('btnNext').onclick = () => go(S.index + 1);
+$('btnLast').onclick = () => go(S.rows.length - 1);
+
+/* W/S walk the paper so the left hand never leaves the keyboard; the right hand stays on
+   the mouse for scrolling the two panes. */
+document.addEventListener('keydown', (event) => {
+  if (event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT') {
+    if (event.key === 'Escape') { $('actFix').focus(); setEditMode(false); }
+    return;
+  }
+  const key = event.key.toLowerCase();
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const map = { w: 'prev', s: 'next', a: 'accept', r: 'needs_review', b: 'block', e: 'fix' };
+  const hit = map[key];
+  if (!hit) return;
+  event.preventDefault();
+  if (hit === 'prev') go(S.index - 1);
+  else if (hit === 'next') go(S.index + 1);
+  else if (hit === 'fix') S.editing ? saveCorrection() : setEditMode(true);
+  else decide(hit);
+});
+
+
+boot();
+</script>
+</body>
+</html>

@@ -17,3 +17,14 @@ __pycache__/
 .env.devspace
 tmp/
 migration_snapshots/
+
+# The question-bank rebuild pipeline's corpus copies and runtime state.
+# `qbr/data/raw` is a 6.3M copy of official PDFs that already live under 國考題資料夾/ - the copy
+# exists so the suite can run without the 267M corpus, and it is derived, not authored. `qbr/runs`
+# and `qbr/tmp` are per-run output. The golden file under qbr/tests/golden/ is NOT ignored: it is
+# the one artifact that must travel with the code, because it is what proves the code still reads
+# a paper the same way.
+qbr/data/
+qbr/runs/
+qbr/tmp/
+qbr/.venv/

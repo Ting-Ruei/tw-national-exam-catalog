@@ -11,6 +11,71 @@ This repository catalogs Taiwan national exam PDFs, MinerU outputs, parsed quest
 - If parser changes alter already-reviewed candidate content, append a per-question `reset_review` event and preserve previous notes.
 - Do not auto-accept or auto-block questions from AI output alone. AI review is advisory.
 
+## Two tracks, each with its own AGENTS.md and skill
+
+This repository now holds two actively maintained tracks. **Read the track's own AGENTS.md before
+changing anything in it** — this file is the repository-wide floor, not the working procedure.
+
+| Track | AGENTS.md | Skill |
+|---|---|---|
+| Question-bank build pipeline | [`qbr/AGENTS.md`](qbr/AGENTS.md) | [`docs/skills/build-exam-question-bank/SKILL.md`](docs/skills/build-exam-question-bank/SKILL.md) |
+| Review UI (v2) | [`review_ui/AGENTS.md`](review_ui/AGENTS.md) | [`docs/skills/review-ui-v2/SKILL.md`](docs/skills/review-ui-v2/SKILL.md) |
+
+### `qbr/` — the build pipeline
+
+`qbr/` turns an official PDF into a platform-verifiable package. It reads the corpus and **writes no
+database**. Its own venv is `qbr/.venv`; dependencies are `requirements/qbr.txt`.
+
+- **Acceptance is two engines agreeing on the paper, not a green suite.** A green test can prove a
+  wrong rule.
+- **Scripts keep only the properties of the paper** (pages, character counts, font families, ink,
+  block geometry) — the things that measuring the same page twice gives the same answer for.
+  Everything that is *reading what the text means* is a **prompt** (`qbr/prompts/`), not a script.
+- **Never state a rule in terms of the parse.** A rule whose input is the parser's output makes the
+  parser and the check confirm each other.
+- **Every check ships with a negative control** — the case that must fail on the old behaviour.
+- **Relative paths only** in assets: no `/Users/`, `/Volumes/`, `file://`, drive letters.
+  Two tests enforce it.
+- **`registry_key` role suffixes are normalised by `package.paper_key()`.** A doubled suffix
+  (`...:question:question`) was an 80/80 defect, and that key is the primary key a reviewer's
+  decision is recorded against.
+- **Do not edit `qbr/tests/golden/`** unless the paper itself changed. It is the proof that the code
+  still reads a paper the same way.
+- `qbr/data/`, `qbr/.venv/`, `qbr/runs/`, `qbr/tmp/` are gitignored; `qbr/tests/golden/` is tracked.
+
+### `review_ui/` — v2 is the baseline
+
+**`review_ui/v2.html` (route `/v2`) is the baseline. v1 is reference-only and no longer maintained**
+(`review_ui/v1-reference/`: `mobile.html`, `workflow.html`). v1 still *answers* on its old routes,
+because an existing bookmark and an installed PWA are contracts a better UI does not get to break;
+fix v1 only to keep it working, never add a feature.
+
+- **Improve by replacing, never by forking.** Two consoles showing the same questions is two places a
+  reviewer's records can be lost.
+- **One source for navigation and content** (charter: 導覽與內容必須來自同一個來源). `S.rows` is both
+  what is drawn and what `W`/`S` walk. "A filter narrows what is drawn, not what is walked" was a
+  real defect — measured, pressing `S` on group question 80 jumped to the next paper.
+- **Keyboard is all left hand**: `W` previous, `S` next, `A` accept, `R` needs review, `B` block,
+  `E` fix/save.
+- **The right-hand PDF is the question sheet only**, never the answer sheet, and it is fully
+  decoupled from the left-hand list.
+- Verify navigation with `node scripts/test_v2_navigation.mjs`, not by clicking. Read
+  [`docs/ROUTE_HISTORY.md`](docs/ROUTE_HISTORY.md) before redesigning anything — it records why the
+  previous designs were abandoned.
+
+### Carrying review records across a rebuild
+
+The reviewer's decisions live in `question_review_events.jsonl`, **append-only**. A rebuild must not
+silently discard or duplicate them. Carrying is **automatic** (no flag to forget), deduplication is
+by **whole record** (not `candidate_key` — one question legitimately carries `block` then `accept`),
+and orphans are kept and counted. If a rebuild would carry 0 records while records exist nearby, it
+**refuses to start (exit 2)** before writing anything.
+
+> **Known unsolved:** rebuilding into the directory the server is serving leaves the list and the
+> candidate file inconsistent for a moment. **Pause the service during a rebuild.**
+> Detail: [`qbr/reports/review_record_safety.md`](qbr/reports/review_record_safety.md).
+
+
 ## Governance and GitHub Change Control
 
 - The human-readable governance authority is `docs/governance/README.md`; the machine-readable companion is `governance/policy.json`.
@@ -29,10 +94,18 @@ python3 -m py_compile scripts/serve_question_review_ui.py scripts/build_question
 bash scripts/ai395_catalog_runtime.sh checkout
 bash scripts/ai395_catalog_runtime.sh verify
 bash scripts/ai395_catalog_runtime.sh tunnel
+
+# the question-bank build pipeline (its own venv)
+cd qbr && .venv/bin/python -m pytest tests/ -q
+# the review UI's navigation contract (drive the real script, not the pixels)
+node scripts/test_v2_navigation.mjs review_ui/v2.html <workdir>/review-ui/candidates.jsonl
 ```
 
 ## Review UI
 
+- **Interface baseline: `review_ui/v2.html` at `/v2`** (linear single-question review). v1 (`mobile.html`, `workflow.html`) moved to `review_ui/v1-reference/` and is **reference-only, no longer maintained**; it still answers on `/mobile`, `/workflow` and `/mobile/workflow` because existing bookmarks and installed PWAs are contracts. Fix v1 only to keep it working. Rationale and the abandoned designs: [`docs/ROUTE_HISTORY.md`](docs/ROUTE_HISTORY.md).
+- The v2 console is served locally over a built queue (`scripts/review_run.sh <workdir> 8774`, route `/v2`) and needs no PostgreSQL. `/v2` is served `no-store`, so editing `v2.html` is live without a restart; the review log is opened append-only.
+- **Navigation follows the drawn list** (charter: 導覽與內容必須來自同一個來源). `S.rows` is both what is drawn and what `W`/`S` walk; verify with `node scripts/test_v2_navigation.mjs`, which drives the real script and ships with the negative control.
 - Since the 2026-08-09 cutover, AI395 (`ssh ai395`, LAN `192.168.10.90`) is the sole production Review UI and PostgreSQL writer. Desktop is `http://192.168.10.90:8765/`; mobile is `http://192.168.10.90:8766/mobile/`. Per the owner's post-cutover decision, both use trusted-LAN access without application login; keep them bound only to the fixed LAN address.
 - The immutable production release is `/srv/ai395/releases/tw-national-exam-catalog/e89c60fd7502a0fce1c47c7b9577a211888504a9`; the clean mutable operator checkout is `/home/tim/src/tw-national-exam-catalog`. Production control is `/srv/ai395/stacks/tw-national-exam-catalog/production/ai395_catalog_production.sh`.
 - PostgreSQL is published only on AI395 loopback `127.0.0.1:54329`; use an SSH tunnel for remote DB maintenance. The older AI395 restore drill remains isolated on `8875/8876/54330` and is not a writer.
