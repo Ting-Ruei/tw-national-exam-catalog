@@ -115,3 +115,32 @@
 
 **注意**：`accept` 的題目裡也有 3 題含 `⻑`（Q40/Q72/Q73）。所以這一條不是「block 的原因」，
 而是「block 裡有一個可量測卻沒被報出來的東西」。它與 144 筆審核紀錄沒有重疊衝突。
+
+## 已寫入（2026-09-19 19:57）
+
+上面那 6 筆 `reset_review` **已寫入**（`qbr/scripts/append_reset_review_events.py --apply`）。
+
+| | |
+|---|---|
+| 事件檔 | `/tmp/qbr-live-sf9/review-ui/question_review_events.jsonl` |
+| 寫入前 | 144 筆，sha256 `81052747388fac9258b0125cad6e9f58732b9264a35d920ccd7a69e5eb6127b2` |
+| 寫入後 | **150 筆**，sha256 `d8aa7b5cf00a05cc34b3126fcfcacb48820fa33c0d67ccaf962b395e533df307` |
+| 備份 | `…jsonl.before-2026-09-19T195759` |
+| 收據 | `…jsonl.reset-receipt.json` |
+
+**原 144 筆一字未改**（append-only；已驗證 `150 - 6 == 144`）。每筆帶著
+`previous_action` / `previous_notes` / `previous_reviewed_at` / `reset_notes` / `changes`，
+這是 `database-ingestion-preflight.md` 要求的合約。
+
+**寫入前重驗**：applier 在寫的當下重新核對「這一題的人工決定是否仍是提案所依據的那一個」，
+不一致就拒寫。已用一個模擬 drift 的檔驗證過（把 q055 改成 `accept`）——那一題確實被拒。
+
+**UI 已吃到**（live server 8774，`focusKey` 查詢）：
+
+```
+q055/q059/q061/q071/q076/q062 → bucket=repair_pending  label=修復後待複核  action=reset_review
+q001（對照）                   → bucket=reviewed         label=已看過        action=accept
+```
+
+分到「修復後待複核」而不是「退回未審」是**正確**的：這是 parser 修復造成的重審，
+不是使用者自己退回。`load_review_events` 會保留人工既有的 `correction`，所以修復不會丟掉人的校正。
