@@ -113,6 +113,169 @@ def test_a_body_sized_run_is_never_taken_for_an_offset():
     assert extract.read_spans(spans) == "A.[Na+]"
 
 
+# ------------------------------------------- which size is the body, and raised letters
+#
+# Three defects a reviewer reported as "flat English sub/superscripts, often", traced to one
+# paper's question 55 and then to the two rules below. They are pinned against the real geometry
+# of `1081_藥師(一)_藥劑學與生物藥劑學.pdf`, page 8, so the numbers here are the paper's own.
+
+
+def test_the_body_is_the_widest_size_not_the_largest():
+    """內文字級是「墨跡最寬」的那一級，不是「最大」的那一級。
+
+    紙本把題號 `55.` 與選項標記印得**比內文大**（12.96pt 對 11.04pt）。用最大字級當 body，
+    等於拿題號當基準：整行內文在它面前都顯得「比較小」，於是內文自己被當成 offset 候選。
+    實測後果：`digoxin 100 mg` 這類整段內文 dcy 來到 -1.98，越過 -1.9 的門檻 ——
+    一整片散文被讀成上標。
+
+    真正的判準是寬度：body 是「承載最多墨跡」的字級。
+    """
+    # 幾何取自 1081 藥師(一) 藥劑學 Q55 的真實座標（x0/x1 為實際值，y 依 top/bottom 比例縮放）
+    spans = [
+        _span("55.", x0=28.0, x1=46.1, top=770.54, bottom=783.50, size=12.96),
+        _span("某藥物⼝服後可以⽤", x0=46.1, x1=145.1, top=768.43, bottom=782.28, size=11.04),
+        _span("C", x0=145.1, x1=153.1, top=770.83, bottom=781.87, size=11.04),
+        _span("p", x0=153.0, x1=158.1, top=776.76, bottom=785.88, size=9.12),
+        _span("=Ｂe", x0=158.2, x1=181.7, top=770.83, bottom=781.87, size=11.04),
+        _span("-kt", x0=181.7, x1=191.8, top=768.00, bottom=777.12, size=9.12),
+    ]
+    # 題號 12.96 只在 3 個字元上（寬 18.1pt），內文 11.04 承載 448pt 的墨跡 → body = 11.04
+    assert extract._body_size(spans) == 11.04
+    # 於是 C 的下標 p 與 e 的上標 -kt 各自被讀成上下標，而題號本身不是
+    assert extract.read_spans(spans) == "55.某藥物⼝服後可以⽤Cₚ=Ｂe⁻ᵏᵗ"
+
+
+def test_width_beats_a_character_count_when_subscripts_are_multi_digit():
+    """用「字元數」當 body 會把化學式反過來：多位數下標會累積出比主體更多的字元。
+
+    `C₇H₁₅SO₃⁻`：主體是 `C` `H` `SO`（4 個字元、28.9pt），下標是 `7` `15` `3`（5 個字元、21.1pt）。
+    比字元數 → 下標贏 → body 取錯 → 7/15/3 不再是下標。比寬度 → 主體贏。
+    """
+    spans = [
+        _span("A.", x0=45.4, x1=57.8, top=209.73, bottom=223.91, size=12.81),
+        _span("C", x0=57.8, x1=65.0, top=215.18, bottom=227.18, size=10.83),
+        _span("7", x0=65.0, x1=69.6, top=219.75, bottom=229.75, size=9.03),
+        _span("H", x0=69.6, x1=77.4, top=215.18, bottom=227.18, size=10.83),
+        _span("15", x0=77.4, x1=86.4, top=219.75, bottom=229.75, size=9.03),
+        _span("SO", x0=86.4, x1=100.2, top=215.18, bottom=227.18, size=10.83),
+        _span("3", x0=100.2, x1=104.8, top=219.75, bottom=229.75, size=9.03),
+        _span("-", x0=104.8, x1=107.8, top=212.36, bottom=222.36, size=9.03),
+    ]
+    assert extract._body_size(spans) == 10.83
+    assert extract.read_spans(spans) == "A.C₇H₁₅SO₃⁻"
+
+
+def test_a_raised_latin_letter_becomes_a_superscript():
+    """上標的拉丁字母要能轉。先前轉換表只有數字與符號，所以 `e⁻ᵏᵗ` 一律印成 `e-kt`。
+
+    這是使用者回報的那一類：藥動學的 `Ｃₚ=Ｂe⁻ᵏᵗ－Ａe⁻ᵏᵃᵗ`、`kₐ`、`Cₘₐₓ`、`Vₚ`、`kₘ`，
+    每年、每一科都出現。
+    """
+    assert extract._SUP_MAP["k"] == "ᵏ"
+    assert extract._SUP_MAP["t"] == "ᵗ"
+    assert extract._SUB_MAP["p"] == "ₚ"
+    assert extract._SUB_MAP["m"] == "ₘ"
+    # 沒有 Unicode 形式的字母不得硬轉（`c` 沒有下標形式）
+    assert "c" not in extract._SUB_MAP
+
+
+def test_a_subscript_latin_word_is_a_subscript():
+    """`Rh_null` 的 `null` 在紙上真的是下標（比 `Rh` 低 5.15pt，渲染後目視可見）。
+
+    `Rhₙᵤₗₗ` 是對的讀法，`Rhnull` 才是缺陷 —— 所以「整段英文單字」不等於假陽性。
+
+    幾何取整行，因為 body 是「整行裡墨跡最寬的字級」：只放 `Rh` 與 `null` 兩個 span 的簡化
+    測試會把 body 算成 `null`（12.0pt 寬 > `Rh` 的 11.0pt），那就不是紙上的情形了。
+    第一版正是這樣寫的，然後失敗 —— 失敗的是測試，不是程式。
+    """
+    spans = [
+        _span("C.", x0=40.6, x1=49.5, top=462.65, bottom=475.01, size=9.00),
+        _span("Rh", x0=49.6, x1=61.0, top=460.73, bottom=473.09, size=9.00),
+        _span("null", x0=61.1, x1=72.7, top=465.88, bottom=476.10, size=7.44),
+        _span("者測不到", x0=72.7, x1=108.7, top=463.02, bottom=472.23, size=9.00),
+        _span("LW", x0=108.7, x1=122.3, top=460.73, bottom=473.09, size=9.00),
+        _span("抗原", x0=122.3, x1=140.3, top=463.02, bottom=472.23, size=9.00),
+    ]
+    assert extract._body_size(spans) == 9.00
+    assert extract.read_spans(spans) == "C.Rhₙᵤₗₗ者測不到LW抗原"
+
+
+def test_the_two_recorded_regressions_still_cannot_convert():
+    """`41.` 與 `HbA1c` 這兩個已經記錄過的迴歸，不得因為新增字母而回來。
+
+    兩者都靠同一條規則擋住：run 的**每一個**字元都要有「那個方向」的上下標形式。
+    `.` 沒有上標形式，`c` 沒有下標形式。
+
+    這裡特別檢查「方向」：`1c` 若允許跨表查（`1` 在下標表、`c` 在上標表）就會通過，
+    而它是下標 span —— 那正是 `HbA₁c` 契約要防的半轉換。
+    """
+    assert extract._mappable_offset("41.", "sup") is False
+    assert extract._mappable_offset("HbA", "sub") is False
+    assert extract._mappable_offset("1c", "sub") is False     # 同一個 run，方向要一致
+    assert extract._mappable_offset("2", "sub") is True
+    assert extract._mappable_offset("3-", "sup") is True
+    assert extract._mappable_offset("-", "sup") is True
+    # 空白的 run 本身不算轉換（否則空白會變成自己的上標）
+    assert extract._mappable_offset(" ", "sup") is False
+
+
+def test_a_raised_run_containing_a_space_is_still_a_superscript():
+    """`Ａe⁻ᵏᵃᵗ` 在 PDF 裡是**一個** span `-ka t`，中間有空白。
+
+    空白沒有上下標形式，但它站在被抬高的 run **裡面**，所以應該跟著一起抬高，
+    而不是讓整段退回平的。實測全掃描：允許空白後只多出這一個 run。
+    """
+    assert extract._mappable_offset("-ka t", "sup") is True
+    assert extract._transliterate("-ka t", "sup") == "⁻ᵏᵃ ᵗ"
+
+
+def test_a_whitespace_only_span_does_not_move_the_baseline():
+    """沒有墨跡的 span 不參與基線的計算。
+
+    這一條是「修好一層不等於修好管線」的實例。上面的 body 修正讓 `Leᵇ` 讀對了，但
+    `1041_醫事檢驗師_臨床血液學與血庫學` 的 `anti-Leᵃ` 仍然讀成 `anti-Lea` —— 而**兩個引擎
+    因此變得不一致**，所以它必須修，不只是好看。
+
+    原因不是門檻，是結構：那一行有一個寬 2.5pt 的空白 span 在 `x=420.4`、`y=35.69`，
+    而題目內文在 `y≈48`。空白沒有墨跡，沒有墨跡就沒有基線；它是頁面殘留，不該代表這一行。
+    把它算進 body 中心的平均，中心被抬高約 1pt，而上下標的門檻只有 ~1.9pt ——
+    `a` 的位移從真實的 -1.99 被拉成 -0.99，剛好掉出門檻。
+
+    同一行在 `extract_cells_a` 裡切成 cell，那個遠方空白自成一個 cell，所以 cells 那條
+    路徑讀得到 `ᵃ`。兩條路徑必須說同一句話，這就是本測試的幾何。
+    """
+    spans = [
+        _span("D.", x0=40.6, x1=49.5, top=42.77, bottom=55.13, size=9.00),
+        _span("新生兒體內血清同時測得 ", x0=49.6, x1=150.9, top=45.90, bottom=55.11, size=9.00),
+        _span("anti-Le", x0=151.0, x1=178.5, top=43.61, bottom=55.97, size=9.00),
+        _span("a", x0=178.4, x1=182.6, top=41.80, bottom=52.02, size=7.44),
+        _span("之可能性極高", x0=182.6, x1=236.6, top=45.90, bottom=55.11, size=9.00),
+        # 遠方的頁面殘留：只有空白，卻帶著 body 的字級
+        _span(" ", x0=420.4, x1=422.9, top=35.69, bottom=48.05, size=9.00),
+    ]
+    assert extract.read_spans(spans) == "D.新生兒體內血清同時測得 anti-Leᵃ之可能性極高  "
+
+
+def test_the_two_paths_agree_about_the_same_glyph():
+    """同一行的 cell 檢視與 line 檢視，不得對同一個字符說不同的話。
+
+    這兩個函式共用 `read_spans`，差別只在 spans 的集合大小。若集合大小會改變一個字符
+    是不是上標，則「骨架 vs 幾何」的比對就會把同一段文字報成不一致 —— 而那個不一致是
+    管線自己製造的，不是紙張的性質。
+    """
+    line = [
+        _span("D.", x0=40.6, x1=49.5, top=42.77, bottom=55.13, size=9.00),
+        _span("新生兒體內血清同時測得 ", x0=49.6, x1=150.9, top=45.90, bottom=55.11, size=9.00),
+        _span("anti-Le", x0=151.0, x1=178.5, top=43.61, bottom=55.97, size=9.00),
+        _span("a", x0=178.4, x1=182.6, top=41.80, bottom=52.02, size=7.44),
+        _span("之可能性極高", x0=182.6, x1=236.6, top=45.90, bottom=55.11, size=9.00),
+        _span(" ", x0=420.4, x1=422.9, top=35.69, bottom=48.05, size=9.00),
+    ]
+    whole = extract.read_spans(line)
+    cells = "".join(extract.read_spans(cell) for cell in extract.group_cells(line))
+    assert "Leᵃ" in whole and "Leᵃ" in cells
+
+
 def test_an_empty_line_reads_as_an_empty_string():
     assert extract.read_spans([]) == ""
 

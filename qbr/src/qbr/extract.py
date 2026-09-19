@@ -61,6 +61,8 @@ _OFFSET_SUB_MIN_DCY = 1.9       # measured: +2.0 for `₂`,`₃`; smaller text w
 _OFFSET_SUP_MAX_DCY_SMALL = -1.0
 _OFFSET_SUB_MIN_DCY_SMALL = 0.8
 
+_OFFSET_WHITESPACE = frozenset(" \t\u00a0")
+
 _SUP_MAP = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
             "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
             "+": "\u207a", "-": "\u207b", "\u2212": "\u207b", "=": "\u207c",
@@ -70,10 +72,136 @@ _SUB_MAP = {"0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u
             "+": "\u208a", "-": "\u208b", "\u2212": "\u208b", "=": "\u208c",
             "(": "\u208d", ")": "\u208e"}
 
+#: Superscript Latin letters. The papers raise whole variable names, not only digits:
+#: `Cp=Ｂe⁻ᵏᵗ−Ａe⁻ᵏᵃᵗ` (pharmacokinetics, every year) and `0.23t` in an exponent. Without these the
+#: run contains a letter, fails the all-characters-mappable rule below, and the formula is printed
+#: flat - which is what a reviewer reported, repeatedly, across subjects.
+#:
+#: What is *not* here is as deliberate as what is. A letter is listed only when Unicode has a real
+#: superscript form for it; nothing is approximated by markup, a caret or a raised digit. That keeps
+#: the existing contract intact by construction rather than by a special case: `41.` still cannot
+#: convert (`.` has no form), and `HbA1c` still cannot (there is no subscript `c`), so neither of the
+#: two regressions this table's strictness was introduced to prevent can come back through it.
+_SUP_LETTERS = {
+    "a": "\u1d43", "b": "\u1d47", "c": "\u1d9c", "d": "\u1d48", "e": "\u1d49",
+    "f": "\u1da0", "g": "\u1d4d", "h": "\u02b0", "i": "\u2071", "j": "\u02b2",
+    "k": "\u1d4f", "l": "\u02e1", "m": "\u1d50", "n": "\u207f", "o": "\u1d52",
+    "p": "\u1d56", "r": "\u02b3", "s": "\u02e2", "t": "\u1d57", "u": "\u1d58",
+    "v": "\u1d5b", "w": "\u02b7", "x": "\u02e3", "y": "\u02b8", "z": "\u1dbb",
+}
+#: Subscript Latin letters, same rule. `null` in `Rh_null` is one of these - the paper sets it 5.15pt
+#: below the baseline of `Rh` and it is legible as a subscript in the rendered page, so `Rhₙᵤₗₗ` is
+#: the reading and `Rhnull` was the defect. The absent `c` is what keeps `HbA1c` as printed.
+_SUB_LETTERS = {
+    "a": "\u2090", "e": "\u2091", "h": "\u2095", "i": "\u1d62", "j": "\u2c7c",
+    "k": "\u2096", "l": "\u2097", "m": "\u2098", "n": "\u2099", "o": "\u2092",
+    "p": "\u209a", "r": "\u1d63", "s": "\u209b", "t": "\u209c", "u": "\u1d64",
+    "v": "\u1d65", "x": "\u2093",
+}
+_SUP_MAP = dict(_SUP_MAP, **_SUP_LETTERS)
+_SUB_MAP = dict(_SUB_MAP, **_SUB_LETTERS)
+
 
 def _span_centre(span):
     box = span.get("bbox") or (0, 0, 0, 0)
     return (float(box[1]) + float(box[3])) / 2.0
+
+
+def _body_centre(body, *, fallback=0.0):
+    """Where the line's baseline sits, measured from the body spans that carry ink.
+
+    Whitespace-only spans are left out, and that is a statement about paper rather than a
+    threshold. A space has no ink, so it has no baseline to speak of; a run of spaces at the body
+    size can sit anywhere on the sheet and still be the body size. This corpus prints exactly
+    that: `1041_醫事檢驗師_臨床血液學與血庫學` puts a two-and-a-half-point space span at
+    `x=420.4` and `y=35.69` while the question it belongs to is set at `y≈48`. Averaging it in
+    with the real text lifts the measured centre by about a point - and one point is the whole
+    margin between reading `Leᵃ` and dropping it, because the offset thresholds are ~1.9pt. The
+    measured effect: `anti-Le` `a` moves from dcy -0.99 (missed) to -2.42 (read as the
+    superscript the paper prints), and across the medical-technologist papers this reads 34 more
+    runs without changing which sizes are called the body.
+
+    Two readings of the same line would otherwise disagree about the same glyph - the cells view
+    puts the stray space in a cell of its own, the line view keeps it in the body - so this is also
+    what keeps `extract_cells_a` and `extract_lines_a` saying the same thing.
+    """
+    inked = [span for span in body if (span.get("text") or "").strip()]
+    measured = inked or body
+    if not measured:
+        return fallback
+    return sum(_span_centre(span) for span in measured) / len(measured)
+
+
+def _body_size(spans):
+    """The line's body type size, chosen by how much ink each size carries.
+
+    The body of a line is the size that most of it is set in, and the honest measure of "most of
+    it" is **width of ink**, not the largest size present and not a count of characters.
+
+    Taking the largest was wrong, and it is why a reviewer saw flat formulas rather than raised
+    ones. A paper prints its question number and its option markers **larger than its body text**
+    (`55.` and `C.` at 12.96pt against 11.04pt of prose), so "largest" picks the marker, every
+    span of real text looks smaller than the body, and the line is read as though its entire text
+    were an offset. Measured on `1081_藥師(一)_藥劑學與生物藥劑學` Q55: with the largest size as the
+    body, the prose fragment `digoxin 100 mg` sits at dcy -1.98 and crosses the -1.9 threshold -
+    a whole phrase read as a superscript. Nothing caught it only because the phrase contains
+    letters, which the offset table then refused; the moment that table grew letters, the paper's
+    prose started turning into superscripts (`tissue`, `volume`, `plateau`, 3,259 runs in a
+    partial sweep). The apparent choice between reading the formulas and keeping the prose was an
+    artifact of the wrong body.
+
+    Counting characters is wrong too, in a way that is easy to miss. In `C₇H₁₅SO₃⁻` the
+    multi-digit subscripts (`7`, `15`, `3`) accumulate more characters than the four body glyphs
+    they hang from, so the body would come out as the subscript size and the formula would invert.
+    Width does not have that failure: the subscripts are set small *and* are only three glyphs, so
+    `10.83` carries 28.9pt of ink against their 21.1pt.
+
+    Both engines answer it. poppler reports no type size at all (its `size` is always 0.0), but its
+    word boxes carry the same evidence in their width and height, which is why the rule is stated
+    over the box rather than over the font.
+
+    When every span shares one size - the common case - this returns it, so nothing changes for
+    lines that have no offsets at all.
+    """
+    ink = {}
+    for span in spans:
+        box = span.get("bbox") or (0, 0, 0, 0)
+        size = round(float(span.get("size") or 0.0), 2)
+        ink[size] = ink.get(size, 0.0) + abs(float(box[2]) - float(box[0]))
+    if not ink:
+        return 0.0
+    return max(ink.items(), key=lambda pair: pair[1])[0]
+
+
+def _mappable_offset(text, kind):
+    """Whether this run is one the offset table for *this kind* can express, in full.
+
+    The table is the one the run will actually be transliterated with, and that is the whole
+    point. Checking "one of the two tables" instead lets `1c` through - `1` is in the subscript
+    table and `c` is in the *superscript* one - and `1c` is exactly the run the `HbA₁c` contract
+    forbids converting, because there is no subscript `c`. A character that the run's own table
+    cannot express means the run would come out half-converted, which is the failure this rule
+    exists to prevent.
+
+    Whitespace is admitted, and it is not a concession. A raised run can hold a space where the
+    paper spaced a two-character exponent - `Ａe⁻ᵏᵃᵗ` is stored as the single span `-ka t` - and
+    refusing the run for that space prints the formula flat. A space has no offset form and needs
+    none: it travels *with* the run it sits inside, and the offset is recorded in the glyphs.
+
+    At least one character must be one the table does change, or nothing is being said: a lone
+    space would otherwise become a "superscript" of itself.
+
+    Measured over pharmacist and medical-technologist papers, admitting whitespace adds exactly one
+    run - `-ka t` - and refuses `41.`, `1c` and `HbA` exactly as before.
+    """
+    table = _SUP_MAP if kind == "sup" else _SUB_MAP
+    mappable = False
+    for char in text:
+        if char in table:
+            mappable = True
+        elif char not in _OFFSET_WHITESPACE:
+            return False
+    return mappable
 
 
 def _offset_kind(span, *, body_centre, body_size):
@@ -102,7 +230,7 @@ def _offset_kind(span, *, body_centre, body_size):
     # option markers (`A.`/`B.`/`C.`/`D.`, which must not convert), `®`, and the chemical symbols
     # that have no subscript form at all (`max`, `p`, `M`, `Cr`). Leaving those alone is honest;
     # half-converting them is not.
-    if not text or not all(char in _SUP_MAP or char in _SUB_MAP for char in text):
+    if not text:
         return None
     delta = _span_centre(span) - body_centre
     # Two subscript styles, and the papers use both. The tight one is 5.5pt against 11pt
@@ -114,10 +242,15 @@ def _offset_kind(span, *, body_centre, body_size):
     # each branch carries the thresholds measured for its own style.
     small = size < body_size * _BODY_SIZE_RATIO
     if delta <= (_OFFSET_SUP_MAX_DCY_SMALL if small else _OFFSET_SUP_MAX_DCY):
-        return "sup"
-    if delta >= (_OFFSET_SUB_MIN_DCY_SMALL if small else _OFFSET_SUB_MIN_DCY):
-        return "sub"
-    return None
+        kind = "sup"
+    elif delta >= (_OFFSET_SUB_MIN_DCY_SMALL if small else _OFFSET_SUB_MIN_DCY):
+        kind = "sub"
+    else:
+        return None
+    # The run is an offset geometrically; now ask whether it can be *said* as one. Refusing here
+    # leaves the run exactly as the paper printed it rather than half-converted, which is the rule
+    # `41.` and `HbA1c` depend on.
+    return kind if _mappable_offset(text, kind) else None
 
 
 # A horizontal gap wider than this fraction of the type size separates two items; a gap
@@ -180,11 +313,11 @@ def group_cells(spans):
     spans = [span for span in spans if span.get("text")]
     if not spans:
         return []
-    biggest = max(spans, key=lambda span: float(span.get("size") or 0.0))
-    body_size = float(biggest.get("size") or 0.0)
+    biggest = _body_size(spans)
+    body_size = float(biggest or 0.0)
     body = [span for span in spans
             if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
-    body_centre = (sum(_span_centre(span) for span in body) / len(body)) if body else 0.0
+    body_centre = _body_centre(body) if body else 0.0
     cells, current = [], [spans[0]]
     for previous, span in zip(spans, spans[1:]):
         # A small glyph is joined to what precedes it when it is *raised or lowered against it*,
@@ -235,12 +368,12 @@ def read_spans(spans):
     spans = [span for span in spans if span.get("text")]
     if not spans:
         return ""
-    biggest = max(spans, key=lambda span: float(span.get("size") or 0.0))
-    body_size = float(biggest.get("size") or 0.0)
+    biggest = _body_size(spans)
+    body_size = float(biggest or 0.0)
     body = [span for span in spans if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
     if not body:
         return "".join(span.get("text", "") for span in spans)
-    body_centre = sum(_span_centre(span) for span in body) / len(body)
+    body_centre = _body_centre(body)
     pieces = []
     for index, span in enumerate(spans):
         if index and not _gap_joins(spans[index - 1], span):
