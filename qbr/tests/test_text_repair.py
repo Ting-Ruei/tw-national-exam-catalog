@@ -26,14 +26,19 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
-from qbr import extract, repair  # noqa: E402
+from qbr import extract, repair, paths  # noqa: E402
 
-PAPER = ("/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/國考題資料夾"
-         "/10_official_pdf/by_official_catalog/醫事檢驗師/115/第2次"
-         "/1152_醫事檢驗師_生物化學與臨床生化學.pdf")
+# The corpus is located, not written down. A hard-coded path here was the exact defect this
+# package set out to remove, and it would only have moved the problem to whichever machine the
+# path happened to be true on.
+ASSET_ROOT = paths.asset_root()
+PAPER = os.path.join(
+    ASSET_ROOT, "10_official_pdf", "by_official_catalog", "醫事檢驗師", "115", "第2次",
+    "1152_醫事檢驗師_生物化學與臨床生化學.pdf")
 ANSWER_SHEET = PAPER.replace(".pdf", "_ANS.pdf")
+requires_paper = pytest.mark.skipif(
+    not os.path.isfile(PAPER), reason="official paper not on disk (not in git); set ASSET_ROOT")
 candidates_jsonl = os.path.join("/tmp/qbr-golden-001", "review-ui", "candidates.jsonl")
-requires_paper = pytest.mark.skipif(not os.path.isfile(PAPER), reason="official paper not on disk")
 requires_run = pytest.mark.skipif(not os.path.isfile(candidates_jsonl), reason="no run to inspect")
 
 

@@ -111,10 +111,14 @@ def test_no_module_hard_codes_an_absolute_home_directory():
     那是在記錄歷史，而這條規則管的是會真正被解析成路徑的字串。
     第一版用 grep 寫，結果 6 個真註解被當成違規；一個會誤報的檢查會很快被人忽略，
     那比沒有檢查更糟。
+
+    掃描範圍**包含 `tests/`**。第一版只掃 `scripts/` 與 `src/`，於是錯過了
+    `tests/test_text_repair.py` 裡一條寫死的路徑 —— 而那個檔案正是這條規則要防的缺陷。
+    檢查器漏掉自己的測試，比漏掉產品程式碼更嚴重：它讓「檢查通過」變成一句不成立的話。
     """
     import ast
     offenders = []
-    for base in ("scripts", "src"):
+    for base in ("scripts", "src", "tests"):
         for dirpath, _dirs, files in os.walk(os.path.join(PKG, base)):
             if "__pycache__" in dirpath:
                 continue
@@ -141,6 +145,11 @@ def test_no_module_hard_codes_an_absolute_home_directory():
                     if isinstance(node, ast.Constant) and isinstance(node.value, str) \
                             and id(node) not in docstrings:
                         for marker in ("/Users/", "/Volumes/", "file://"):
-                            if marker in node.value:
+                            # A literal that **is** the bare marker is a detection pattern - this very
+                            # test and `test_merge_golden.py` hold them in tuples. What is forbidden is
+                            # a literal that *contains* the marker plus real path content, i.e. an
+                            # actual absolute path. Without this distinction the scanner reports
+                            # itself, which is how a check gets switched off.
+                            if marker in node.value and node.value.strip() != marker:
                                 offenders.append(f"{path}:{node.lineno}: {node.value[:60]!r}")
     assert not offenders, offenders
