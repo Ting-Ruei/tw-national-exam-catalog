@@ -129,7 +129,36 @@ qbr/data/review-queues/live/review-ui/     ← 持久路徑
 
 `qbr/data/` 在 `.gitignore` 內，不會進版控，但**在 repo 目錄下**，重開機不會消失。
 
-## 七、還沒做（需要你決定）
+## 七、同一件事發生在測試上（我先把這個修好了）
+
+在調查你的紀錄時，我注意到 `qbr` 的測試從 **237 passed** 變成 **220 passed / 17 skipped**。
+**總數沒變（237），但 17 個測試從「通過」變成「跳過」——這是靜默的覆蓋率損失。**
+
+原因**跟你遇到的問題是同一種**：那 17 個測試讀 `/tmp/qbr-golden-001`、`/tmp/qbr-golden-002`
+的真實產物。這兩個目錄被清空了（只剩 `review-ui/question_review_events.jsonl`），
+測試的 `skipif` 就把「**讀不到證據**」靜默地變成「**不必驗**」。
+
+```
+RUNS = [p for p in ("/tmp/qbr-golden-001", "/tmp/qbr-golden-002")
+        if os.path.isfile(os.path.join(p, "run_manifest.json"))]
+requires_run = pytest.mark.skipif(not RUNS, reason="no golden-path run to inspect")
+```
+
+**已修復並驗證**：
+
+| 檢查 | 結果 |
+|---|---|
+| 重建 golden-001 / 002 | 80 題、七階段全過（含 S6 verify） |
+| 與 git 追蹤的 `tests/golden/…jsonl` 逐欄比對 | **逐欄相同** |
+| 送分題（Q10/Q41） | `送分` / `is_special_correction=True` ✓ |
+| 兩次重建 `questions.jsonl` sha256 | 相同（冪等）✓ |
+| `pytest tests/` | **237 passed, 0 skipped** |
+
+這不是「剛好也在 `/tmp`」，而是**同一條規則**：
+證據放在 `/tmp`、取不到時靜默降級。你的審核紀錄是「靜默不顯示」，
+測試是「靜默不驗」。**兩者的共同修法不是記得備份，是讓缺席變可見。**
+
+## 八、還沒做（需要你決定）
 
 兩個儲存要合併，有兩條路，**差別在「用哪邊的紙本」**：
 
@@ -155,7 +184,7 @@ qbr/data/review-queues/live/review-ui/     ← 持久路徑
 新佇列內容新但沒有歷史。不管走哪條，都要先決定**哪一份紙本是準的**，
 否則就是在兩個都能不一致的地方各留一份。
 
-## 八、這件事的教訓（給下一個人）
+## 九、這件事的教訓（給下一個人）
 
 1. **「紀錄不會丟」的驗證要問「哪些紀錄」**。我驗的是「重建 3 次都是 186 筆」，
    而真正的 19,867 題從來不在我驗的那個檔案裡。**驗一個子集不會證明全集安全。**
@@ -164,7 +193,7 @@ qbr/data/review-queues/live/review-ui/     ← 持久路徑
 3. **使用者說「我沒看到」時，先去看他看的那個畫面**。
    我先前一直在量 `/tmp` 佇列，卻沒有問「8774 到底指到哪」。
 
-## 九、現在可以立刻做的
+## 十、現在可以立刻做的
 
 ```
 http://127.0.0.1:8776/v2     ← /v2 介面 + SQL 後端（你的紀錄都在）
