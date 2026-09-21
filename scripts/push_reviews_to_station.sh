@@ -92,8 +92,16 @@ ssh -n -o BatchMode=yes "${STATION}" "cat ${REMOTE_LOG}" > "${TMP}"
 
 # 事件身分的規則在 `qbr/scripts/merge_events.py`，它用的是管線自己的
 # `review_queue.record_identity`——不是這裡再寫一份。
-"${CATALOG}/qbr/.venv/bin/python" "${CATALOG}/qbr/scripts/merge_events.py" \
-  "${TMP}" "${LOCAL_LOG}" "${ADDED_FILE}"
+#
+# 用 qbr 的 venv；它不在時退回系統 python3，因為這支腳本只讀 json，不需要 qbr 的任何依賴。
+# 硬寫死直譯器會讓一台沒建 venv 的機器完全推不了紀錄，而那是最不該因為環境就失敗的一步。
+MERGE_PY="${CATALOG}/qbr/scripts/merge_events.py"
+if [[ -x "${CATALOG}/qbr/.venv/bin/python" ]]; then
+  PYTHON="${CATALOG}/qbr/.venv/bin/python"
+else
+  PYTHON="$(command -v python3 || echo /usr/bin/python3)"
+fi
+"${PYTHON}" "${MERGE_PY}" "${TMP}" "${LOCAL_LOG}" "${ADDED_FILE}"
 ADDED_COUNT="$(wc -l < "${ADDED_FILE}" | tr -d ' ')"
 echo "要附加的      ：${ADDED_COUNT} 行（以事件身分比對，已排除 _carried_from）"
 
