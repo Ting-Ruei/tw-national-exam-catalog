@@ -122,6 +122,37 @@ def verify_paper(lines_a, lines_b, shipped):
     }
 
 
+def confirm_against(losses, lines, shipped):
+    """The subset of `losses` that the OTHER engine's reading corroborates.
+
+    This exists because the intersection in `verify_paper` is not sufficient once the fields are
+    produced FROM one of the two readings. `segment_best(engine_a_lines)` derives the fields from
+    A, so checking those fields against A's lines cannot fail - the count came back 0 the run after
+    the wrap fix, which proves the check there is a tautology, not a clean result.
+
+    What is not a tautology: the other engine prints the field's own text and the dropped text as
+    ONE CONTINUOUS RUN. Then that engine read the option as an unbroken string that the shipped
+    field stops in the middle of - which is the claim worth acting on. Two weaker tests were tried
+    and rejected while building this:
+
+    * `dropped in haystack` - nearly always true, because the other reading contains the whole
+      paper. It reported 1,784 corroborated losses on the FIXED code, which is how it was caught.
+    * `losses` seen by both engines - not available when the fields come from one of them, and a
+      tautology when they do.
+
+    A loss only the one engine reports is that engine's own line splitting, and is not evidence
+    against the field.
+    """
+    haystack = _dense("".join(lines or []))
+    out = []
+    for item in losses or []:
+        text = _dense((shipped.get(item["question_number"]) or {}).get(item["option"], ""))
+        dropped = _dense(item.get("dropped", ""))
+        if len(dropped) >= MIN_CONTINUATION and text and (text + dropped) in haystack:
+            out.append(item)
+    return out
+
+
 def summarise(papers):
     """Totals over `verify_paper` results, for the queue index and for S6."""
     loss_a = loss_b = loss_both = 0

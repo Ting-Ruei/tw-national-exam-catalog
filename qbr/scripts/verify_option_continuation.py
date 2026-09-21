@@ -91,16 +91,35 @@ def main(argv=None):
             continue
         rows_a = repair.mask_chrome(extract.extract_lines_a(pdf))[0]
         rows_b = repair.mask_chrome(extract.extract_lines_b(pdf))[0]
-        # The shipped fields are read from the same reading the pipeline segments, so the check and
-        # the defect share no assumption beyond the paper itself.
+        # The fields are the ones the pipeline actually ships, segmented from the reading it
+        # segments, and each engine's lines are the reading THAT engine produced. Checking A's own
+        # output against A's own lines is not a cross-engine check at all: `segment_best` derives
+        # the fields from `repaired_a`, so a loss there is impossible by construction and the
+        # number came back 0 the first time this script was run after the fix. `loss_a` is kept
+        # only because a non-zero value would mean the pipeline and these lines have diverged;
+        # the measurement that means anything is B's.
         repaired_a = repair.text_from_rows(rows_a)
         records, _residual, _diagnostics = repair.segment_best(repaired_a)
         fields = shipped_fields(records)
         questions += len(fields)
-        result = continuation.verify_paper(
-            repair.text_from_rows(rows_a).split("\n"),
-            repair.text_from_rows(rows_b).split("\n"),
-            fields)
+        # Three different measurements, deliberately not collapsed into one:
+        #
+        #   loss_a  the segmenter and the span-reader are separate code reading the same text.
+        #           A non-zero value means the pipeline's own product disagrees with the rule
+        #           this standard is written in - a divergence inside one engine, worth seeing.
+        #   loss_b  engine B reports the option stops before text B printed. Alone this is B's
+        #           line splitting, so it is reported but never acted on by itself.
+        #   both    B reports the loss AND engine A's reading prints the field and the dropped
+        #           text as one continuous run. Two instruments that split lines differently
+        #           agree the paper continues there while the shipped field stops. This is the
+        #           number that must fall, and the one a reviewer sees.
+        lines_a = repaired_a.split("\n")
+        lines_b = repair.text_from_rows(rows_b).split("\n")
+        found_a = continuation.continuation_losses(lines_a, fields)
+        found_b = continuation.continuation_losses(lines_b, fields)
+        agreed = continuation.confirm_against(found_b, lines_a, fields)
+        result = {"both": agreed, "only_b": [item for item in found_b if item not in agreed],
+                  "loss_a": len(found_a), "loss_b": len(found_b), "loss_both": len(agreed)}
         results.append(result)
         if result["both"]:
             papers_with_loss.add(paper["run"])
@@ -110,6 +129,8 @@ def main(argv=None):
 
     totals = continuation.summarise(results)
     print("=== option text dropped at a line wrap, measured inside each engine's own reading ===")
+    print("  (loss_a = the segmenter vs the span-reader inside engine A; loss_b = engine B's")
+    print("   reading alone; both = B reports it AND A prints field+dropped as one run.)")
     print("  papers                %d" % totals["papers"])
     print("  questions read        %d" % questions)
     print("  loss seen by A        %d" % totals["loss_a"])

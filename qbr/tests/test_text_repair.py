@@ -477,6 +477,72 @@ def test_option_mark_alone_on_its_line_takes_the_next_line_as_its_body():
     assert "alfuzosin" not in item["stem"], "藥名不該留在題幹"
 
 
+def test_a_wrapped_option_keeps_its_continuation():
+    """選項文字在換行處被切斷時，續行屬於該選項，不是題幹的尾巴。
+
+    量測 `1002_物理治療師_骨科疾病物理治療學` Q10：紙本印的是
+    `A.…導致步態` / `異常` / `B.…`，續行 `異常` 被送進題幹，出貨的選項 A 停在
+    `導致步態`，而題幹變成 `…何者正確？異常`。這是本管線最大的一類未標記缺陷。
+
+    這一條在修復前必須失敗（charter 的負向對照）：把 `_continues_an_option` 拿掉，
+    續行會回到題幹，這一條就會紅。
+    """
+    from qbr import repair
+    lines = [x for n in range(1, 4)
+             for x in ("%d.第%d題的題幹文字夠長了嗎？" % (n, n), "A.甲", "B.乙", "C.丙", "D.丁")]
+    lines += ["4.下列有關薦髂關節病變的敘述，何者正確？",
+              "A.薦髂關節疼痛可能對臀中肌造成反射性抑制，導致步態",
+              "異常",
+              "B.當發現左邊的前上腸骨棘均較右邊的位置偏高",
+              "C.發生在恥骨聯合的問題不會影響到薦髂關節",
+              "D.此關節有多條肌肉經過，所以常發生病變"]
+    lines += [x for n in range(5, 81)
+              for x in ("%d.第%d題的題幹文字夠長了嗎？" % (n, n), "A.甲", "B.乙", "C.丙", "D.丁")]
+    records, _residual, _diag = repair.segment_mixed("\n".join(lines))
+    q4 = [r for r in records if r.get("number") == 4][0]
+    assert q4["options"]["A"] == "薦髂關節疼痛可能對臀中肌造成反射性抑制，導致步態異常", \
+        "選項 A 的續行必須留在 A"
+    assert "異常" not in "".join(q4["stem"]), "續行不該被塞進題幹"
+    assert q4["options"]["B"] == "當發現左邊的前上腸骨棘均較右邊的位置偏高"
+
+
+def test_a_line_opening_a_question_is_still_a_question():
+    """選項之後的數字錨點仍然是下一題，不可以被當成上一個選項的續行。
+
+    這是續行規則最容易過度觸發的地方：紙本上「選項的續行」與「下一題的題幹」都是
+    沒有標記的文字列。分辨它們靠的是數字錨點，不是語意。
+    """
+    from qbr import repair
+    lines = [x for n in range(1, 80)
+             for x in ("%d.第%d題的題幹文字夠長了嗎？" % (n, n), "A.甲", "B.乙", "C.丙", "D.丁")]
+    records, _residual, _diag = repair.segment_mixed("\n".join(lines))
+    assert len(records) >= 79, "每一題都必須在，沒有被前一個選項吃掉"
+
+
+def test_a_page_footer_after_an_option_belongs_to_no_option():
+    """選項之後若出現頁尾／節標題，它不屬於任何選項。
+
+    樣本裡沒有這種列（40 卷中 169 條續行候選、29 條短碎片、0 條頁尾），所以這道護欄
+    是為全集而設，不是為了樣本。頁尾用的是真的會出現在紙上的形狀（`第 3 頁`）。
+    """
+    from qbr import repair
+    lines = [x for n in range(1, 4)
+             for x in ("%d.第%d題的題幹文字夠長了嗎？" % (n, n), "A.甲", "B.乙", "C.丙", "D.丁")]
+    lines += ["4.下列關於骨盆的敘述，何者正確？",
+              "A.薦髂關節疼痛可能對臀中肌造成反射性抑制",
+              "B.當發現左邊的前上腸骨棘均較右邊的位置偏高",
+              "第 2 頁",
+              "C.發生在恥骨聯合的問題不會影響到薦髂關節",
+              "D.此關節有多條肌肉經過，所以常發生病變"]
+    lines += [x for n in range(5, 81)
+              for x in ("%d.第%d題的題幹文字夠長了嗎？" % (n, n), "A.甲", "B.乙", "C.丙", "D.丁")]
+    records, _residual, _diag = repair.segment_mixed("\n".join(lines))
+    q4 = [r for r in records if r.get("number") == 4][0]
+    assert q4["options"]["B"] == "當發現左邊的前上腸骨棘均較右邊的位置偏高", \
+        "頁尾不該被黏到 B 的尾巴"
+    assert q4["options"]["C"] == "發生在恥骨聯合的問題不會影響到薦髂關節"
+
+
 def test_a_row_of_bare_option_marks_does_not_swallow_the_stem():
     """一排只有標記的列（沒有內容行）不可以吃掉後面的題幹。"""
     from qbr import repair
