@@ -228,6 +228,71 @@ def test_the_finding_stream_is_carried_by_a_rebuild_and_protected_by_a_deploy():
     assert ai_findings.STREAM in deploy, "deploy_station.sh would delete the findings on sync"
 
 
+def _shell_list_entries(script_text, start_marker, end_marker):
+    """The real entries of a shell list, ignoring comments.
+
+    A whole-file `in` check is not enough, and this is not hypothetical: the negative control for
+    this test passed when it should have failed, because the name was still present in an explanatory
+    **comment** above the list. Searching for a string finds prose about a rule as readily as the
+    rule. So extract the block between the two markers and keep only live entries.
+    """
+    block = script_text.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    entries = []
+    for line in block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # A shell list wraps with trailing backslashes, so one source line holds several entries:
+        # `name_a.jsonl name_b.jsonl \\`. Splitting only on newlines therefore yields two names as a
+        # single string, and the membership check fails on correct code. Split on whitespace too.
+        for token in line.replace("\\", " ").split():
+            entries.append(token.strip().strip('"').strip("'"))
+    return entries
+
+
+def test_every_place_that_moves_a_stream_names_the_findings_one():
+    # There are four places a stream name has to appear as a **live entry**: the queue rebuild
+    # carries it, the deploy excludes it from `--delete`, the backup loop copies it, and the push
+    # helper sends it home. The push helper was the one that got missed, and the cost was concrete:
+    # 71 findings, produced and reviewed on this machine, existed **only** here, while the machine
+    # that is actually backed up had no such file. A test that checked three of four would have
+    # passed the whole time, which is why this one reads the entry lists rather than the file text.
+    catalog = os.path.dirname(PKG)
+    deploy = open(os.path.join(catalog, "scripts", "deploy_station.sh"), encoding="utf-8").read()
+    assert ai_findings.STREAM in _shell_list_entries(deploy, "EVENT_STREAMS=(", ")"), \
+        "deploy_station.sh would delete the findings on sync"
+
+    push = open(os.path.join(catalog, "scripts", "push_reviews_to_station.sh"),
+                encoding="utf-8").read()
+    stream_entries = _shell_list_entries(push, "STREAMS=(", ")")
+    assert ai_findings.STREAM in stream_entries, \
+        "the push helper would leave the findings on this laptop"
+    # And it must still push the human log - the fix for the findings may not drop the decisions,
+    # which are the most expensive thing the pipeline produces.
+    assert "question_review_events.jsonl" in stream_entries, \
+        "the push helper dropped the human decisions"
+
+
+def test_the_backup_loop_copies_every_stream_the_push_helper_sends_home():
+    # The backup loop and the push list are written by hand in different languages (a shell heredoc
+    # vs an array), so they can disagree without any test noticing. Read both and compare the
+    # entries, rather than trusting that whoever adds the next stream edits both.
+    catalog = os.path.dirname(PKG)
+    push = open(os.path.join(catalog, "scripts", "push_reviews_to_station.sh"),
+                encoding="utf-8").read()
+    deploy = open(os.path.join(catalog, "scripts", "deploy_station.sh"), encoding="utf-8").read()
+
+    # Scope to the remote heredoc first: `deploy_station.sh` has **two** `for name in` loops, and
+    # the first one builds the rsync exclude list (which names the stream indirectly, via
+    # `${EVENT_STREAMS[@]}`). Matching the first one tests the wrong loop and reports a failure on
+    # correct code - which is how this test found its own bug.
+    heredoc = deploy.split("<<'REMOTE_BACKUP'", 1)[1].split("REMOTE_BACKUP", 1)[0]
+    backup_entries = _shell_list_entries(heredoc, "for name in", "do")
+    for name in _shell_list_entries(push, "STREAMS=(", ")"):
+        assert name in backup_entries or name == "review_ui_preferences.json", \
+            "%s is pushed home but never backed up" % name
+
+
 def test_a_finding_never_becomes_a_review_event(tmp_path):
     # GOV-05: the record has no action and no reviewer, so it cannot be mistaken for a decision and
     # cannot be concatenated into the human log without someone deliberately doing it.
