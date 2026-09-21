@@ -33,8 +33,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CATALOG="$(cd "${HERE}/.." && pwd)"
 STATION="${QBR_STATION:-192.168.10.70}"
 REMOTE_DIR="/Users/tim/qbr-review/queue/review-ui"
-REMOTE_LOG="${REMOTE_DIR}/question_review_events.jsonl"
-LOCAL_LOG="${CATALOG}/qbr/data/review-queues/live/review-ui/question_review_events.jsonl"
+LOCAL_DIR="${CATALOG}/qbr/data/review-queues/live/review-ui"
+
+# 要推回常駐機的事件流。兩個都是**無法從語料重建**的資料，所以走同一套規則、同一套檢查。
+#
+#   question_review_events.jsonl  人的決定（最貴的東西）
+#   question_ai_findings.jsonl    模型對「人已 block」的題目寫的筆記（哪裡錯、怎麼修）
+#
+# 第二個名字與 `qbr/src/qbr/ai_findings.py` 的 `STREAM` 同一個。它不是人的決定，但同樣
+# 記的是「模型看過某一次特定讀法之後說了什麼」，而那些讀法正是沒人能一眼分類的個案——
+# 一次同步或重建把它靜默刪掉，就沒有第二次。這支腳本原本只推第一個，於是我在筆電跑出來的
+# 71 筆 finding **只存在筆電上**：一個沒有人搬的 store 會消失。
+STREAMS=(
+  question_review_events.jsonl
+  question_ai_findings.jsonl
+)
 
 DRY_RUN=0
 for arg in "$@"; do
@@ -44,51 +57,6 @@ for arg in "$@"; do
     *) echo "未知參數：${arg}" >&2; exit 2 ;;
   esac
 done
-
-if [[ ! -f "${LOCAL_LOG}" ]]; then
-  echo "筆電上沒有 ${LOCAL_LOG}——沒有東西可以推。" >&2
-  echo "（先跑 scripts/pull_station_reviews.sh）" >&2
-  exit 1
-fi
-
-# 1. 常駐機活著嗎，以及它現在幾行。
-REMOTE_COUNT="$(ssh -n -o BatchMode=yes -o ConnectTimeout=8 "${STATION}" \
-  "wc -l < ${REMOTE_LOG}" 2>/dev/null | tr -d ' ' || true)"
-if [[ -z "${REMOTE_COUNT}" ]]; then
-  echo "連不上常駐機 ${STATION}，或讀不到 ${REMOTE_LOG}。" >&2
-  echo "（什麼都不做——不確定的時候不要寫人類的紀錄）" >&2
-  exit 1
-fi
-LOCAL_COUNT="$(wc -l < "${LOCAL_LOG}" | tr -d ' ')"
-
-echo "常駐機 ${STATION}：${REMOTE_COUNT} 行"
-echo "筆電              ：${LOCAL_COUNT} 行"
-
-# 2. 家裡的東西變少了嗎。這只有在有人從站上刪東西時才會發生，而那正是要停下來看的事。
-if [[ "${REMOTE_COUNT}" -lt "${LOCAL_COUNT}" ]] && [[ "${DRY_RUN}" == 0 ]]; then
-  echo "拒絕推送：常駐機的紀錄（${REMOTE_COUNT}）比筆電的（${LOCAL_COUNT}）還少。" >&2
-  echo "  站上是家，它不該比副本少。先查清楚少了什麼再繼續。" >&2
-  exit 1
-fi
-
-# 3. 算出「站上還沒有的**事件**」，寫到暫存檔。
-#
-# **不能用整行比對**——我第一版就是那樣寫，而它錯了：合併佇列時管線會在事件上補
-# `_carried_from` 欄位（`"_carried_from": "qbr/data/review-queues/live"`），所以同一個
-# 事件在兩邊是**不同的字串**。實測：站上 347 行、筆電 346 行，而整行比對會說「要附加 151 行」
-# ——把 151 個已經有人做的決定再寫一次。附加重複事件不是無害的：它會讓「誰審了什麼」的帳
-# 多算一次，而審核紀錄的帳就是它的全部意義。
-#
-# 身分要建在事件自己的欄位上，而且要**排除 `_carried_from`**：那是運輸資訊（這個事件
-# 從哪個佇列被帶過來的），不是決定本身。兩邊對同一個決定有不同的運輸資訊是正常的。
-#
-# **第二個錯：不能用 `$(...)` 接結果。** 命令替換會吃掉結尾的換行，所以附加的最後一行
-# 會沒有換行——事件內容其實對了，但 `wc -l` 少算一行，於是驗收會失敗（實測：真的失敗了），
-# 而若沒驗收就會留下一個「下一行跟它黏在一起」的檔案。寫到暫存檔就沒有這個問題。
-TMP="$(mktemp -t qbr-push.XXXXXX)"
-ADDED_FILE="$(mktemp -t qbr-added.XXXXXX)"
-trap 'rm -f "${TMP}" "${ADDED_FILE}"' EXIT
-ssh -n -o BatchMode=yes "${STATION}" "cat ${REMOTE_LOG}" > "${TMP}"
 
 # 事件身分的規則在 `qbr/scripts/merge_events.py`，它用的是管線自己的
 # `review_queue.record_identity`——不是這裡再寫一份。
@@ -101,41 +69,129 @@ if [[ -x "${CATALOG}/qbr/.venv/bin/python" ]]; then
 else
   PYTHON="$(command -v python3 || echo /usr/bin/python3)"
 fi
-"${PYTHON}" "${MERGE_PY}" "${TMP}" "${LOCAL_LOG}" "${ADDED_FILE}"
-ADDED_COUNT="$(wc -l < "${ADDED_FILE}" | tr -d ' ')"
-echo "要附加的      ：${ADDED_COUNT} 行（以事件身分比對，已排除 _carried_from）"
 
-if [[ "${ADDED_COUNT}" == "0" ]]; then
-  echo "站上已經有筆電的每一個事件——沒有東西要推。"
-  exit 0
-fi
+# 把一個事件流推回常駐機。回傳 0 = 成功，1 = 拒絕（不確定的時候不要寫）。
+push_stream() {
+  local name="$1"
+  local remote_log="${REMOTE_DIR}/${name}"
+  local local_log="${LOCAL_DIR}/${name}"
 
-if [[ "${DRY_RUN}" == 1 ]]; then
-  echo "（dry-run）會把這 ${ADDED_COUNT} 行附加到 ${REMOTE_LOG}"
-  head -5 "${ADDED_FILE}"
-  [[ "${ADDED_COUNT}" -gt 5 ]] && echo "  …（其餘 $((ADDED_COUNT - 5)) 行）"
-  exit 0
-fi
+  echo ""
+  echo "── ${name}"
 
-# 4. 附加前先留備份，備份在**常駐機上**做——那才是紀錄的家，而且萬一這支腳本後面失敗，
-#    備份仍然在。順序是刻意的：先備份，後寫入。
-STAMP="$(date +%Y%m%d-%H%M%S)"
-ssh -o BatchMode=yes "${STATION}" "bash -s" <<REMOTE_BACKUP
+  if [[ ! -f "${local_log}" ]]; then
+    echo "   筆電上沒有這個檔——沒有東西可以推（先跑 scripts/pull_station_reviews.sh）"
+    return 0
+  fi
+
+  # 1. 常駐機活著嗎，以及它現在幾行。
+  #
+  # 回傳格式是 `exists:count`，因為「**檔案不存在**（所以 0 行）」與「**檔案存在但只有 0 行**」
+  # 是不同的狀態。原本只看行數，所以第一次推一個全新的流就被自己的守衛擋下來：站上 0 行、筆電 71 行，
+  # 守衛說「站上是家，不該比副本少」——對人的決定日誌來說那個守衛是對的，但對一個還沒上站過的
+  # 新流來說，站上 0 行正是正確的起始狀態。分不清楚就會把「第一次」永久擋住。
+  # 注意 `\$(wc …)` 要跳脫：這整串是 ssh 的引數，不跳脫的話 `$()` 會在**本機**先展開，
+  # 於是本機去找常駐機的路徑（實測：`No such file or directory`），而 `if` 判斷還照樣回 ok:0。
+  local remote_state remote_exists remote_count
+  remote_state="$(ssh -n -o BatchMode=yes -o ConnectTimeout=8 "${STATION}" \
+    "if [ -f ${remote_log} ]; then echo yes:\$(wc -l < ${remote_log}); else echo no:0; fi" 2>/dev/null \
+    | tr -d ' ' || true)"
+  if [[ -z "${remote_state}" ]]; then
+    echo "   連不上常駐機 ${STATION}，或讀不到 ${remote_log}。" >&2
+    echo "   （什麼都不做——不確定的時候不要寫無法重建的紀錄）" >&2
+    return 1
+  fi
+  remote_exists="${remote_state%%:*}"
+  remote_count="${remote_state##*:}"
+  local_count="$(wc -l < "${local_log}" | tr -d ' ')"
+
+  if [[ "${remote_exists}" == "no" ]]; then
+    echo "   常駐機 ${STATION}：還沒有這個流（第一次推）"
+  else
+    echo "   常駐機 ${STATION}：${remote_count} 行"
+  fi
+  echo "   筆電            ：${local_count} 行"
+
+  # 2. 家裡的東西變少了嗎。只在**檔案已經存在**且比副本少時才會發生，而那正是要停下來看的事。
+  #    「檔案不存在」不是變少，是還沒有。（這兩個案例都真實發生過：人類日誌 347→346 是真的變少；
+  #    模型筆記 0 行是還沒上站。同一個守衛要能分出來。）
+  if [[ "${remote_exists}" == "yes" ]] && [[ "${remote_count}" -lt "${local_count}" ]] && [[ "${DRY_RUN}" == 0 ]]; then
+    echo "   拒絕推送：常駐機（${remote_count}）比筆電（${local_count}）還少。" >&2
+    echo "     站上是家，它不該比副本少。先查清楚少了什麼再繼續。" >&2
+    return 1
+  fi
+
+  # 3. 算出「站上還沒有的**事件**」，寫到暫存檔。
+  #
+  # **不能用整行比對**——我第一版就是那樣寫，而它錯了：合併佇列時管線會在事件上補
+  # `_carried_from` 欄位，所以同一個事件在兩邊是**不同的字串**。實測：站上 347 行、筆電 346 行，
+  # 而整行比對會說「要附加 151 行」——把 151 個已經有人做的決定再寫一次。附加重複事件不是無害的：
+  # 它會讓「誰審了什麼」的帳多算一次，而審核紀錄的帳就是它的全部意義。
+  #
+  # **第二個錯：不能用 `$(...)` 接結果。** 命令替換會吃掉結尾的換行，所以附加的最後一行會沒有換行。
+  # 寫到暫存檔就沒有這個問題。
+  local tmp added_file added_count
+  tmp="$(mktemp -t qbr-push.XXXXXX)"
+  added_file="$(mktemp -t qbr-added.XXXXXX)"
+  ssh -n -o BatchMode=yes "${STATION}" \
+    "if [ -f ${remote_log} ]; then cat ${remote_log}; fi" > "${tmp}"
+  "${PYTHON}" "${MERGE_PY}" "${tmp}" "${local_log}" "${added_file}"
+  added_count="$(wc -l < "${added_file}" | tr -d ' ')"
+  echo "   要附加的 ：${added_count} 行（以事件身分比對，已排除 _carried_from）"
+
+  if [[ "${added_count}" == "0" ]]; then
+    echo "   站上已經有筆電的每一個事件——沒有東西要推。"
+    rm -f "${tmp}" "${added_file}"
+    return 0
+  fi
+
+  if [[ "${DRY_RUN}" == 1 ]]; then
+    echo "   （dry-run）會把這 ${added_count} 行附加到 ${remote_log}"
+    head -5 "${added_file}"
+    [[ "${added_count}" -gt 5 ]] && echo "     …（其餘 $((added_count - 5)) 行）"
+    rm -f "${tmp}" "${added_file}"
+    return 0
+  fi
+
+  # 4. 附加前先留備份，備份在**常駐機上**做——那才是紀錄的家，而且萬一這支腳本後面失敗，
+  #    備份仍然在。順序是刻意的：先備份，後寫入。
+  local stamp
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  ssh -o BatchMode=yes "${STATION}" "bash -s" <<REMOTE_BACKUP
 set -e
 mkdir -p "\${HOME}/qbr-review/backups"
-cp "${REMOTE_LOG}" "\${HOME}/qbr-review/backups/question_review_events.pre-push-${STAMP}.jsonl"
-echo "    已備份 → ~/qbr-review/backups/question_review_events.pre-push-${STAMP}.jsonl"
+if [ -f "${remote_log}" ]; then
+  cp "${remote_log}" "\${HOME}/qbr-review/backups/${name}.pre-push-${stamp}.jsonl"
+  echo "      已備份 → ~/qbr-review/backups/${name}.pre-push-${stamp}.jsonl"
+else
+  echo "      （站上還沒有這個檔，沒有東西要備份）"
+fi
 REMOTE_BACKUP
 
-# 5. 附加。用 `>>` 而不是 scp：scp 會截斷，而截斷就是刪掉人類的決定。
-ssh -o BatchMode=yes "${STATION}" "cat >> ${REMOTE_LOG}" < "${ADDED_FILE}"
+  # 5. 附加。用 `>>` 而不是 scp：scp 會截斷，而截斷就是刪掉無法重建的紀錄。
+  ssh -o BatchMode=yes "${STATION}" "cat >> ${remote_log}" < "${added_file}"
+  rm -f "${tmp}" "${added_file}"
 
-# 6. 驗行數，不是驗指令成功。`ssh` 回 0 只證明連線沒斷。
-AFTER="$(ssh -n -o BatchMode=yes "${STATION}" "wc -l < ${REMOTE_LOG}" | tr -d ' ')"
-EXPECTED="$((REMOTE_COUNT + ADDED_COUNT))"
-if [[ "${AFTER}" != "${EXPECTED}" ]]; then
-  echo "推送後行數 ${AFTER} ≠ 預期 ${EXPECTED}——請看備份檔。" >&2
+  # 6. 驗行數，不是驗指令成功。`ssh` 回 0 只證明連線沒斷。
+  local after expected
+  after="$(ssh -n -o BatchMode=yes "${STATION}" "wc -l < ${remote_log}" | tr -d ' ')"
+  expected="$((remote_count + added_count))"
+  if [[ "${after}" != "${expected}" ]]; then
+    echo "   推送後行數 ${after} ≠ 預期 ${expected}——請看備份檔。" >&2
+    return 1
+  fi
+  echo "   已推回：${remote_count} → ${after} 行（附加 ${added_count}）"
+  return 0
+}
+
+FAILED=0
+for stream in "${STREAMS[@]}"; do
+  push_stream "${stream}" || FAILED=1
+done
+
+echo ""
+if [[ "${FAILED}" != 0 ]]; then
+  echo "有事件流沒有推成功——看上面的訊息。" >&2
   exit 1
 fi
-echo "已推回：${REMOTE_COUNT} → ${AFTER} 行（附加 ${ADDED_COUNT}）"
-echo "伺服器會在偵測到檔案變動時自行重載（serve_question_review_ui.py:2560），不必重啟。"
+echo "全部事件流都已處理。伺服器會在偵測到檔案變動時自行重載（serve_question_review_ui.py:2560），不必重啟。"
