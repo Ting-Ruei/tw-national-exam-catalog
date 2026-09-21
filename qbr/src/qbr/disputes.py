@@ -134,22 +134,39 @@ NATIVE_SCRIPT_PREFIXES = (
 )
 
 
-def _is_han(character):
-    """True for the characters a Chinese exam paper is written in, including its radicals."""
-    return any(marker in _unicode_name(character)
-               for marker in ("CJK", "IDEOGRAPHIC", "KANGXI"))
-
-
 def _unicode_name(character):
     import unicodedata
     return unicodedata.name(character, "")
 
 
-def foreign_script_characters_in_chinese(question):
-    """Characters from a foreign script sitting inside a Chinese word, with their address.
+def foreign_script_characters(question):
+    """Characters from a script a Taiwan exam paper never prints, with their address.
 
-    Returns the script, the character, the field and the position, and the surrounding text, so a
-    reviewer can open the page at that word instead of searching the question.
+    Every occurrence is returned. There is **no** "must sit inside a Chinese word" condition, and
+    removing it was a measurement, not a relaxation.
+
+    The condition was added for a stated reason - "papers legitimately print English and Greek, so
+    require a Han neighbour to report the shape of a wrong character" - and the reason was wrong.
+    English and Greek are `LATIN` and `GREEK`, which `NATIVE_SCRIPT_PREFIXES` already excludes, so the
+    neighbour test never filtered them. What it did filter, measured over 79,090 questions, was 567
+    of the 1,042 genuine occurrences (54%), because the defect does not know where a Chinese word is:
+
+      * `ӧ` in `Waldenstrӧm's` / `Henoch-Schӧnlein` - inside a Latin word (2),
+      * `Г` in `（²²⁶Ra Г=8.25 R-cm²/mg-h）` - the paper's `Γ`, next to a space (1),
+      * option texts that are *entirely* Cyrillic, e.g. `ћќѝўџ` for `①②③④⑤` - the neighbour is
+        another Cyrillic letter, so no Han character is anywhere near it (555, incl. 19 questions
+        where the option is a bare `ћќѝ` sequence).
+
+    Those 555 are the most broken questions in the corpus - an option whose whole text is line noise
+    - and the condition was hiding them because they looked nothing like "one wrong character in a
+    Chinese word". That is precisely the trap the charter warns about: a rule written from the shape
+    of the first example rejects the second. The script lists stay, because they are what makes the
+    rule narrow: measured, the corpus prints 4.6M CJK, 3.3M Latin and 6,653 Greek characters, and
+    every one of the 1,042 hits is in a script with zero legitimate occurrences.
+
+    The old name said `..._in_chinese`, which was accurate when the Han condition existed and became
+    a lie the moment it left. Naming it after a condition the code no longer has is how the condition
+    gets re-added by somebody reading the name instead of the body.
     """
     found = []
     options = question.get("options") or []
@@ -162,11 +179,6 @@ def foreign_script_characters_in_chinese(question):
                 continue
             script = name.split()[0]
             if script in NATIVE_SCRIPT_PREFIXES or script not in FOREIGN_SCRIPT_PREFIXES:
-                continue
-            neighbours = [character_at for character_at in
-                          ((value or "")[position - 1:position], (value or "")[position + 1:position + 2])
-                          if character_at]
-            if not any(_is_han(neighbour) for neighbour in neighbours):
                 continue
             found.append({"char": character, "script": script, "field": field, "position": position,
                           "context": "%s%s%s" % ((value or "")[max(0, position - 6):position],
@@ -312,7 +324,7 @@ def of_question(question, *, alphabet_size=None, engine_counts=None, option_imag
     # known from `RADICAL_SUPPLEMENT_MEANS`, here it is not, so this dispute deliberately does not
     # guess what the paper printed - it reports the script and the address and leaves the symbol to
     # the reviewer. That is why it can catch scripts nobody has catalogued yet.
-    foreign = foreign_script_characters_in_chinese(question)
+    foreign = foreign_script_characters(question)
     if foreign:
         scripts = sorted({item["script"] for item in foreign})
         out.append(_d("substituted-script",

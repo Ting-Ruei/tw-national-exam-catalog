@@ -270,9 +270,19 @@ def main() -> None:
                     rows = [json.loads(line) for line in handle if line.strip()]
                 before = collections.Counter(d.get("kind") for row in rows
                                              for d in (row.get("disputes") or []))
+                # How many *rows* changed, before the rewrite computes the new disputes.
+                #
+                # Reported, not just counted internally: the first version of this path printed the
+                # summary line's `更新候選列 0` while rewriting every row in 989 files, because the
+                # counter is only incremented by the crop path. "0 rows updated" next to a detector
+                # that had just started firing is the kind of summary that makes somebody re-run the
+                # step to check whether it worked - so the number has to come from this path too.
+                before_rows = [json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows]
                 review_queue.disputes_for_paper(rows)
                 after = collections.Counter(d.get("kind") for row in rows
                                             for d in (row.get("disputes") or []))
+                changed = sum(1 for row, previous in zip(rows, before_rows)
+                              if json.dumps(row, ensure_ascii=False, sort_keys=True) != previous)
                 temporary = candidates_path + ".partial"
                 with open(temporary, "w", encoding="utf-8") as handle:
                     for row in rows:
@@ -282,7 +292,12 @@ def main() -> None:
                          for kind in set(before) | set(after)
                          if after.get(kind, 0) != before.get(kind, 0)}
                 totals["runs"] += 1
-                print(f"  {name[:52]:54} 列 {len(rows):>3}  差 {delta or '無'}", flush=True)
+                totals["changed-rows"] += changed
+                # The per-run line is printed only when something moved, so a 989-run pass reads as
+                # the handful of papers the new detector actually touched.
+                if changed or delta:
+                    print(f"  {name[:52]:54} 列 {len(rows):>3}  改 {changed:>3}  差 {delta or '無'}",
+                          flush=True)
                 continue
 
             category = name.split("_")[1] if len(name.split("_")) > 1 else ""
@@ -342,6 +357,7 @@ def main() -> None:
           f"   找不到 PDF {totals['no-paper']}")
     if args.reannotate_only:
         print("  （--reannotate-only：只重算偵測結果，沒有重切任何圖）")
+        print("   （列上的 disputes 由列自己算出來，圖片沒有參與，所以不需要重切）")
 
 
 def reflow_subject(run_name):

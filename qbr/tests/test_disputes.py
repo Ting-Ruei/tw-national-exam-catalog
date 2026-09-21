@@ -179,17 +179,34 @@ def test_a_cyrillic_character_inside_a_chinese_word_is_reported_with_its_script_
     assert "means" not in substitution
 
 
-def test_a_foreign_character_between_latin_letters_is_not_reported():
-    """負對照：字母要緊貼漢字才報。
+def test_a_foreign_character_next_to_latin_letters_is_still_reported():
+    """曾經漏掉的那一類：錯字的位置在拉丁字母裡面、或旁邊只有空白。
 
-    紙本合法地印英文與希臘文（實測：希臘字母 6,653 次、修飾字母 1,323 次）。
-    若把「出現外國字母」當成訊號，整個題庫都是訊號——所以判準是「它插在一個中文詞裡」，
-    也就是**錯字的形狀**：一個走錯位置的字母。這一條會讓那條規則若被放寬就失敗。
+    前一版要求外國字母「緊貼漢字」，理由是「紙本合法地印英文與希臘文」。那個理由**是錯的**
+    ——英文與希臘文是 `LATIN` 與 `GREEK`，已經被 `NATIVE_SCRIPT_PREFIXES` 擋掉了，所以鄰居
+    條件從來沒有擋掉它們。它實際擋掉的是 1,042 處裡面的 567 處真缺陷，例如：
+
+      * `Waldenstrӧm's`、`Henoch-Schӧnlein`：錯字在一個英文字裡面；
+      * `（²²⁶Ra Г=8.25 R-cm²/mg-h）`：紙本印 Γ，錯成 Г，旁邊是空白；
+      * `ћќѝ` 這種整串都是西里爾的選項：鄰居是另一個西里爾字母。
+
+    這一條釘住那個結論：字母本身是外國字母系統就夠了，不必旁邊有漢字。
     """
-    # 1ˢᵗ 是實際語料：`insufficient 1ˢᵗ metatarsophalangeal`，ˢ 是合法的修飾字母。
+    # 實際語料：Waldenström's macroglobulinemia。
+    assert "substituted-script" in _kinds(_q(3, stem="華氏巨球蛋白血症（Waldenstr\u04e7m's）"))
+    # 紙本印 Γ，文字層存 Г；前後是空白。
+    assert "substituted-script" in _kinds(_q(46, stem="（²²⁶Ra \u0413=8.25 R-cm²/mg-h）"))
+
+
+def test_a_subscript_or_modifier_letter_is_not_a_foreign_script():
+    """負對照：修飾字母（1ˢᵗ 的 ˢ）是紙本真的印得出的排版，不是亂碼。
+
+    實測語料裡有 13,535 個 SUPERSCRIPT、6,469 個 SUBSCRIPT、1,323 個修飾字母。它們的字元名稱
+    開頭是 `MODIFIER`／`SUPERSCRIPT`／`SUBSCRIPT`，不在外國字母系統清單裡，所以不會觸發。
+    這條是拿掉漢字鄰居條件之後仍然需要存在的界線：**放寬的是位置，不是字母系統。**
+    """
     assert "substituted-script" not in _kinds(_q(62, stem="第一蹠趾關節背屈不足（insufficient 1\u02e2ᵗ）"))
-    # 純英文片語裡的西里爾字母：兩側都不是漢字。
-    assert "substituted-script" not in _kinds(_q(3, stem="drug name \u045babc"))
+    assert "substituted-script" not in _kinds(_q(63, stem="血中濃度C\u209a與時間t的關係"))
 
 
 def test_greek_is_not_a_foreign_script_because_the_paper_prints_it():
