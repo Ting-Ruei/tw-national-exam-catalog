@@ -6,8 +6,33 @@ and prints them; this script asks the model about exactly those questions, one a
 writes down for each one: **where it thinks the error is**, **how it would fix it**, and **whether
 it thinks this is a class or a one-off**.
 
-Why the record is the point
+Two populations, and the second is the user's rule
+------------------------------------------------
+
+    default   the questions a person **blocked** and no detector explains.
+    --all     **every** question in the queue. After the pipeline runs, the whole corpus goes past
+              the model once - not only what a person already rejected, because a defect the reader
+              has not reached yet is exactly what this is for.
+
+The engine is Splash (8088) for everything. It was chosen by measurement, not by size: on
+`108030:305 q076` it reported `FIGURE_MISSING` where the smaller engine said NONE, and on `q049` it
+named the Kangxi radicals that the deterministic scan had explicitly decided were harmless. One
+engine answering everything also matters for the record - two engines answering the same question is
+how this project ends up with two notes that disagree and no rule for which one is right.
+
+Where this sits in the loop
 ---------------------------
+
+    pipeline  ──►  every question goes past Splash once (--all)
+                          │
+                          └─►  a person reads the DEFECT findings, confirms
+                                        │
+                                        └─►  the confirmed class becomes a rule in disputes.py
+                                                   │
+                                                   └─►  rescan the corpus for that shape
+
+What the record is for
+----------------------
 Some of these questions are 國考題的意外 - real defects whose shape is strange enough that nobody can
 classify them on sight. For those, a model's opinion is not a verdict, it is a note: something to
 read later when a person sits down to discuss that single case. That only works if the note is
@@ -26,6 +51,10 @@ Usage
     # what does the model say about the blocks no detector explains?
     .venv/bin/python scripts/ask_about_blocks.py --queue data/review-queues/live
 
+    # the corpus pass: every question, resumable, ~2s/question at concurrency 4
+    .venv/bin/python scripts/ask_about_blocks.py --queue data/review-queues/live --all \
+        --concurrency 4 --resume
+
     # only some of them, or re-ask without losing the earlier answer
     .venv/bin/python scripts/ask_about_blocks.py --queue ... --only q012 q059
     .venv/bin/python scripts/ask_about_blocks.py --queue ... --limit 5
@@ -40,6 +69,7 @@ import collections
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -53,15 +83,31 @@ from qbr import ai_findings  # noqa: E402
 from qbr import vision  # noqa: E402
 import repair_loop  # noqa: E402
 
-# The endpoint is a local engine, so it is a parameter. Two are configured because they answer
-# differently and the point of a note is that a person can compare them later; the default is the
-# one that was measured to read this project's papers.
+# The engines, by name. `splash` is the default because it is the one measured to find defects the
+# smaller engine calls NONE - on `108030:305 q076` it reported `FIGURE_MISSING` where ornith said
+# NONE, and on `q049` it named the Kangxi radicals that the deterministic scan had explicitly
+# decided were harmless. One engine answering everything is also the point: two engines answering
+# the same question is how this project ends up with two records that disagree and no rule for
+# which one is right.
+#
+# `reasoning_effort: none` is not a quality setting, it is what makes the run finish: measured on
+# 8088, thinking on takes 21-54s/question (1,164-3,262 reasoning tokens), thinking off takes 3-5s
+# and still finds the same defects. The default is off for the corpus pass and can be turned back
+# on per-run for a single hard question.
 ENDPOINTS = {
+    "splash": {"url": os.environ.get("QBR_SPLASH_BASE_URL", "http://127.0.0.1:8088"),
+               "name": os.environ.get("QBR_SPLASH_MODEL", "incoai/Qwen3.8-27B-Splash"),
+               "key": os.environ.get("QBR_SPLASH_API_KEY", ""),
+               "reasoning": "none"},
     "mtplx-35b": {"url": os.environ.get("QBR_MODEL_BASE_URL", "http://127.0.0.1:18120"),
                   "name": os.environ.get("QBR_MODEL_NAME", "ornith-1.5-mtplx-35b"),
-                  "key": os.environ.get("QBR_MODEL_API_KEY", "mtplx")},
+                  "key": os.environ.get("QBR_MODEL_API_KEY", "mtplx"),
+                  # MTPLX turns thinking off with this spelling; `reasoning_effort` is a vLLM/Splash
+                  # control and is ignored by it, silently, which is how a "thinking off" run keeps
+                  # thinking. The spelling belongs to the engine, so it is stored with the engine.
+                  "thinking": {"chat_template_kwargs": {"enable_thinking": False}}},
     "qwen3.8-flash-next": {"url": "http://192.168.10.90:8888", "name": "qwen3.8-flash-next",
-                           "key": "dgx-spark-local"},
+                           "key": "dgx-spark-local", "reasoning": "none"},
 }
 
 
@@ -70,16 +116,27 @@ def parse_args() -> argparse.Namespace:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--queue", required=True,
                         help="queue root; decisions live in its review-ui/ subdirectory")
-    parser.add_argument("--model", default="mtplx-35b", choices=sorted(ENDPOINTS))
+    parser.add_argument("--model", default="splash", choices=sorted(ENDPOINTS))
     parser.add_argument("--only", nargs="*", default=None,
                         help="question numbers (q012 or 12); default is every unexplained block")
     parser.add_argument("--limit", type=int, default=0, help="ask at most this many (0 = all)")
+    parser.add_argument("--all", action="store_true",
+                        help="ask about *every* question in the queue, not only the human blocks "
+                             "(the corpus pass; 79,090 questions at ~2s/question concurrent)")
+    parser.add_argument("--concurrency", type=int, default=4,
+                        help="how many questions to ask at once; measured 1->4.9s/q, 4->2.0s/q, "
+                             "8->1.95s/q on Splash, so past 4 the engine queues rather than helps")
     parser.add_argument("--out", help="findings path; default <queue>/review-ui/"
                                         + ai_findings.STREAM)
     parser.add_argument("--report", action="store_true",
                         help="read back what was recorded instead of asking")
-    parser.add_argument("--max-tokens", type=int, default=3000,
-                        help="the reasoning is charged here too, so this is not the answer's length")
+    parser.add_argument("--max-tokens", type=int, default=4000,
+                        help="Splash needs ~1,200-3,300 for its reasoning when thinking is on; with "
+                             "it off the answer alone is under 400. Kept above the answer length "
+                             "because a budget that cuts the JSON off mid-field loses the note.")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip questions that already have a finding (a corpus pass is ~44h, "
+                             "so stopping and continuing must not re-ask anything)")
     parser.add_argument("--timeout", type=int, default=1800)
     return parser.parse_args()
 
@@ -94,15 +151,18 @@ def _endpoint(base: str) -> str:
 def ask(messages, *, endpoint, max_tokens, timeout):
     """One call. Returns (parsed_or_None, raw, complaint, usage, seconds).
 
-    Thinking is turned **off** with the same control `vision.py` measured for this engine, and that
-    is not a tuning choice - it is the difference between an answer and no answer. Measured here on
-    `108030:305 q049`: with thinking on, the engine spent 8000/8000 tokens on reasoning and returned
-    an *empty* string (and 2927/3000 on q014, cutting the JSON off mid-field). With thinking off the
-    same question answered in 2 seconds. A note that is never written is worse than a terse one.
+    The thinking switch is a property of the engine, not of this caller: Splash takes
+    `reasoning_effort: none` (measured 21-54s -> 3-5s with the same findings), MTPLX takes
+    `chat_template_kwargs.enable_thinking` and **silently ignores** the other spelling - which is how
+    a "thinking off" run keeps thinking and returns an empty string when the budget runs out.
     """
-    body = {"model": endpoint["name"], "messages": messages, "max_tokens": max_tokens,
-            "temperature": 0}
-    body.update(vision.THINKING_CONTROLS[0])
+    if endpoint["reasoning"]:
+        body = {"model": endpoint["name"], "messages": messages, "max_tokens": max_tokens,
+                "temperature": 0, "reasoning_effort": endpoint["reasoning"]}
+    else:
+        body = {"model": endpoint["name"], "messages": messages, "max_tokens": max_tokens,
+                "temperature": 0}
+        body.update(endpoint["thinking"])
     request = urllib.request.Request(
         _endpoint(endpoint["url"]), data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json",
@@ -118,20 +178,41 @@ def ask(messages, *, endpoint, max_tokens, timeout):
     return (ai_findings.parse_finding(content), content, None, raw.get("usage") or {}, seconds)
 
 
-def targets(queue_dir: str, only, limit):
-    """The questions a person blocked and no detector explains - the loop's own step 3 output.
+def targets(queue_dir: str, only, limit, everything=False, done=(), questions=None):
+    """Which questions to ask about.
 
-    Reusing `repair_loop.explain` rather than recomputing is the point: two definitions of "the
-    blocks that nothing explains" is two places for it to drift, and the whole workflow is that the
-    model is asked about the *same* set the loop printed.
+    Two modes, and the difference matters to what the answer is worth:
+
+      default   the questions a person **blocked** and no detector explains - the loop's own step 3.
+                Reusing `repair_loop.explain` rather than recomputing is deliberate: two definitions
+                of "the blocks that nothing explains" is two places for it to drift, and the whole
+                workflow is that the model is asked about the *same* set the loop printed.
+      --all     **every** question in the queue. The user's rule is that after the pipeline runs, the
+                whole corpus goes past the model once - not only what a person already rejected -
+                because a defect the reader has not reached yet is exactly what this is for. It is
+                the same question asked of every row, so the prompt and the record are identical;
+                what changes is the population.
+
+    `done` skips keys already recorded, so a 44-hour corpus pass can be stopped and resumed without
+    re-asking anything. A question is only skipped when it has a finding, so a failed call is retried.
     """
-    blocked, rows = repair_loop.collect_blocks(queue_dir)
-    _explained, unexplained = repair_loop.explain(blocked, rows)
-    entries = [{**entry, "question": rows.get(entry["candidate_key"])} for entry in unexplained]
+    if everything:
+        rows = (questions if questions is not None
+                else repair_loop.load_candidates(os.path.join(queue_dir, "candidates.jsonl")))
+        entries = [{"candidate_key": q.get("candidate_key"), "question": q,
+                    "notes": "", "kinds": [], "paper": repair_loop.paper_of(q.get("candidate_key"))}
+                   for q in rows]
+    else:
+        blocked, rows = repair_loop.collect_blocks(queue_dir)
+        _explained, unexplained = repair_loop.explain(blocked, rows)
+        entries = [{**entry, "question": rows.get(entry["candidate_key"])} for entry in unexplained]
     if only:
         wanted = {str(item).lower().lstrip("q").lstrip("0") or "0" for item in only}
         entries = [entry for entry in entries
                    if str(entry["question"].get("question_number")).lstrip("0") in wanted]
+    if done:
+        skip = set(done)
+        entries = [entry for entry in entries if entry["candidate_key"] not in skip]
     if limit:
         entries = entries[:limit]
     return entries
@@ -177,6 +258,30 @@ def report(path: str) -> int:
     return 0
 
 
+def ask_one(entry, *, endpoint, out, args):
+    """Ask about one question and append the finding. Returns a one-line summary.
+
+    Called from a worker thread, so it touches only its own records and one append - the append is
+    a single `open(...,"a")` write, and the store is append-only by shape, so concurrent writers
+    cannot corrupt each other's records or a previous run's.
+    """
+    question = entry["question"]
+    if not question:
+        return None
+    system, user = ai_findings.build_prompt(question)
+    parsed, raw, complaint, usage, seconds = ask(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
+    error = None if parsed is not None else (complaint or "unparsed")
+    record = ai_findings.make_record(
+        question=question, finding=parsed, model=endpoint["name"], endpoint=endpoint["url"],
+        prompt_system=system, prompt_user=user, raw="" if parsed else raw, usage=usage,
+        seconds=round(seconds, 1), error=error)
+    ai_findings.append(out, record)
+    return {"key": entry["candidate_key"], "finding": parsed, "error": error,
+            "seconds": seconds, "raw": raw}
+
+
 def main() -> int:
     args = parse_args()
     queue_dir = repair_loop.review_ui_dir(args.queue)
@@ -185,49 +290,82 @@ def main() -> int:
     if args.report:
         return report(out)
 
-    if not os.path.exists(os.path.join(queue_dir, "candidates.jsonl")):
+    candidates = os.path.join(queue_dir, "candidates.jsonl")
+    if not os.path.exists(candidates):
         print("找不到 candidates.jsonl：%s" % queue_dir, file=sys.stderr)
         return 2
 
-    entries = targets(queue_dir, args.only, args.limit)
+    done = set(ai_findings.latest_by_question(out)) if args.resume else ()
+    questions = None
+    if args.all:
+        # Read once and hold, rather than have every worker re-read 196 MB.
+        questions = list(repair_loop.load_candidates(candidates))
+    entries = targets(queue_dir, args.only, args.limit, everything=args.all, done=done,
+                      questions=questions)
     if not entries:
-        print("沒有要問的題目（沒有未解釋的 block，或 --only 沒對上）。")
+        print("沒有要問的題目（沒有未解釋的 block、--only 沒對上，或都已問過）。")
         return 0
     endpoint = ENDPOINTS[args.model]
-    print("問 %s（%s）關於 %d 題未解釋的 block" % (endpoint["name"], endpoint["url"], len(entries)))
-    print("記錄寫到：%s" % out)
+    population = "全部題目" if args.all else "未解釋的 block"
+    print("問 %s（%s）關於 %d 題%s%s"
+          % (endpoint["name"], endpoint["url"], len(entries), population,
+             "（已跳過 %d 題問過的）" % len(done) if done else ""))
+    print("並發 %d；記錄寫到：%s" % (args.concurrency, out))
     print()
 
     asked = 0
-    for entry in entries:
-        question = entry["question"]
-        number = question.get("question_number")
-        stem = (question.get("stem") or "")[:38].replace("\n", " ")
-        print("Q%-4s %-30s …%s" % (number, entry["candidate_key"].replace("moex:", ""), stem),
-              flush=True)
-        system, user = ai_findings.build_prompt(question)
-        parsed, raw, complaint, usage, seconds = ask(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
-        error = None if parsed is not None else (complaint or "unparsed")
-        record = ai_findings.make_record(
-            question=question, finding=parsed, model=endpoint["name"], endpoint=endpoint["url"],
-            prompt_system=system, prompt_user=user, raw="" if parsed else raw, usage=usage,
-            seconds=round(seconds, 1), error=error)
-        ai_findings.append(out, record)
-        asked += 1
-        if parsed is None:
-            print("      → 無法解析（%s）%s" % (error, (raw or "")[-90:].replace("\n", " ")))
-        else:
-            print("      → %s／%s  規則價值=%s  %.0fs"
-                  % (parsed.get("verdict"), parsed.get("what"), parsed.get("rule_worthy"),
-                     seconds))
-            print("        哪裡錯：%s" % (parsed.get("where") or "（沒說）"))
-            print("        怎麼修：%s" % (parsed.get("fix") or "（沒說）"))
+    failures = 0
+    done_lock = threading.Lock()
+    printed = [0]
+    if args.concurrency > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def work(entry):
+            return ask_one(entry, endpoint=endpoint, out=out, args=args)
+
+        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            for result in pool.map(work, entries):
+                asked += 1
+                if result is None:
+                    continue
+                if result["finding"] is None:
+                    failures += 1
+                with done_lock:
+                    printed[0] += 1
+                    if printed[0] % 50 == 0 or printed[0] <= 20:
+                        _print_result(result, printed[0], len(entries))
+    else:
+        for entry in entries:
+            result = ask_one(entry, endpoint=endpoint, out=out, args=args)
+            asked += 1
+            if result is None:
+                continue
+            if result["finding"] is None:
+                failures += 1
+            printed[0] += 1
+            _print_result(result, printed[0], len(entries))
 
     print()
-    print("已記錄 %d 筆。讀回來：--report" % asked)
+    print("已記錄 %d 筆（其中無法解析 %d 筆）。讀回來：--report" % (asked, failures))
     return 0
+
+
+def _print_result(result, index, total) -> None:
+    key = result["key"].replace("moex:", "")
+    finding = result["finding"]
+    if finding is None:
+        print("[%d/%d] %-46s 無法解析（%s）%s"
+              % (index, total, key, result["error"],
+                 (result["raw"] or "")[-70:].replace("\n", " ")), flush=True)
+        return
+    print("[%d/%d] %-46s %s／%s 規則=%s %.1fs"
+          % (index, total, key, finding.get("verdict"), finding.get("what"),
+             finding.get("rule_worthy"), result["seconds"]), flush=True)
+    if result["seconds"] > 20 or finding.get("verdict") == "DEFECT":
+        # Only the interesting ones get their note printed; the corpus pass would otherwise write
+        # 79,090 notes to the terminal, and a log nobody can read is not a record.
+        print("        哪裡錯：%s" % (finding.get("where") or "（沒說）"), flush=True)
+        print("        怎麼修：%s" % (finding.get("fix") or "（沒說）"), flush=True)
 
 
 if __name__ == "__main__":

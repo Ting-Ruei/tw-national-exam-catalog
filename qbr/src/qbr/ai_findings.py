@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 
 from . import canon
@@ -101,9 +102,44 @@ USER = """科目：{subject}
 選項：
 {options}
 
-答案：{answer}
+{figures}答案：{answer}
 
 這個題目已經被人類標記為「有問題」。請說出你認為哪裡錯了、以及該怎麼修。"""
+
+#: What to tell the model about images. It matters because an option that is a picture is stored with
+#: **empty text and an image reference**, and a model shown four empty options reports `MISSING_OPTION`
+#: or `FIGURE_MISSING` every time - correctly, from what it can see, and uselessly, because this
+#: project already decided those are figure-option questions and not defects. Measured: on
+#: `105020:305:11 q052`/`q053` Splash called the empty options a defect and marked it rule-worthy.
+#: The model is not being told the answer; it is being shown the same evidence a human reviewer gets,
+#: which is that the option is an image.
+FIGURE_NOTE = ("這一題的圖片：{count} 張（{parts}）。\n"
+               "若某個選項的文字是空的，但上面說它有對應的圖片，那就是**圖片選項**，"
+               "不是選項遺失——請不要把它當成缺陷。\n"
+               "若題幹說「如下圖」、但這一題沒有任何圖片，那才是缺陷。\n\n")
+
+
+def figures_note(question) -> str:
+    """The image evidence, in the same vocabulary the reviewer's screen uses (`image_refs`)."""
+    refs = question.get("image_refs") or []
+    if not refs:
+        return FIGURE_NOTE.format(count=0, parts="沒有任何圖片") if _mentions_figure(question) else ""
+    parts = []
+    for ref in refs:
+        role = ref.get("asset_role") or "image"
+        key = ref.get("option_key")
+        parts.append("選項 %s 的圖" % key if role == "option-image" and key else role)
+    return FIGURE_NOTE.format(count=len(refs), parts="、".join(parts))
+
+
+def _mentions_figure(question) -> bool:
+    """Whether the text refers to a figure at all.
+
+    Only used to decide whether to say "there are no images". Saying it on every question would
+    invite the model to look for a missing figure on a question that never had one.
+    """
+    text = question.get("stem") or ""
+    return bool(re.search(r"圖|表|figure|shown below|下図", text))
 
 
 def options_block(options) -> str:
@@ -164,6 +200,7 @@ def build_prompt(question) -> tuple:
                        number=number if number is not None else "?",
                        stem=question.get("stem") or "（空白）",
                        options=options_block(question.get("options")) or "（無）",
+                       figures=figures_note(question),
                        answer=answer_of(question) or "（無）")
     return SYSTEM.format(codes=codes), user
 
@@ -335,14 +372,30 @@ def parse_finding(content: str):
         return None
     verdict = str(finding.get("verdict") or "").strip().upper()
     if verdict not in VERDICTS:
-        # An unrecognised verdict is a different thing from an unrecognised code: it decides whether
-        # the note is a defect report at all, so the note is kept but marked unclassified.
-        finding["verdict_reported"] = finding.get("verdict")
-        finding["verdict"] = None
+        # A code where a verdict belongs. Measured on the Splash engine (`reasoning_effort=none`):
+        # it answered `"verdict":"FIGURE_MISSING","what":"FIGURE_MISSING"` and, on another question,
+        # `"verdict":"FIGURE_MISSING"` with the code left out of `what` - so requiring the verdict to
+        # be one of three words discarded two of three correct findings. The code's own meaning
+        # supplies the verdict: `NONE` is not a defect, every other code is.
+        code_from_verdict = normalize_code(finding.get("verdict"))
+        if code_from_verdict is not None:
+            finding["verdict_reported"] = finding.get("verdict")
+            finding["verdict"] = "OK" if code_from_verdict == "NONE" else "DEFECT"
+            if not finding.get("what"):
+                finding["what"] = code_from_verdict
+            verdict = finding["verdict"]
+        else:
+            # Genuinely unrecognised. It decides whether the note is a defect report at all, so the
+            # note is kept but marked unclassified rather than guessed at.
+            finding["verdict_reported"] = finding.get("verdict")
+            finding["verdict"] = None
+            verdict = None
     reported = finding.get("what")
     code = normalize_code(reported)
     if code is None and reported is not None:
         finding["what_reported"] = reported
+    if code is not None:
+        finding.pop("what_reported", None)
     finding["what"] = code
     # A DEFECT that says NONE (or says nothing) contradicts itself; it is treated as unclassified
     # rather than as a defect, but the note survives.

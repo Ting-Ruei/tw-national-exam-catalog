@@ -58,6 +58,66 @@ def test_a_finding_carries_the_evidence_and_the_exact_prompt():
     assert record["finding"]["fix"]
 
 
+def test_a_code_in_the_verdict_field_supplies_the_verdict():
+    # Measured on the Splash engine: it answered `"verdict":"FIGURE_MISSING"` with the code either
+    # repeated in `what` or left out of it. Requiring the verdict to be one of three words discarded
+    # two of three correct findings, so the code's own meaning decides: NONE is not a defect, every
+    # other code is. Both shapes are asserted because both occurred.
+    both = ai_findings.parse_finding(
+        '{"verdict":"FIGURE_MISSING","what":"FIGURE_MISSING","where":"如下圖","fix":"查紙本"}')
+    assert both is not None and both["verdict"] == "DEFECT" and both["what"] == "FIGURE_MISSING"
+
+    only = ai_findings.parse_finding(
+        '{"verdict":"FIGURE_MISSING","where":"如下圖","fix":"查紙本"}')
+    assert only is not None and only["verdict"] == "DEFECT" and only["what"] == "FIGURE_MISSING"
+
+    # NONE in the verdict slot is an OK verdict, not a defect with no code.
+    none = ai_findings.parse_finding('{"verdict":"NONE","where":"完整","fix":"不用修"}')
+    assert none is not None and none["verdict"] == "OK"
+
+    # A word that is neither a verdict nor a code stays unclassified, with the note kept.
+    weird = ai_findings.parse_finding('{"verdict":"MAYBE","what":"DROP_OUT","where":"w"}')
+    assert weird is not None and weird["verdict"] is None and weird["what"] == "DROP_OUT"
+
+
+def test_the_prompt_tells_the_model_which_options_are_pictures():
+    # An option that is a picture is stored with empty text and an image reference. A model shown four
+    # empty options reports a missing option every time - correctly from what it can see, and uselessly,
+    # because this project decided those are figure-option questions. Measured: Splash called
+    # `105020:305:11 q052` a rule-worthy defect. The prompt must carry the same evidence the reviewer
+    # gets, which is that the option is an image.
+    picture_options = _question(options=[{"key": k, "text": ""} for k in "ABCD"])
+    picture_options["image_refs"] = [{"asset_role": "option-image", "option_key": k} for k in "ABCD"]
+    _system, user = ai_findings.build_prompt(picture_options)
+    assert "圖片選項" in user
+    assert "選項 A 的圖" in user
+    # And a question that references a figure while carrying none must be told the opposite, so the
+    # model can legitimately report FIGURE_MISSING.
+    no_figure = _question(stem="承上題，由上圖可知…")
+    _system, user2 = ai_findings.build_prompt(no_figure)
+    assert "沒有任何圖片" in user2
+    # A question that never mentioned a figure is not prompted to look for one.
+    plain = _question(stem="下列何者正確？")
+    _system, user3 = ai_findings.build_prompt(plain)
+    assert "圖片" not in user3
+
+
+def test_a_picture_option_question_is_not_reported_as_empty_options():
+    # The evidence the prompt now carries is the same field the UI uses, so a finding about it can be
+    # checked against `image_refs` rather than against the model's word.
+    picture_options = _question(options=[{"key": k, "text": ""} for k in "ABCD"])
+    picture_options["image_refs"] = [{"asset_role": "option-image", "option_key": k} for k in "ABCD"]
+    _system, user = ai_findings.build_prompt(picture_options)
+    assert "這一題的圖片：4 張" in user
+
+
+def test_a_fenced_finding_is_parsed():
+    # Splash wraps its JSON in ```json fences; the fence must not be what makes a finding unreadable.
+    fenced = ai_findings.parse_finding(
+        '```json\n{"verdict":"DEFECT","what":"DROP_OUT","where":"w","fix":"f"}\n```')
+    assert fenced is not None and fenced["what"] == "DROP_OUT"
+
+
 def test_the_prompt_asks_for_where_and_how_to_fix_and_whether_it_is_a_one_off():
     # The requirement is exactly these three questions, so the prompt must actually ask them.
     system, _user = ai_findings.build_prompt(_question())
