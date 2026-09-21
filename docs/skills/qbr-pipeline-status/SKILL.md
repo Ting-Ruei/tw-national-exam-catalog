@@ -376,11 +376,25 @@ B.當發現左邊的前上腸骨棘（anterior superior
   不是「B 領讀的切法」。我在這一輪犯了這個錯四次（14.21% → 9.06% → 2.34% → 2.06%），
   **每一次都是量測工具重製了它要量的缺陷。**
 
-### 與模型的分工（這條標準不取消那一條）
+### 與模型的分工（這條標準不取消那一條，它給模型一個可判的問題）
 
-「兩引擎都看到」是**確定性的**，所以它先跑、免費、可重現。
-只有它說「兩個引擎不一致」的那些欄位，才輪到模型或人。
+「兩引擎都看到」是**確定性的**，所以它先跑、免費、可重現。它把清單縮到 265 題／160 卷。
 **模型不需要看全部 78,690 題，只需要看兩個儀器互相不同意的那些。**
+
+而且這個問題是**封閉的、有可核對答案的**——正是本專案已經證明模型可靠的那一種工作
+（不是「找缺陷」，那量過只有 12–16% 精確率）。我實測了（`scripts/ask_option_continuation.py`）：
+
+| 引擎 | 判為「是」（同意兩引擎） | 還原出的漏字 | 時間 |
+|---|---|---|---|
+| **`qwen3.8-flash-next`**（DGX 8888） | **10 / 10** | 與 ground truth **逐字相同**，只有拉丁詞旁多餘空白 | 1.1–2.9 s/題 |
+| **`ornith-1.5-mtplx-35b`**（18120） | **10 / 10** | 同上 | 2.4–11.2 s/題 |
+
+例：ground truth `lidocaine＞bupivacaine`，兩個引擎都答 `lidocaine＞bupivacaine`；
+ground truth `骨頭`，都答 `骨頭`；`maximalhyperemia` → 都答 `maximal hyperemia`（只差空白）。
+
+**注意這與「AI 初篩」的差別**：那一輪問模型「這題有沒有問題」（開放），得到 12–16%。
+這一輪問「這句話是不是還沒結束」（封閉、有標準答案），得到 10/10。
+**同一批模型，不同的問法。** 這是目前為止模型在本專案唯一可接進流程的位置。
 
 ---
 
@@ -421,6 +435,19 @@ PY
 預期（160 卷／12,840 題）：`loss seen by A` 658、`loss seen by B` 2207、
 **`seen by BOTH` 385**、`distinct questions` 265、`distinct papers` 72。
 **這條數字應該是往下走的**——修好 `repair.py` 之後它會降；不降就是沒修到。
+
+### 模型回答「這句話還沒結束嗎」（第 6.1 節的封閉問題）
+
+```sh
+# 候選引擎（2026-09-21 實測皆在線）
+#   flash-next  http://192.168.10.90:8888/v1   qwen3.8-flash-next        Bearer mtplx
+#   ornith 35b  http://127.0.0.1:18120/v1      ornith-1.5-mtplx-35b      Bearer mtplx
+#   27B-Splash  http://127.0.0.1:8088/v1       incoai/Qwen3.8-27B-Splash （他專案使用中）
+#   ornith 若沒開：models/ornith/bin/ornith start 35b
+
+.venv/bin/python scripts/ask_option_continuation.py --engine flash --papers 8 --limit 10
+.venv/bin/python scripts/ask_option_continuation.py --engine ornith --papers 8 --limit 10
+```
 
 ### 跨引擎一致性（本文件第 6 節的量測）
 
