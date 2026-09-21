@@ -45,7 +45,7 @@ for (const id of ['textSide', 'listBody', 'crumbs', 'scopeCount', 'doneCount', '
   'toast', 'figureNote', 'editor', 'viewStem', 'viewOpts', 'actFix', 'actSave', 'actAccept',
   'editStem', 'pickCategory', 'pickYear', 'pickSitting', 'pickSubject', 'figuresOnly',
   'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
-  'btnLast', 'actHold', 'actBlock']) makeElement(id);
+  'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where']) makeElement(id);
 elements.get('figuresOnly').tagName = 'INPUT';
 
 /* The chip radios: only the chip the test selects should read as checked. */
