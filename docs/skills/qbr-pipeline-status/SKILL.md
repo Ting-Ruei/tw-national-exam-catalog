@@ -666,23 +666,41 @@ PY
 ### 測試
 
 ```sh
-.venv/bin/python -m pytest tests/ -q      # 現況：237 passed, 0 skipped
+.venv/bin/python -m pytest tests/ -q      # 現況：261 passed, 0 skipped
 ```
 
 > 17 個測試靠 `/tmp/qbr-golden-001`、`/tmp/qbr-golden-002` 的真實產物。這兩個目錄被清空後，
-> `skipif` 會把「讀不到證據」變成「不必驗」（總數 237 不變，**靜默**）。
+> `skipif` 會把「讀不到證據」變成「不必驗」（總數不變，**靜默**）。
 > 重建方式見 `build-exam-question-bank` skill；**測試變少要當成缺陷，不是正常。**
 
-### 服務
+### 服務（常駐在另一台機器上）
+
+**審題介面的家在常駐機，不在筆電**，因為筆電可以關掉帶走：
+
+```
+http://192.168.10.70:8765/v2         192.168.10.70 = TimsMac.lan（M4 Max，up 70 天）
+```
+
+- **8765 是契約**（舊 review UI 的號碼，書籤與已安裝的 PWA 指向它）。從筆電搬到常駐機時，
+  **URL 不變**。
+- 常駐機上的部署在 `~/qbr-review/`（`code/` + `queue/` + `assets/`），自成一體，不依賴任何
+  git checkout。詳見 `deploy-qbr-review` skill。
+- **只有一個 writer。** 筆電不跑第二份審題服務——兩個 live writer 就是兩個審核儲存，
+  那正是 `two_review_stores.md` 描述的缺陷。筆電用
+  `scripts/pull_station_reviews.sh` 把人的決定**拉回來**（單向，覆蓋前先備份）。
+
+本機要臨時開一份來開發（不是給人審題用）：
 
 ```sh
-# 8774 = 新管線（jsonl 後端）。埠是契約，不要改。
 python3 scripts/serve_question_review_ui.py \
   --candidate-jsonl qbr/data/review-queues/live/review-ui/candidates.jsonl \
   --issue-csv      qbr/data/review-queues/live/review-ui/issues.csv \
   --review-log     qbr/data/review-queues/live/review-ui/question_review_events.jsonl \
   --review-backend jsonl --host 127.0.0.1 --port 8774
 ```
+
+> 本機這一份會**寫自己的審核紀錄**。開著它讓別人審題就會製造第二個儲存——
+> 要給人審題就叫人連常駐機的 8765。
 
 `v2` 有「**爭議**」晶片（客戶端過濾，`data-view="disputed"`），數字就在晶片上——
 這是「只看有問題的」入口，不需要模型。

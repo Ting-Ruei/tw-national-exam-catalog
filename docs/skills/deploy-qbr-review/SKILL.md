@@ -12,6 +12,54 @@ HTTP so a reviewer can open it from a browser on another device.
 Those are a **different review store**. Reviewing the new pipeline and mixing the old one in is the
 error this deployment exists to avoid (`qbr/reports/two_review_stores.md`).
 
+## Where it runs, and why that matters more than how
+
+The review UI lives on the **always-on station**, not on the laptop:
+
+| | |
+|---|---|
+| **Station (the home)** | `192.168.10.70` = `TimsMac.lan`, M4 Max, up 70 days, Docker Desktop `AutoStart=true` |
+| **The URL** | **`http://192.168.10.70:8765/v2`** |
+| Laptop | may be closed and carried away — it is a **consumer**, not the host |
+
+The station is where the old SQL review UI used to run (`tw-national-exam-review-ui`, `Exited 137`,
+`--review-backend sql` → Postgres on 8765/8766). It was **neutralised with `docker update
+--restart=no`** and kept for archaeology; it is not deleted because it is evidence of the old store.
+
+**The rule this topology exists to keep: one review store.** Because the laptop can be closed, the
+human decisions must permanently live on the station; otherwise a reviewer working while the laptop
+is away writes into a second store and the two silently diverge. Concretely:
+
+- The station's container is **the only writer**. Do **not** leave a Review UI running on the laptop
+  on a second port — two live writers *are* two stores.
+- The laptop **pulls** the decisions back for packages, reports and backup:
+  `scripts/pull_station_reviews.sh` (one-way station → laptop, backs up before overwriting).
+
+### The station's layout (self-contained on purpose)
+
+The station does **not** serve out of a git checkout. Everything it needs is under `~/qbr-review/`,
+so the service does not depend on any checkout still being there or being up to date:
+
+```
+~/qbr-review/
+  code/     the repo minus 國考題資料夾*, qbr/data, .git, .venv     (55M, rsync'd)
+  queue/    candidates.jsonl + crops + question_review_events.jsonl  (1.0G)
+  assets/   國考題資料夾/10_official_pdf/by_official_catalog only    (1.9G, 30 categories)
+  bin/      ensure-up.sh           (watchdog)
+  logs/     ensure-up.log
+```
+
+The corpus is **only** `by_official_catalog` (1.9G of the laptop's 20G): that is the only subtree
+the queue's `question_pdf_relative` refers to, and it is verified **byte-identical** to the laptop
+(all 1,960 PDFs the queue needs, sha256 equal). The rest is for rebuilding, which the station
+never does.
+
+Config lives in `~/qbr-review/code/deploy/qbr-review/.env` (not in git): `REVIEW_UI_PORT=8765`,
+`CATALOG_ROOT`, `ASSET_ROOT`, `QBR_QUEUE_DIR`, `QBR_REVIEW_LOG`, all absolute.
+
+> **8765 is the contract.** It is the old review UI's number and the reviewer's bookmarks/PWA point
+> at it. Moving the service between machines must not move the URL.
+
 ## Start it
 
 ```sh
@@ -23,11 +71,13 @@ deploy/qbr-review/up.sh --rebuild    # re-run the queue from packages first (aft
 Then, from any device on the LAN:
 
 ```
-http://<this-machine-LAN-IP>:8774/v2
+http://<this-machine-LAN-IP>:8765/v2
 ```
 
 At boot: Docker Desktop **AutoStart = True**, container `qbr-review-ui` with
-`restart: unless-stopped`. Nothing else is needed — if the machine came up, the server is up.
+`restart: unless-stopped`. That covers "the machine rebooted". It does **not** cover "the container
+was stopped by hand" or "Docker came up before the container existed", so the station also has a
+watchdog — see *Keeping it up* below.
 
 ## The three things up.sh checks, and why in that order
 
@@ -76,16 +126,54 @@ resolves no matter where the queue is mounted. The bug this fixed: refs used to 
 - **`--review-backend jsonl` needs no `DATABASE_URL`.** Deliberately not set, so the next reader does
   not think the two routes are one.
 
-## When something looks wrong — pull evidence from that machine
+## Keeping it up (the station's watchdog)
 
-Do not reason from the other device's screen. On the host:
+Docker Desktop `AutoStart=true` + `restart: unless-stopped` covers the reboot case only. The gap:
+**a container stopped by hand, or Docker coming up before the container exists, has nobody to bring
+it back.** The station closes that gap with a launchd job and an idempotent script:
+
+```
+~/Library/LaunchAgents/com.timsvms.qbr-review-ensure.plist   RunAtLoad + every 300s
+~/qbr-review/bin/ensure-up.sh                                 probes the API; repairs only if down
+~/qbr-review/logs/ensure-up.log                               empty when healthy
+```
+
+It measures the **API's number**, not the container's state — same rule as `up.sh`. When the service
+is healthy it writes nothing, so an empty log is the correct reading. Verified by stopping the
+container and clearing its restart policy, then watching the watchdog recreate it.
+
+> The station has **no auto-login**; its `console` user is `tim`, logged in for 70 days, and the exam
+> platform already depends on the same Docker Desktop AutoStart. The review UI matches that existing
+> reliability model rather than inventing a different one.
+
+## The one review store (what the reviewer's decisions are, and where they live)
+
+`~/qbr-review/queue/review-ui/question_review_events.jsonl` on the station is **the home**. It is
+the only thing here that cannot be rebuilt: the queue is rebuildable from packages, the crops from
+PDFs, the corpus from the archive — **a person's decision is not**.
+
+Pull it back to the laptop before building packages, writing reports, or backing up:
 
 ```sh
-cd tw-national-exam-catalog
+scripts/pull_station_reviews.sh            # one-way station → laptop
+scripts/pull_station_reviews.sh --dry-run  # say what would happen
+```
+
+It backs up the laptop's copy (`.pre-pull-<stamp>.jsonl`) before overwriting, and refuses to act at
+all when the station is unreachable — *rather than overwrite a human record with a file whose
+provenance is unknown*. The reverse direction is deliberately **not** implemented: it would make the
+laptop a second writer, which is the defect.
+
+## When something looks wrong — pull evidence from that machine
+
+Do not reason from the other device's screen. On the station (`ssh 192.168.10.70`):
+
+```sh
+cd ~/qbr-review/code
 
 # Is it up, and what is it serving?
 docker compose -f deploy/qbr-review/compose.yaml ps
-curl -s http://127.0.0.1:8774/api/queue_index | python3 -m json.tool | head -20
+curl -s http://127.0.0.1:8765/api/queue_index | python3 -m json.tool | head -20
 
 # What does the container itself say?
 docker compose -f deploy/qbr-review/compose.yaml logs --tail 80
@@ -93,16 +181,38 @@ docker compose -f deploy/qbr-review/compose.yaml logs --tail 80
 # Which queue is mounted, and how many records are in it?
 docker inspect qbr-review-ui --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} ({{.Mode}})
 {{end}}'
-wc -l qbr/data/review-queues/live/review-ui/candidates.jsonl
+wc -l ~/qbr-review/queue/review-ui/question_review_events.jsonl
 
 # Is an image actually served (not just the page)?
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
-     "http://127.0.0.1:8774/queue/review-ui/crops/<paper>/<name>.png"
+     "http://127.0.0.1:8765/file?path=review-ui/crops/<paper>/<name>.png"
 ```
+
+The asset route is **`/file?path=<urlencoded queue-relative path>`**, not `/queue/...`: the queue
+root is an *additional asset root* and refs are resolved against it.
 
 The question to answer first is always: **is it not drawing, or is the thing not there?**
 (`build-exam-question-bank/SKILL.md` records the same lesson: the first three explanations were
 about rendering; the cause was that the scan never saw the picture.)
+
+## Deploying to another machine (the sequence that worked)
+
+1. **Recon before touching.** What is on the target port, is the corpus already there (*and is it the
+   same bytes?*), is the code there, is Docker's AutoStart on? Copying 20G unnecessarily, or serving
+   a stale corpus, are both avoidable by measuring first.
+2. **rsync the code** (excluding `國考題資料夾*`, `qbr/data/`, `.git/`, `.venv/`) — ~55M.
+3. **`mkdir` the mountpoint** `code/國考題資料夾` in the destination. The compose file mounts the
+   corpus *inside* `/workspace`, which is mounted read-only, so Docker cannot create the mountpoint
+   and the container fails with `read-only file system`. It must already exist in the source tree.
+4. **Copy the corpus subtree the queue actually references** (`by_official_catalog`), then verify
+   sha256 against the source for **every** referenced PDF — not just that the paths exist.
+5. **Copy the queue**, then verify `candidates.jsonl` sha256 and the crop file count.
+6. **Seed the review log** with the existing decisions.
+7. **Neutralise any old service on the port** (`docker update --restart=no`) so it cannot come back
+   and take the port later.
+8. **`up.sh`**, then verify **from another device**: page, `/api/queue_index`, a real image, a real
+   PDF, a real **write**, and the navigation contract against the **served** HTML (`curl` it, then
+   run `scripts/test_v2_navigation.mjs` on that file — the served bytes, not the repo's).
 
 ## Rebuilding the queue while serving
 

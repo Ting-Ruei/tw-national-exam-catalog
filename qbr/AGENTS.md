@@ -155,6 +155,20 @@ cd tw-national-exam-catalog/qbr
 
 細節與三個未解項目：`reports/review_record_safety.md`。
 
+### 紀錄的「家」在常駐機（2026-09-21 起）
+
+審題介面現在跑在**常開的機器**上（`192.168.10.70` = `TimsMac.lan`，`http://192.168.10.70:8765/v2`），
+因為筆電可以關掉帶走，而審核要能隨時進行。所以：
+
+- **常駐機上的 `~/qbr-review/queue/review-ui/question_review_events.jsonl` 是唯一的家。**
+- **筆電不跑第二份審題服務。** 兩個 live writer 就是兩個審核儲存（`reports/two_review_stores.md`
+  描述的缺陷），只是換了一種形式再發生一次。
+- 筆電把決定**拉回來**（單向）：`scripts/pull_station_reviews.sh`，覆蓋前先備份，
+  連不上常駐機時拒絕動作。反方向刻意不做。
+- 部署拓撲與維運：`docs/skills/deploy-qbr-review/SKILL.md`。
+
+> 這不是新的儲存，是**搬家**：一個家，換一台機器。
+
 ---
 
 ## 圖片：本地模型，不是定位擷圖
