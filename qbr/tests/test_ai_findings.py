@@ -562,3 +562,61 @@ def test_only_the_latest_finding_decides_whether_a_question_is_stale(tmp_path):
     assert ai_findings.stale_questions(path, "cccccccccccc", "corpus") == {corpus["candidate_key"]}
     # A question whose only finding is old is stale.
     assert ai_findings.stale_questions(path, "dddddddddddd") == {key, corpus["candidate_key"]}
+
+
+def test_repeated_learned_flags_do_not_become_a_list_of_characters():
+    """The bug that shipped into the first corpus sweep.
+
+    `--learned CODE=... --learned CODE=...` without `action="append"` leaves argparse holding just
+    the last string, and `parse_learned` iterated it one character at a time - so every record from
+    that pass stores a bulleted list of single characters as its `learned` block. It failed quietly
+    because a block of junk still reads as "already known": the model simply ignored it.
+    """
+    import ask_about_blocks
+    given = ["substituted-script=文字層存的是別國字元",
+             "FIGURE_MISSING=這一題沒有圖"]
+    parsed = ask_about_blocks.parse_learned(given)
+    assert parsed == {"substituted-script": "文字層存的是別國字元", "FIGURE_MISSING": "這一題沒有圖"}
+    # A bare string is one direction, never a sequence of characters.
+    assert ask_about_blocks.parse_learned("substituted-script=別國字元") == {
+        "substituted-script": "別國字元"}
+    note = ai_findings.learned_note(parsed)
+    assert "F\n- I\n- G" not in note
+    assert "FIGURE_MISSING：這一題沒有圖" in note
+
+
+def test_the_learned_flag_collects_every_occurrence():
+    """Argparse must not keep only the last `--learned`.
+
+    The parser's shape is what makes the previous test's input reach `parse_learned` as a list at
+    all, so it is asserted directly rather than assumed.
+    """
+    import ask_about_blocks
+    real_argv = sys.argv
+    try:
+        sys.argv = ["ask_about_blocks.py", "--queue", "q", "--all",
+                    "--learned", "a=1", "--learned", "b=2"]
+        args = ask_about_blocks.parse_args()
+    finally:
+        sys.argv = real_argv
+    assert args.learned == ["a=1", "b=2"]
+
+
+def test_the_learned_block_itself_is_part_of_the_prompt_version():
+    """Two runs told to ignore different things are two different measurements.
+
+    Hashing the `LEARNED` template alone said they were the same prompt. Measured: the first corpus
+    sweep stored a garbled `learned` block (argparse kept only the last flag and `parse_learned`
+    walked the string a character at a time), and under the template-only hash those records claimed
+    the same version as a run given the real block.
+    """
+    no_learned = ai_findings.prompt_version("corpus")
+    a = ai_findings.prompt_version("corpus", {"substituted-script": "別國字元"})
+    b = ai_findings.prompt_version("corpus", {"FIGURE_MISSING": "沒有圖"})
+    assert len({no_learned, a, b}) == 3
+    # And the record must carry the version its own learned block produces.
+    record = ai_findings.make_record(
+        question={"stem": "x"}, finding={"verdict": "OK", "what": "NONE"}, model="m",
+        endpoint="e", prompt_system="s", prompt_user="u", population="corpus",
+        learned={"FIGURE_MISSING": "沒有圖"})
+    assert record["prompt_version"] == b

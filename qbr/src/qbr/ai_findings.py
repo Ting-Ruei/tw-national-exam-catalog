@@ -324,7 +324,7 @@ def build_prompt(question, *, learned=None, population="blocked") -> tuple:
     return SYSTEM.format(codes=codes, arrival=framing["arrival"]) + learned_note(learned), user
 
 
-def prompt_version(population="blocked") -> str:
+def prompt_version(population="blocked", learned=None) -> str:
     """A short hash of the prompt itself, so a change to it is visible in every record.
 
     The loop's whole point is that the prompt is adjusted between batches, which means two records
@@ -334,9 +334,12 @@ def prompt_version(population="blocked") -> str:
     a diff. `disputes.py`'s detectors have the same problem and the same answer: a rule change is
     identified by a name, not by remembering when it happened.
 
-    Deliberately hashes `LEARNED` too. The learned block changes what the model is asked to ignore,
-    so two runs with different learned blocks are different prompts even though the instructions are
-    identical.
+    `learned` is hashed **by its rendered text, not by the template**, which is the whole point of
+    passing it: hashing `LEARNED` alone would say a run told to ignore `substituted-script` and a run
+    told to ignore `FIGURE_MISSING` are the same prompt, and those are two different measurements of
+    the model. (Measured: the first corpus sweep stored a garbled `learned` block - argparse dropped
+    all but the last flag and `parse_learned` walked the string a character at a time - and under the
+    template-only hash those records claimed the same version as a run given the real block.)
 
     And `population`, because a pass that tells the model "a human flagged this" is not the same
     measurement as one that tells it "nobody has looked at this yet" - they even ask for different
@@ -345,8 +348,8 @@ def prompt_version(population="blocked") -> str:
     consistent measurement.
     """
     framing = POPULATIONS[population]
-    body = "\x00".join([SYSTEM, USER, LEARNED, framing["arrival"], framing["ask"],
-                         ANSWER_READING, "\x00".join(sorted(CODES))])
+    body = "\x00".join([SYSTEM, USER, LEARNED, learned_note(learned), framing["arrival"],
+                         framing["ask"], ANSWER_READING, "\x00".join(sorted(CODES))])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
@@ -391,7 +394,7 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         # Which generation of the prompt this note belongs to. The prompt is adjusted between batches
         # - that is the loop - so without this field two notes taken before and after a change look
         # like the same measurement and cannot be compared without diffing the stored text by hand.
-        "prompt_version": prompt_version(population),
+        "prompt_version": prompt_version(population, learned),
         # How the question reached the model: a person blocked it, or it was next in the file. A
         # finding about a blocked question and one about a random corpus question are different
         # claims with different error rates, so which population it came from is part of the record.

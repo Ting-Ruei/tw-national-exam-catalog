@@ -134,11 +134,16 @@ def parse_args() -> argparse.Namespace:
                         help="Splash needs ~1,200-3,300 for its reasoning when thinking is on; with "
                              "it off the answer alone is under 400. Kept above the answer length "
                              "because a budget that cuts the JSON off mid-field loses the note.")
-    parser.add_argument("--learned", default=None,
+    parser.add_argument("--learned", action="append", default=None,
                         help="what earlier batches already settled, so the next batch starts from it "
                              "instead of rediscovering it: `CODE=what it means` repeated, or a "
                              "quoted string. Recorded on every note, because the prompt is part of "
-                             "the measurement and a changed prompt is a different pass")
+                             "the measurement and a changed prompt is a different pass. "
+                             "Must be `action=\"append\"`: without it argparse keeps only the last "
+                             "flag, and `parse_learned` then iterates the *string* one character at "
+                             "a time - measured on the first corpus sweep, whose stored `learned` is "
+                             "a bulleted list of single characters. It failed quietly because a "
+                             "block of junk still reads as \"already known\"")
     parser.add_argument("--resume", action="store_true",
                         help="skip questions that already have a finding (a corpus pass is ~44h, "
                              "so stopping and continuing must not re-ask anything)")
@@ -239,9 +244,18 @@ def parse_learned(values):
     A bare string is passed through unchanged, because a direction that is not one code ("this paper
     prints the answer key on a separate sheet") is still worth carrying forward, and forcing it into
     `CODE=` would lose it.
+
+    **A single string is not a list of items.** This function used to iterate `values` directly, so a
+    bare string (which argparse produces when `--learned` is missing `action="append"`, keeping only
+    the last flag) was walked one **character** at a time and came out as a bulleted list of single
+    characters - measured on the first corpus sweep. `learned_note` accepts a string too, so this is
+    also the path that a hand-typed multi-line direction takes: a string that *contains* newlines or
+    `=`-free text is one direction, not many.
     """
     if not values:
         return None
+    if isinstance(values, str):
+        values = [values]
     learned = {}
     extras = []
     for item in values:
@@ -417,10 +431,14 @@ def main() -> int:
         # skip set has to become "everything except those", because `--resume` skips every question
         # that has *any* finding - including the stale ones this flag exists to re-ask.
         population = "corpus" if args.all else "blocked"
-        stale = ai_findings.stale_questions(out, ai_findings.prompt_version(population), population)
+        # The version has to be computed with the *same* learned block this run will use - the
+        # learned text is part of the prompt, so a run with a different block is a different
+        # measurement and every record from the other one is legitimately stale.
+        stale = ai_findings.stale_questions(
+            out, ai_findings.prompt_version(population, args.learned), population)
         done = set(ai_findings.latest_by_question(out)) - stale
         print("提示詞版本 %s：%d 題的現行 finding 是舊版，要重問。"
-              % (ai_findings.prompt_version(population), len(stale)))
+              % (ai_findings.prompt_version(population, args.learned), len(stale)))
     questions = None
     if args.all:
         # Read once and hold, rather than have every worker re-read 196 MB.
