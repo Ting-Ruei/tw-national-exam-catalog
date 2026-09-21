@@ -28,3 +28,4 @@ qbr/data/
 qbr/runs/
 qbr/tmp/
 qbr/.venv/
+deploy/qbr-review/.env

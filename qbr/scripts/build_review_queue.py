@@ -178,6 +178,12 @@ def _keys_of(candidates_path):
 
 
 def merge(work_roots, out_dir, *, include_papers=None, previous=()):
+    # Made absolute **before anything reads it**, so `_adopt_crops` can compute a queue-relative
+    # path with `os.path.relpath` regardless of how `--out` was spelled. Without this, a relative
+    # `--out` would leave the stored crop reference pointing outside the queue. `abspath` (not
+    # `realpath`) on purpose: `/tmp` is a symlink to `/private/tmp` on this machine, and resolving
+    # it would make the stored path and the served root disagree by a prefix.
+    out_dir = os.path.abspath(out_dir)
     runs = run_dirs(work_roots)
     if include_papers:
         wanted = set(include_papers)
@@ -191,6 +197,10 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     # files for 30,440 questions and makes the queue self-contained: copy it anywhere, serve it
     # there, and the pictures come with it.
     crops_root = os.path.join(out_dir, "review-ui", "crops")
+    # The root the stored crop references are relative to. Taken once, here, from the argument as
+    # given, because the stored path must not depend on the caller's working directory - see
+    # `_adopt_crops`.
+    queue_root = out_dir
     candidates, issues = [], []
     per_paper = []
     seen_keys = {}
@@ -208,7 +218,7 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
         for row in rows:
             if row.get("image_refs"):
                 row["image_refs"] = _adopt_crops(row["image_refs"], run, paper, crops_root,
-                                                 copied)
+                                                 copied, queue_root=queue_root)
             # The review log keys on `candidate_key`, which is the source question keyed by the
             # registry key - unique across the corpus. A collision means two runs packaged the
             # same paper twice, which is a finding rather than something to paper over.
@@ -340,13 +350,28 @@ def _taxonomy(per_paper):
     return tree
 
 
-def _adopt_crops(refs, run, paper, crops_root, copied):
+def _adopt_crops(refs, run, paper, crops_root, copied, *, queue_root):
     """Copy a run's crops into the merged queue and rewrite the references to point there.
 
     The path a candidate carries is absolute and points into the package run it was built from.
     Left alone it would make the merged queue depend on 243 directories that a later cleanup may
     remove, and the Review UI - which serves files only under registered roots - would answer 404
     for every crop. The relative reference is what the queue keeps; the copy is what makes it true.
+
+    **Relative to the queue, not to the caller's working directory.** This is the one thing the
+    version above got wrong, and it was invisible for as long as no merged queue had any pictures:
+    `path` was left as the value of `os.path.join(out_dir, ...)`, so what the row stored depended on
+    how the operator spelled `--out`. Run `build_review_queue.py --out data/review-queues/x` from
+    `qbr/` and the row says `data/review-queues/x/review-ui/crops/...`; run it with an absolute
+    `--out` and the row says `/abs/...`. Serving that queue from a container (where `/queue` is the
+    queue and the CWD is `/workspace`) then answered **404 for every figure**, which is exactly the
+    failure this function exists to prevent. Measured: 3,483 questions with 4,549 crops, all 404 at
+    `/file`, until the path was made queue-relative.
+
+    So the stored value is always `review-ui/crops/<paper>/<name>`, which is the one spelling that
+    resolves against whichever root the queue is mounted at - `/queue` in the container, the queue
+    directory anywhere else. A copy of the queue is still self-contained; the reference no longer
+    encodes where it was built.
     """
     adopted = []
     for ref in refs:
@@ -366,7 +391,8 @@ def _adopt_crops(refs, run, paper, crops_root, copied):
         if not os.path.isfile(target):
             shutil.copyfile(source, target)
             copied["copied"] += 1
-        adopted.append({**ref, "path": target, "exists": True})
+        relative = os.path.relpath(target, queue_root)
+        adopted.append({**ref, "path": relative, "exists": True})
     return adopted
 
 

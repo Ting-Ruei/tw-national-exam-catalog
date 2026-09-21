@@ -133,6 +133,55 @@ def test_no_absolute_path_reaches_the_queue():
                 assert not str(value).startswith("/"), (key, value)
 
 
+def test_a_merged_crop_reference_does_not_depend_on_the_calling_directory(tmp_path):
+    """A merged queue's crop path must resolve against the queue, not against the CWD it was built in.
+
+    Measured, and the reason this test exists: 3,483 questions holding 4,549 crops were written with
+    a `path` of `data/review-queues/<q>/review-ui/crops/...` - the value of `--out` exactly as the
+    operator spelled it. Served from a container, where the queue is mounted at `/queue` and the CWD
+    is `/workspace`, `/file` answered **404 for every figure**, so the reviewer saw no picture at all.
+    The bug was invisible while no merged queue had pictures, which is how it survived.
+
+    This is a **negative control**: it fails on the version that stored `--out` as given
+    (`git stash` of `qbr/scripts/build_review_queue.py`), and the assertion is on the stored string
+    rather than on a copied file's existence, so it cannot pass for the wrong reason.
+    """
+    builder = _builder()
+    run = tmp_path / "run"
+    review_ui = run / "review-ui"
+    crops = review_ui / "crops"
+    crops.mkdir(parents=True)
+    (crops / "figure.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    row = {"candidate_key": "k1", "question_number": 1,
+           "image_refs": [{"path": str(crops / "figure.png"), "raw_ref": "figure.png",
+                           "asset_role": "figure-crop"}]}
+    with open(review_ui / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    # The caller is one directory up, and `--out` is given **relative** - both halves of the trap.
+    import subprocess
+    queue = tmp_path / "queue"
+    subprocess.run([sys.executable,
+                    os.path.join(PKG, "scripts", "build_review_queue.py"),
+                    "--work", str(tmp_path), "--out", "queue"],
+                   cwd=str(tmp_path), check=True, capture_output=True)
+
+    with open(queue / "review-ui" / "candidates.jsonl", encoding="utf-8") as handle:
+        written = json.loads(handle.readline())
+    stored = written["image_refs"][0]["path"]
+    assert stored == "review-ui/crops/run/figure.png", stored
+    assert not os.path.isabs(stored)
+    # And the claim that makes the reference true: the file really is inside the queue, so a copy
+    # of the queue still serves it.
+    assert (queue / stored).is_file()
+    # Negative control on the fix itself: the queue is relocatable, which is the whole point.
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    import shutil as _shutil
+    _shutil.copytree(queue / "review-ui", moved / "review-ui")
+    assert (moved / stored).is_file()
+
+
 # ------------------------------------------------------- the reviewer's records survive a rebuild
 # These import the builder by path rather than by `import`, because the module is a script that
 # parses argv in `main()` and has no package home. The point of the tests is narrow and worth
