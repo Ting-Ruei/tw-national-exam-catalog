@@ -138,13 +138,42 @@ it back.** The station closes that gap with a launchd job and an idempotent scri
 ~/qbr-review/logs/ensure-up.log                               empty when healthy
 ```
 
-It measures the **API's number**, not the container's state — same rule as `up.sh`. When the service
-is healthy it writes nothing, so an empty log is the correct reading. Verified by stopping the
-container and clearing its restart policy, then watching the watchdog recreate it.
+Both files live in the repo (`deploy/qbr-review/`), because a plist that only exists on one machine
+is a machine that cannot be rebuilt. Install them with:
 
-> The station has **no auto-login**; its `console` user is `tim`, logged in for 70 days, and the exam
-> platform already depends on the same Docker Desktop AutoStart. The review UI matches that existing
-> reliability model rather than inventing a different one.
+```sh
+deploy/qbr-review/install-watchdog.sh              # idempotent: bootout then bootstrap
+QBR_HOME=/some/other/path deploy/qbr-review/install-watchdog.sh   # non-default location
+```
+
+It is idempotent (re-running does not stack jobs), rewrites the paths when `QBR_HOME` differs, and
+**verifies the job appears in `launchctl list`** — "bootstrap returned no error" is not "the job
+exists".
+
+It measures the **API's number**, not the container's state — same rule as `up.sh`. When the service
+is healthy it writes nothing, so an empty log is the correct reading.
+
+### Two bugs the watchdog had, and one outage I caused (2026-09-21)
+
+Both were found by actually stopping things, not by reading the script:
+
+1. **`open -ga Docker` does not start Docker Desktop on this machine.** The app is **nested**:
+   `/Applications/Docker.app/Contents/MacOS/Docker Desktop.app`. `open -ga Docker` returns 0 and does
+   **nothing**, so the watchdog "tried to start Docker" every 5 minutes and failed silently.
+   Fixed to use the explicit nested bundle path (with the name-based call only as a fallback).
+2. **A process name is not a health check.** The main process is `Docker Desktop`, not `Docker`, so
+   `pgrep -x Docker` reports "not running" while Docker is fine. Only `docker info` is trustworthy.
+
+> **Do not `osascript quit` Docker Desktop to "simulate a reboot".** This host is also the
+> always-on exam platform (`exam_edge`, `exam_db`, `ai_learning_platform-*` all run here). I did
+> exactly that to test the watchdog, its VM wedged on `no route to host`, and **the whole platform
+> was down for ~30 minutes** before it recovered. To exercise the watchdog, stop **only the
+> container** (`docker stop qbr-review-ui`) — that is the gap it exists to cover. The watchdog's
+> Docker-start branch is for a Docker that is genuinely not running, not a test fixture.
+
+> Note the station has **no auto-login**; its `console` user is `tim`, logged in for 70 days, and
+the exam platform already depends on the same Docker Desktop AutoStart. The review UI matches that
+existing reliability model rather than inventing a different one.
 
 ## The one review store (what the reviewer's decisions are, and where they live)
 
