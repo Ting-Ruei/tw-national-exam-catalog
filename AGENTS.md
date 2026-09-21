@@ -21,6 +21,13 @@ changing anything in it** — this file is the repository-wide floor, not the wo
 | Question-bank build pipeline | [`qbr/AGENTS.md`](qbr/AGENTS.md) | [`docs/skills/build-exam-question-bank/SKILL.md`](docs/skills/build-exam-question-bank/SKILL.md) |
 | Review UI (v2) | [`review_ui/AGENTS.md`](review_ui/AGENTS.md) | [`docs/skills/review-ui-v2/SKILL.md`](docs/skills/review-ui-v2/SKILL.md) |
 
+Two working procedures cross those tracks and are worth having open while doing the work:
+
+| When | Skill |
+|---|---|
+| A paper reads the wrong number of questions, shipped text is doubled/truncated, or you are adding a rule to `extract.py`/`repair.py` | [`docs/skills/repair-qbr-extraction/SKILL.md`](docs/skills/repair-qbr-extraction/SKILL.md) |
+| Bringing the review server up on the LAN, opened from another device, verified, or restarted after a rebuild | [`docs/skills/deploy-qbr-review/SKILL.md`](docs/skills/deploy-qbr-review/SKILL.md) |
+
 ### `qbr/` — the build pipeline
 
 `qbr/` turns an official PDF into a platform-verifiable package. It reads the corpus and **writes no

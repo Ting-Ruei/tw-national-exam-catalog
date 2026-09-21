@@ -176,8 +176,12 @@ def crops_for_run(run_dir, paper_path, *, subject="", out_dir, think=False, limi
         # the geometry has no reason to re-ask the model about pictures that were already
         # described, and paying for 1,100 readings to move a box is how a rebuild becomes
         # something nobody runs. `--no-describe` re-cuts and leaves the reading to a later pass.
+        #
+        # And when the option pictures ARE the figure (`covered`), there is no crop to ask about:
+        # `png` is None, and passing it to the model is a crash, not a reading. The pictures the
+        # reviewer sees are the option crops, and their labels already say so.
         verdict = (vision.describe_crop(png, subject=subject, question=entry["stem"], think=think)
-                   if describe else {})
+                   if (describe and png is not None) else {})
         parsed = verdict.get("verdict") or {}
         # The shape the Review UI reads: a list of dicts, each with an absolute `path` (the run is
         # a registered asset root, so it is servable) and the measured reason as its label. A bare

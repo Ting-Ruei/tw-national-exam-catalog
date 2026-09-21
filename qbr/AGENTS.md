@@ -7,7 +7,9 @@
 （後者是方案本身，含每個主張背後的量測），然後 [`../../docs/ARCHITECTURE_CHARTER.md`](../../docs/ARCHITECTURE_CHARTER.md)
 （跨專案最高規範）。** 三者衝突時以 charter 為準。
 
-工作程序見 [`docs/skills/build-exam-question-bank/SKILL.md`](../docs/skills/build-exam-question-bank/SKILL.md)。
+工作程序見 [`docs/skills/build-exam-question-bank/SKILL.md`](../docs/skills/build-exam-question-bank/SKILL.md)；
+**修抽取／切題的缺陷**見 [`docs/skills/repair-qbr-extraction/SKILL.md`](../docs/skills/repair-qbr-extraction/SKILL.md)
+（量測紀律、負對照、「壞掉的儀器看起來和壞掉的產品一樣」、已找到的缺陷目錄）。
 
 **`docs/` 有 48 份文件，先看索引 [`docs/README.md`](../docs/README.md)。**
 那個目錄橫跨兩代管線：類 2 的文件描述的是 **`qbr` 已經量過並取代的 MinerU + 全文件 VLM 路徑**，
@@ -224,8 +226,13 @@ cd tw-national-exam-catalog/qbr
 
 ## 現況
 
-- 測試：**218 passed**（自帶 `.venv`，依賴清單 `../requirements/qbr.txt`）。
-- 已展開：全部 醫事檢驗師 + 藥師(一)(二)；合併佇列已建。
-- 整個語料骨架通用性已證：**3,516/3,516 兩個引擎一致**。
+- 測試：**257 passed**（自帶 `.venv`，依賴清單 `../requirements/qbr.txt`）。
+- 已展開：30 個類科／**3,516 卷**；合併佇列已建（984 卷／78,690 題）。
+- 骨架通用性：**3,516/3,516**（兩個引擎的骨架一致）。
+  **這不是「文字相等」**——文字相等達不到，也不是驗收標準。
+  可執行的驗收標準是「每個出貨欄位都要被第二個引擎在自己的讀數裡找到」，見
+  [`docs/skills/qbr-pipeline-status/SKILL.md`](../docs/skills/qbr-pipeline-status/SKILL.md) 第 6.1 節。
+- 已修：`醫師(二)` 六份 `count-mismatch` 卷（兩個根因，現皆 80/80）、選項續行被截斷、
+  疊字與 `NN 年…` 題幹被當表頭。逐項見 `reports/`。
 - Golden：`tests/golden/golden_1152_medtech_biochem_candidates.jsonl`（80 題）。
 - 合併報告：`reports/merge_into_catalog.md`。
