@@ -48,6 +48,13 @@ abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "${HERE}/${1#./}" ;;
 QUEUE="$(abs "${QUEUE_DIR}")"
 LOG="$(abs "${QBR_REVIEW_LOG:-${QUEUE}/review-ui/question_review_events.jsonl}")"
 
+# ── 0. 找到 docker ─────────────────────────────────────────────────────
+# **非互動式 ssh 沒有 /usr/local/bin 在 PATH 裡。** 實測：`ssh host 'bash up.sh'` 得到的
+# PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，於是 `docker: command not found`——而這正是
+# `scripts/deploy_station.sh --restart` 走的路，所以部署會回報成功但服務沒有重啟。
+# `ensure-up.sh` 早就用這個寫法解決同一件事；這裡跟它一致（一條規則，一個地方）。
+DOCKER="$(command -v docker || echo /usr/local/bin/docker)"
+
 # ── 1. 佇列 ────────────────────────────────────────────────────────────────
 CANDIDATES="${QUEUE}/review-ui/candidates.jsonl"
 if [[ ! -f "${CANDIDATES}" ]]; then
@@ -86,10 +93,21 @@ RECORDS="$(wc -l < "${LOG}" | tr -d ' ')"
 export QBR_QUEUE_DIR="${QUEUE}" QBR_REVIEW_LOG="${LOG}"
 
 echo "== 建立 image =="
-docker compose -f "${HERE}/compose.yaml" build
+"${DOCKER}" compose -f "${HERE}/compose.yaml" build
 
 echo "== 起服務 =="
-docker compose -f "${HERE}/compose.yaml" up -d --remove-orphans
+# `up -d` 對一個已經在跑的容器**什麼都不做**（它說 `Container qbr-review-ui Running`），
+# 而這個容器跑的是 Python——**程式碼是 bind mount 進去的，但已經載入的模組不會自己重讀**。
+# 實測：改了 `serve_question_review_ui.py`、跑了 `deploy_station.sh --restart`、`up.sh` 也
+# 回報成功，但容器的 `StartedAt` 還是 11:20（一小時前），gzip 與 HTTP/1.1 完全沒生效——
+# 部署「成功」而服務仍是舊行為，是這類部署最會騙人的失敗。
+# 所以要真的重建容器。`--force-recreate` 只重建容器，不動 image 快取。
+"${DOCKER}" compose -f "${HERE}/compose.yaml" up -d --remove-orphans --force-recreate
+
+echo "== 確認真的換了程序 =="
+# 「重建成功」不是「換了程序」：量容器的 StartedAt，不是看指令的退出碼。
+STARTED="$("${DOCKER}" inspect qbr-review-ui --format '{{.State.StartedAt}}' 2>/dev/null || echo '')"
+echo "  容器啟動於 ${STARTED}"
 
 echo "== 等待就緒 =="
 for _ in $(seq 1 60); do
@@ -101,7 +119,7 @@ done
 INDEX="$(curl -fsS --max-time 10 "http://127.0.0.1:${PORT}/api/queue_index" || true)"
 if [[ -z "${INDEX}" ]]; then
   echo "服務起來了但 API 沒有回應——看 log：" >&2
-  echo "  docker compose -f ${HERE}/compose.yaml logs --tail 40" >&2
+  echo "  ${DOCKER} compose -f ${HERE}/compose.yaml logs --tail 40" >&2
   exit 1
 fi
 
@@ -117,5 +135,5 @@ echo "（其他裝置用 http://<這台的 LAN IP>:${PORT}/v2）"
 echo "佇列       ${CANDIDATES}"
 echo "題數       ${COUNT}"
 echo "審核紀錄   ${LOG}（目前 ${RECORDS} 筆）"
-echo "停止       docker compose -f ${HERE}/compose.yaml down"
-echo "看 log     docker compose -f ${HERE}/compose.yaml logs -f"
+echo "停止       ${DOCKER} compose -f ${HERE}/compose.yaml down"
+echo "看 log     ${DOCKER} compose -f ${HERE}/compose.yaml logs -f"

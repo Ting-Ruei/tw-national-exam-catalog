@@ -90,3 +90,180 @@ class ReviewUiPerformanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImageContentTypeTests(unittest.TestCase):
+    """A crop whose bytes are not what its name claims must not be mislabelled.
+
+    Measured on the served queue: 44 option pictures are JPEG 2000. Serving them as `image/png`
+    because the file says `.png` makes Chrome refuse to draw them - the file exists, the request
+    returns 200, and the reviewer sees an empty box. The bytes therefore decide the type and the
+    name is only the fallback.
+    """
+
+    def test_png_bytes_are_labelled_png(self) -> None:
+        self.assertEqual(review_ui.content_type_of("a.bin", b"\x89PNG\r\n\x1a\n" + b"x" * 8),
+                         "image/png")
+
+    def test_jpeg_bytes_are_labelled_jpeg_whatever_the_name_says(self) -> None:
+        self.assertEqual(review_ui.content_type_of("a.png", b"\xff\xd8\xff" + b"x" * 8),
+                         "image/jpeg")
+
+    def test_webp_and_gif_are_recognised(self) -> None:
+        self.assertEqual(review_ui.content_type_of("a.png", b"RIFF\x00\x00\x00\x00WEBP"),
+                         "image/webp")
+        self.assertEqual(review_ui.content_type_of("a.png", b"GIF89a" + b"x" * 8), "image/gif")
+
+    def test_a_pdf_is_labelled_pdf_not_binary(self) -> None:
+        self.assertEqual(review_ui.content_type_of("a.pdf", b"%PDF-1.7"), "application/pdf")
+
+    def test_an_unknown_file_falls_back_to_its_name(self) -> None:
+        self.assertEqual(review_ui.content_type_of("a.txt", b"hello"),
+                         "text/plain")
+
+
+class FacetProjectionTests(unittest.TestCase):
+    """The facets must not need a regex per row per request.
+
+    Measured on the served queue: `facets()` walked all 79,090 candidates and ran
+    `category_matches_filter` (two regex substitutions plus a `re.sub`) on each of them for
+    **every** `/api/candidates` response. That was 0.755 s of the 0.79 s a single sitting cost, and
+    a 32-sitting category paid it 32 times. The fix folds each row's category once per queue load,
+    so the per-request cost is set membership - and the answer must be **identical**, because a
+    faster wrong number is worse than the slow right one.
+
+    The negative control is `_facets_reference`: the implementation as it was, kept here as a second
+    engine. If the folded path and the reference ever disagree, this fails.
+    """
+
+    def _state(self) -> "review_ui.ReviewState":
+        state = review_ui.ReviewState.__new__(review_ui.ReviewState)
+        state.candidates = [
+            {"candidate_key": "a", "metadata": {"normalized_category_name": "物理治療師",
+                                                "normalized_subject_name": "骨科疾病物理治療學",
+                                                "year": 115, "exam_ordinal": 2}},
+            {"candidate_key": "b", "metadata": {"normalized_category_name": "藥師(一)",
+                                                "normalized_subject_name": "藥學(一)",
+                                                "year": 108, "exam_ordinal": 1}},
+            # A second spelling of the same category, which the fold must treat as equal.
+            {"candidate_key": "c", "metadata": {"normalized_category_name": "藥師（一）",
+                                                "normalized_subject_name": "藥學(二)",
+                                                "year": 108, "exam_ordinal": 1}},
+            # No category at all - it must not appear in `categories` and must not crash.
+            {"candidate_key": "d", "metadata": {"normalized_subject_name": "無類科",
+                                                "year": 110, "exam_ordinal": 1}},
+        ]
+        return state
+
+    @staticmethod
+    def _reference(state, params):
+        """`facets` as it was before the fold - the negative control's second engine."""
+        values = {"categories": set(), "subjects": set(), "years": set(), "ordinals": set()}
+        for item in state.candidates:
+            metadata = item.get("metadata") or {}
+            category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
+            subject = metadata.get("normalized_subject_name") or ""
+            year = str(metadata.get("year") or "")
+            ordinal = str(metadata.get("exam_ordinal") or "")
+            if category:
+                values["categories"].add(category)
+            if state._facet_match(category, subject, year, ordinal, params, ignore="subject") and subject:
+                values["subjects"].add(subject)
+            if state._facet_match(category, subject, year, ordinal, params, ignore="year") and year:
+                values["years"].add(year)
+            if state._facet_match(category, subject, year, ordinal, params, ignore="ordinal") and ordinal:
+                values["ordinals"].add(ordinal)
+        return {
+            key: sorted(value, key=lambda item: (int(item) if item.isdigit() else 9999, item))
+            if key in {"years", "ordinals"} else sorted(value)
+            for key, value in values.items()
+        }
+
+    def test_the_folded_facets_equal_the_per_row_regex_facets(self) -> None:
+        cases = [
+            {},
+            {"category": "物理治療師"},
+            {"category": "藥師(一)"},
+            # The full-width spelling must select the same rows as the half-width one.
+            {"category": "藥師（一）"},
+            {"category": "藥師"},
+            {"category": "不存在"},
+            {"year": "108", "ordinal": "1"},
+            {"subject": "藥學(二)"},
+            {"category": "藥師(一)", "subject": "藥學(二)"},
+        ]
+        for params in cases:
+            with self.subTest(params=params):
+                state = self._state()
+                self.assertEqual(state.facets(params), self._reference(state, params))
+
+    def test_a_category_with_no_name_is_in_no_category_facet(self) -> None:
+        state = self._state()
+        self.assertNotIn("", state.facets({})["categories"])
+
+    def test_the_facets_are_asked_for_once_per_queue_not_once_per_request(self) -> None:
+        state = self._state()
+        state._facet_row_values()
+        first = state._facet_rows
+        state._facet_row_values()
+        # The same list object, so the fold was not redone.
+        self.assertIs(state._facet_rows, first)
+
+    def test_a_filtered_request_only_scans_its_own_sitting(self) -> None:
+        state = self._state()
+        state._build_candidate_index()
+        self.assertEqual(len(state._candidate_scan({"year": "108", "ordinal": "1"})), 2)
+        # Without both levels there is no bucket that can be proven complete, so the whole queue is
+        # scanned - the answer stays right, it is only slower.
+        self.assertEqual(len(state._candidate_scan({"year": "108"})), 4)
+        self.assertEqual(len(state._candidate_scan({})), 4)
+
+
+class CompressedResponseTests(unittest.TestCase):
+    """A 2.13 MB JSON response must not be sent as 2.13 MB when the browser can read gzip.
+
+    Measured: the review queue's responses carried no `Content-Encoding` at all, and `v2.html`
+    fetches a whole sitting per request and a whole category as 32 of them - 80 MB of text to open
+    物理治療師. The same bytes gzip to about 5% of their size because the payload is mostly repeated
+    field names and CJK text.
+    """
+
+    def _handler(self, accept_encoding: str):
+        handler = review_ui.Handler.__new__(review_ui.Handler)
+        handler.headers = {"Accept-Encoding": accept_encoding}
+        return handler
+
+    def test_json_is_gzipped_when_the_client_asked_for_it(self) -> None:
+        handler = self._handler("gzip, deflate")
+        body = review_ui.Handler.compressible(handler, b"x" * 5000, "application/json; charset=utf-8")
+        self.assertLess(len(body), 5000)
+
+    def test_json_is_sent_unchanged_when_the_client_did_not_ask(self) -> None:
+        handler = self._handler("")
+        data = b"x" * 5000
+        self.assertIs(review_ui.Handler.compressible(handler, data, "application/json; charset=utf-8"),
+                      data)
+
+    def test_an_image_is_never_gzipped(self) -> None:
+        # Images are already compressed; gzipping them costs CPU and can make them bigger.
+        handler = self._handler("gzip")
+        data = b"\x89PNG\r\n\x1a\n" + b"x" * 5000
+        self.assertIs(review_ui.Handler.compressible(handler, data, "image/png"), data)
+
+    def test_a_tiny_body_is_not_wrapped_in_a_gzip_header(self) -> None:
+        handler = self._handler("gzip")
+        data = b'{"ok": false}'
+        self.assertIs(review_ui.Handler.compressible(handler, data, "application/json"), data)
+
+
+class HttpKeepAliveTests(unittest.TestCase):
+    """HTTP/1.0 closes the socket per response, which makes the parallel fetch pointless.
+
+    Measured: every response came from a fresh connection (`curl` reported a new connection each
+    time), so a sitting's crops, its PDF and the category's 32 sittings each paid a TCP handshake.
+    HTTP/1.1 keeps the connection, and that is only safe because every response declares
+    `Content-Length`.
+    """
+
+    def test_the_handler_negotiates_http_1_1(self) -> None:
+        self.assertEqual(review_ui.Handler.protocol_version, "HTTP/1.1")

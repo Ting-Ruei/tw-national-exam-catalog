@@ -330,14 +330,16 @@ const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻�
    two subjects of one sitting are two papers, and one subject of two sittings is two papers. */
 function toItem(candidate) {
   const metadata = candidate.metadata || {};
-  const queued = (S.queued || new Map()).get(candidate.candidate_key) || {};
   return {
     candidate_key: candidate.candidate_key,
     question_number: candidate.question_number,
     stem_preview: candidate.stem,
     paper: paperOf(candidate),
-    category: queued.category || metadata.category_name || metadata.normalized_category_name || '',
-    subject: queued.subject || metadata.canonical_subject_name || metadata.normalized_subject_name || '',
+    // Read straight off the row. `normalized_*` is the name the queue builder normalised for
+    // matching, and it is present on every row measured (1,000/1,000 across a sitting), so there is
+    // nothing to fall back to and no second opinion about what the category is.
+    category: metadata.normalized_category_name || metadata.category_name || '',
+    subject: metadata.normalized_subject_name || metadata.canonical_subject_name || '',
     // Whether the question carries a machine crop. Read from the row the server sent, because a
     // crop that exists on disk but is not on the row cannot be shown, and "is there a figure"
     // has to be answered by the data rather than by a second guess at the text.
@@ -350,12 +352,32 @@ function toItem(candidate) {
     group_size: Number(candidate.group_size || 1),
     group_position: candidate.group_position,
     group_ref: candidate.group_ref || '',
-    year: queued.year || metadata.exam_year || metadata.year || yearOf(candidate),
-    ordinal: queued.ordinal || metadata.exam_ordinal,
-    human_action: queued.human_action || 'unreviewed',
-    reason_codes: queued.reason_codes || [],
+    year: metadata.exam_year || metadata.year || yearOf(candidate),
+    ordinal: metadata.exam_ordinal,
+    // The review state of this question, read from **its own row** rather than from the 2,000-row
+    // `/api/workflow` window. That window was the only source before, and it is capped: measured
+    // on the served queue it described 2,000 of 79,090 questions, so a question reviewed yesterday
+    // showed as 未看 again the moment the page was reloaded - `S.verdict` was never seeded from disk
+    // at all. Reading the row is also what makes the list correct on an unseen queue: it is the
+    // queue's own statement about the question, not a second opinion about it.
+    human_action: rowReviewAction(candidate) || 'unreviewed',
+    reason_codes: [],
     candidate,
   };
+}
+
+/* What a queue row says about its own review state. `review.action` is what the server projects
+   from the append-only event log, so it is the same value `S.verdict` gets when a decision is made
+   in this session - and reading it back is what lets a reload resume instead of restarting. A row
+   with no human event carries `null`, which is 未看. */
+function rowReviewAction(candidate) {
+  const review = candidate && candidate.review;
+  if (!review || typeof review !== 'object') return '';
+  // A reset is a recorded decision that says "look again", and it outranks an older action: the
+  // events are append-only, so after a repair the old `accept` is still on the row and the newest
+  // statement about the question is the reset.
+  if (review.is_reset_unreviewed) return 'needs_review';
+  return String(review.action || '');
 }
 
 /* The paper's identity: the official PDF's file name without its extension. */
@@ -683,11 +705,18 @@ async function applyScope() {
     // Per paper is also wrong, and it is what the previous version did: 419 requests to read one
     // category, each a separate round trip, when the data is already grouped.
     //
-    // A sitting is the natural unit. Measured over the whole queue, the 96 (category, year,
+    // A sitting is the natural unit. Measured over the whole queue, the 220 (category, year,
     // sitting) groups hold at most 480 questions - 醫事檢驗師 115 第2次, six papers - which is
-    // comfortably inside the cap, and 96 requests replace 419.
+    // comfortably inside the cap.
+    //
+    // They are fetched **together, not one after another**. Measured against the station: a sitting
+    // is 0.02 s of server time but a wide scope is 32 of them, and awaiting each in turn cost
+    // 13.7 s to open 物理治療師 because the round trips added up instead of overlapping. The server
+    // is threaded and the connections are now kept alive, so issuing the 32 at once costs about what
+    // the slowest one costs. The results are reassembled in paper order below, so the order the
+    // requests happen to finish in cannot change what the reviewer sees.
+    const requests = [];
     const seen = new Set();
-    const rows = [];
     for (const paper of papers) {
       const where = whereOfPaper(paper);
       if (!where) continue;
@@ -697,17 +726,23 @@ async function applyScope() {
       const query = new URLSearchParams({
         category: where.category, year: where.year, ordinal: where.ordinal, limit: '1000',
       });
+      requests.push({ where, query });
+    }
+    const responses = await Promise.all(requests.map(async ({ where, query }) => {
       const response = await fetch(`/api/candidates?${query}`, { cache: 'no-store' });
-      const data = await response.json();
-      if (!data.candidates) throw new Error(data.error || `HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}（${where.year} 年第${where.ordinal}次）`);
+      return response.json();
+    }));
+    const rows = [];
+    for (const data of responses) {
+      if (!data.candidates) throw new Error(data.error || '伺服器沒有回傳 candidates');
       // The server says how many rows matched and how many it sent. If they differ, the answer was
       // truncated, and a truncated answer that looks complete is exactly the defect this rewrote
       // away - so it is reported rather than swallowed. Measured: the largest sitting is 480
       // questions against a cap of 1,000, so this must never fire; if it ever does, the cap has
       // moved and the paging has to come back.
       if (data.filtered_count > data.candidates.length) {
-        throw new Error(`考次 ${where.year} 第${where.ordinal}次 有 ${data.filtered_count} 題，`
-          + `伺服器只回了 ${data.candidates.length} 題（上限 ${1000}）。`);
+        throw new Error(`某個考次有 ${data.filtered_count} 題，伺服器只回了 ${data.candidates.length} 題（上限 1000）。`);
       }
       // Keep only the papers this scope names; the sitting may hold others (a subject filter
       // narrows within one sitting of one year).
@@ -722,6 +757,16 @@ async function applyScope() {
       a.paper < b.paper ? -1 : a.paper > b.paper ? 1
         : Number(a.question_number) - Number(b.question_number)
     ));
+    // Seed the session's verdict map from what the queue says each question already is. Without
+    // this a reload - or a scope change onto a paper read an hour ago - drew every row as 未看 and
+    // opened on question 1, so the reviewer could not tell what they had already done. Only rows in
+    // *this* scope are seeded, which is correct: the map is a cache of the row's own state, and
+    // every row carries it.
+    for (const item of S.view) {
+      const action = rowReviewAction(item.candidate);
+      if (action) S.verdict.set(item.candidate_key, action);
+      else S.verdict.delete(item.candidate_key);
+    }
     S.scopeTotal = S.view.length;
   } catch (error) {
     S.view = [];
@@ -1191,9 +1236,8 @@ async function go(index) {
   // re-fetches every crop. On a chemical-structure paper - four option pictures per question plus
   // the question figure - that is the delay that was reported.
   //
-  // Everything the panel draws already arrived with `/api/candidates`: stem, options, answer,
-  // `image_refs`. The queue's per-question decoration (`reason_codes`, `human_action`) is read from
-  // `S.queued`, which `boot()` loads once. Nothing here needs a per-question request.
+  // Everything the panel draws arrived with `/api/candidates`: stem, options, answer,
+  // `image_refs`, and the row's own `review.action`. Nothing here needs a per-question request.
 }
 
 function setEditMode(on) {
@@ -1308,25 +1352,19 @@ async function next() {
 /* ---------------------------------------------------------------- boot */
 async function boot() {
   try {
-    // The queue's opinion of the questions is fetched once and is small - it carries no stems and
-    // no options. The questions themselves are *not* fetched here: there are 32,350 of them and the
-    // endpoint returns at most a thousand, so loading them all is not possible and pretending
-    // otherwise left the list empty for every scope outside the first thousand. `applyScope()`
-    // asks the server for the scope being shown, which is the only way the count can be right.
-    const workflowResponse = await fetch('/api/workflow', { cache: 'no-store' }).catch(() => null);
-    let workflow = null;
-    if (workflowResponse && workflowResponse.ok) {
-      try { workflow = await workflowResponse.json(); } catch (error) { workflow = null; }
-    }
-    S.queued = new Map(((workflow && workflow.queue_items) || []).map((i) => [i.candidate_key, i]));
-    // The taxonomy comes from the queue builder, and it is built from the queue's own index rather
-    // than from the loaded questions, because the loaded questions are one scope and the navigation
-    // has to describe them all.
-    let tree = null;
+    // The taxonomy and the queue's own counts come from `queue_index.json`, which is 659 KB and
+    // 0.07 s. This used to also call `/api/workflow` here, which took **2.9 s on every page load**
+    // to return a 2,000-row window of `queue_items` - a window the list then used as its source of
+    // per-question review state. Both halves of that were wrong: the cost was paid on every load,
+    // and the window is capped, so 77,090 of the 79,090 questions had no state in it and a
+    // reviewed question showed as 未看 after a reload. Every field the list needs is on the row
+    // that `applyScope()` fetches, so the call is gone rather than made smaller.
+    let index = null;
     try {
       const indexResponse = await fetch('/api/queue_index', { cache: 'no-store' });
-      if (indexResponse.ok) tree = (await indexResponse.json()).taxonomy || null;
-    } catch (error) { tree = null; }
+      if (indexResponse.ok) index = await indexResponse.json();
+    } catch (error) { index = null; }
+    const tree = index && index.taxonomy;
     if (!tree) throw new Error('這個佇列沒有 queue_index.json，無法建立分類');
     buildScope(tree);
   } catch (error) {

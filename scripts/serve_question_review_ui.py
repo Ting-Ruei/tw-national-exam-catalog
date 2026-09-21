@@ -13,6 +13,7 @@ import argparse
 import base64
 import csv
 import gc
+import gzip
 import hashlib
 import hmac
 import html
@@ -738,6 +739,33 @@ def project_path(value: str) -> Path:
     return ASSET_ROOT / value
 
 
+def content_type_of(name: str, data: bytes) -> str:
+    """The type to send for a file, from its bytes and only then from its name.
+
+    A file's extension is a claim, and the claim can be wrong. Measured on this corpus: 44 option
+    pictures are stored as JPEG 2000 but named `*.jpx` while one earlier run named them `*.png`, and
+    a browser will not render JPEG 2000 under any type. The name alone therefore cannot decide what
+    to say, because saying `image/png` for bytes that are not PNG makes Chrome refuse to draw them
+    and the reviewer gets an empty box with the alt text showing - the image "not displaying".
+
+    The bytes are checked first, and the name is the fallback. This cannot make a bad image good; it
+    can only stop the server from actively mislabelling one.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    if data[:4] == b"%PDF":
+        return "application/pdf"
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
 def safe_file_path(value: str) -> Path | None:
     if not value:
         return None
@@ -747,6 +775,17 @@ def safe_file_path(value: str) -> Path | None:
     except FileNotFoundError:
         return None
     allowed_roots = [ASSET_ROOT.resolve()]
+    # Local staged runs keep derived PNGs separate from the source archive.
+    # Explicit roots avoid granting access to the entire project (and .env).
+    extra_roots = [Path(raw).expanduser().resolve() for raw in
+                   os.environ.get("REVIEW_UI_ADDITIONAL_ASSET_ROOTS", "").split(os.pathsep) if raw]
+    allowed_roots.extend(extra_roots)
+    if not resolved.is_file() and not Path(value).is_absolute():
+        for root in extra_roots:
+            candidate = (root / value).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                resolved = candidate
+                break
     if os.environ.get("REVIEW_UI_ALLOW_PROJECT_FILES", "0").lower() in {"1", "true", "yes"}:
         allowed_roots.append(PROJECT_ROOT.resolve())
     if any(resolved == root or root in resolved.parents for root in allowed_roots):
@@ -2130,6 +2169,7 @@ class ReviewState:
             self.candidates = load_jsonl(candidate_path)
             self.candidate_by_key = {str(item.get("candidate_key")): item for item in self.candidates if item.get("candidate_key")}
             self.issues = load_issues(issue_path)
+        self._build_candidate_index()
         self.review_log.parent.mkdir(parents=True, exist_ok=True)
         self.answer_review_log = self.review_log.parent / "answer_review_events.jsonl"
         self.ai_review_log = self.review_log.parent / "question_ai_review_events.jsonl"
@@ -2483,6 +2523,7 @@ class ReviewState:
                 self.candidates = new_candidates
                 self.candidate_by_key = new_candidate_by_key
                 self._candidate_signature = candidate_signature
+                self._build_candidate_index()
             if issue_stale or force:
                 self.issues = load_issues(self.issue_path)
                 self._issue_signature = issue_signature
@@ -5853,30 +5894,51 @@ filtered AS (
 
     def facets(self, params: dict[str, str] | None = None) -> dict[str, list[str]]:
         params = params or {}
+        # The facet values depend only on the candidate rows, not on review events, and every
+        # queue load resets this. Cached because it walks the whole queue and it is asked for on
+        # every `/api/candidates` response - measured at 0.27 s of every request, for an answer
+        # that changes only when the queue is rebuilt.
+        cache_key = "\u0000".join(sorted(f"{key}={value}" for key, value in params.items()))
+        cached = getattr(self, "_facets_cache", {}).get(cache_key)
+        if cached is not None:
+            return cached
         values: dict[str, set[str]] = {"categories": set(), "subjects": set(), "years": set(), "ordinals": set()}
-        for item in self.candidates:
-            metadata = item.get("metadata") or {}
-            category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
-            subject = metadata.get("normalized_subject_name") or ""
-            year = str(metadata.get("year") or "")
-            ordinal = str(metadata.get("exam_ordinal") or "")
+        # The category filter is folded once per request, not once per row; the row's own folded
+        # form was computed at load. `category_matches_filter` also accepts the group aliases, so
+        # the alias lookup is resolved here too and the per-row test is a set membership.
+        category_filter = params.get("category") or ""
+        wanted_categories = (
+            CATEGORY_GROUP_NORMALIZED_FILTERS.get(category_filter) if category_filter in CATEGORY_GROUP_FILTERS
+            else (frozenset({normalize_category_name(category_filter)}) if category_filter else None)
+        )
+        subject_filter = params.get("subject") or ""
+        year_filter_v = params.get("year") or ""
+        ordinal_filter_v = params.get("ordinal") or ""
+        for category, category_norm, subject, year, ordinal in self._facet_row_values():
+            category_ok = True if wanted_categories is None else category_norm in wanted_categories
             # The category selector is the top-level navigation rail. Keep it
             # global so selecting one category never hides the other categories
             # and traps the reviewer inside the current choice.
             if category:
                 values["categories"].add(category)
-            if self._facet_match(category, subject, year, ordinal, params, ignore="subject") and subject:
+            if category_ok and (not year_filter_v or year == year_filter_v) \
+                    and (not ordinal_filter_v or ordinal == ordinal_filter_v) and subject:
                 values["subjects"].add(subject)
-            if self._facet_match(category, subject, year, ordinal, params, ignore="year") and year:
+            if category_ok and (not subject_filter or subject == subject_filter) \
+                    and (not ordinal_filter_v or ordinal == ordinal_filter_v) and year:
                 values["years"].add(year)
-            if self._facet_match(category, subject, year, ordinal, params, ignore="ordinal") and ordinal:
+            if category_ok and (not subject_filter or subject == subject_filter) \
+                    and (not year_filter_v or year == year_filter_v) and ordinal:
                 values["ordinals"].add(ordinal)
-        return {
+        result = {
             key: sorted(value, key=lambda item: (int(item) if item.isdigit() else 9999, item))
             if key in {"years", "ordinals"}
             else sorted(value)
             for key, value in values.items()
         }
+        if hasattr(self, "_facets_cache"):
+            self._facets_cache[cache_key] = result
+        return result
 
     def _facet_match(
         self,
@@ -5903,6 +5965,71 @@ filtered AS (
                 return False
         return True
 
+    def _facet_row_values(self) -> list[tuple[str, str, str, str, str]]:
+        """(category, folded category, subject, year, ordinal) for every candidate.
+
+        The category is folded **once per queue load**, not once per row per request. Measured:
+        the regex in `category_matches_filter` run over all 79,090 rows cost 0.755 s of the 0.79 s
+        that a single sitting's `/api/candidates` response took, and a 32-sitting category paid it
+        32 times. The raw category is kept beside the folded one because the facets *report* the
+        paper's own spelling; only the comparison uses the folded form.
+
+        Built lazily so a `ReviewState` assembled without `__init__` (as the tests do) still
+        answers, and so there is exactly **one** implementation of the row projection.
+        """
+        rows = getattr(self, "_facet_rows", None)
+        if rows is None:
+            rows = []
+            for item in self.candidates:
+                metadata = item.get("metadata") or {}
+                category = str(
+                    metadata.get("normalized_category_name") or metadata.get("group_name") or ""
+                )
+                rows.append((
+                    category,
+                    normalize_category_name(category),
+                    str(metadata.get("normalized_subject_name") or ""),
+                    str(metadata.get("year") or ""),
+                    str(metadata.get("exam_ordinal") or ""),
+                ))
+            self._facet_rows = rows
+        return rows
+
+    def _build_candidate_index(self) -> None:
+        """Index candidates by (year, sitting) so a narrow request does not scan the whole queue.
+
+        Measured: `filtered_candidate_payloads` walked all 79,090 candidates for **every** request,
+        even one that names a single sitting of 480 questions, because the counts it returns
+        (`filtered_count`, `reviewed_count`) are computed by counting matches over the full list. So
+        one sitting cost 1.4 ms/question of scanning plus the payload build - 0.43 s for 480 rows -
+        and the whole 物理治療師 category cost 13.7 s because `v2.html` fetches it one sitting at a
+        time.
+
+        (year, sitting) is the right key because it is what the UI asks by and it is already narrow:
+        220 buckets over 79,090 rows, the largest 480. A request that names both year and sitting
+        can therefore iterate only that bucket and get the *same* counts, since a row outside it
+        cannot satisfy either filter. A request that names neither still falls back to the full
+        list, so no filter is silently dropped.
+        """
+        buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for item in self.candidates:
+            metadata = item.get("metadata") or {}
+            key = (str(metadata.get("year") or ""), str(metadata.get("exam_ordinal") or ""))
+            buckets.setdefault(key, []).append(item)
+        self._candidate_sitting_index = buckets
+        self._facet_rows = None
+        self._facets_cache = {}
+
+    def _candidate_scan(self, params: dict[str, str]) -> list[dict[str, Any]]:
+        """The candidates a request has to look at - all of them, or just one sitting's worth."""
+        year_filter = params.get("year") or ""
+        ordinal_filter = params.get("ordinal") or ""
+        if year_filter and ordinal_filter:
+            index = getattr(self, "_candidate_sitting_index", None)
+            if index is not None:
+                return index.get((year_filter, ordinal_filter), [])
+        return self.candidates
+
     def filtered_candidate_payloads(self, params: dict[str, str]) -> dict[str, Any]:
         if self.sql_review_enabled:
             return self.filtered_candidate_payloads_sql(params)
@@ -5923,7 +6050,7 @@ filtered AS (
         payloads: list[dict[str, Any]] = []
         filtered_count = 0
         reviewed_count = 0
-        for item in self.candidates:
+        for item in self._candidate_scan(params):
             key = item["candidate_key"]
             latest_review = self.latest_reviews.get(key)
             latest_reset_review = self.latest_reset_reviews.get(key)
@@ -8940,6 +9067,14 @@ filtered_sheets AS (
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.0 closes the socket after every response, so a page that loads one paper, its six
+    # crops and its PDF pays a fresh TCP handshake for each of them - and the queue is fetched as
+    # 32 separate responses. Measured: `curl` reports a new connection per request and each is a
+    # full round trip. HTTP/1.1 keeps the connection, which is what makes the parallel fetch in
+    # `v2.html` worth doing. It is only safe because **every** response here declares
+    # `Content-Length` (checked across all `send_response` sites), so the client always knows where
+    # one response ends; `send_error` closes the connection explicitly, which is also correct.
+    protocol_version = "HTTP/1.1"
     state: ReviewState
     _post_rate_lock = threading.Lock()
     _post_rate_events: dict[str, list[float]] = {}
@@ -9021,15 +9156,41 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         return True
 
+    def accepts_gzip(self) -> bool:
+        return "gzip" in self.headers.get("Accept-Encoding", "").lower()
+
+    def compressible(self, data: bytes, content_type: str) -> bytes:
+        """Gzip a response body when the client asked for it and the type is worth compressing.
+
+        Measured on the served queue: one sitting is 2.13 MB of JSON and the whole 物理治療師
+        category is 80 MB, none of it compressed. The same bytes gzip to 227 KB from 5.19 MB - a
+        23x reduction - and the queue is mostly repeated field names and CJK text, which is exactly
+        what gzip is good at. Images are already compressed, so they are skipped by type rather
+        than by trying and measuring.
+
+        The threshold exists so a tiny error document is not wrapped in a gzip header that can be
+        larger than it is; below it, the identity body is returned unchanged.
+        """
+        if len(data) < 1024 or not self.accepts_gzip():
+            return data
+        if not (content_type.startswith("application/json") or content_type.startswith("text/")):
+            return data
+        return gzip.compress(data, 5)
+
     def send_json(self, payload: Any, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        content_type = "application/json; charset=utf-8"
+        body = self.compressible(data, content_type)
         try:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(data)))
+            if len(body) != len(data):
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(body)
         except BrokenPipeError:
             return
 
@@ -9220,10 +9381,27 @@ class Handler(BaseHTTPRequestHandler):
             if path is None or not path.exists() or not path.is_file():
                 self.send_error(404, "File not found or not allowed")
                 return
-            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             data = path.read_bytes()
+            mime = content_type_of(path.name, data)
+            # A crop is immutable: it is addressed by path and a rebuild writes a new queue
+            # directory, so the bytes behind a given path never change. Measured, the server sent
+            # no caching header at all and HTTP/1.0 closed the socket, so every step onto question
+            # 31 re-downloaded all four option pictures of question 30 - the reviewer's crops were
+            # re-fetched once per press. The ETag makes a repeat request a 304 instead of a
+            # 484 KB body, and the same token lets the PDF viewer and the browser's image cache
+            # agree about what they already hold.
+            data_signature = hashlib.sha256(data).hexdigest()[:32]
+            etag = f'"{data_signature}"'
             self.send_response(200)
+            if self.headers.get("If-None-Match", "") == etag:
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "public, max-age=86400, immutable")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             self.send_header("Content-Type", mime)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=86400, immutable")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
