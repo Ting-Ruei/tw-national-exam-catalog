@@ -291,7 +291,7 @@
       <button class="act save" id="actSave" style="display:none">儲存修正 <span class="kbd">E</span></button>
       <div class="reason" id="reasonBox">
         <p class="noteFor" id="noteFor"></p>
-        <textarea id="reasonText" placeholder="請寫原因（會存進 append-only 紀錄；例如：紙本第 3 頁為『莢膜』，抽出成『莢膜』）"></textarea>
+        <textarea id="reasonText" placeholder="請寫原因（Enter 儲存、Shift+Enter 換行；會存進 append-only 紀錄，例如：紙本第 3 頁為『莢膜』，抽出成『莢膜』）"></textarea>
       </div>
     </div>
   </main>
@@ -1310,8 +1310,30 @@ function closeNote() {
   $('noteFor').textContent = '';
 }
 
+/* 註記框裡的 Enter 是「存」，Shift+Enter 才是換行。
+
+   原本只有 Cmd/Ctrl+Enter 會存，而 `Enter` 什麼都不做——那是一個看不出來的鍵：畫面把框畫出來、
+   游標也放進去了，看起來就是在等你打字後按 Enter，結果按下去沒有任何事發生。使用者回報
+   「註記目前無法輸入」就是這個。一個只在複合鍵上才會動的儲存鍵，等於沒有儲存鍵。
+
+   按鍵要在 `keydown` 就攔下來（不是等瀏覽器把換行插進去再補救），否則 Enter 會先插入一個
+   換行字元，再被存成一份多一個空行的註記。 */
+function noteKeydown(event) {
+  if (event.key !== 'Enter') return;
+  if (event.shiftKey) return;            // Shift+Enter 交還給瀏覽器：使用者要的是下一行
+  event.preventDefault();
+  saveNote();
+}
+
 function toggleNote(force) {
   const item = S.rows[S.index];
+  // 已經開著的時候再按一次註記（或再按 C）＝存起來。
+  // 「再按一次同一個按鈕存」是使用者要求的第二種存法：滑鼠已經在按鈕上了，不該逼人回頭去按 Enter。
+  // 但如果框是空的，那只是關掉，不要跳「沒有寫任何註記」的錯誤——那會讓「我只是想收起框」變成一個失敗。
+  if (force === undefined && $('reasonBox').classList.contains('on')) {
+    if ($('reasonText').value.trim()) { saveNote(); return; }
+    closeNote(); return renderTextSide();
+  }
   const open = force !== undefined ? force : !$('reasonBox').classList.contains('on');
   if (!open) { closeNote(); return renderTextSide(); }
   // `closeEditor`, not `setEditMode(false)`: the latter also closes the note, which would undo the
@@ -1327,8 +1349,8 @@ function toggleNote(force) {
   // must not look like the reviewer is changing their mind.
   const standing = item ? verdictOf(item.candidate_key) : '';
   $('noteFor').textContent = standing
-    ? `這題已標記「${LABEL[standing] || standing}」；這裡寫的註記會保留那個標記，不會改掉它。`
-    : '這題還沒決定；儲存註記不會把它算成已過目。';
+    ? `這題已標記「${LABEL[standing] || standing}」；這裡寫的註記會保留那個標記，不會改掉它。Enter 儲存、Shift+Enter 換行。`
+    : '這題還沒決定；儲存註記不會把它算成已過目。Enter 儲存、Shift+Enter 換行。';
   $('reasonText').focus();
   renderTextSide();
 }
@@ -1491,6 +1513,7 @@ $('actSave').onclick = () => saveCorrection();
 $('actHold').onclick = () => decide('needs_review');
 $('actBlock').onclick = () => decide('block');
 $('actNote').onclick = () => toggleNote();
+$('reasonText').addEventListener('keydown', noteKeydown);
 $('btnFirst').onclick = () => go(0);
 $('btnPrev').onclick = () => go(S.index - 1);
 $('btnNext').onclick = () => go(S.index + 1);
@@ -1500,11 +1523,10 @@ $('btnLast').onclick = () => go(S.rows.length - 1);
    the mouse for scrolling the two panes. */
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT') {
-    // `Esc` closes the editor and the note box; `Cmd/Ctrl+Enter` saves a note without leaving the
-    // keyboard, because a reviewer writing several notes should not have to reach for the mouse.
+    // `Esc` closes the editor and the note box. `Enter` saves a note - handled by the box's own
+    // `keydown` listener (`noteKeydown`), not here, because this handler must not also prevent the
+    // default when the reviewer is typing `Enter` inside the 修正 editor.
     if (event.key === 'Escape') { $('actFix').focus(); setEditMode(false); closeNote(); }
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)
-        && event.target.id === 'reasonText') { event.preventDefault(); saveNote(); }
     return;
   }
   const key = event.key.toLowerCase();
