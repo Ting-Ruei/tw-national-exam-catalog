@@ -536,3 +536,29 @@ def test_an_or_answer_is_not_shown_as_a_multi_select_answer():
     # And a single letter is untouched.
     one = {"answer": "B", "answer_payload": {"accepted_values": ["B"], "answer": "B"}}
     assert ai_findings.answer_of(one) == "B"
+
+
+def test_only_the_latest_finding_decides_whether_a_question_is_stale(tmp_path):
+    """A re-asked question must stop looking stale, or `--restale` re-asks it forever.
+
+    And the framing is filtered separately: a corpus sweep in flight is not stale just because a fix
+    landed - it is a different measurement on purpose, and without the filter `--restale` during a
+    running pass would try to re-ask all 79,090 questions.
+    """
+    path = str(tmp_path / "findings.jsonl")
+    key = "moex:1:1:1:1:question:q001"
+    old = {"candidate_key": key, "prompt_version": "aaaaaaaaaaaa", "population": "blocked"}
+    new = {"candidate_key": key, "prompt_version": "cccccccccccc", "population": "blocked"}
+    corpus = {"candidate_key": "moex:1:1:1:1:question:q002", "prompt_version": "aaaaaaaaaaaa",
+              "population": "corpus"}
+    import json as _json
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in (old, corpus, new):
+            handle.write(_json.dumps(record) + "\n")
+    # The latest record for q001 is the current version, so it is not stale even though an older
+    # record for it is - only the current answer's generation matters.
+    assert ai_findings.stale_questions(path, "cccccccccccc", "blocked") == set()
+    # The corpus record is a different framing and is not reported as stale for the blocked pass.
+    assert ai_findings.stale_questions(path, "cccccccccccc", "corpus") == {corpus["candidate_key"]}
+    # A question whose only finding is old is stale.
+    assert ai_findings.stale_questions(path, "dddddddddddd") == {key, corpus["candidate_key"]}

@@ -142,6 +142,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true",
                         help="skip questions that already have a finding (a corpus pass is ~44h, "
                              "so stopping and continuing must not re-ask anything)")
+    parser.add_argument("--restale", action="store_true",
+                        help="re-ask the questions whose current finding was written under an older "
+                             "prompt version - the prompt is part of the measurement, so after a "
+                             "fix the answers that were asked the old question have to be asked "
+                             "again, and only those")
     parser.add_argument("--timeout", type=int, default=1800)
     return parser.parse_args()
 
@@ -252,12 +257,76 @@ def parse_learned(values):
     return learned or None
 
 
+def _paper_scope(path: str) -> dict:
+    """paper code (`115090:305`) -> (考別, 考科), read from the queue's own candidates.
+
+    Not from `queue_index.json`: its `per_paper` is keyed by run name (`1152_物理治療師_...`), which a
+    finding's `paper` field (`115090:305`) does not name, so joining on it silently matched nothing.
+    The candidates themselves carry the paper code and the names together, so streaming them is the
+    join that actually works. They sit next to the findings, which is why they are found from there.
+    """
+    directory = os.path.dirname(path)
+    candidates = os.path.join(directory, "candidates.jsonl")
+    if not os.path.exists(candidates) and os.path.basename(directory) == "review-ui":
+        candidates = os.path.join(os.path.dirname(directory), "candidates.jsonl")
+    scope = {}
+    try:
+        with open(candidates, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    question = json.loads(line)
+                except ValueError:
+                    continue
+                code = ":".join(str(question.get("candidate_key") or "").split(":")[1:3])
+                if code and code not in scope:
+                    metadata = question.get("metadata") or {}
+                    scope[code] = (
+                        metadata.get("normalized_category_name")
+                        or metadata.get("official_category_name") or "",
+                        metadata.get("normalized_subject_name")
+                        or metadata.get("official_subject_name") or "",
+                    )
+    except OSError:
+        return {}
+    return scope
+
+
+def _scope_line(records_by_key, keys, paper_scope=None):
+    """Where a class's questions actually come from: one 考科, one 考別, or spread out.
+
+    This is the difference between a rule and a rule that should be scoped. Nine hits inside one
+    考科 is one cause in one paper's shape, and widening it to every paper is how a rule starts
+    misfiring on papers that never had the problem. Nine hits across nine 考別 is the opposite claim.
+    The report has to say which, or a reader cannot tell them apart.
+    """
+    paper_scope = paper_scope or {}
+    cats, subs = collections.Counter(), collections.Counter()
+    for key in keys:
+        record = records_by_key.get(key) or {}
+        category = record.get("category")
+        subject = record.get("subject")
+        if not category:
+            category, indexed_subject = paper_scope.get(record.get("paper") or "", ("", ""))
+            subject = subject or indexed_subject
+        cats[category or "（未知）"] += 1
+        subs[(category or "?", subject or "?")] += 1
+    if len(subs) == 1:
+        (cat, sub), count = next(iter(subs.items()))
+        return "考科限定：%s / %s（%d 題都在同一考科）" % (cat, sub, count)
+    if len(cats) == 1:
+        cat = next(iter(cats))
+        return "考別限定：%s（%d 個考科）" % (cat, len(subs))
+    return "跨考別：%d 個考別、%d 個考科" % (len(cats), len(subs))
+
+
 def report(path: str) -> int:
     records = ai_findings.load(path)
     if not records:
         print("還沒有任何 AI 記錄：%s" % path)
         return 0
     summary = ai_findings.summarize(records)
+    by_key = {r.get("candidate_key"): r for r in records}
+    paper_scope = _paper_scope(path)
     print("AI 記錄：%s" % path)
     print("  共 %d 筆（模型判定不是抽取缺陷的 %d 筆、無法解析的 %d 筆）"
           % (len(records), len(summary["not_extraction"]), len(summary["failed"])))
@@ -265,16 +334,24 @@ def report(path: str) -> int:
     print("== 模型認為是「一類」問題（值得寫規則）==")
     if not summary["classes"]:
         print("  （無）")
-    for what, keys in sorted(summary["classes"].items()):
+    for what, keys in sorted(summary["classes"].items(),
+                             key=lambda item: (-len(item[1]), item[0])):
         print("  %-26s %d 題" % (what, len(keys)))
+        # 一個類別要寫成全域規則還是限定某考科，取決於它出現在哪裡；這一行就是那個證據。
+        print("      範圍：%s" % _scope_line(by_key, keys, paper_scope))
         for key in keys:
-            print("      %s" % key.replace("moex:", ""))
+            record = by_key.get(key) or {}
+            category = record.get("category") or paper_scope.get(record.get("paper") or "", ("", ""))[0]
+            print("      %-40s %s / %s" % (key.replace("moex:", ""), category or "?",
+                                            (record.get("subject") or "")[:22]))
     print()
     print("== 模型認為是個案（要單獨探討，不要寫規則）==")
     if not summary["one_offs"]:
         print("  （無）")
     for item in summary["one_offs"]:
-        print("  %s  [%s]" % (item["candidate_key"].replace("moex:", ""), item["what"]))
+        record = by_key.get(item["candidate_key"]) or {}
+        print("  %s  [%s]  %s" % (item["candidate_key"].replace("moex:", ""), item["what"],
+                                  (record.get("subject") or "")[:28]))
         print("      哪裡錯：%s" % (item["where"] or "（沒說）"))
         print("      怎麼修：%s" % (item["fix"] or "（沒說）"))
     print()
@@ -335,6 +412,15 @@ def main() -> int:
         return 2
 
     done = set(ai_findings.latest_by_question(out)) if args.resume else ()
+    if args.restale:
+        # Re-ask the questions whose current finding belongs to an older prompt generation. The
+        # skip set has to become "everything except those", because `--resume` skips every question
+        # that has *any* finding - including the stale ones this flag exists to re-ask.
+        population = "corpus" if args.all else "blocked"
+        stale = ai_findings.stale_questions(out, ai_findings.prompt_version(population), population)
+        done = set(ai_findings.latest_by_question(out)) - stale
+        print("提示詞版本 %s：%d 題的現行 finding 是舊版，要重問。"
+              % (ai_findings.prompt_version(population), len(stale)))
     questions = None
     if args.all:
         # Read once and hold, rather than have every worker re-read 196 MB.

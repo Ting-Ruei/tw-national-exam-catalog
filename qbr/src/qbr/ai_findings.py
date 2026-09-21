@@ -478,6 +478,26 @@ def latest_by_question(path: str) -> dict:
     return latest
 
 
+def stale_questions(path: str, current_version: str, population=None) -> set:
+    """Keys whose *latest* finding was written under a different prompt generation.
+
+    Deliberately not "every record whose version differs": a question re-asked later would otherwise
+    still look stale from its older record, and would be re-asked forever. What matters is which
+    generation the question's **current** answer belongs to, which is what `latest_by_question` means.
+
+    `population` restricts it to one framing: a corpus sweep in flight is not stale just because a
+    fix landed, it is a different measurement on purpose. Without this, `--restale` during a running
+    pass would try to re-ask all 79,090 questions.
+    """
+    stale = set()
+    for key, record in latest_by_question(path).items():
+        if population is not None and record.get("population") != population:
+            continue
+        if record.get("prompt_version") != current_version:
+            stale.add(key)
+    return stale
+
+
 def _edit_distance(a: str, b: str) -> int:
     """Levenshtein distance, small enough to write out. Used only to recover a near-miss code."""
     if abs(len(a) - len(b)) > 1:
