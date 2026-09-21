@@ -226,6 +226,22 @@ about rendering; the cause was that the scan never saw the picture.)
 
 ## Deploying to another machine (the sequence that worked)
 
+**From the laptop, there are two scripts for this — use them, not hand-run `rsync` + `ssh`:**
+
+```sh
+scripts/deploy_station.sh                # sync code to the station + record provenance
+scripts/deploy_station.sh --queue        # also sync the queue (after a rebuild)
+scripts/deploy_station.sh --restart      # sync, then up.sh on the station
+
+scripts/pull_station_reviews.sh          # bring the human decisions back (one-way)
+```
+
+`deploy_station.sh` exists because hand-running the copy misses two things silently: the
+`code/國考題資料夾` **mountpoint** (see step 3 below) and the **source revision** that
+`record-deploy.sh` needs. It never touches the review log — that direction is the pull script's.
+
+Manual sequence, for when something is different enough that the script does not fit:
+
 1. **Recon before touching.** What is on the target port, is the corpus already there (*and is it the
    same bytes?*), is the code there, is Docker's AutoStart on? Copying 20G unnecessarily, or serving
    a stale corpus, are both avoidable by measuring first.
@@ -242,6 +258,19 @@ about rendering; the cause was that the scan never saw the picture.)
 8. **`up.sh`**, then verify **from another device**: page, `/api/queue_index`, a real image, a real
    PDF, a real **write**, and the navigation contract against the **served** HTML (`curl` it, then
    run `scripts/test_v2_navigation.mjs` on that file — the served bytes, not the repo's).
+
+### What is actually running: `DEPLOYED.json`
+
+The station mirrors the laptop's **working tree**, and a working tree is not a commit. Measured: the
+deployed `scripts/serve_question_review_ui.py` carries an **uncommitted** `content_type_of` fix (from
+another work-stream) that is what makes images display at the right MIME type. So "what is running"
+cannot be answered by `git log` alone.
+
+`deploy/qbr-review/record-deploy.sh` writes `~/qbr-review/DEPLOYED.json`: source repo + HEAD +
+dirty-file count, sha256 of the server, `v2.html`, `candidates.jsonl` and the review log, plus the
+live question count. `deploy_station.sh` calls it and passes the **true** source revision over; run
+directly on the station it would read the station's **old unrelated checkout** (`3925d978`) and
+record the wrong provenance — which it did, once, before the parameter existed.
 
 ## Rebuilding the queue while serving
 
