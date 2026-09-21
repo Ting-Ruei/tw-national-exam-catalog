@@ -473,3 +473,44 @@ def test_asking_cannot_change_the_human_log(tmp_path):
     before = open(log, "rb").read()
     ask_about_blocks.targets(os.path.join(queue, "review-ui"), None, 0)
     assert open(log, "rb").read() == before
+
+
+def test_a_voided_answer_is_not_shown_as_four_answers():
+    """送分 must reach the model as 送分, not as `A、B、C、D`.
+
+    A question that was voided is stored with every option in `accepted_values` so an answer
+    comparison cannot fail, and that machine view was being handed to the model as if it were the
+    answer. The model then did the correct thing with it and reported that a single-choice question
+    cannot have four answers - measured at 15 of 28 `ANSWER_DISAGREES` findings in the first corpus
+    sweep, all of them defects in the prompt rather than in the paper.
+    """
+    voided = {"answer": "送分",
+              "answer_payload": {"accepted_values": ["A", "B", "C", "D"], "answer": "送分",
+                                 "is_special_correction": True, "raw_answer": "A,B,C,D"}}
+    shown = ai_findings.answer_of(voided)
+    assert shown.startswith("送分")
+    assert "不是有四個答案" in shown
+    system, user = ai_findings.build_prompt({"stem": "下列何者正確？", "answer": "送分",
+                                             "answer_payload": voided["answer_payload"]})
+    assert "答案：送分" in user
+    # A normal question keeps the plain letters - the fix must not decorate every answer.
+    normal = {"answer": "B", "answer_payload": {"accepted_values": ["B"], "answer": "B",
+                                                "is_special_correction": False}}
+    assert ai_findings.answer_of(normal) == "B"
+
+
+def test_the_answer_reading_is_part_of_the_prompt_version():
+    """A record must not claim the same prompt generation as one written for a different reading.
+
+    `answer_of` is behaviour rather than prompt text, so hashing the prompt strings alone would not
+    notice it being rewritten - and the two records most likely to be compared (before and after the
+    送分 fix) would look like one consistent measurement.
+    """
+    version = ai_findings.prompt_version("blocked")
+    real = ai_findings.ANSWER_READING
+    try:
+        ai_findings.ANSWER_READING = real + "（不同讀法）"
+        assert ai_findings.prompt_version("blocked") != version
+    finally:
+        ai_findings.ANSWER_READING = real
+    assert ai_findings.prompt_version("blocked") == version

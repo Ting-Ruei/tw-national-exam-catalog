@@ -197,8 +197,39 @@ def options_block(options) -> str:
     return "\n".join(lines)
 
 
+#: How a voided answer is rendered, kept as a named thing because `prompt_version` has to be able to
+#: see it change. `answer_of` is behaviour, not text, so the hash below would not notice it being
+#: rewritten - and a record written before the fix would claim the same prompt generation as one
+#: written after, which is exactly the confusion the version field exists to prevent. The 15
+#: false-positive `ANSWER_DISAGREES` findings are what a version that could not see this change
+#: cost. Bump the wording here whenever how the answer is read changes.
+ANSWER_READING = "送分／不計分的題目要以「送分」呈現，不是 A、B、C、D"
+
+
 def answer_of(question) -> str:
+    """The answer as a person should read it, which is not always the accepted values.
+
+    A voided question is stored with `accepted_values` of every option so that an answer comparison
+    does not fail - that is the machine's view, and it is deliberately not the reader's. The
+    corrections sheet said "第10題一律給分", and the reader's view is `送分`. This function used to
+    prefer `accepted_values` unconditionally, so the model was shown `答案：A、B、C、D` for a
+    question whose answer was voided and no indication that the list meant "everyone scores".
+
+    Measured cost: 15 of 28 `ANSWER_DISAGREES` findings in the first corpus sweep were this - the
+    model correctly observed that a single-choice question cannot have four answers, and reported a
+    defect in the paper when the defect was in the prompt. The same trap `review_queue.py` documents
+    on the display side, arriving on the model's side.
+
+    `is_special_correction` is the field that says which reading applies, so it decides.
+    """
     payload = question.get("answer_payload") or {}
+    if payload.get("is_special_correction"):
+        display = str(payload.get("answer") or question.get("answer") or "送分")
+        accepted = [str(value) for value in (payload.get("accepted_values") or [])]
+        if accepted:
+            return "%s（這一題不計分／全部給分；選項 %s 都算對，這不是有四個答案）" % (
+                display, "、".join(accepted))
+        return display
     accepted = payload.get("accepted_values") or []
     if accepted:
         return "、".join(str(value) for value in accepted)
@@ -209,6 +240,24 @@ def subject_of(question) -> str:
     metadata = question.get("metadata") or {}
     return (metadata.get("normalized_subject_name") or metadata.get("official_subject_name")
             or "")
+
+
+def category_of(question) -> str:
+    """The 考別 (which profession the paper is for), the unit a rule may be scoped to.
+
+    Recorded on every finding because the requirement is that an error and its remedy be attributed
+    to where it came from: a defect confined to one 考科 (藥學(一) formulas, 臨床生理學 tables) may be
+    real and frequent there while being absent elsewhere, and a fix that helps one paper's shape may
+    be wrong to apply globally. Without the field, "this happens 9 times" and "this happens 9 times
+    in the same paper" look the same, and those call for different rules - a scoped one and a global
+    one. `disputes.py` already decides scope per rule; this is the evidence that tells it which.
+
+    Deliberately the *normalized* name, i.e. the same string the reviewer's screen and the queue
+    index use, so a report can be joined back to the queue by name rather than by a code nobody reads.
+    """
+    metadata = question.get("metadata") or {}
+    return (metadata.get("normalized_category_name") or metadata.get("official_category_name")
+            or metadata.get("group_name") or "")
 
 
 def paper_of(question) -> str:
@@ -286,7 +335,7 @@ def prompt_version(population="blocked") -> str:
     """
     framing = POPULATIONS[population]
     body = "\x00".join([SYSTEM, USER, LEARNED, framing["arrival"], framing["ask"],
-                         "\x00".join(sorted(CODES))])
+                         ANSWER_READING, "\x00".join(sorted(CODES))])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
@@ -321,6 +370,9 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         "question_number": question.get("question_number"),
         "paper": paper_of(question),
         "subject": subject_of(question),
+        # 考別. Part of the record because a rule that is right for 藥學(一) may be wrong globally, and
+        # "this shape occurs 9 times" must be readable as "9 times in the same paper".
+        "category": category_of(question),
         "reading_sha256": reading_fingerprint(question),
         "created_at": created_at or time.strftime("%Y-%m-%dT%H:%M:%S"),
         "model": model,
