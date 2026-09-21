@@ -72,9 +72,10 @@ others shows up as a decrease somewhere. **Zero decreases is the bar.**
 | 2 | A paper truncated from a question starting `NN 年…` | `is_year_line` matched `^NNN年`, so a **stem** was masked as a running head; `_is_year_running_head` existed but contributed **0** real heads and mis-blocked **29** stems | delete `_is_year_running_head`; tighten `is_year_line` to require the exam-title continuation (`第`/`專`) and NFKC-fold | commit `7adbec3` |
 | 3 | An option stopped mid-sentence; its tail became part of the stem | `segment_questions` had a wrap test only for the **stem** anchor; an option had none | `_continues_an_option` in `repair.py` (same shape as the stem rule; **no length limit**) | commit `7d4e087`, report `option_continuation_fix.md` |
 | 4 | `⻑` (U+2ED1) instead of `長` | CJK radical codepoint | NFKC fold at comparison, **stored text preserved** | commit `724a363` |
-| 5 | `segment_mixed` treated the `options` **dict** as a list | measurement-tool bug, not a product bug | third instance of "the instrument was broken" | — |
+| 5 | A paper blocked as `count-mismatch:items=80 expected=79` | the gate read the question count off the **parsed table**, but a voided question (`#` + `一律給分`) has no letter and is dropped from it | read the sheet's own printed `題數：NN題` (every one of 4,833 sheets prints it); table kept as fallback | `golden_path.py`, report `count_mismatch_three_causes.md` |
+| 6 | `segment_mixed` treated the `options` **dict** as a list | measurement-tool bug, not a product bug | third instance of "the instrument was broken" | — |
 
-**Two of the five were measurement-tool defects.** Expect roughly that ratio.
+**Two of the six were measurement-tool defects.** Expect roughly that ratio.
 
 ## What is deliberately NOT done
 
@@ -99,6 +100,11 @@ others shows up as a decrease somewhere. **Zero decreases is the bar.**
   Always assert the population size (`3,516` papers / `30` categories) before trusting a total.
 - **A fix that only handles "one overlapping character" misses "a whole redrawn run".** The first
   Cause-A fix improved the total (6,389 → 4,887) and left all six target papers untouched.
+- **"The questions read correctly" is not "the paper shipped".** `1001_醫師(二)_醫學(三)` read 80/80
+  after the Cause-A/B fixes and still never entered the queue: the gate's `expected` came from the
+  answer sheet and was 79. Only **rebuilding the queue and checking each paper's count** exposed
+  it. Checking "how many questions did the extractor report" checks the number that was already
+  right.
 - **`--carry-from` points at the queue ROOT**, not its `review-ui/` subdir.
 - **`/tmp` is wiped by reboot.** Persist measurements under `qbr/data/runs/` or `qbr/reports/`.
 
