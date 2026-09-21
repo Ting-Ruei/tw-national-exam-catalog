@@ -39,6 +39,30 @@ from . import disputes
 # silently flattened.
 SPECIAL_ANSWER_MARKERS = ("#", "送分", "從寬", "均給分")
 
+#: Fields on a review event that are **not** part of its identity.
+#:
+#: `_carried_from` is added by `build_review_queue.py` when a queue carries a record forward, so the
+#: same decision has a different value in two queues. Comparing it made every carried record look
+#: new: measured, a first rebuild carried 392 records and rebuilding from that queue carried 629 -
+#: the same 181 questions twice. The opposite mistake is a key narrower than the record (e.g. just
+#: `candidate_key`), which silently drops a reviewer's later decisions; measured, `sf8`'s 52 records
+#: all appeared missing from `sf9` although `sf9` held them all.
+NON_IDENTITY_FIELDS = ("_carried_from",)
+
+
+def record_identity(record):
+    """An event's identity: its whole content, minus the fields that record where it was found.
+
+    Deliberately "everything except", not "these fields": a decision is identified by what it says,
+    and a list of kept fields is a list somebody has to remember to extend when an event gains a
+    field. This lives here so the carry logic (`build_review_queue.py`) and the push helper
+    (`scripts/push_reviews_to_station.sh`) compare events the same way - two definitions of "the same
+    event" is two places for a review record to be lost or duplicated.
+    """
+    return json.dumps({key: value for key, value in record.items()
+                       if key not in NON_IDENTITY_FIELDS},
+                      sort_keys=True, ensure_ascii=False)
+
 
 def _answer_string(labels):
     if not labels:

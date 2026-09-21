@@ -29,6 +29,7 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 
 from qbr import groups  # noqa: E402
+from qbr import review_queue  # noqa: E402
 
 
 def run_dirs(work_roots):
@@ -140,20 +141,11 @@ def review_events_to_carry(out_dir, previous=()):
                         continue
                     # Identity is the record's **content**, not where it was found.
                     #
-                    # `_carried_from` is provenance added by this very function, so including it in
-                    # the key made every carried record a new record on the next rebuild, and the
-                    # queue accumulated duplicates without bound. Measured: a first rebuild carried
-                    # 392 records, and rebuilding again from that queue carried 629 - the same 181
-                    # questions, with every record present twice. Two rebuilds later it would have
-                    # been three times, and the reviewer's history would read as if they had judged
-                    # each question repeatedly.
-                    #
-                    # Deduplicating on the whole record rather than on `candidate_key` is deliberate:
-                    # one question legitimately carries several events (`correct` then `accept`), so
-                    # keying by question would silently drop the reviewer's later decisions - the
-                    # opposite error, and a quieter one.
-                    record.pop("_carried_from", None)
-                    key = (name, json.dumps(record, sort_keys=True, ensure_ascii=False))
+                    # The rule lives in `review_queue.record_identity` so that it is the same rule
+                    # the push helper uses; see that function for the two measured mistakes
+                    # (including `_carried_from`, which made every carried record a new record, and
+                    # keying too narrowly, which dropped a reviewer's later decisions).
+                    key = (name, review_queue.record_identity(record))
                     if key in seen:
                         continue
                     seen.add(key)
@@ -471,13 +463,10 @@ def review_logs_elsewhere(out_dir, roots=None):
                             record = json.loads(line)
                         except ValueError:
                             continue
-                        # `_carried_from` is added when a record is carried, so it is not part of
-                        # the record's identity. Comparing with it left every carried record looking
-                        # like a *different* record, and the guard then refused a rebuild that was
-                        # in fact carrying everything - measured: sf8's 52 records all appeared
-                        # "missing" from sf9 although sf9 held them all plus 92 more.
-                        record.pop("_carried_from", None)
-                        keys.add((stream, json.dumps(record, sort_keys=True, ensure_ascii=False)))
+                        # The rule lives in `review_queue.record_identity`; see it for the two
+                        # measured mistakes this prevents (a carried record looking new, and a key
+                        # narrower than the record dropping later decisions).
+                        keys.add((stream, review_queue.record_identity(record)))
             if keys:
                 found.append((run, keys))
     return found
