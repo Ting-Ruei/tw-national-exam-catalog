@@ -241,6 +241,9 @@ def main() -> None:
     parser.add_argument("--no-describe", action="store_true",
                         help="cut the crops without asking the model what they contain")
     parser.add_argument("--only", nargs="*", default=None, help="run directory names")
+    parser.add_argument("--reannotate-only", action="store_true",
+                        help="recompute disputes on the existing rows without re-cutting any crop; "
+                             "for when a detector changed and the pictures did not")
     args = parser.parse_args()
 
     import batch_package
@@ -253,6 +256,35 @@ def main() -> None:
             candidates_path = os.path.join(run_dir, "review-ui", "candidates.jsonl")
             if not os.path.isfile(candidates_path):
                 continue
+
+            # `--reannotate-only`: a detector changed, the pictures did not.
+            #
+            # `image_refs` already records which options got a picture, and disputes are computed
+            # **from the rows plus that field** (`review_queue.disputes_for_paper` reads `image_refs`
+            # and needs no crop). So a detector change can be propagated by rewriting the rows
+            # alone - re-cutting 3,500 crops to refresh a JSON field would be minutes of work for a
+            # field that is already on disk. This path exists so that "the new rule reaches the
+            # reviewer" does not require pretending the pictures changed too.
+            if args.reannotate_only:
+                with open(candidates_path, encoding="utf-8") as handle:
+                    rows = [json.loads(line) for line in handle if line.strip()]
+                before = collections.Counter(d.get("kind") for row in rows
+                                             for d in (row.get("disputes") or []))
+                review_queue.disputes_for_paper(rows)
+                after = collections.Counter(d.get("kind") for row in rows
+                                            for d in (row.get("disputes") or []))
+                temporary = candidates_path + ".partial"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    for row in rows:
+                        handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                os.replace(temporary, candidates_path)
+                delta = {kind: after.get(kind, 0) - before.get(kind, 0)
+                         for kind in set(before) | set(after)
+                         if after.get(kind, 0) != before.get(kind, 0)}
+                totals["runs"] += 1
+                print(f"  {name[:52]:54} 列 {len(rows):>3}  差 {delta or '無'}", flush=True)
+                continue
+
             category = name.split("_")[1] if len(name.split("_")) > 1 else ""
             paper = paper_path_of(category, name)
             if paper is None:
@@ -308,6 +340,8 @@ def main() -> None:
     print(f"\n=== 圖片裁切")
     print(f"  卷 {totals['runs']}   圖 {totals['figures']}   更新候選列 {totals['changed-rows']}"
           f"   找不到 PDF {totals['no-paper']}")
+    if args.reannotate_only:
+        print("  （--reannotate-only：只重算偵測結果，沒有重切任何圖）")
 
 
 def reflow_subject(run_name):
