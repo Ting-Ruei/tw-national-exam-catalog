@@ -311,7 +311,7 @@ def refused_offsets(spans):
         return []
     body_centre = _body_centre(body)
     found = []
-    for span in spans:
+    for index, span in enumerate(spans):
         text = (span.get("text") or "").strip()
         kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
         if kind is None or not text:
@@ -328,9 +328,21 @@ def refused_offsets(spans):
             continue
         if not all(char in _OFFSET_BLOCKING_PUNCTUATION for char in blockers):
             continue
+        # And it has to **hang off something**. This condition was added after the first version of
+        # this rule over-fired by 67x: measured over 36 papers it returned 1,806 questions instead
+        # of 27, because a question's own number sits in a smaller face and is shifted, and `4.`
+        # blocked by `.` passed every test above. Every one of those was *line-initial* - measured
+        # on `1062_物理治療師_心肺疾病與小兒物理治療學`: 39 of 39 line-initial, 0 attached - while
+        # every genuine flattened formula hangs off a host with a span to its left (`-1.5t` after
+        # `= 70e`; `1/2` after `t`). A margin number is a label for the line it begins; a superscript
+        # is part of an expression, and an expression has something on its left. That is geometry,
+        # not meaning, so it belongs here.
+        if index == 0:
+            continue
         found.append({"text": text, "kind": kind, "blockers": blockers,
                       "bbox": list(span.get("bbox") or (0, 0, 0, 0)),
                       "size": float(span.get("size") or 0.0),
+                      "host": (spans[index - 1].get("text") or "")[-12:],
                       "why": "offset-table-cannot-express"})
     return found
 
