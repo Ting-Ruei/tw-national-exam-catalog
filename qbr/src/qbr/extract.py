@@ -270,6 +270,14 @@ _ZERO_WIDTH = 0.5
 # categories. Half a body height sits between the two groups rather than inside either.
 _COLUMN_GAP_RATIO = 0.5
 
+# Two spans are the same draw when their boxes agree to within this many points. Measured on the
+# duplicate draws: the fake-bold overlays sit 0.24pt apart horizontally and the doubled question
+# numerals sit 0.00pt apart, while genuine neighbours - the next numeral, the next option - are
+# never closer than the width of a character. A tolerance of one point therefore separates a
+# redraw from a neighbour with two orders of magnitude of room on the redraw side and no way to
+# reach a real neighbour on the other.
+_REDRAW_TOLERANCE = 1.0
+
 # A raised run may stand a little clear of its host and still be a superscript. Measured: the
 # joins at a gap of 1-4 points are these, and the ones at ten points and above are columns, so
 # the allowance reaches most of the way to a column gap without crossing it.
@@ -364,6 +372,13 @@ def read_spans(spans):
     visual line, and gluing them back together would turn four separate options - `田野研究`
     `大眾和專業評論` … - into one unreadable word. The same test keeps a superscript against
     its host, because the gap inside `[Na⁺]` is zero.
+
+    A span that **overlaps** its predecessor is trimmed first, by `_covered_prefix_length`: the
+    overlapping characters are already in the text, and appending them again invents a character
+    the paper does not carry. This is the second time this function has had to be told that two
+    boxes can share a position - the first was `_gap_joins`, which stops a column gap from being
+    read as no gap; this one stops a shared character from being read as two. Both are properties
+    of the boxes, and neither is a property of the words.
     """
     spans = [span for span in spans if span.get("text")]
     if not spans:
@@ -375,13 +390,129 @@ def read_spans(spans):
         return "".join(span.get("text", "") for span in spans)
     body_centre = _body_centre(body)
     pieces = []
-    for index, span in enumerate(spans):
-        if index and not _gap_joins(spans[index - 1], span):
-            pieces.append(" ")
-        kind = _offset_kind(span, body_centre=body_centre, body_size=body_size)
+    previous = None
+    for span in spans:
         text = span.get("text", "")
+        if previous is not None:
+            if _is_a_redraw(previous, span, text):
+                continue
+            trimmed = _covered_prefix_length(previous, span, text)
+            if trimmed:
+                text = text[trimmed:]
+                if not text:
+                    continue
+            elif not _gap_joins(previous, span):
+                pieces.append(" ")
+        kind = _offset_kind(span, body_centre=body_centre, body_size=body_size)
         pieces.append(_transliterate(text, kind) if kind else text)
+        previous = span
     return "".join(pieces)
+
+
+def _is_a_redraw(previous, span, text, *, tolerance=_REDRAW_TOLERANCE):
+    """True when `span` sits inside `previous` and carries text that is already there.
+
+    A **geometry** rule with one text test on top, and the text test is what makes it safe: a
+    span is dropped only when its characters are provably present in the line already, so
+    dropping it cannot lose anything.
+
+    These papers draw some runs more than once - a faked bold sets the same string two to four
+    times at slightly different offsets - and they draw some question numbers twice at the very
+    same spot. Read end to end, each extra draw becomes an extra character. Measured on
+    `1031_醫師(二)_醫學(四)`, whose question numbers are bare two-column numerals:
+
+    * question 3 arrives as span `3` at x=[52.68, 58.17] followed by span `3` at
+      x=[52.68, 58.17] - the same box twice, read as `33`;
+    * question 34 arrives as `34` at x=[47.16, 58.17] followed by `4` at x=[52.68, 58.17] -
+      the second inside the first, read as `344`.
+
+    Both were fatal, because a question number that is not the successor of the one before it
+    is rejected by the numbering rule and the rest of the paper is dropped. Before this rule
+    that paper read as **2 questions out of 80**; with it, 33 do - and the remainder are a later,
+    separate defect, not this one.
+
+    The test is `inside` rather than `coincident` so that both shapes are caught, and the text
+    half is what keeps a real repetition: a paper that genuinely prints `3 3` puts the two
+    glyphs at different x positions, so the second is not inside the first, and a word that
+    genuinely repeats - `常常`, `慢慢` - likewise has its second copy starting where the first
+    ends, not inside it. Only a draw lying within the draw before it, carrying characters that
+    are already in the line, is dropped.
+    """
+    if not text:
+        return False
+    left = previous.get("bbox") or (0, 0, 0, 0)
+    right = span.get("bbox") or (0, 0, 0, 0)
+    if float(right[0]) < float(left[0]) - tolerance:
+        return False
+    if float(right[2]) > float(left[2]) + tolerance:
+        return False
+    return text.strip() in previous.get("text", "")
+
+
+def _covered_prefix_length(previous, span, text):
+    """How many characters of `span` are already in the text, having been read from `previous`.
+
+    A **geometry** rule, in the same class as `_gap_joins`: it asks where two boxes sit, never
+    what they say. It exists because this reader lays every span end to end, and on these papers
+    a long run is often emitted as several spans that share their boundary character - the printer
+    draws the same glyph twice, once at the end of one span and once at the start of the next, so
+    the shared character was being read twice and `血液中` came out as `血液液中`, `下列` as
+    `下列列`.
+
+    Both shapes are visible on `1131_醫事檢驗師_臨床血液學與血庫學` (113 年第 2 次):
+
+    * A **seam**: span `…尤其是貧血。血液` at x=[215.40, 435.35] then span `液中沒有發現對抗紅血球`
+      at x=[424.32, 545.27]. The `液` of the first sits at [424.32, 435.35], the `液` of the second
+      at [424.32, 434.40]. One character, two boxes - and appending them made `血液液`.
+    * An **overlay**: the header `科目名稱：臨床血液學與血庫` is drawn four times by the fake-bold
+      printer, at x0 33.96 / 33.96 / 34.20 / 34.20 and y alternating by 0.24pt. Every span of an
+      overlay starts left of the one before it, because it is the same run redrawn, not a
+      continuation.
+
+    Only the seam is trimmed, because only the seam has the property that says so: the following
+    span starts **right** of the previous one and overlaps its tail. An overlay's spans march left
+    as often as right, so the `right[0] <= left[0]` guard rejects them, and the fake-bold text
+    survives intact. Without that guard the header read `科目名稱科目名稱科目名稱科目名稱：臨床血液學與血庫庫學`
+    - deleting real characters is worse than the duplication being removed.
+
+    The count is a rounding of geometry, not a fitted threshold: characters are laid out at a
+    uniform pitch inside a span, so the covered width over the per-character width is how many
+    characters are covered, and coverage of less than half a character is left alone - which is
+    what keeps a subscript merely overhanging its host from losing its first character. Coverage
+    of the *whole* span is left alone too: that is a redraw, not a seam.
+
+    Evidence that this is our defect and not the paper's: PyMuPDF's own `get_text("text")` returns
+    `血液中` once, and engine B (poppler, which does its own overlap handling) reads the paper with
+    zero doubled characters. Two independent readings agreed; only this function disagreed.
+
+    This was not cosmetic. The affected papers had their **question numbers** doubled as well -
+    `72` read as `722` - and a number that is not the successor of the one before it is rejected
+    by the numbering rule, so the run stops there and the rest of the paper is dropped. That is
+    the whole of the `count-mismatch` refusal on the six `醫師(二)` papers, which is why they
+    looked like six unrelated broken papers rather than one broken reader.
+    """
+    if not text:
+        return 0
+    left = previous.get("bbox") or (0, 0, 0, 0)
+    right = span.get("bbox") or (0, 0, 0, 0)
+    covered = float(left[2]) - float(right[0])
+    if covered <= 0.0:
+        return 0
+    if float(right[0]) <= float(left[0]):
+        # The following span does not start to the right of the previous one, so it is not a
+        # continuation of it - it is the same run drawn again. Leave it whole.
+        return 0
+    width = float(right[2]) - float(right[0])
+    if width <= 0.0:
+        return 0
+    per_character = width / len(text)
+    if per_character <= 0.5:
+        return 0
+    count = int(round(covered / per_character))
+    if count >= len(text):
+        # The whole span already sits inside the previous one: a redraw, not a seam.
+        return 0
+    return count
 
 
 def _spans_of_page(page):

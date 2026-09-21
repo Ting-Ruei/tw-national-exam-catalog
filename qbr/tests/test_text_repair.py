@@ -113,6 +113,102 @@ def test_a_body_sized_run_is_never_taken_for_an_offset():
     assert extract.read_spans(spans) == "A.[Na+]"
 
 
+# ------------------------------- characters the paper draws twice, read twice
+#
+# The defect this block pins was measured, not guessed: over the 841 shipped source papers the
+# old reader produced 595 adjacent doubled characters that neither PyMuPDF's own extractor nor
+# poppler contains. The reader laid every span end to end, and on these papers a run can reach it
+# as several spans that share their boundary character - the printer draws that glyph twice, once
+# at the end of one span and once at the start of the next.
+#
+# The cost was not cosmetic. The doubled text went into the shipped queue (`血液液中`, `下列列`),
+# and on the papers whose question numbers are drawn the same way it doubled the numbers too:
+# question `3` read as `33`, `34` as `344`. The numbering rule accepts only a successor, so the
+# run stopped there and the rest of the paper was withheld - `1031_醫師(二)_醫學(四)` was reported
+# as **2 questions out of 80**. Six `醫師(二)` papers carried `count-mismatch` for this reason.
+
+def test_a_character_shared_by_two_spans_is_not_read_twice():
+    """The seam, in the paper's own numbers: `…貧血。血液` then `液中沒有…`.
+
+    `1131_醫事檢驗師_臨床血液學與血庫學`, question 1. The `液` of the first span sits at
+    [424.32, 435.35]; the `液` of the second at [424.32, 434.40] - one character, two boxes.
+    """
+    spans = [_span("少，而且好像越來愈厲害，尤其是貧血。血液", x0=215.40, x1=435.35, size=11.0),
+             _span("液中沒有發現對抗紅血球", x0=424.32, x1=545.27, size=11.0)]
+    assert extract.read_spans(spans) == "少，而且好像越來愈厲害，尤其是貧血。血液中沒有發現對抗紅血球"
+
+
+def test_the_same_character_drawn_at_the_same_box_is_not_read_twice():
+    """The other shape: a bare question number drawn twice at the *same* box.
+
+    `1031_醫師(二)_醫學(四)`, whose numbers are two-column bare numerals. Question 3 arrives as
+    span `3` at x=[52.68, 58.17] followed by span `3` at x=[52.68, 58.17]. Read end to end that
+    is `33`, and `33` is not the successor of `2`, so the paper stopped at question 2.
+    """
+    spans = [_span("3", x0=52.68, x1=58.17),
+             _span("3", x0=52.68, x1=58.17),
+             _span(" ", x0=58.20, x1=61.25),
+             _span("一位2歲男童於發燒", x0=72.30, x1=173.16)]
+    text = extract.read_spans(spans)
+    assert text == "3  一位2歲男童於發燒", text
+    assert "33" not in text
+
+
+def test_a_span_contained_in_the_one_before_it_is_not_read_twice():
+    """Question 34 arrives as `34` then `4`, the second lying inside the first."""
+    spans = [_span("34", x0=47.16, x1=58.17), _span("4", x0=52.68, x1=58.17)]
+    assert extract.read_spans(spans) == "34"
+
+
+def test_a_real_repetition_survives_because_its_boxes_do_not_coincide():
+    """Negative control: `常常` is written twice on the page, at two positions.
+
+    The old code read `常常` correctly and must go on doing so. A rule that deleted every
+    repeated character would have passed the three tests above and broken this one.
+    """
+    spans = [_span("常常", x0=10.0, x1=32.0),
+             _span("常常", x0=32.0, x1=54.0)]
+    assert extract.read_spans(spans) == "常常常常"
+
+
+def test_a_question_number_followed_by_its_stem_is_not_a_redraw():
+    """Negative control: `3   3 歲兒童` - the number, a gap, then a value.
+
+    The numeral is 3 and the stem opens with 3 (the age). Their boxes do not overlap, so nothing
+    is dropped; and the text test alone would not be enough here, because `3` *is* in the line.
+    """
+    spans = [_span("3", x0=52.68, x1=58.17),
+             _span(" ", x0=58.20, x1=72.28),
+             _span("3 歲兒童的體重", x0=72.30, x1=150.0)]
+    assert extract.read_spans(spans) == "3 3 歲兒童的體重"
+
+
+def test_the_fake_bold_header_keeps_every_one_of_its_characters():
+    """Negative control: the header is the same run drawn four times, and none may be deleted.
+
+    `1131_醫事檢驗師_臨床血液學與血庫學` sets `科目名稱：臨床血液學與血庫` four times at
+    x0 33.96 / 33.96 / 34.20 / 34.20. These are overlays, not seams: each span starts where the
+    one before it started, and some of them lie *inside* it. A first attempt at the seam rule -
+    which trimmed any covered width without checking direction - read this header as
+    `科目名稱科目名稱科目名稱科目名稱：臨床血液學與血庫庫學`; it deleted `庫`, `學` and both
+    `科目名稱`s' tails. Deleting real characters is worse than the duplication it removes, so
+    this case is pinned.
+    """
+    spans = [_span("科目名稱", x0=33.96, x1=90.11, top=113.53, bottom=127.90, size=14.0),
+             _span("科目名稱：臨床血液學與血庫", x0=33.96, x1=216.47, top=113.29, bottom=127.66, size=14.0),
+             _span("科目名稱", x0=34.20, x1=90.35, top=113.29, bottom=127.66, size=14.0),
+             _span("科目名稱", x0=34.20, x1=90.35, top=113.53, bottom=127.90, size=14.0),
+             _span("臨床血液學與血庫", x0=104.04, x1=216.23, top=113.53, bottom=127.90, size=14.0),
+             _span("臨床血液學與血庫", x0=104.04, x1=216.23, top=113.29, bottom=127.66, size=14.0),
+             _span("臨床血液學與血庫", x0=104.28, x1=216.47, top=113.53, bottom=127.90, size=14.0),
+             _span("庫學", x0=202.44, x1=230.39, top=113.29, bottom=127.66, size=14.0),
+             _span("庫學 ", x0=202.44, x1=237.42, top=113.29, bottom=127.90, size=14.0)]
+    text = extract.read_spans(spans)
+    assert "科目名稱：臨床血液學與血庫" in text.replace("\n", "")
+    for piece in ("科目名稱", "臨床血液學與血庫"):
+        assert piece in text, "the redrawn header must survive; got %r" % text
+
+
 # ------------------------------------------- which size is the body, and raised letters
 #
 # Three defects a reviewer reported as "flat English sub/superscripts, often", traced to one
