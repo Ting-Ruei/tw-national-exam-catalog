@@ -108,14 +108,15 @@ OPTIONS_MAX = 6
 #: glyphs a fixed distance from the printed symbol, and 22 characters in the corpus do fit exactly
 #: that (+0x2005: U+045B `ћ` -> U+2460 `①`, U+04D8 `Ә` -> U+24DD `ⓝ`). **But it is not a law, and
 #: building on it would be building on a coincidence.** Measured: U+090B `ऋ`, U+0F4A `ཊ`, U+0E25
-#: `ล` and eleven others also sit inside Chinese words and do *not* fit any offset. So the rule
-#: names what is true of all 28 - the script is one this paper never prints - and the reviewer is
-#: told which script, not which symbol it might have been.
+#: `ล` and eleven others also appear and do *not* fit any offset. So the rule names what is true of
+#: all 28 - the script is one this paper never prints - and the reviewer is told which script, not
+#: which symbol it might have been.
 #:
-#: Why "inside a Chinese word" is part of the test: a paper legitimately prints English (`protein`),
-#: Greek (`β`, 6,653 occurrences) and Thai/Devanagari in a handful of drug names. Requiring a Han
-#: character immediately before or after removes that noise, and it is the *shape of the mistake*
-#: being reported - a stray letter is a letter that displaced a Chinese one.
+#: A "must sit inside a Chinese word" condition was tried and **removed**: English and Greek are
+#: `LATIN` and `GREEK`, which `NATIVE_SCRIPT_PREFIXES` already allows, so the condition never
+#: filtered them and instead discarded 54% of the genuine occurrences (including option texts that
+#: are entirely Cyrillic). The full measurement is in the docstring of `foreign_script_characters`,
+#: which is also its own name - the old `..._in_chinese` said a condition the body no longer has.
 #:
 #: Measured over the served 79,090-question queue: **110 questions**, of which **0 have been accepted
 #: by a person** (so the rule does not reopen judged work) and **3 of the 16 human blocks** are hits.
