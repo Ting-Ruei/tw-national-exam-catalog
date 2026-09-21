@@ -514,3 +514,25 @@ def test_the_answer_reading_is_part_of_the_prompt_version():
     finally:
         ai_findings.ANSWER_READING = real
     assert ai_findings.prompt_version("blocked") == version
+
+
+def test_an_or_answer_is_not_shown_as_a_multi_select_answer():
+    """`B或C` is the sheet saying either scores, not a question with two answers.
+
+    The same trap as 送分, a quieter version: `accepted_values` holds both labels, so the model was
+    shown `答案：B、C` and correctly objected that a single-choice question cannot have an answer of
+    two letters. Measured at 4 of the 28 `ANSWER_DISAGREES` findings; 769 questions in the corpus
+    carry an `或` answer.
+    """
+    either = {"answer": "B或C",
+              "answer_payload": {"accepted_values": ["B", "C"], "answer": "B或C",
+                                 "is_special_correction": False}}
+    shown = ai_findings.answer_of(either)
+    assert shown.startswith("B或C")
+    assert "任一" in shown
+    # A genuine multi-select answer is left alone: `BC` *is* two boxes marked at once.
+    both = {"answer": "BC", "answer_payload": {"accepted_values": ["BC"], "answer": "BC"}}
+    assert ai_findings.answer_of(both) == "BC"
+    # And a single letter is untouched.
+    one = {"answer": "B", "answer_payload": {"accepted_values": ["B"], "answer": "B"}}
+    assert ai_findings.answer_of(one) == "B"

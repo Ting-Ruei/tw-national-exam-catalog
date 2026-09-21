@@ -221,19 +221,30 @@ def answer_of(question) -> str:
     on the display side, arriving on the model's side.
 
     `is_special_correction` is the field that says which reading applies, so it decides.
+
+    There is a second, quieter version of the same trap: the corrections sheet writes `答Ｂ或Ｃ者均給分`
+    as `B或C`, and `accepted_values` holds both letters. Shown as `答案：B、C` that reads as a
+    multi-select answer, and on a single-choice paper the model correctly objects - measured at 4 of
+    the 28 `ANSWER_DISAGREES` findings, and 769 questions in the corpus carry an `或` answer. The
+    stored display string already has the sheet's own wording, so it is used and the ambiguity is
+    spelled out.
     """
     payload = question.get("answer_payload") or {}
+    accepted = [str(value) for value in (payload.get("accepted_values") or [])]
     if payload.get("is_special_correction"):
         display = str(payload.get("answer") or question.get("answer") or "送分")
-        accepted = [str(value) for value in (payload.get("accepted_values") or [])]
         if accepted:
             return "%s（這一題不計分／全部給分；選項 %s 都算對，這不是有四個答案）" % (
                 display, "、".join(accepted))
         return display
-    accepted = payload.get("accepted_values") or []
+    stored = str(payload.get("answer") or question.get("answer") or "")
+    # A display string carrying `或` is the sheet saying "any of these is accepted". The letters are
+    # not several answers to be marked at once.
+    if len(accepted) > 1 and "或" in stored:
+        return "%s（更正答案：這幾個選項**任一**都算對，不是要同時選）" % stored
     if accepted:
-        return "、".join(str(value) for value in accepted)
-    return str(question.get("answer") or "")
+        return "、".join(accepted)
+    return stored
 
 
 def subject_of(question) -> str:
