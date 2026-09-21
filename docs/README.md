@@ -23,6 +23,7 @@
 | 你要做什麼 | 讀這份 |
 |---|---|
 | 建立考題（官方 PDF → 封裝） | [`../qbr/AGENTS.md`](../qbr/AGENTS.md) ＋ [skill](skills/build-exam-question-bank/SKILL.md) |
+| **管線現在到哪了**（穩定／待優化／待決策） | [skill](skills/qbr-pipeline-status/SKILL.md) |
 | 審題介面 | [`../review_ui/AGENTS.md`](../review_ui/AGENTS.md) ＋ [skill](skills/review-ui-v2/SKILL.md) |
 | 舊介面為什麼被換掉 | [`ROUTE_HISTORY.md`](ROUTE_HISTORY.md) |
 | 管線最佳化的兩個方向 | [`PIPELINE_OPTIMIZATION_DIRECTIONS.md`](PIPELINE_OPTIMIZATION_DIRECTIONS.md) |
