@@ -56,15 +56,53 @@ def missing_events(target_path, source_path):
     return missing
 
 
+def unmatched(target_path, source_path):
+    """Lines in `target_path` that `source_path` cannot account for.
+
+    The companion question to `missing_events`, and the two are not the same shape. `missing_events`
+    asks *what do I have that you lack* - which is what gets appended. This asks **do you have
+    anything I cannot account for**, which is the only thing that should stop a push.
+
+    Why the count comparison this replaces was wrong, measured: the same guard served two streams
+    whose producers are different. For the human log the station writes and the laptop copies, so a
+    station with fewer lines really is suspicious. For `question_ai_findings.jsonl` the **laptop**
+    writes and the station only ever holds what was pushed, so the laptop growing from 71 to 5,295
+    lines is the normal state of an unpushed store - and the guard refused exactly the push that
+    existed to carry it home. A count cannot tell "I am behind" from "I lost data"; membership can,
+    and membership is what actually matters: appending is safe precisely when every event the
+    station holds is one the laptop also holds.
+
+    What this does **not** catch: the station losing a tail the laptop never saw. There is no
+    external oracle for that, and neither could the count version - if the laptop had ever seen those
+    events it would still hold them and they would come back on the next append. The real protection
+    there is the pre-push backup and never truncating the station file (`>>`, never `scp`).
+    """
+    known = {_identity(line) for line in _lines(source_path)}
+    return [line for line in _lines(target_path) if _identity(line) not in known]
+
+
 def main() -> int:
-    """`merge_events.py <target> <source> <out>` - write the lines to append into `out`."""
-    if len(sys.argv) != 4:
-        print("usage: merge_events.py <target.jsonl> <source.jsonl> <out.jsonl>", file=sys.stderr)
+    """Write the lines to move, either direction.
+
+        merge_events.py <target> <source> <out>            # append: source lines missing from target
+        merge_events.py --unmatched <target> <source> <out>  # target lines source cannot account for
+
+    Two modes rather than two scripts because they compare events by the *same* rule and the same
+    rule is the whole point - two implementations would be two ideas of what "the same event" is,
+    which is how a duplicate gets appended or a lost record gets called present.
+    """
+    args = sys.argv[1:]
+    mode = "append"
+    if args and args[0] == "--unmatched":
+        mode, args = "unmatched", args[1:]
+    if len(args) != 3:
+        print("usage: merge_events.py [--unmatched] <target.jsonl> <source.jsonl> <out.jsonl>",
+              file=sys.stderr)
         return 2
-    target, source, out = sys.argv[1:4]
-    missing = missing_events(target, source)
+    target, source, out = args
+    lines = unmatched(target, source) if mode == "unmatched" else missing_events(target, source)
     with open(out, "w", encoding="utf-8") as handle:
-        handle.writelines(missing)
+        handle.writelines(lines)
     return 0
 
 

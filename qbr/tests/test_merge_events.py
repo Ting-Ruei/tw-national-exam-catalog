@@ -145,3 +145,36 @@ def test_the_count_reported_by_the_script_equals_the_lines_actually_written(tmp_
     out = merge_events.missing_events(target, source)
     assert len(out) == 2
     assert sum(1 for line in out if line.strip()) == 2
+
+
+def test_a_laptop_that_grew_is_not_a_station_that_shrank(tmp_path):
+    """The guard that refused the exact push it existed to make.
+
+    The count comparison said "the station has fewer lines than the laptop, so the station lost
+    something" and refused. Measured: the station held 71 AI findings and the laptop had produced
+    5,295, because the **laptop** is the producer of that stream and the station only ever holds what
+    was pushed. Growing is the normal state of an unpushed store.
+
+    `unmatched` is the question that should be asked instead: can the laptop account for everything
+    the station has? Appending is safe exactly when the answer is yes.
+    """
+    station = _write(tmp_path / "station.jsonl", [_event("k1", "accept"), _event("k2", "block")])
+    laptop = _write(tmp_path / "laptop.jsonl",
+                    [_event("k1", "accept"), _event("k2", "block"), _event("k3", "accept")])
+    assert merge_events.unmatched(station, laptop) == []          # nothing unaccounted for: safe
+    assert len(merge_events.missing_events(station, laptop)) == 1  # and one event to append
+
+
+def test_an_event_the_station_has_and_the_laptop_lost_is_still_caught(tmp_path):
+    """The negative control: the guard must still stop when the home holds something unexplained.
+
+    This is the case the count comparison was trying to catch, and it does catch it - which is why
+    the comparison looked right. It is only the *growing producer* case it got wrong, so both the
+    catch and the non-catch are asserted, or the fix could have been "never refuse".
+    """
+    station = _write(tmp_path / "station.jsonl",
+                     [_event("k1", "accept"), _event("k9", "block", created_at="2026-09-21T11:00:00")])
+    laptop = _write(tmp_path / "laptop.jsonl", [_event("k1", "accept")])
+    assert merge_events.unmatched(station, laptop) == [
+        json.dumps(_event("k9", "block", created_at="2026-09-21T11:00:00"),
+                   ensure_ascii=False) + "\n"]

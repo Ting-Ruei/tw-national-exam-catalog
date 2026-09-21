@@ -112,36 +112,40 @@ push_stream() {
   fi
   echo "   筆電            ：${local_count} 行"
 
-  # 2. 家裡的東西變少了嗎。只在**檔案已經存在**且比副本少時才會發生，而那正是要停下來看的事。
-  #    「檔案不存在」不是變少，是還沒有。（這兩個案例都真實發生過：人類日誌 347→346 是真的變少；
-  #    模型筆記 0 行是還沒上站。同一個守衛要能分出來。）
-  if [[ "${remote_exists}" == "yes" ]] && [[ "${remote_count}" -lt "${local_count}" ]] && [[ "${DRY_RUN}" == 0 ]]; then
-    echo "   拒絕推送：常駐機（${remote_count}）比筆電（${local_count}）還少。" >&2
-    echo "     站上是家，它不該比副本少。先查清楚少了什麼再繼續。" >&2
-    return 1
-  fi
-
-  # 3. 算出「站上還沒有的**事件**」，寫到暫存檔。
+  # 3. 站上有沒有一筆「筆電無法解釋」的事件。這才是應該擋下推送的事。
   #
-  # **不能用整行比對**——我第一版就是那樣寫，而它錯了：合併佇列時管線會在事件上補
-  # `_carried_from` 欄位，所以同一個事件在兩邊是**不同的字串**。實測：站上 347 行、筆電 346 行，
-  # 而整行比對會說「要附加 151 行」——把 151 個已經有人做的決定再寫一次。附加重複事件不是無害的：
-  # 它會讓「誰審了什麼」的帳多算一次，而審核紀錄的帳就是它的全部意義。
+  # **不是比行數。** 原本是：站上比筆電少就拒絕。那個守衛服務兩個流，而它們的生產者不同：
+  # 人類日誌是站上在寫、筆電只會複製，所以站上比較少確實可疑；但
+  # `question_ai_findings.jsonl` 是**筆電**在寫、站上只持有推上去的那些，所以筆電從 71 行長到
+  # 5,295 行正是「還沒推上去的 store」的正常狀態——而那個守衛剛好擋掉了唯一能把它帶回家的推送。
+  # 行數分不出「我落後了」與「我丟了資料」；**成員關係可以**，而成員關係才是真正要緊的事：
+  # 附加之所以安全，正是因為站上持有的每一個事件筆電都持有。
   #
-  # **第二個錯：不能用 `$(...)` 接結果。** 命令替換會吃掉結尾的換行，所以附加的最後一行會沒有換行。
-  # 寫到暫存檔就沒有這個問題。
-  local tmp added_file added_count
+  # 這抓不到的：站上掉了一截尾巴而筆電從沒看過。那沒有外部依據，行數版也一樣抓不到——
+  # 只要筆電曾經看過那些事件，它就還持有，下一次附加就會帶回去。真正的保護是推送前的備份
+  # 與「永遠不截斷站上檔案」（`>>`，不是 `scp`）。
+  local tmp added_file added_count unmatched_file unmatched_count
   tmp="$(mktemp -t qbr-push.XXXXXX)"
   added_file="$(mktemp -t qbr-added.XXXXXX)"
+  unmatched_file="$(mktemp -t qbr-unmatched.XXXXXX)"
   ssh -n -o BatchMode=yes "${STATION}" \
     "if [ -f ${remote_log} ]; then cat ${remote_log}; fi" > "${tmp}"
+  "${PYTHON}" "${MERGE_PY}" --unmatched "${tmp}" "${local_log}" "${unmatched_file}"
+  unmatched_count="$(wc -l < "${unmatched_file}" | tr -d ' ')"
+  if [[ "${unmatched_count}" != "0" ]] && [[ "${DRY_RUN}" == 0 ]]; then
+    echo "   拒絕推送：站上有 ${unmatched_count} 筆事件筆電無法解釋（家裡的東西對不上）。" >&2
+    echo "     先查清楚少了什麼再繼續。前幾筆：" >&2
+    head -3 "${unmatched_file}" | sed 's/^/       /' >&2
+    rm -f "${tmp}" "${added_file}" "${unmatched_file}"
+    return 1
+  fi
   "${PYTHON}" "${MERGE_PY}" "${tmp}" "${local_log}" "${added_file}"
   added_count="$(wc -l < "${added_file}" | tr -d ' ')"
   echo "   要附加的 ：${added_count} 行（以事件身分比對，已排除 _carried_from）"
 
   if [[ "${added_count}" == "0" ]]; then
     echo "   站上已經有筆電的每一個事件——沒有東西要推。"
-    rm -f "${tmp}" "${added_file}"
+    rm -f "${tmp}" "${added_file}" "${unmatched_file}"
     return 0
   fi
 
@@ -149,7 +153,7 @@ push_stream() {
     echo "   （dry-run）會把這 ${added_count} 行附加到 ${remote_log}"
     head -5 "${added_file}"
     [[ "${added_count}" -gt 5 ]] && echo "     …（其餘 $((added_count - 5)) 行）"
-    rm -f "${tmp}" "${added_file}"
+    rm -f "${tmp}" "${added_file}" "${unmatched_file}"
     return 0
   fi
 
