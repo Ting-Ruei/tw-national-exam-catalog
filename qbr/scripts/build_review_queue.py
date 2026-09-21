@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 
+from qbr import ai_findings  # noqa: E402
 from qbr import groups  # noqa: E402
 from qbr import review_queue  # noqa: E402
 
@@ -122,7 +123,14 @@ def review_events_to_carry(out_dir, previous=()):
     names = ("question_review_events.jsonl", "answer_review_events.jsonl",
              "question_ai_review_events.jsonl", "question_ai_feedback_events.jsonl",
              "question_ai_learning_events.jsonl",
-             "question_correction_feedback_events.jsonl")
+             "question_correction_feedback_events.jsonl",
+             # A model's finding about a question a person blocked is not a decision, but it is the
+             # same kind of irreplaceable data: it says what was believed about one particular
+             # reading, and the readings it is about are the strange one-offs nobody can classify on
+             # sight. It is carried by the same mechanism as the decision logs because the failure
+             # mode is the same - a rebuild that silently discards it - and the `ai_findings.STREAM`
+             # name is imported rather than retyped so the two cannot drift.
+             ai_findings.STREAM)
     records = []
     seen = set()
     for source in previous:

@@ -34,6 +34,11 @@ EVENT_STREAMS=(
   question_ai_feedback_events.jsonl
   question_ai_learning_events.jsonl
   question_correction_feedback_events.jsonl
+  # AI 對「人已標 block」的題目所寫的筆記（哪裡錯、怎麼修）。它不是人類決定，但同樣是
+  # 無法從語料重建的資料——它記的是模型看過某一次特定讀法之後說了什麼，而那些讀法正是
+  # 沒人能一眼分類的個案。保護它的理由與保護人類紀錄完全相同：一次同步或一次重建
+  # 把它靜默刪掉，就沒有第二次。這個名字與 `qbr/src/qbr/ai_findings.py` 的 `STREAM` 同一個。
+  question_ai_findings.jsonl
 )
 # 還有人類的偏好設定與任何非事件檔的人工產物。
 PROTECTED_EXTRA=(review_ui_preferences.json)
@@ -101,6 +106,7 @@ found=0
 for name in question_review_events.jsonl answer_review_events.jsonl \
             question_ai_review_events.jsonl question_ai_feedback_events.jsonl \
             question_ai_learning_events.jsonl question_correction_feedback_events.jsonl \
+            question_ai_findings.jsonl \
             review_ui_preferences.json; do
   [ -f "${Q}/${name}" ] || continue
   cp "${Q}/${name}" "${D}/${name}.${T}.bak"
