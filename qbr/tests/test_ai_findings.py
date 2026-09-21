@@ -80,6 +80,48 @@ def test_a_code_in_the_verdict_field_supplies_the_verdict():
     assert weird is not None and weird["verdict"] is None and weird["what"] == "DROP_OUT"
 
 
+def test_a_changed_prompt_is_visible_in_every_record():
+    # The loop adjusts the prompt between batches, so two notes taken before and after a change must
+    # be distinguishable by a field rather than by diffing the stored text by hand.
+    first = ai_findings.make_record(question=_question(), finding=None, model="m", endpoint="e",
+                                    prompt_system="s", prompt_user="u")
+    assert first["prompt_version"] == ai_findings.prompt_version()
+    # And the version covers the learned block too, because it changes what the model is told to
+    # ignore - the instructions can be identical while the question asked is not.
+    with_learned = ai_findings.make_record(
+        question=_question(), finding=None, model="m", endpoint="e",
+        prompt_system="s", prompt_user="u", learned={"FIGURE_MISSING": "已由 disputes 偵測"})
+    assert with_learned["learned"] == {"FIGURE_MISSING": "已由 disputes 偵測"}
+
+
+def test_the_prompt_version_changes_when_the_prompt_changes():
+    # A version that cannot move is not a version. This is the negative control for the field: if
+    # `prompt_version` hashed something constant, every assertion above would still pass.
+    import hashlib
+    base = ai_findings.prompt_version()
+    original = ai_findings.SYSTEM
+    try:
+        ai_findings.SYSTEM = original + "\n額外指示"
+        assert ai_findings.prompt_version() != base
+    finally:
+        ai_findings.SYSTEM = original
+    assert ai_findings.prompt_version() == base
+
+
+def test_the_learned_block_is_only_added_when_there_is_something_to_say():
+    # An empty 【已經知道的事】 section reads as "nothing is known", which is a different claim from
+    # "this run was not given prior findings". It belongs in the *system* prompt because it is a
+    # property of the run, not of the question.
+    question = _question()
+    system, _user = ai_findings.build_prompt(question, learned={"DROP_OUT": "已修"})
+    assert "已經知道" in system and "DROP_OUT" in system
+    plain_system, _user = ai_findings.build_prompt(question)
+    assert "已經知道" not in plain_system
+    # A bare direction that is not one code is still carried forward rather than lost.
+    free_system, _user = ai_findings.build_prompt(question, learned="這份卷的答案印在另一張紙")
+    assert "這份卷的答案印在另一張紙" in free_system
+
+
 def test_the_prompt_tells_the_model_which_options_are_pictures():
     # An option that is a picture is stored with empty text and an image reference. A model shown four
     # empty options reports a missing option every time - correctly from what it can see, and uselessly,

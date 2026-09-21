@@ -92,6 +92,29 @@ SYSTEM = """你是國考題庫抽取品管員。使用者給你一題「已經�
 
 若 verdict 是 DEFECT，`what` 不可以是 NONE。若不確定，把 confidence 設低，不要猜。"""
 
+#: What has already been learned from earlier runs, added to the prompt when the caller asks for it.
+#:
+#: This is the loop's fourth step made real. The loop is: a person blocks, a model says what is wrong
+#: and how to fix it, a person confirms, a rule is written - and then the *next* batch should start
+#: from what was learned rather than from scratch. Without this the model rediscovers the same shapes
+#: every run and the only place the knowledge lives is a human's memory.
+#:
+#: It is stated as things already **known or ruled out**, not as instructions to look for them, for two
+#: reasons. A prompt that says "look for X" invites the model to find X whether or not it is there -
+#: measured here: telling the model that empty options were picture options made it stop reporting
+#: them as defects, which was right, but the same trick aimed at a shape that is *not* settled would
+#: manufacture findings. And a settled shape does not need finding again: `disputes.py` already
+#: detects it deterministically, which is the project's rule (detection is a script, meaning is a
+#: prompt). What the model is asked to do with a settled shape is **not** report it, so the notes
+#: stay about things nobody has classified yet.
+LEARNED = """
+【已經知道的事】以下是先前批次已經確認過、或已經被判定不是缺陷的形狀：
+{learned}
+若這一題的異常屬於上面任何一種，請在 `where` 簡短註明「已列為既知形狀：<代碼>」，
+`rule_worthy` 用 false（已經有規則或已被排除，不需要再寫一次），
+並把注意力放在**其他**異常上。若沒有其他異常，verdict 用 NOT_EXTRACTION。
+"""
+
 USER = """科目：{subject}
 試卷：{paper}
 題號：第 {number} 題
@@ -191,8 +214,13 @@ def reading_fingerprint(question) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def build_prompt(question) -> tuple:
-    """The system prompt and the user turn. Returned together so a record can store both."""
+def build_prompt(question, *, learned=None) -> tuple:
+    """The system prompt and the user turn. Returned together so a record can store both.
+
+    `learned` is optional on purpose. Omitting it is not the same as passing an empty one: a pass
+    given prior findings and one that was not are different passes, and the record keeps the prompt
+    verbatim so the difference survives.
+    """
     codes = "\n".join("- %s：%s" % (code, desc) for code, desc in CODES.items())
     number = question.get("question_number")
     user = USER.format(subject=subject_of(question) or "（未知）",
@@ -202,11 +230,45 @@ def build_prompt(question) -> tuple:
                        options=options_block(question.get("options")) or "（無）",
                        figures=figures_note(question),
                        answer=answer_of(question) or "（無）")
-    return SYSTEM.format(codes=codes), user
+    return SYSTEM.format(codes=codes) + learned_note(learned), user
+
+
+def prompt_version() -> str:
+    """A short hash of the prompt itself, so a change to it is visible in every record.
+
+    The loop's whole point is that the prompt is adjusted between batches, which means two records
+    written an hour apart may answer slightly different questions. Storing the prompt text verbatim
+    already makes that *checkable*; this makes it *visible* - a record says which prompt generation
+    it belongs to, so notes from before and after a change can be compared by a field rather than by
+    a diff. `disputes.py`'s detectors have the same problem and the same answer: a rule change is
+    identified by a name, not by remembering when it happened.
+
+    Deliberately hashes `LEARNED` too. The learned block changes what the model is asked to ignore,
+    so two runs with different learned blocks are different prompts even though the instructions are
+    identical.
+    """
+    body = "\x00".join([SYSTEM, USER, LEARNED, "\x00".join(sorted(CODES))])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+
+
+def learned_note(learned) -> str:
+    """The "already known" block, or nothing when there is nothing to say.
+
+    Kept out of the prompt entirely when empty: an empty 【已經知道的事】 section would read as
+    "nothing is known", which is a different claim from "this run was not given prior findings".
+    """
+    if not learned:
+        return ""
+    if isinstance(learned, str):
+        lines = [learned]
+    else:
+        lines = ["- %s：%s" % (str(item).strip(), str(known or "").strip())
+                 for item, known in sorted(learned.items())]
+    return LEARNED.format(learned="\n".join(lines))
 
 
 def make_record(*, question, finding, model, endpoint, prompt_system, prompt_user,
-                raw="", usage=None, seconds=0.0, error=None, created_at=None) -> dict:
+                raw="", usage=None, seconds=0.0, error=None, created_at=None, learned=None) -> dict:
     """One finding, with everything needed to check it later.
 
     `prompt_user` is stored verbatim and not regenerated at read time: the point of the record is
@@ -223,6 +285,11 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         "created_at": created_at or time.strftime("%Y-%m-%dT%H:%M:%S"),
         "model": model,
         "endpoint": endpoint,
+        # Which generation of the prompt this note belongs to. The prompt is adjusted between batches
+        # - that is the loop - so without this field two notes taken before and after a change look
+        # like the same measurement and cannot be compared without diffing the stored text by hand.
+        "prompt_version": prompt_version(),
+        "learned": learned or None,
         "prompt_system": prompt_system,
         "prompt_user": prompt_user,
         # The exact text the model was shown. A reader who cannot see the evidence is trusting a

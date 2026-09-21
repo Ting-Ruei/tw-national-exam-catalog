@@ -134,6 +134,11 @@ def parse_args() -> argparse.Namespace:
                         help="Splash needs ~1,200-3,300 for its reasoning when thinking is on; with "
                              "it off the answer alone is under 400. Kept above the answer length "
                              "because a budget that cuts the JSON off mid-field loses the note.")
+    parser.add_argument("--learned", default=None,
+                        help="what earlier batches already settled, so the next batch starts from it "
+                             "instead of rediscovering it: `CODE=what it means` repeated, or a "
+                             "quoted string. Recorded on every note, because the prompt is part of "
+                             "the measurement and a changed prompt is a different pass")
     parser.add_argument("--resume", action="store_true",
                         help="skip questions that already have a finding (a corpus pass is ~44h, "
                              "so stopping and continuing must not re-ask anything)")
@@ -218,6 +223,30 @@ def targets(queue_dir: str, only, limit, everything=False, done=(), questions=No
     return entries
 
 
+def parse_learned(values):
+    """Turn `--learned CODE=what it means` into the mapping `learned_note` expects.
+
+    A bare string is passed through unchanged, because a direction that is not one code ("this paper
+    prints the answer key on a separate sheet") is still worth carrying forward, and forcing it into
+    `CODE=` would lose it.
+    """
+    if not values:
+        return None
+    learned = {}
+    extras = []
+    for item in values:
+        if "=" in item:
+            code, meaning = item.split("=", 1)
+            learned[code.strip()] = meaning.strip()
+        else:
+            extras.append(item)
+    if extras:
+        return "\n".join(["- %s：%s" % (code, meaning)
+                          for code, meaning in sorted(learned.items())]
+                         + ["- %s" % extra for extra in extras])
+    return learned or None
+
+
 def report(path: str) -> int:
     records = ai_findings.load(path)
     if not records:
@@ -268,7 +297,7 @@ def ask_one(entry, *, endpoint, out, args):
     question = entry["question"]
     if not question:
         return None
-    system, user = ai_findings.build_prompt(question)
+    system, user = ai_findings.build_prompt(question, learned=args.learned)
     parsed, raw, complaint, usage, seconds = ask(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
@@ -276,7 +305,7 @@ def ask_one(entry, *, endpoint, out, args):
     record = ai_findings.make_record(
         question=question, finding=parsed, model=endpoint["name"], endpoint=endpoint["url"],
         prompt_system=system, prompt_user=user, raw="" if parsed else raw, usage=usage,
-        seconds=round(seconds, 1), error=error)
+        seconds=round(seconds, 1), error=error, learned=args.learned)
     ai_findings.append(out, record)
     return {"key": entry["candidate_key"], "finding": parsed, "error": error,
             "seconds": seconds, "raw": raw}
@@ -284,6 +313,7 @@ def ask_one(entry, *, endpoint, out, args):
 
 def main() -> int:
     args = parse_args()
+    args.learned = parse_learned(args.learned)
     queue_dir = repair_loop.review_ui_dir(args.queue)
     out = args.out or ai_findings.store_path(args.queue)
 
