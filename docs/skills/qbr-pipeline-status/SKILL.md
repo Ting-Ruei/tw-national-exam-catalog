@@ -18,7 +18,7 @@ description: The measured state of the qbr question-bank pipeline as of 2026-09-
 | 面向 | 現況 |
 |---|---|
 | 抽取（切題／選項／答案） | **穩定**（78,690 題，8 類科，S3 只擋 11 卷） |
-| **選項續行被截斷** | **已修（6.2）**：抽樣 344 → **1** 欄位（160 卷）；新測試在舊碼上紅 |
+| **選項續行被截斷** | **已修 2026-09-21**：抽樣 344 → **1** 欄位（160 卷）；新測試在舊碼上紅；詳見 `qbr/reports/option_continuation_fix.md` |
 | 圖片截圖 | **舊佇列穩定（已驗收）；新佇列完全沒有** |
 | 題組 | **穩定**（908 組／1,967 題，三項完整性檢查全過） |
 | AI 審核呈現 | **新管線 0 題；舊管線有 543,944 筆但不在 v2 顯示** |
@@ -492,9 +492,14 @@ PY
 .venv/bin/python scripts/verify_option_continuation.py 160 7
 ```
 
-預期（160 卷／12,840 題）：`loss seen by A` 658、`loss seen by B` 2207、
-**`seen by BOTH` 385**、`distinct questions` 265、`distinct papers` 72。
-**這條數字應該是往下走的**——修好 `repair.py` 之後它會降；不降就是沒修到。
+**已修（2026-09-21）**，預期（160 卷／12,840 題）：`loss seen by A` **0**、`loss seen by B` 1,858、
+**`seen by BOTH` 1**、`distinct questions` 1、`distinct papers` 1。
+
+修復前的同一個量測：`loss_a` **658**、`loss_b` 2,207、**`both` 344**、題 235、卷 60。
+**這條數字往下走就是驗收本身。** 負向對照（`git stash push qbr/src/qbr/repair.py`）必須回到 344。
+
+剩下那 1 筆不是缺陷，是升級（兩個引擎對「哪個選項擁有那段文字」不一致）——
+**留 1 筆是正確的，歸零才可疑**。詳見 [`qbr/reports/option_continuation_fix.md`](../../../qbr/reports/option_continuation_fix.md)。
 
 ### 模型回答「這句話還沒結束嗎」（第 6.1 節的封閉問題）
 
