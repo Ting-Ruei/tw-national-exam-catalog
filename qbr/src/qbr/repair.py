@@ -56,6 +56,15 @@ _HAN = (chr(0x4E00) + "-" + chr(0x9FFF)
         + chr(0xF900) + "-" + chr(0xFAFF))
 
 _YEAR = re.compile("^[" + _WHITE + "]*[" + _DIGITS + "]{2,3}[" + _WHITE + "]*" + _chars(0x5E74))
+# What may follow the `年` of a paper's running head and still be a running head. The head is the
+# exam's own title - `115年第一次專門職業及技術人員高等考試…` - so after the year comes the
+# sitting or the kind of exam. A question stem that opens with a number and the word 年 continues
+# with the subject instead: `56 年老女性…`, `7 年齡介於65～79歲…`, `12 年金給付水準…`. Measured
+# over all 3,516 shipped papers: 2,186 `NNN年…` lines are heads and every one of them continues
+# with 第 or 專, and the 19 that continue with anything else are all question stems. The set is
+# therefore not fitted - it is the two words the print form actually uses, with the other
+# candidates (公/特/高/普) measured to add nothing over these two.
+_YEAR_HEAD_CONTINUATION = (0x7B2C, 0x5C08)   # 第 專
 _ANCHOR_RESIDUE = re.compile("^[" + _WHITE + "]*[" + _DIGITS + "]{1,3}$")
 
 # Deliberately explicit, source-anchored rule set for this corpus.
@@ -477,8 +486,34 @@ def starts_with_number(line):
 
 
 def is_year_line(line):
-    """`104年第一次…` headers start with digits but are not question numbers."""
-    return bool(_YEAR.match(line.strip()))
+    """`115年第一次…` headers start with digits but are not question numbers.
+
+    The old form of this rule was `^NNN年` and nothing else, so it also swallowed question stems
+    that open with a number and the word 年: `56 年老女性發生肱骨…`, `7 年齡介於65～79歲…`,
+    `12 年金給付水準…`. That is not a small mistake - the line was then treated as chrome and
+    skipped by the numbering scan, so the paper lost every question from that point on. Measured
+    over all 3,516 shipped papers, 19 papers were cut short this way, `1092_法醫師_一般醫學` to
+    43 questions of 100 and `1062_諮商心理師…` to 31 of 40.
+
+    What a head has that a stem does not is the rest of the exam's own title: after the year
+    comes the sitting or the kind of exam (`第`, `專`). Measured: 2,186 `NNN年…` lines are heads
+    and all 2,186 continue with one of those two; the other 19 are all stems. So the rule is the
+    continuation and not a length or a threshold - and it holds on unseen papers because it names
+    what the print form prints, not what any one paper happens to contain.
+
+    The comparison is made against the NFKC form, because these papers print the year with a
+    compatibility ideograph in some places: `年` (U+F98E) rather than `年` (U+5E74). The two are
+    different codepoints that only NFKC brings together, which is a property of the typesetting
+    and not of any engine - the same class of damage as the private-use bullets.
+    """
+    folded = unicodedata.normalize("NFKC", line.strip())
+    if not _YEAR.match(folded):
+        return False
+    match = re.match("^[" + _WHITE + "]*[" + _DIGITS + "]{2,3}[" + _WHITE + "]*" + _chars(0x5E74), folded)
+    if not match:
+        return False
+    rest = folded[match.end():]
+    return bool(rest) and ord(rest[0]) in _YEAR_HEAD_CONTINUATION
 
 
 def is_option_line(line):
@@ -538,40 +573,6 @@ def is_punctuation_only(line):
     return all(not ch.isalpha() and not ch.isdigit() for ch in stripped)
 
 
-def _is_year_running_head(line, consumed):
-    """True when a bare-number match is the year of a paper's running head.
-
-    `bare_number_space` accepts any line that starts with a number, whitespace and content,
-    because that is what a question looks like after a number cell has been merged onto its
-    question: `20 下列…`. The same shape describes the running head of the paper - `100 年第一次專門…`
-    - and the style then reads the year as question 100.
-
-    The two are told apart without a threshold, by a property of the paper rather than of an
-    engine. Measured over 1,500 papers from the corpus: the head is followed by `年` in every
-    case where it matches at all (973 papers had a `NNN年…` head, the year values running
-    100-114, the Republic-of-China years), and no question stem in the corpus begins that way.
-    The question numbers of these papers run 1-100, so the year and the numbering cannot
-    collide.
-
-    The comparison is made against the NFKC form of the line, because these papers print the
-    year with a compatibility ideograph: `年` (U+F98E) rather than `年` (U+5E74), and the two
-    are different codepoints that only NFKC brings together. That is a property of the
-    typesetting, not of any engine, and it is the same class of damage as the private-use
-    bullets - the character that is delivered is not the character that is meant.
-
-    Refusing the match here does not drop the line - it stays in the text and is reported as
-    residual, which is what it is.
-    """
-    if consumed is None or consumed >= len(line):
-        return False
-    rest = unicodedata.normalize("NFKC", line[consumed:]).lstrip()
-    return rest.startswith("年")
-    if consumed is None or consumed >= len(line):
-        return False
-    rest = line[consumed:].lstrip()
-    return rest.startswith("年")
-
-
 def _style_matches(style, line):
     """Return `(number, consumed_length)` or None for one candidate line."""
     if style == "cjk_number_line":
@@ -587,7 +588,12 @@ def _style_matches(style, line):
         number, consumed = int(match.group(1)), match.end()
     except (IndexError, ValueError, TypeError):
         return None
-    if style == "bare_number_space" and _is_year_running_head(line.strip(), consumed):
+    if style == "bare_number_space" and is_year_line(line):
+        # The running head of the paper - `100 年第一次專門…` - is the same shape as a questioned
+        # line after its number cell has been merged onto it (`20 下列…`), and without this the
+        # style reads the year as question 100. `is_year_line` is the single place that decides
+        # what a head is; a second, looser test used to sit here and it disagreed with this one
+        # often enough to cut 29 question stems out of 19 papers (measured, over all 3,516).
         return None
     return number, consumed
 

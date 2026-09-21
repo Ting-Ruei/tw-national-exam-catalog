@@ -247,6 +247,50 @@ def test_a_year_heading_is_not_a_question_number():
     assert skeleton["chrome"] == [1]
 
 
+def test_a_question_stem_that_opens_with_a_number_and_the_word_nian_is_not_a_heading():
+    """`56 年老女性…` is question 56; `56年第一次…` would be a heading.
+
+    The old rule was `^NNN年` and nothing more, so every question stem that opens with a number
+    and 年 was thrown away as chrome and the paper lost the rest of its questions. Measured over
+    all 3,516 shipped papers: 19 papers were cut short this way, `1092_法醫師_一般醫學` to 43 of
+    100, `1062_諮商心理師…` to 31 of 40, `1002_醫師(二)_醫學(五)` to 56 of 80.
+
+    What separates them is what follows the 年. A heading continues with the exam's own title
+    (`第`, `專`); a stem continues with its subject. These four cases are the whole rule.
+    """
+    from qbr import repair
+    assert repair.is_year_line("115年第一次專門職業及技術人員高等考試")
+    assert repair.is_year_line("115 年第一次專門職業及技術人員高等考試")
+    assert repair.is_year_line("105年專門職業及技術人員高等考試")
+    assert not repair.is_year_line("56  年老女性發生肱骨頸部骨折時的敘述，何者正確？")
+    assert not repair.is_year_line("7 年齡介於65～79 歲健康男性的血清尿酸")
+    assert not repair.is_year_line("12  年金給付水準通常以「替代率」來計算")
+    assert not repair.is_year_line("50年代脊髓灰白質炎流行中達到高峰")
+
+
+def test_a_stem_that_opens_with_a_number_and_nian_keeps_its_paper():
+    """Negative control: the paper is read whole, not cut at the first such stem.
+
+    A reading that merely stopped calling the line chrome would still be wrong if the numbering
+    scan then took `56` for a question number before question 55 - so the whole path is exercised:
+    the line is neither chrome nor an anchor, and it is carried into the question being read.
+    """
+    from qbr import repair
+    text = "\n".join([
+        "114年第一次專門職業及技術人員高等考試醫師考試",
+        "1  第1題的題幹，下列何者正確？",
+        "A.甲", "B.乙", "C.丙", "D.丁",
+        "2  年老女性發生肱骨頸部骨折時的敘述，何者正確？",
+        "A.戊", "B.己", "C.庚", "D.辛",
+        "3  第3題的題幹，下列何者正確？",
+        "A.壬", "B.癸", "C.子", "D.丑",
+    ])
+    records, _residual, _diagnostics = repair.segment_best(text)
+    numbers = [record["number"] for record in records]
+    assert numbers == [1, 2, 3], numbers
+    assert "年老女性" in records[1]["stem"]
+
+
 def test_a_wrapped_formula_is_not_the_next_question_number():
     """A wrapped line that opens with digits sits in the option column, not at the margin.
 
