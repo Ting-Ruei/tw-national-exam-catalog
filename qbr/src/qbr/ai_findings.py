@@ -67,7 +67,31 @@ CODES = {
 #: extraction is correct while the PDF text layer is the truncated thing.
 VERDICTS = ("DEFECT", "NOT_EXTRACTION", "OK")
 
-SYSTEM = """你是國考題庫抽取品管員。使用者給你一題「已經被人類標記為有問題」的題目文字。
+#: How the question arrived in front of the model. This is **part of the measurement**, not decoration.
+#:
+#: The prompt was written for the loop, where every question really had been blocked by a person, so
+#: it said so. Then `--all` sent the whole corpus through the same prompt and that sentence became a
+#: **lie**: questions nobody had judged were described as "a human already flagged this". That is
+#: worse than inaccurate, it is leading - it asserts a defect exists and asks for it to be named,
+#: which is precisely how a corpus-wide pass manufactures findings, 79,090 questions at a time.
+#:
+#: A question that arrives because a person rejected it and one that arrives because it is next in the
+#: file are different questions, and the answer means something different in each case. The prompt
+#: has to say which one this is, and the version hash has to change when it does.
+POPULATIONS = {
+    "blocked": {
+        "arrival": "使用者給你一題「已經被人類標記為有問題」的題目文字。",
+        "ask": "這個題目已經被人類標記為「有問題」。請說出你認為哪裡錯了、以及該怎麼修。",
+    },
+    "corpus": {
+        "arrival": "使用者依序給你題庫裡的題目，請你檢查抽取結果有沒有問題。",
+        "ask": "這一題**沒有**被人類標記過——它是整份題庫依序送來的其中一題。"
+               "請自己判斷抽取結果是否正確。**沒有發現異常是正常的答案**：這種情況 verdict 用 OK，"
+               "`what` 用 NONE，不要為了有東西交而把正常的題目說成缺陷。",
+    },
+}
+
+SYSTEM = """你是國考題庫抽取品管員。{arrival}
 你的工作只有兩件：
 
 1. `where`：**哪裡錯了**。指出具體位置（題幹，還是哪一個選項 A/B/C/D），並引用出問題的原文片段。
@@ -127,7 +151,7 @@ USER = """科目：{subject}
 
 {figures}答案：{answer}
 
-這個題目已經被人類標記為「有問題」。請說出你認為哪裡錯了、以及該怎麼修。"""
+{ask}"""
 
 #: What to tell the model about images. It matters because an option that is a picture is stored with
 #: **empty text and an image reference**, and a model shown four empty options reports `MISSING_OPTION`
@@ -214,13 +238,19 @@ def reading_fingerprint(question) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def build_prompt(question, *, learned=None) -> tuple:
+def build_prompt(question, *, learned=None, population="blocked") -> tuple:
     """The system prompt and the user turn. Returned together so a record can store both.
 
     `learned` is optional on purpose. Omitting it is not the same as passing an empty one: a pass
     given prior findings and one that was not are different passes, and the record keeps the prompt
     verbatim so the difference survives.
+
+    `population` says how the question got here, and it is not cosmetic - see `POPULATIONS`. The
+    default is the loop's case (a person blocked it), because that is what the record format was
+    built around; the corpus pass must pass `"corpus"` explicitly so it cannot inherit a claim that
+    a human flagged a question nobody has looked at.
     """
+    framing = POPULATIONS[population]
     codes = "\n".join("- %s：%s" % (code, desc) for code, desc in CODES.items())
     number = question.get("question_number")
     user = USER.format(subject=subject_of(question) or "（未知）",
@@ -229,11 +259,12 @@ def build_prompt(question, *, learned=None) -> tuple:
                        stem=question.get("stem") or "（空白）",
                        options=options_block(question.get("options")) or "（無）",
                        figures=figures_note(question),
-                       answer=answer_of(question) or "（無）")
-    return SYSTEM.format(codes=codes) + learned_note(learned), user
+                       answer=answer_of(question) or "（無）",
+                       ask=framing["ask"])
+    return SYSTEM.format(codes=codes, arrival=framing["arrival"]) + learned_note(learned), user
 
 
-def prompt_version() -> str:
+def prompt_version(population="blocked") -> str:
     """A short hash of the prompt itself, so a change to it is visible in every record.
 
     The loop's whole point is that the prompt is adjusted between batches, which means two records
@@ -246,8 +277,16 @@ def prompt_version() -> str:
     Deliberately hashes `LEARNED` too. The learned block changes what the model is asked to ignore,
     so two runs with different learned blocks are different prompts even though the instructions are
     identical.
+
+    And `population`, because a pass that tells the model "a human flagged this" is not the same
+    measurement as one that tells it "nobody has looked at this yet" - they even ask for different
+    things. Two records that differ only in that sentence must not hash to the same version, or the
+    records most likely to be compared (blocked questions vs the corpus sweep) would look like one
+    consistent measurement.
     """
-    body = "\x00".join([SYSTEM, USER, LEARNED, "\x00".join(sorted(CODES))])
+    framing = POPULATIONS[population]
+    body = "\x00".join([SYSTEM, USER, LEARNED, framing["arrival"], framing["ask"],
+                         "\x00".join(sorted(CODES))])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
@@ -268,7 +307,8 @@ def learned_note(learned) -> str:
 
 
 def make_record(*, question, finding, model, endpoint, prompt_system, prompt_user,
-                raw="", usage=None, seconds=0.0, error=None, created_at=None, learned=None) -> dict:
+                raw="", usage=None, seconds=0.0, error=None, created_at=None, learned=None,
+                population="blocked") -> dict:
     """One finding, with everything needed to check it later.
 
     `prompt_user` is stored verbatim and not regenerated at read time: the point of the record is
@@ -288,7 +328,11 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         # Which generation of the prompt this note belongs to. The prompt is adjusted between batches
         # - that is the loop - so without this field two notes taken before and after a change look
         # like the same measurement and cannot be compared without diffing the stored text by hand.
-        "prompt_version": prompt_version(),
+        "prompt_version": prompt_version(population),
+        # How the question reached the model: a person blocked it, or it was next in the file. A
+        # finding about a blocked question and one about a random corpus question are different
+        # claims with different error rates, so which population it came from is part of the record.
+        "population": population,
         "learned": learned or None,
         "prompt_system": prompt_system,
         "prompt_user": prompt_user,

@@ -94,6 +94,58 @@ def test_a_changed_prompt_is_visible_in_every_record():
     assert with_learned["learned"] == {"FIGURE_MISSING": "已由 disputes 偵測"}
 
 
+def test_the_corpus_pass_does_not_claim_a_human_flagged_the_question():
+    # The prompt was written for the loop, where every question really had been blocked, so it said
+    # a person had flagged it. `--all` then sent the whole corpus through the same words: 79,090
+    # questions nobody had judged were described as already flagged, which asserts a defect exists
+    # and asks for it to be named. A corpus pass that says that about every row is a machine for
+    # manufacturing findings, and the failure would look like a successful sweep of defects.
+    question = _question()
+
+    blocked_system, blocked_user = ai_findings.build_prompt(question, population="blocked")
+    assert "已經被人類標記" in blocked_user
+
+    corpus_system, corpus_user = ai_findings.build_prompt(question, population="corpus")
+    assert "已經被人類標記" not in corpus_system
+    assert "已經被人類標記" not in corpus_user
+    # And it must not merely stay silent about it - silence leaves the model to infer from a prompt
+    # that otherwise asks "what is wrong here". It has to say the opposite, and say that OK is an
+    # acceptable answer, or the model will still feel obliged to produce a defect.
+    assert "沒有" in corpus_user and "OK" in corpus_user
+
+    # The two framings are different questions, so they cannot share a prompt version - otherwise
+    # the records most likely to be compared (blocked questions vs the corpus sweep) would look
+    # like one consistent measurement.
+    assert ai_findings.prompt_version("corpus") != ai_findings.prompt_version("blocked")
+
+
+def test_the_question_population_is_recorded_not_guessed():
+    # The framing must follow how the entry was collected. Here that is asserted on the script's own
+    # `targets`, because the wrong answer came from a flag being re-read at the call site instead of
+    # from the data - and those two can disagree.
+    import ask_about_blocks
+
+    rows = [{"candidate_key": "moex:108030:305:33:1:question:q001", "question_number": 1}]
+    corpus = ask_about_blocks.targets("unused", None, None, everything=True, done=(),
+                                      questions=iter(rows))
+    assert [entry["population"] for entry in corpus] == ["corpus"]
+
+
+def test_make_record_stores_which_population_the_finding_is_about():
+    question = _question()
+    system, user = ai_findings.build_prompt(question, population="corpus")
+    record = ai_findings.make_record(question=question, finding=None, model="m", endpoint="e",
+                                     prompt_system=system, prompt_user=user, population="corpus")
+    assert record["population"] == "corpus"
+    assert record["prompt_version"] == ai_findings.prompt_version("corpus")
+    # A finding about a question a person rejected and one about a random row are different claims
+    # with different error rates; the default keeps the loop's case so old callers do not silently
+    # start describing their findings as corpus findings.
+    default = ai_findings.make_record(question=question, finding=None, model="m", endpoint="e",
+                                      prompt_system=system, prompt_user=user)
+    assert default["population"] == "blocked"
+
+
 def test_the_prompt_version_changes_when_the_prompt_changes():
     # A version that cannot move is not a version. This is the negative control for the field: if
     # `prompt_version` hashed something constant, every assertion above would still pass.

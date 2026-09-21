@@ -204,13 +204,18 @@ def targets(queue_dir: str, only, limit, everything=False, done=(), questions=No
     if everything:
         rows = (questions if questions is not None
                 else repair_loop.load_candidates(os.path.join(queue_dir, "candidates.jsonl")))
+        # `population="corpus"` is set here, where we know the rows came from the file rather than
+        # from a person's block. The prompt must not claim a human flagged these; measured cost of
+        # getting that wrong is a whole-corpus pass priming itself to invent 79,090 defects.
         entries = [{"candidate_key": q.get("candidate_key"), "question": q,
-                    "notes": "", "kinds": [], "paper": repair_loop.paper_of(q.get("candidate_key"))}
+                    "notes": "", "kinds": [], "population": "corpus",
+                    "paper": repair_loop.paper_of(q.get("candidate_key"))}
                    for q in rows]
     else:
         blocked, rows = repair_loop.collect_blocks(queue_dir)
         _explained, unexplained = repair_loop.explain(blocked, rows)
-        entries = [{**entry, "question": rows.get(entry["candidate_key"])} for entry in unexplained]
+        entries = [{**entry, "population": "blocked", "question": rows.get(entry["candidate_key"])}
+                   for entry in unexplained]
     if only:
         wanted = {str(item).lower().lstrip("q").lstrip("0") or "0" for item in only}
         entries = [entry for entry in entries
@@ -297,7 +302,11 @@ def ask_one(entry, *, endpoint, out, args):
     question = entry["question"]
     if not question:
         return None
-    system, user = ai_findings.build_prompt(question, learned=args.learned)
+    # The population decides the prompt's framing, and it must come from how the entry was
+    # collected rather than from a flag re-read here - those two could disagree, and the whole
+    # point of the fix is that the question "did a person block this" is answered by the data.
+    population = entry.get("population") or "blocked"
+    system, user = ai_findings.build_prompt(question, learned=args.learned, population=population)
     parsed, raw, complaint, usage, seconds = ask(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
@@ -305,7 +314,7 @@ def ask_one(entry, *, endpoint, out, args):
     record = ai_findings.make_record(
         question=question, finding=parsed, model=endpoint["name"], endpoint=endpoint["url"],
         prompt_system=system, prompt_user=user, raw="" if parsed else raw, usage=usage,
-        seconds=round(seconds, 1), error=error, learned=args.learned)
+        seconds=round(seconds, 1), error=error, learned=args.learned, population=population)
     ai_findings.append(out, record)
     return {"key": entry["candidate_key"], "finding": parsed, "error": error,
             "seconds": seconds, "raw": raw}
