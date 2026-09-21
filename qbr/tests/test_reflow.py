@@ -181,6 +181,44 @@ def test_a_superscript_stays_with_its_host_cell():
     assert extract.read_spans(cells[0]).startswith("PO")
 
 
+def test_an_offset_run_the_table_cannot_spell_is_reported_instead_of_lost():
+    """Geometry says superscript; Unicode has no superscript period; the run must not vanish.
+
+    This is the measured cause of the flattened formulas a reviewer kept blocking. `read_spans`
+    folds a raised run back into its host line - correct, since the formula must read as one line -
+    and that fold is exactly what destroys the evidence. So the run is recorded while the spans
+    still exist.
+    """
+    from qbr import extract
+    spans = [
+        {"text": "C=80e", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "-0.35t", "size": 7.0, "bbox": (40, 1, 60, 8)},
+    ]
+    found = extract.refused_offsets(spans)
+    assert [item["text"] for item in found] == ["-0.35t"]
+    assert found[0]["kind"] == "sup" and found[0]["blockers"] == ["."]
+    # And the reading really did drop the offset: that is why the evidence has to be kept.
+    assert "⁻" not in extract.read_spans(spans)
+
+
+def test_small_print_at_a_low_baseline_is_not_a_flattened_offset():
+    """The negative control: `dextrose`, `P`, `D`, `M`, `β` must not be reported.
+
+    These are geometrically lowered - sitting in a small face a little below the baseline - and the
+    offset table also refuses them. But they are table entries and single-letter abbreviations, not
+    formulas, and calling them subscripts would be inventing an offset. Measured on the same paper
+    as the true class: six genuine flattened formulas, five of these.
+    """
+    from qbr import extract
+    spans = [
+        {"text": "glucose", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "dextrose", "size": 7.0, "bbox": (40, 8, 70, 15)},
+        {"text": "P", "size": 7.0, "bbox": (70, 8, 75, 15)},
+        {"text": "M", "size": 7.0, "bbox": (75, 8, 80, 15)},
+    ]
+    assert extract.refused_offsets(spans) == []
+
+
 # --- the paper states its own structure -----------------------------------------------------
 # The skeleton reads only what the paper prints. These tests fix the two ways it was wrong before
 # the corpus was measured, because both were silent: the first made an entire year unreadable and

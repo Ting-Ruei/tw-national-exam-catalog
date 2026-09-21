@@ -568,7 +568,12 @@ def stage_records(parsed, gate, table, sheets, meta, registry_key, review_status
         rows.append(package.build_question(
             item, meta=meta, answer=labels, registry_key=registry_key,
             answer_source=source, flags=flags, review_status=review_status,
-            answer_text=answer_text))
+            answer_text=answer_text,
+            # The formula runs the page says are offsets and Unicode cannot spell. They travel with
+            # the question all the way to the reviewer's screen for the same reason `lost_glyphs`
+            # does: the defect is at a place on the paper, and the place is the useful half of the
+            # report. The name is the same one the extractor used, so there is one spelling of it.
+            extra_metadata={"flattened_offsets": item.get("flattened_offsets") or None}))
     return rows, sources
 
 

@@ -85,6 +85,12 @@ KINDS = {
     "dangling-answer": ("blocker", "答案指到的選項不存在"),
     "option-shape": ("blocker", "選項數與紙本宣示不符"),
     "lost-glyph": ("review", "紙本有字，文字層拼不出來"),
+    # The paper prints a formula with a raised or lowered run, and the offset table has no form for
+    # a character inside it, so the whole run comes out flat: `C=80e-0.35t` instead of `80e⁻⁰·³⁵ᵗ`.
+    # The run is *measured on the page* (`extract.refused_offsets`) and carried here, because after
+    # the text is read a flattened formula and a flat one are the same string - `disputes.py` is
+    # PDF-free by design, so this module can only report the evidence the extractor kept.
+    "flattened-offset": ("review", "公式的上下標被印成平的（文字層無此形式）"),
     "substituted-ideograph": ("review", "文字層存的是另一個字，讀者看到錯的字"),
     "substituted-script": ("review", "文字層存的是別國字元，讀者看到亂碼"),
     "unresolved-mark": ("review", "紙本定義的記號無法對照"),
@@ -284,6 +290,20 @@ def of_question(question, *, alphabet_size=None, engine_counts=None, option_imag
     if lost:
         out.append(_d("lost-glyph", question.get("lost_glyph_note") or "字形遺失",
                       glyphs=lost))
+
+    # 4b. The paper prints a formula whose offset cannot be spelled, so the run came out flat.
+    #
+    # The evidence is geometric and was gathered while the page existed, because there is no
+    # text-only way to find this: `e-0.35t` with the exponent raised and `e-0.35t` printed flat are
+    # the same string once read. Measured - the class the reviewer kept blocking and the model kept
+    # naming, six runs on `1051_藥師(一)_藥劑學`, every one of them blocked by `.` or `/`.
+    flattened = question.get("flattened_offsets") or []
+    if flattened:
+        runs = [str(item.get("text") or "") for item in flattened if item.get("text")]
+        if runs:
+            out.append(_d("flattened-offset",
+                          "公式 %s 的上下標被印成平的（Unicode 無此形式）" % "、".join(runs),
+                          runs=runs))
 
     # 5. The paper defines a mark that the reading could not resolve into the paper's own words.
     legend = question.get("subitem_legend") or {}

@@ -198,6 +198,10 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         # reviewer can fix it against the paper; the character is never guessed at.
         "lost_glyphs": subitems.lost_glyphs(lost_source, legend) or None,
         "lost_glyph_note": subitems.describe_lost_glyphs(lost_source, legend),
+        # Formula runs the page's geometry says are offsets and Unicode cannot spell, carried out of
+        # the extraction because they cannot be found afterwards. Read from `metadata` under the same
+        # name the extractor wrote, so there is one spelling of the field from page to screen.
+        "flattened_offsets": metadata.get("flattened_offsets") or None,
         # The places where the reading is **not settled**. Filled in by `write_candidates`, which is
         # the only place that sees the whole paper at once - a `dangling-answer` needs the options,
         # and an `engine-disagreement` needs the paper's two counts. A question with no disputes

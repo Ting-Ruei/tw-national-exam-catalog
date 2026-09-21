@@ -63,6 +63,25 @@ _OFFSET_SUB_MIN_DCY_SMALL = 0.8
 
 _OFFSET_WHITESPACE = frozenset(" \t\u00a0")
 
+#: Characters that sit **inside a formula the paper prints as an offset**, but for which Unicode has
+#: no raised or lowered form. These are the reason a whole run comes out flat.
+#:
+#: This is the measured cause of the class a reviewer kept blocking and the model kept naming
+#: `SUPERSCRIPT_FLATTENED`. On `1051_藥師(一)_藥劑學(包括生物藥劑學)` the geometry says six runs are
+#: superscripts and the table refuses all six; the only characters blocking them are `.` (seven
+#: occurrences) and `/` (one). The papers print `C=80e-0.35t` with `-0.35t` raised, and there is no
+#: superscript period in Unicode, so `_mappable_offset` returns False, `_offset_kind` returns None,
+#: and the reader is shown `e-0.35t` - a formula that has lost its layer. Same for a subscript
+#: fraction `1/2`.
+#:
+#: What is **not** here matters as much: `dextrose`, `P`, `D`, `M`, `β` are also geometrically
+#: lowered and also refused, and they are *not* this class - they are small print at a slightly low
+#: baseline (table entries, single-letter abbreviations), and calling them subscripts would be
+#: inventing an offset. The distinction is not the letter vs the punctuation: it is that the
+#: punctuation sits **inside a run that is otherwise a formula** (it contains a digit), while those
+#: words are not formulas at all. Hence the second condition in `refused_offsets` below.
+_OFFSET_BLOCKING_PUNCTUATION = frozenset(".,/·×÷")
+
 _SUP_MAP = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
             "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
             "+": "\u207a", "-": "\u207b", "\u2212": "\u207b", "=": "\u207c",
@@ -204,32 +223,21 @@ def _mappable_offset(text, kind):
     return mappable
 
 
-def _offset_kind(span, *, body_centre, body_size):
-    """`"sup"`, `"sub"`, or None for a span that sits on the baseline.
+def _offset_direction(span, *, body_centre, body_size):
+    """`"sup"`, `"sub"`, or None from geometry alone - before asking whether it can be spelled.
 
-    A run is an offset only when it is smaller than the line's body, shifted well clear of the
-    baseline, **and made only of characters that have an offset form**. All three are required,
-    and the third is what keeps ordinary small text out: this corpus sets `A.`/`B.` option
-    markers and whole English phrases in a smaller face, and they sit at ratios the size floor
-    admits. Measured over the four categories - 145,639 spans smaller than their line's body -
-    the runs at |shift| >= 2.5 that are entirely offset characters are the chemical formulas
-    (`₃` in `CH₃`, `₂` in `H₂O`, `₄` in `NH₄Cl`, `ₚ` in `Kₚ`, `⁻` in `10⁻⁵`), and 1,617 of the
-    1,664 that are not are option markers and prose. Requiring the mapping also means a run this
-    rule cannot express is left exactly as the paper printed it, rather than half-converted.
+    Split out of `_offset_kind` because two different questions had been fused into one answer.
+    "Where does this run sit" is a fact about the page; "can Unicode spell that" is a fact about the
+    offset table. Fusing them threw the first away whenever the second said no, and the first is
+    exactly the evidence a flattened formula needs - measured on the pharmacist paper, six runs are
+    geometrically offsets and the table can spell none of them. Returning the direction even when
+    the table refuses is what lets `refused_offsets` report the run instead of silently printing it
+    flat. The three size/shift tests are the ones documented in the old docstring, unchanged.
     """
     size = float(span.get("size") or 0.0)
     text = (span.get("text") or "").strip()
     if not body_size or not size or size >= body_size * _OFFSET_MAX_SIZE_RATIO:
         return None
-    # Every character has to have an offset form. `any` was tried first and it corrupts text: a
-    # span mixing mappable and unmappable characters gets *half* converted, and measured over the
-    # corpus that turned the digits of ordinary numbers into superscripts - `41.` became `⁴¹.`,
-    # `1c` became `₁c`, `-0.2t` became `⁻⁰.²t`, 240 spans in all. Requiring all of them means a run
-    # this rule cannot express is left exactly as the paper printed it. The cost is measurable and
-    # was measured: 4,546 runs convert and 4,550 do not, and the ones that do not are the corpus's
-    # option markers (`A.`/`B.`/`C.`/`D.`, which must not convert), `®`, and the chemical symbols
-    # that have no subscript form at all (`max`, `p`, `M`, `Cr`). Leaving those alone is honest;
-    # half-converting them is not.
     if not text:
         return None
     delta = _span_centre(span) - body_centre
@@ -242,15 +250,99 @@ def _offset_kind(span, *, body_centre, body_size):
     # each branch carries the thresholds measured for its own style.
     small = size < body_size * _BODY_SIZE_RATIO
     if delta <= (_OFFSET_SUP_MAX_DCY_SMALL if small else _OFFSET_SUP_MAX_DCY):
-        kind = "sup"
-    elif delta >= (_OFFSET_SUB_MIN_DCY_SMALL if small else _OFFSET_SUB_MIN_DCY):
-        kind = "sub"
-    else:
+        return "sup"
+    if delta >= (_OFFSET_SUB_MIN_DCY_SMALL if small else _OFFSET_SUB_MIN_DCY):
+        return "sub"
+    return None
+
+
+def _offset_kind(span, *, body_centre, body_size):
+    """`"sup"`, `"sub"`, or None for a span that sits on the baseline.
+
+    A run is an offset only when it is smaller than the line's body, shifted well clear of the
+    baseline, **and made only of characters that have an offset form**. All three are required,
+    and the third is what keeps ordinary small text out: this corpus sets `A.`/`B.` option
+    markers and whole English phrases in a smaller face, and they sit at ratios the size floor
+    admits. Measured over the four categories - 145,639 spans smaller than their line's body -
+    the runs at |shift| >= 2.5 that are entirely offset characters are the chemical formulas
+    (`₃` in `CH₃`, `₂` in `H₂O`, `₄` in `NH₄Cl`, `ₚ` in `Kₚ`, `⁻` in `10⁻⁵`), and 1,617 of the
+    1,664 that are not are option markers and prose. Requiring the mapping also means a run this
+    rule cannot express is left exactly as the paper printed it, rather than half-converted.
+
+    When the mapping refuses, the run's *direction* is still known - `refused_offsets` reads it
+    through `_offset_direction` and reports the run, so the information is not lost even though this
+    function's answer is None.
+    """
+    text = (span.get("text") or "").strip()
+    kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
+    if kind is None:
         return None
     # The run is an offset geometrically; now ask whether it can be *said* as one. Refusing here
     # leaves the run exactly as the paper printed it rather than half-converted, which is the rule
     # `41.` and `HbA1c` depend on.
     return kind if _mappable_offset(text, kind) else None
+
+
+def refused_offsets(spans):
+    """Runs the page's geometry calls offsets and the offset table cannot say, with their address.
+
+    Returns a list of `{"text", "kind", "blockers", "bbox", "size", "why"}`, one per run.
+
+    This is evidence a later stage can act on, and it has to be gathered **here**, where the page
+    still exists. Once the text has been read, `e-0.35t` (a formula that lost its layer) and
+    `e-0.35t` (a formula the paper printed flat) are the same string - no text-only rule can tell
+    them apart, which is why `disputes.py` cannot detect this class and why this function exists.
+    It is the same shape as `lost_glyphs`: a defect whose evidence is on the paper, reported at the
+    position it occurs, with the character never guessed at.
+
+    The run is returned **only when it looks like a formula** - it contains a digit, and every
+    character blocking it is one Unicode prints no offset for but a formula contains. A run blocked
+    by an ordinary letter (`dextrose`, `P`, `D`, `M`, `β`) is small print at a low baseline, not a
+    flattened offset, and reporting it would make the class fire on every table in the corpus.
+    Measured on the pharmacist paper above: six runs kept (`-1.5t`, `-1.386t`, `-0.0866t`, `-0.1t`,
+    `-0.46t`, `1/2`), five refused (`dextrose`, `P`, `D`, `M`, `β`).
+    """
+    if not spans:
+        return []
+    body_size = float(_body_size(spans) or 0.0)
+    body = [span for span in spans
+            if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
+    if not body:
+        return []
+    body_centre = _body_centre(body)
+    found = []
+    for span in spans:
+        text = (span.get("text") or "").strip()
+        kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
+        if kind is None or not text:
+            continue
+        if _mappable_offset(text, kind):
+            continue
+        table = _SUP_MAP if kind == "sup" else _SUB_MAP
+        blockers = [char for char in text
+                    if char not in table and char not in _OFFSET_WHITESPACE]
+        if not blockers:
+            continue
+        # The run has to be a formula for this to be a flattened offset rather than small print.
+        if not any(char.isdigit() for char in text):
+            continue
+        if not all(char in _OFFSET_BLOCKING_PUNCTUATION for char in blockers):
+            continue
+        found.append({"text": text, "kind": kind, "blockers": blockers,
+                      "bbox": list(span.get("bbox") or (0, 0, 0, 0)),
+                      "size": float(span.get("size") or 0.0),
+                      "why": "offset-table-cannot-express"})
+    return found
+
+
+def refused_offsets_of_page(spans):
+    """`refused_offsets` grouped per visual line, so a caller can say which line it was on."""
+    out = []
+    for line in group_visual_lines(spans):
+        for item in refused_offsets(line):
+            box = item["bbox"]
+            out.append(dict(item, y0=min(float(box[1]), float(box[3]))))
+    return out
 
 
 # A horizontal gap wider than this fraction of the type size separates two items; a gap
@@ -624,6 +716,13 @@ def extract_lines_a(path):
                     "size": float(body.get("size", 0.0) or 0.0),
                     "block": -1,
                     "line": line_index,
+                    # Gathered while the spans still exist. `read_spans` folds a raised run back
+                    # into its host line so the formula reads as one line - which is right, and is
+                    # also what destroys the evidence that the run *was* raised. A run the offset
+                    # table cannot spell is therefore recorded here, at the one moment its geometry
+                    # is visible; after this the reader's string and a genuinely flat formula are
+                    # indistinguishable.
+                    "flattened_offsets": refused_offsets(spans),
                 }
             )
     document.close()

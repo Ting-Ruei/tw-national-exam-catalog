@@ -96,6 +96,31 @@ def test_all_four_options_empty_is_a_shape_dispute_not_four_empty_options():
 
 # ------------------------------------------------------------------- lost glyphs
 
+def test_a_flattened_offset_is_a_dispute_with_the_formula_it_hit():
+    # The class the reviewer kept blocking and the model kept naming `SUPERSCRIPT_FLATTENED`. The
+    # paper prints `C=80e-0.35t` with `-0.35t` raised; Unicode has no superscript period, so the
+    # offset table refuses the whole run and the reader sees it flat. Nothing else can find this -
+    # after the text is read, a flattened formula and a flat one are the same string - so the fact
+    # is carried out of the page and the dispute reports it with the run's own text.
+    raised = _q(flattened_offsets=[{"text": "-0.35t", "kind": "sup", "blockers": ["."],
+                                    "why": "offset-table-cannot-express"}])
+    kinds = {d["kind"] for d in disputes.of_question(raised)}
+    assert "flattened-offset" in kinds
+    found = [d for d in disputes.of_question(raised) if d["kind"] == "flattened-offset"][0]
+    assert found["runs"] == ["-0.35t"] and "-0.35t" in found["detail"]
+
+    # Negative control: no evidence means no dispute. A rule that fires on every question would
+    # look exactly like a rule that finds every flattened formula.
+    clean = {d["kind"] for d in disputes.of_question(_q())}
+    assert "flattened-offset" not in clean
+
+
+def test_a_flattened_offset_dispute_is_a_review_not_a_blocker():
+    # It is a defect, but not one that makes the question unreadable: the formula is on the paper
+    # and a person can fix the reading against it. A blocker would quarantine the paper.
+    severity, _note = disputes.KINDS["flattened-offset"]
+    assert severity == "review"
+
 def test_a_lost_glyph_is_a_dispute_with_its_address():
     """字形遺失是已知位置的真缺陷，必須帶著位址，而且不得猜字。"""
     question = _q(lost_glyphs=[{"in": "轉氨", "position": 3}],
