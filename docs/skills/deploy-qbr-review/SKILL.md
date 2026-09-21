@@ -190,8 +190,39 @@ scripts/pull_station_reviews.sh --dry-run  # say what would happen
 
 It backs up the laptop's copy (`.pre-pull-<stamp>.jsonl`) before overwriting, and refuses to act at
 all when the station is unreachable — *rather than overwrite a human record with a file whose
-provenance is unknown*. The reverse direction is deliberately **not** implemented: it would make the
-laptop a second writer, which is the defect.
+provenance is unknown*.
+
+### The other direction: inspect on the laptop, push the correction back
+
+The station is the home, but the loop the reviewer actually wants is *pull a copy, fix it, push the
+new version back*. That direction exists, and it is not `scp`:
+
+```sh
+scripts/push_reviews_to_station.sh            # append-only: station ← laptop
+scripts/push_reviews_to_station.sh --dry-run  # say how many events would be appended
+```
+
+**It only ever appends the events the station does not already have.** Someone may have kept
+reviewing on the station (a lab computer does exactly this) while the laptop held a copy, and
+transferring the file over would delete their work silently. The server's own write is `open("a")`
+(`serve_question_review_ui.py:3993`) and it reloads when the file signature changes (`:2560`), so
+appending to a running server is what it already supports — no restart, no second writer.
+
+It refuses to act when the station is unreachable, and when the station's record has *fewer* lines
+than the laptop's (the home should never be the smaller one — that means something was deleted and
+is worth understanding before writing anything). It backs up the station's log to
+`~/qbr-review/backups/question_review_events.pre-push-<stamp>.jsonl` **before** appending, on the
+station rather than the laptop, so the backup survives a failure of the laptop's connection.
+
+**Event identity is content, not bytes.** The queue builder adds `_carried_from` when it carries a
+record forward, so the same decision is a *different string* in two queues. Comparing whole lines is
+therefore wrong, and measured wrong: station 347 lines, laptop 346 lines, and whole-line comparison
+said "append 151 lines" — re-writing 151 decisions a person had already made. The rule is
+`review_queue.record_identity` (the record's content minus `_carried_from`) and it is written
+**once**; `merge_events.py` uses it, and so does `build_review_queue.py`. A hand-rolled second
+definition in the shell is how a review record goes missing, which is why `test_merge_events.py`
+asserts both directions of the mistake (an empty exclusion set → 2 failures; keying on
+`candidate_key` → 1 failure).
 
 ## When something looks wrong — pull evidence from that machine
 
