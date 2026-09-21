@@ -139,6 +139,37 @@ carried 0), and the dedup key included `_carried_from`, so every rebuild re-adde
 - If a dispute looks wrong, it is a measurement to check, not an opinion to argue with:
   `qbr/src/qbr/disputes.py`. `null` means "none computed"; `[]` never occurs.
 
+## 註記（只加註記，C）—— 一個「不是決定」的事件
+
+**這個功能原本是壞的，而且壞得看不出來。** `reasonBox` 一直在 DOM 裡，但 `.on` 這個 class
+在整個檔案裡**只被移除、從來沒有被加上**（`classList` 只有三處，全是 remove），所以那個 textarea
+永遠 `display:none`——`reasonText.value` 在每一次決定時都是空的，**每一則打進去的註記都被靜默丟掉**。
+這就是「註記為了速度被省略」的真相：不是選擇，是 class 從來沒被打開。
+
+所以註記現在是**刻意打開的**（按鈕 `只加註記` 或 `C`），而不是每題都攤在畫面上：快速走過去的人
+不會被一個框吸走注意力。儲存時送 `comment` 事件。
+
+**加這個功能時最容易做錯的地方，是它會把決定吃掉。** 事件日誌以**最新事件**當作題目的狀態，
+所以在 `確認正常` 之後存一則註記，會把那個接受**撤掉**（`comment` 不在 `QUESTION_READY_ACTIONS` 裡），
+題目就從正式題庫掉出去——而沒有任何人決定任何事。`correct` 一直都有做「重申底下那個決定」這件事，
+註記必須做同一件事；現在兩者走同一個 `_reaffirm_standing_action`，四個重複的 `correct`-only 區塊
+都刪了（**一條規則，一個地方**）。在**還沒決定**的題目上寫註記，它就只是一則註記——它不會
+把任何東西升級，因為只有 `accept`/`unblock` 會讓題目變成 ready。
+
+前端把 `comment` **故意排除在 verdict map 之外**：在快速走過去的時候加註記，不可以把題目標成已過目
+而讓動線跳過它。註記顯示在題目旁邊（`noteShown`）——看不到第二次的註記，就是會被寫第二次的註記。
+
+**驗收：「框存在」和「審核者打得開」是兩個不同的主張。**
+
+```bash
+python3 -m unittest tests.test_review_ui_note          # 12 項，3 個負向對照會紅
+node scripts/test_v2_note_browser.mjs http://127.0.0.1:<port>   # 真 Chrome，跑真佇列
+```
+
+後者用 CDP 驅動**頁面自己的** click 與 save 處理函式，檢查框真的開得起來、吃得到游標、存得下去、
+重載還在，**而且不算已過目**。在真的 79,090 題佇列上跑：11 項全過。截圖上寫完一則註記後計數器
+仍然是 `0 / 80 已過目`。
+
 ## Reporting a defect to the pipeline
 
 The UI shows what the pipeline built. When a question looks wrong here, the fix usually belongs in
