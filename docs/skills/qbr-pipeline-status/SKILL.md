@@ -443,6 +443,7 @@ PY
 #   flash-next  http://192.168.10.90:8888/v1   qwen3.8-flash-next        Bearer mtplx
 #   ornith 35b  http://127.0.0.1:18120/v1      ornith-1.5-mtplx-35b      Bearer mtplx
 #   27B-Splash  http://127.0.0.1:8088/v1       incoai/Qwen3.8-27B-Splash （他專案使用中）
+#               權重路徑是 /Users/tim/models/qwen38-27b/splash（不是 models/qwen38/splash）
 #   ornith 若沒開：models/ornith/bin/ornith start 35b
 
 .venv/bin/python scripts/ask_option_continuation.py --engine flash --papers 8 --limit 10
