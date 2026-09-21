@@ -130,6 +130,15 @@ QUESTION_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "exclud
 ANSWER_REVIEW_ACTIONS = {"accept", "correct", "needs_review", "block", "unblock", "comment", "reviewed", *RESET_REVIEW_ACTIONS}
 QUESTION_READY_ACTIONS = {"accept", "unblock"}
 ANSWER_READY_ACTIONS = {"accept", "unblock"}
+#: Actions that record something *about* a question rather than a verdict on it. A note must not become
+#: the question's latest decision: `comment` is not in `QUESTION_READY_ACTIONS`, so a note written after
+#: `確認正常` would flip the projection to "needs another look" and drop the question out of the formal
+#: set without anyone having decided anything. The event therefore keeps the action that stands - see
+#: `_reaffirm_standing_action`.
+NOTE_ACTIONS = {"comment"}
+#: The actions a note or a correction may re-state. It is the set `correct` already used, given one name
+#: so a note and a correction cannot drift apart in how they treat the decision underneath.
+STANDING_ACTIONS = {"accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"}
 HUMAN_SUPERSEDES_AI_ACTIONS = {"accept", "unblock", "block", "needs_review", "exclude", "reviewed", "correct"}
 PHARMACIST_TRACK_FILTER = "__pharmacist_track__"
 # These are UI-only filters.  The official category name remains unchanged in
@@ -2089,6 +2098,31 @@ def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None
         "lane_findings": findings_by_lane,
         "lane_results": lane_results,
     }
+
+
+def _reaffirm_standing_action(event: dict[str, Any], previous: dict[str, Any] | None) -> None:
+    """Keep a note or a correction from replacing the decision it is attached to.
+
+    A correction has always done this; a note has to do the same thing for the same reason. Both say
+    something *about* a question, and neither is a verdict on it - but the event log keeps the latest
+    event as the question's state, so an unreaffirmed `comment` would silently withdraw an `accept`
+    from the formal set (`comment` is not in `QUESTION_READY_ACTIONS`) and make an annotated question
+    look unreviewed again. So the event keeps the action that stands, and `comment` is left as the
+    action only when there is no decision yet - where it promotes nothing, because nothing but
+    `accept`/`unblock` ever marks a question ready.
+    """
+    action = event.get("action")
+    if action not in NOTE_ACTIONS and action != "correct":
+        return
+    if action == "correct":
+        event.setdefault("correction_action", "save")
+    else:
+        event.setdefault("note_action", "note")
+    previous_action = (previous or {}).get("action")
+    if previous_action in STANDING_ACTIONS:
+        event["action"] = previous_action
+    elif action == "correct":
+        event["action"] = "reviewed"
 
 
 class ReviewState:
@@ -8100,11 +8134,8 @@ filtered_sheets AS (
         event = dict(event)
         key = event.get("candidate_key")
         feedback_before = self._feedback_before_snapshot(str(key or "")) if event.get("correction") else None
-        if event.get("action") == "correct":
-            previous = self.current_question_review(str(key or ""))
-            previous_action = previous.get("action") if previous else None
-            event.setdefault("correction_action", "save")
-            event["action"] = previous_action if previous_action in {"accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"} else "reviewed"
+        if event.get("action") in (NOTE_ACTIONS | {"correct"}):
+            _reaffirm_standing_action(event, self.current_question_review(str(key or "")))
         event.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
         sql_storage = self._insert_sql_question_review_event(event)
         jsonl_storage = self._legacy_jsonl_storage(self.review_log, event)
@@ -8153,13 +8184,8 @@ filtered_sheets AS (
             key = str(event.get("candidate_key") or "")
             if not key:
                 continue
-            if event.get("action") == "correct":
-                previous = self.current_question_review(key)
-                previous_action = previous.get("action") if previous else None
-                event.setdefault("correction_action", "save")
-                event["action"] = previous_action if previous_action in {
-                    "accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"
-                } else "reviewed"
+            if event.get("action") in (NOTE_ACTIONS | {"correct"}):
+                _reaffirm_standing_action(event, self.current_question_review(key))
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:
@@ -8209,11 +8235,8 @@ filtered_sheets AS (
         event = dict(event)
         key = event.get("candidate_key")
         feedback_before = self._feedback_before_snapshot(str(key or "")) if "corrected_answer" in event else None
-        if event.get("action") == "correct":
-            previous = self.latest_answer_reviews.get(key or "")
-            previous_action = previous.get("action") if previous else None
-            event["correction_action"] = "save"
-            event["action"] = previous_action if previous_action in {"accept", "needs_review", "block", "unblock", "comment", "reviewed"} else "reviewed"
+        if event.get("action") in (NOTE_ACTIONS | {"correct"}):
+            _reaffirm_standing_action(event, self.latest_answer_reviews.get(key or ""))
         event.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
         sql_storage = self._insert_sql_answer_review_event(event)
         jsonl_storage = self._legacy_jsonl_storage(self.answer_review_log, event)
@@ -8250,7 +8273,7 @@ filtered_sheets AS (
     def append_answer_reviews_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized_events: list[dict[str, Any]] = []
         latest_for_correct: dict[str, dict[str, Any]] = {}
-        if any(event.get("action") == "correct" for event in events):
+        if any(event.get("action") in (NOTE_ACTIONS | {"correct"}) for event in events):
             keys = [str(event.get("candidate_key") or "") for event in events if event.get("candidate_key")]
             if self.sql_review_enabled:
                 latest_for_correct, _counts, _reset = self._sql_latest_event_maps(
@@ -8266,11 +8289,8 @@ filtered_sheets AS (
             key = str(event.get("candidate_key") or "")
             if not key:
                 continue
-            if event.get("action") == "correct":
-                previous = latest_for_correct.get(key) or {}
-                previous_action = previous.get("action") if previous else None
-                event["correction_action"] = "save"
-                event["action"] = previous_action if previous_action in {"accept", "needs_review", "block", "unblock", "comment", "reviewed"} else "reviewed"
+            if event.get("action") in (NOTE_ACTIONS | {"correct"}):
+                _reaffirm_standing_action(event, latest_for_correct.get(key))
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:

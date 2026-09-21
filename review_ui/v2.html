@@ -208,13 +208,26 @@
   .act.hold:hover { background:#fff8e8; border-color:var(--amber); color:var(--amber); }
   .act.block:hover { background:#fdf0ef; border-color:var(--red); color:var(--red); }
   .act.save { border-color:var(--blue); background:var(--blue); color:#fff; }
+  .act.note { border-color:var(--muted); color:var(--muted); }
+  .act.note:hover, .act.note.on { background:#f4f5f7; color:var(--ink); }
   .act:disabled { background:var(--canvas); }
   .hint { color:var(--muted); font-size:12px; }
+  /* The note box is opened by `只加註記`, not shown under every question. While it is open it says
+     which decision the note attaches to, because a note written after `確認正常` must not look like
+     the reviewer is changing their mind. */
   .reason { display:none; width:100%; }
   .reason.on { display:block; }
+  .reason .noteFor { font-size:11.5px; color:var(--muted); margin:0 0 4px; }
   .reason textarea {
     width:100%; min-height:52px; padding:9px 11px;
     border:1px solid var(--amber); border-radius:8px; resize:vertical; outline:none;
+  }
+  .reason textarea:disabled { background:var(--canvas); color:var(--muted); }
+  /* The note the reviewer already wrote, shown with the question it is about. It is not a verdict, so
+     it is drawn in the muted colour: a note must not look like a decision. */
+  .noteShown {
+    margin-top:10px; padding:8px 11px; background:#fbf9f2; border-left:3px solid var(--amber);
+    border-radius:0 8px 8px 0; font-size:13px; color:var(--ink); white-space:pre-wrap;
   }
 
   .empty { display:grid; place-items:center; height:100%; color:var(--muted); font-size:14px; text-align:center; }
@@ -273,9 +286,11 @@
       <button class="act fix"    id="actFix">修正 <span class="kbd">E</span></button>
       <button class="act hold"   id="actHold">需重看 <span class="kbd">R</span></button>
       <button class="act block"  id="actBlock">阻擋 <span class="kbd">B</span></button>
+      <button class="act note"   id="actNote">只加註記 <span class="kbd">C</span></button>
       <span class="hint" id="stateHint"></span>
       <button class="act save" id="actSave" style="display:none">儲存修正 <span class="kbd">E</span></button>
       <div class="reason" id="reasonBox">
+        <p class="noteFor" id="noteFor"></p>
         <textarea id="reasonText" placeholder="請寫原因（會存進 append-only 紀錄；例如：紙本第 3 頁為『莢膜』，抽出成『莢膜』）"></textarea>
       </div>
     </div>
@@ -289,7 +304,7 @@ const S = {
   view: [],            // the questions of the current scope, before the chips narrow them
   rows: [],            // what the list DRAWS and what W/S WALK - always the same array
   viewPos: new Map(),  // candidate_key -> position in `view`, so the nearest row is O(1)
-  byKey: new Map(), data: null, index: 0, verdict: new Map(),
+  byKey: new Map(), data: null, index: 0, verdict: new Map(), notes: new Map(),
   editing: false, draft: null, paperPath: null,
   // `null` is "not chosen yet" and `''` is "all, chosen deliberately". They are different states
   // and conflating them made every 全部 option unreachable: `refreshScope` saw `''` was not among
@@ -312,7 +327,15 @@ function toast(message, bad) {
 }
 
 const verdictOf = (key) => S.verdict.get(key) || '';
-const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正' };
+// `comment` is a note, not a decision, so it is deliberately **not** in the verdict map: it must not
+// make a question count as 已過目. Notes are kept beside it, because a note the reviewer cannot see
+// again is a note they will write twice - or stop writing.
+const noteOf = (key) => S.notes.get(key) || '';
+const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正', comment: '只加註記' };
+//: The one place that says whether an action is a *verdict on* a question or a *note about* it. The
+//: server applies the same distinction (a note reaffirms the decision it is attached to rather than
+//: replacing it); here it decides whether the question counts as 已過目.
+const NOTE_ACTIONS = new Set(['comment']);
 
 /* ------------------------------------------------------------------- list */
 /* --------------------------------------------------------------- the scope
@@ -361,6 +384,7 @@ function toItem(candidate) {
     // at all. Reading the row is also what makes the list correct on an unseen queue: it is the
     // queue's own statement about the question, not a second opinion about it.
     human_action: rowReviewAction(candidate) || 'unreviewed',
+    note: String((candidate.review || {}).notes || ''),
     reason_codes: [],
     candidate,
   };
@@ -764,8 +788,14 @@ async function applyScope() {
     // every row carries it.
     for (const item of S.view) {
       const action = rowReviewAction(item.candidate);
-      if (action) S.verdict.set(item.candidate_key, action);
+      // A note never makes a question 已過目: it is something written *about* a question, and the
+      // reviewer still has to decide. That is why it is kept in its own map rather than in
+      // `S.verdict` - if it went in there, annotating a question during a fast first pass would
+      // silently mark it read and the walk would skip it.
+      if (action && !NOTE_ACTIONS.has(action)) S.verdict.set(item.candidate_key, action);
       else S.verdict.delete(item.candidate_key);
+      if (item.note) S.notes.set(item.candidate_key, item.note);
+      else S.notes.delete(item.candidate_key);
     }
     S.scopeTotal = S.view.length;
   } catch (error) {
@@ -1056,7 +1086,10 @@ function renderTextSide() {
   const flags = (item.reason_codes || []).filter(Boolean);
 
   $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)}`;
-  $('stateHint').textContent = v ? `已標記：${LABEL[v] || v}` : '';
+  const standing = verdictOf(item.candidate_key);
+  const note = noteOf(item.candidate_key);
+  $('stateHint').textContent = standing ? `已標記：${LABEL[standing] || standing}`
+    : (note ? '只有註記・尚未決定' : '');
 
   const edited = metadata.review_status === 'human_corrected' || (candidate.review?.has_correction);
   const editor = S.editing ? `<div class="edit on" id="editor">${editorHtml(candidate, options)}</div>` : '';
@@ -1073,6 +1106,7 @@ function renderTextSide() {
         <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${esc(option.text)}</span>
       </div>`).join('')}</div>
     ${figureHtml(candidate)}
+    ${note ? `<div class="noteShown">註記：${esc(note)}</div>` : ''}
     ${editor}
     ${S.editing ? '' : evidenceHtml(candidate, metadata)}`;
 
@@ -1240,13 +1274,91 @@ async function go(index) {
   // `image_refs`, and the row's own `review.action`. Nothing here needs a per-question request.
 }
 
+function closeEditor() {
+  S.editing = false;
+  $('actFix').classList.remove('on');
+  $('actSave').style.display = 'none';
+  $('actAccept').style.display = '';
+}
+
 function setEditMode(on) {
-  S.editing = on;
-  $('actFix').classList.toggle('on', on);
-  $('actSave').style.display = on ? '' : 'none';
-  $('actAccept').style.display = on ? 'none' : '';
-  if (!on) $('reasonBox').classList.remove('on');
+  if (on) {
+    // The editor and the note are two different things to write about a question, and the pane can
+    // only show one at a time - so opening the editor closes the note.
+    closeNote();
+    S.editing = true;
+    $('actFix').classList.add('on');
+    $('actSave').style.display = '';
+    $('actAccept').style.display = 'none';
+  } else {
+    closeEditor();
+    closeNote();
+  }
   renderTextSide();
+}
+
+/* The note, opened deliberately by `只加註記` rather than shown under every question.
+
+   It used to be in the DOM and never visible: `reasonBox` only ever had its `on` class *removed*,
+   never added, so `reasonText.value` was empty on every decision and every note was silently
+   dropped. A field nobody can see is a field nobody fills in. Opening it on demand also keeps the
+   fast pass fast - the reviewer who has nothing to add never has their eye drawn to a box. */
+function closeNote() {
+  $('reasonBox').classList.remove('on');
+  $('actNote').classList.remove('on');
+  $('reasonText').disabled = false;
+  $('noteFor').textContent = '';
+}
+
+function toggleNote(force) {
+  const item = S.rows[S.index];
+  const open = force !== undefined ? force : !$('reasonBox').classList.contains('on');
+  if (!open) { closeNote(); return renderTextSide(); }
+  // `closeEditor`, not `setEditMode(false)`: the latter also closes the note, which would undo the
+  // box this function is about to open.
+  closeEditor();
+  $('reasonBox').classList.add('on');
+  $('actNote').classList.add('on');
+  $('reasonText').disabled = false;
+  const existing = item ? noteOf(item.candidate_key) : '';
+  $('reasonText').value = existing;
+  // Say what the note attaches to, because the same box is used before and after a decision and
+  // those are different acts: before, the note explains the decision about to be made; after, it
+  // must not look like the reviewer is changing their mind.
+  const standing = item ? verdictOf(item.candidate_key) : '';
+  $('noteFor').textContent = standing
+    ? `這題已標記「${LABEL[standing] || standing}」；這裡寫的註記會保留那個標記，不會改掉它。`
+    : '這題還沒決定；儲存註記不會把它算成已過目。';
+  $('reasonText').focus();
+  renderTextSide();
+}
+
+/* Save a note. It is a `comment` event: recorded, append-only, and not a verdict - the question
+   stays 未看 until the reviewer actually decides. The server reaffirms whatever decision is already
+   on the question, so annotating after `確認正常` cannot withdraw it. */
+async function saveNote() {
+  const item = S.rows[S.index];
+  if (!item) return;
+  const notes = $('reasonText').value.trim();
+  if (!notes) return toast('沒有寫任何註記', true);
+  try {
+    const response = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_key: item.candidate_key, action: 'comment', notes,
+        reviewer: 'local', source: 'linear_v2',
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    S.notes.set(item.candidate_key, notes);
+    closeNote();
+    toast(`第 ${item.question_number} 題：註記已存`);
+    renderTextSide();
+    renderList();
+  } catch (error) {
+    toast(`寫入失敗：${error.message || error}`, true);
+  }
 }
 
 function markDirty() {
@@ -1260,9 +1372,9 @@ async function decide(action) {
   if (!item) return;
   // `需重看` and `阻擋` are recorded **without** a reason. Requiring one made the reviewer stop and
   // type before every flag, and a fast first pass is the whole point of the linear walk: the reason
-  // is written when the reviewer knows it, not as a toll on the way past. The textarea stays open
-  // and whatever is typed is saved, so a reason can still be given at any time - it is simply no
-  // longer a precondition for recording the decision.
+  // is written when the reviewer knows it, not as a toll on the way past. If the note box is open,
+  // whatever is typed goes with the decision; otherwise the decision is recorded bare, which is the
+  // common case.
   const notes = $('reasonText').value.trim();
   const body = { candidate_key: item.candidate_key, action, notes, reviewer: 'local', source: 'linear_v2' };
   try {
@@ -1272,8 +1384,9 @@ async function decide(action) {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     S.verdict.set(item.candidate_key, action);
-    $('reasonText').value = '';
-    $('reasonBox').classList.remove('on');
+    if (notes) S.notes.set(item.candidate_key, notes);
+    renderList();
+    closeNote();
     toast(`第 ${item.question_number} 題：${LABEL[action]}`);
     await next();
   } catch (error) {
@@ -1377,6 +1490,7 @@ $('actFix').onclick = () => setEditMode(!S.editing);
 $('actSave').onclick = () => saveCorrection();
 $('actHold').onclick = () => decide('needs_review');
 $('actBlock').onclick = () => decide('block');
+$('actNote').onclick = () => toggleNote();
 $('btnFirst').onclick = () => go(0);
 $('btnPrev').onclick = () => go(S.index - 1);
 $('btnNext').onclick = () => go(S.index + 1);
@@ -1386,18 +1500,23 @@ $('btnLast').onclick = () => go(S.rows.length - 1);
    the mouse for scrolling the two panes. */
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT') {
-    if (event.key === 'Escape') { $('actFix').focus(); setEditMode(false); }
+    // `Esc` closes the editor and the note box; `Cmd/Ctrl+Enter` saves a note without leaving the
+    // keyboard, because a reviewer writing several notes should not have to reach for the mouse.
+    if (event.key === 'Escape') { $('actFix').focus(); setEditMode(false); closeNote(); }
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)
+        && event.target.id === 'reasonText') { event.preventDefault(); saveNote(); }
     return;
   }
   const key = event.key.toLowerCase();
   if (event.ctrlKey || event.metaKey || event.altKey) return;
-  const map = { w: 'prev', s: 'next', a: 'accept', r: 'needs_review', b: 'block', e: 'fix' };
+  const map = { w: 'prev', s: 'next', a: 'accept', r: 'needs_review', b: 'block', e: 'fix', c: 'note' };
   const hit = map[key];
   if (!hit) return;
   event.preventDefault();
   if (hit === 'prev') go(S.index - 1);
   else if (hit === 'next') go(S.index + 1);
   else if (hit === 'fix') S.editing ? saveCorrection() : setEditMode(true);
+  else if (hit === 'note') toggleNote();
   else decide(hit);
 });
 
