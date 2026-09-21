@@ -86,6 +86,7 @@ KINDS = {
     "option-shape": ("blocker", "選項數與紙本宣示不符"),
     "lost-glyph": ("review", "紙本有字，文字層拼不出來"),
     "substituted-ideograph": ("review", "文字層存的是另一個字，讀者看到錯的字"),
+    "substituted-script": ("review", "文字層存的是別國字元，讀者看到亂碼"),
     "unresolved-mark": ("review", "紙本定義的記號無法對照"),
     "empty-option": ("review", "選項沒有文字"),
     "engine-disagreement": ("review", "兩個引擎對題數不一致"),
@@ -96,6 +97,82 @@ KINDS = {
 #: passes when it knows it.
 OPTIONS_MIN = 2
 OPTIONS_MAX = 6
+
+
+#: Alphabets a Taiwanese exam paper does not print, but whose letters appear in the text layer
+#: anyway, sitting *inside a Chinese word*. These are the first word of the Unicode character name,
+#: so what is listed is a script and not a character list - the rule generalises to letters nobody
+#: has hit yet.
+#:
+#: Why a *script* rule and not an offset rule: the tempting story is that these fonts number their
+#: glyphs a fixed distance from the printed symbol, and 22 characters in the corpus do fit exactly
+#: that (+0x2005: U+045B `ћ` -> U+2460 `①`, U+04D8 `Ә` -> U+24DD `ⓝ`). **But it is not a law, and
+#: building on it would be building on a coincidence.** Measured: U+090B `ऋ`, U+0F4A `ཊ`, U+0E25
+#: `ล` and eleven others also sit inside Chinese words and do *not* fit any offset. So the rule
+#: names what is true of all 28 - the script is one this paper never prints - and the reviewer is
+#: told which script, not which symbol it might have been.
+#:
+#: Why "inside a Chinese word" is part of the test: a paper legitimately prints English (`protein`),
+#: Greek (`β`, 6,653 occurrences) and Thai/Devanagari in a handful of drug names. Requiring a Han
+#: character immediately before or after removes that noise, and it is the *shape of the mistake*
+#: being reported - a stray letter is a letter that displaced a Chinese one.
+#:
+#: Measured over the served 79,090-question queue: **110 questions**, of which **0 have been accepted
+#: by a person** (so the rule does not reopen judged work) and **3 of the 16 human blocks** are hits.
+FOREIGN_SCRIPT_PREFIXES = (
+    "CYRILLIC", "DEVANAGARI", "THAI", "TIBETAN", "BENGALI", "SAMARITAN", "ARMENIAN",
+    "LAO", "ARABIC", "MALAYALAM", "GUJARATI", "NKO", "MANDAIC", "THAANA", "GURMUKHI",
+    "SINHALA", "KHMER", "MYANMAR", "ETHIOPIC", "CHEROKEE", "OGHAM", "RUNIC", "SYRIAC",
+    "HEBREW", "GEORGIAN",
+)
+
+#: Scripts the paper *does* print, so a letter from them is not evidence of anything. Kept here
+#: rather than inline so the two lists are read together and a new script forces a decision.
+NATIVE_SCRIPT_PREFIXES = (
+    "LATIN", "GREEK", "COMMON", "INHERITED", "BOPOMOFO", "HANGUL", "HIRAGANA", "KATAKANA",
+    "CJK", "IDEOGRAPHIC", "KANGXI",
+)
+
+
+def _is_han(character):
+    """True for the characters a Chinese exam paper is written in, including its radicals."""
+    return any(marker in _unicode_name(character)
+               for marker in ("CJK", "IDEOGRAPHIC", "KANGXI"))
+
+
+def _unicode_name(character):
+    import unicodedata
+    return unicodedata.name(character, "")
+
+
+def foreign_script_characters_in_chinese(question):
+    """Characters from a foreign script sitting inside a Chinese word, with their address.
+
+    Returns the script, the character, the field and the position, and the surrounding text, so a
+    reviewer can open the page at that word instead of searching the question.
+    """
+    found = []
+    options = question.get("options") or []
+    for field, value in (("stem", question.get("stem")),
+                         ) + tuple(("option %s" % option.get("key"), option.get("text"))
+                                   for option in options):
+        for position, character in enumerate(value or ""):
+            name = _unicode_name(character)
+            if not name:
+                continue
+            script = name.split()[0]
+            if script in NATIVE_SCRIPT_PREFIXES or script not in FOREIGN_SCRIPT_PREFIXES:
+                continue
+            neighbours = [character_at for character_at in
+                          ((value or "")[position - 1:position], (value or "")[position + 1:position + 2])
+                          if character_at]
+            if not any(_is_han(neighbour) for neighbour in neighbours):
+                continue
+            found.append({"char": character, "script": script, "field": field, "position": position,
+                          "context": "%s%s%s" % ((value or "")[max(0, position - 6):position],
+                                                 character,
+                                                 (value or "")[position + 1:position + 7])})
+    return found
 
 
 def _d(kind, detail, **address):
@@ -225,6 +302,23 @@ def of_question(question, *, alphabet_size=None, engine_counts=None, option_imag
                       "、".join("%s 應為 %s" % (item["char"], item["means"])
                                 for item in substituted),
                       substitutions=substituted))
+
+    # 7. The paper prints a symbol and the text layer stores a *letter of another alphabet*.
+    #
+    # Same defect family as 6 (the reader sees the wrong character) but a different mechanism: the
+    # font's glyph is mapped to a letter from a script this paper never prints, so `①` comes out as
+    # Cyrillic `ћ` and the option markers turn into line noise. It is a separate kind rather than a
+    # wider `substituted-ideograph` because the *evidence* differs: there the intended codepoint is
+    # known from `RADICAL_SUPPLEMENT_MEANS`, here it is not, so this dispute deliberately does not
+    # guess what the paper printed - it reports the script and the address and leaves the symbol to
+    # the reviewer. That is why it can catch scripts nobody has catalogued yet.
+    foreign = foreign_script_characters_in_chinese(question)
+    if foreign:
+        scripts = sorted({item["script"] for item in foreign})
+        out.append(_d("substituted-script",
+                      "、".join("%s（%s 字母，共 %d 處）" % (script.lower(), script, sum(
+                          1 for item in foreign if item["script"] == script)) for script in scripts),
+                      substitutions=foreign))
 
     # 6. The two engines do not agree about the paper this question belongs to.
     if engine_counts:

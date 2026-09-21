@@ -155,7 +155,73 @@ def test_kangxi_radicals_are_not_reported_because_nfkc_folds_them():
         assert unicodedata.normalize("NFKC", char) != char, char
 
 
-# --------------------------------------------------------------------- severity
+# --------------------------------------------------------------------- substituted letter
+
+def test_a_cyrillic_character_inside_a_chinese_word_is_reported_with_its_script_and_address():
+    """紙本印 `①`，文字層存西里爾 `ћ`（U+045B）—— 讀者看到的是亂碼。
+
+    實際量到的：`1131_物理治療師_神經疾病物理治療學` Q2 的題幹
+    `…不可變參數？①總時間 ②相對時間…`，文字層存的是 `ћќѝўџ`。以 300 dpi 回對紙本確認過。
+    使用者將同一卷的四題（q030/q036/q044/q078）判為 block。
+    """
+    question = _q(2, stem="下列何者為通用動作程式中的不可變參數？\u045b\u7576\u6642\u9593")
+    found = disputes.of_question(question)
+    kinds = [d["kind"] for d in found]
+    assert kinds == ["substituted-script"], kinds
+    dispute = found[0]
+    assert dispute["severity"] == "review"
+    substitution = dispute["substitutions"][0]
+    assert substitution["char"] == "\u045b"
+    assert substitution["script"] == "CYRILLIC"
+    assert substitution["field"] == "stem"
+    assert substitution["context"] == "不可變參數？\u045b\u7576\u6642\u9593"
+    # 這個 kind 刻意不猜紙本印的是什麼，所以它不能帶著一個錯的「應為」。
+    assert "means" not in substitution
+
+
+def test_a_foreign_character_between_latin_letters_is_not_reported():
+    """負對照：字母要緊貼漢字才報。
+
+    紙本合法地印英文與希臘文（實測：希臘字母 6,653 次、修飾字母 1,323 次）。
+    若把「出現外國字母」當成訊號，整個題庫都是訊號——所以判準是「它插在一個中文詞裡」，
+    也就是**錯字的形狀**：一個走錯位置的字母。這一條會讓那條規則若被放寬就失敗。
+    """
+    # 1ˢᵗ 是實際語料：`insufficient 1ˢᵗ metatarsophalangeal`，ˢ 是合法的修飾字母。
+    assert "substituted-script" not in _kinds(_q(62, stem="第一蹠趾關節背屈不足（insufficient 1\u02e2ᵗ）"))
+    # 純英文片語裡的西里爾字母：兩側都不是漢字。
+    assert "substituted-script" not in _kinds(_q(3, stem="drug name \u045babc"))
+
+
+def test_greek_is_not_a_foreign_script_because_the_paper_prints_it():
+    """負對照：希臘字母是紙本真的會印的字，不是亂碼。
+
+    β/α/μ 在語料裡上萬次，都是真的。把它們列進外國字母會讓這條規則一上線就淹掉。
+    """
+    assert "substituted-script" not in _kinds(_q(4, stem="血紅素（Hb）與\u03b2球蛋白的結合力"))
+
+
+def test_a_foreign_punctuation_mark_inside_a_chinese_word_is_also_reported():
+    """不限於字母：實測命中的 475 個字元裡有 64 個標點、26 個數字，而它們壞得一樣徹底。
+
+    實際語料：`下࠻何種診斷` 應讀 `下列何種診斷`（U+083B 撒馬利亞標點），`光߉` 應讀 `光量`
+    （U+07C9 西非 N'Ko 數字）。所以判準是字元名稱裡的**字母系統**，不是 `category`。
+    """
+    question = _q(22, stem="下\u083b何種診斷最有可能？")
+    dispute = disputes.of_question(question)[0]
+    assert dispute["kind"] == "substituted-script"
+    assert dispute["substitutions"][0]["script"] == "SAMARITAN"
+
+
+def test_every_foreign_letter_reports_the_script_so_the_reviewer_knows_what_to_look_for():
+    """多個字母來自不同字母系統時，每一個都要說出自己是哪個系統。"""
+    question = _q(5, stem="\u0f4a\u5b57\u8207\u045b\u5b57")
+    dispute = disputes.of_question(question)[0]
+    assert dispute["kind"] == "substituted-script"
+    assert {item["script"] for item in dispute["substitutions"]} == {"TIBETAN", "CYRILLIC"}
+    assert len(dispute["substitutions"]) == 2
+
+
+# ------------------------------------------------------------------ severity
 
 def test_worst_severity_ranks_blocker_above_review():
     """排序要讓 blocker 浮上來，否則快速審核時會被漏掉。"""
