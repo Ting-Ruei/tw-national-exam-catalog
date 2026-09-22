@@ -22,6 +22,7 @@
 
 | 你要做什麼 | 讀這份 |
 |---|---|
+| **審完一批題，要跑 AI 審核迴圈、建新規則、重掃** | [skill](skills/run-question-review-loop/SKILL.md) |
 | 建立考題（官方 PDF → 封裝） | [`../qbr/AGENTS.md`](../qbr/AGENTS.md) ＋ [skill](skills/build-exam-question-bank/SKILL.md) |
 | **管線現在到哪了**（穩定／待優化／待決策） | [skill](skills/qbr-pipeline-status/SKILL.md) |
 | 修抽取／切題的缺陷（讀錯題數、文字重複、選項被截斷） | [skill](skills/repair-qbr-extraction/SKILL.md) |

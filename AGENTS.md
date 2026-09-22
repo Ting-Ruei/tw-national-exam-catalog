@@ -2,6 +2,21 @@
 
 This repository catalogs Taiwan national exam PDFs, MinerU outputs, parsed question candidates, review events, and PostgreSQL schema drafts.
 
+## 你在哪裡開 pi？（工作界線）
+
+**在 `tw-national-exam-catalog/` 打開 pi，就是「做題目匯入、審核、優化這一條線」。**
+使用者在這邊審完一批題，就會在這一層開 session 說「跑審核迴圈」。
+
+| 起點 | 工作範圍 |
+|---|---|
+| `ai_learning_platform/`（傘層） | **所有子專案**都能調（考題匯入、審核、優化，以及 `platform-app/` 等） |
+| **`tw-national-exam-catalog/`（本層）** | **只做題目這一條線**：匯入、審核、優化、建規則、重掃 |
+
+指引：[`docs/skills/run-question-review-loop/SKILL.md`](docs/skills/run-question-review-loop/SKILL.md)
+—— 那是在這一層指揮的**操作程序**（每一步打什麼、判準是什麼）。
+使用**地端模型**：`qwen3.8-27b-splash`（`127.0.0.1:8088`，缺陷判讀與看圖）搭配
+`qwen3.8-flash-next`（`192.168.10.90:8888`，大量閱讀）。**不用 Ollama、不用 medgemma。**
+
 ## Ground Rules
 
 - Do not commit secrets, API keys, owner tokens, database passwords, or copyrighted textbook content.
