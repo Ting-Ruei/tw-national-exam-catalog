@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import tempfile
@@ -242,6 +243,174 @@ class FindingVisibleTests(unittest.TestCase):
         injected = body.replace("c.stored", "c.from").replace("c.page", "c.to")
         self.assertNotIn("c.stored", injected)
         self.assertNotIn("c.page", injected)
+
+
+class TailLoadedFindingStoreTests(unittest.TestCase):
+    """每 append 一行就重載整檔，等於每請求 1.4 秒；只讀尾巴必須得到**一模一樣**的結果。
+
+    實測（被服務的佇列）：`question_ai_findings.jsonl` = 480 MB / 73,688 筆，整檔重載 **1.4 s**。
+    它在**全語料掃描**跑的時候每秒都在長，所以每一個請求都會看到 signature 變了、就重載一次。
+    這是「UI 慢」的真正成因，也是為什麼要讓載入只增不重載。
+
+    這裡的重點不是快，是**一致**：只讀尾巴的結果必須與整檔重載逐筆相同（包含最後一筆贏），
+    而且要能看出「檔案被換掉/被截斷」而不是把它當成 append。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        sys.path.insert(0, str(ROOT / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "serve_question_review_ui_tail_test", ROOT / "scripts" / "serve_question_review_ui.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        cls.ui = module
+
+    def _file(self, tmp, lines):
+        path = Path(tmp) / "question_ai_findings.jsonl"
+        path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return path
+
+    def test_the_tail_loader_equals_the_whole_file_loader(self):
+        # 兩個引擎：`load_qbr_ai_findings`（整檔）與 `QbrAiFindingsStore`（只讀尾巴）。
+        # 逐筆比對，而且要比對到 `_carried_from` 這種「不是畫面欄位」的差異。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, [
+                '{"candidate_key":"q001","finding":{"what":"NONE"},"prompt_user":"'
+                + "大" * 3000 + '"}',
+                '{"candidate_key":"q001","finding":{"what":"GLYPH_DAMAGE"}}',
+                '{"candidate_key":"q002","finding":{"what":"OK"},"crop":"c.png"}',
+            ])
+            store = self.ui.QbrAiFindingsStore(path)
+            # 再 append 三筆，其中一筆是既有的 key（最後一筆要贏）。
+            for line in [
+                '{"candidate_key":"q002","finding":{"what":"DEFECT"}}',
+                '{"candidate_key":"q003","finding":{"what":"DROP_OUT"},"changes":[{"field":"A"}]}',
+                '{"candidate_key":"q001","finding":{"what":"SPACE_INSIDE_WORD"}}',
+            ]:
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+                self.assertTrue(store.refresh(), "append 之後 refresh 必須說 store 變了")
+            self.assertEqual(store.latest, self.ui.load_qbr_ai_findings(path))
+            self.assertEqual(store.latest["q001"]["finding"]["what"], "SPACE_INSIDE_WORD")
+            self.assertEqual(store.latest["q002"]["finding"]["what"], "DEFECT")
+            # 精簡白名單仍然生效：重的那一份不進記憶體。
+            self.assertNotIn("prompt_user", store.latest["q001"])
+            # 而 append 的欄位也進來了。
+            self.assertEqual(store.latest["q003"]["changes"], [{"field": "A"}])
+
+    def test_the_negative_control_a_first_record_wins_tail_loader_would_lie(self):
+        # 負對照（真的把載入規則改錯）：若尾巴載入器沒讓最後一筆贏，上面那條就會不一致。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, ['{"candidate_key":"q","finding":{"what":"FIRST"}}'])
+            store = self.ui.QbrAiFindingsStore(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"candidate_key":"q","finding":{"what":"LAST"}}\n')
+            store.refresh()
+            self.assertEqual(store.latest["q"]["finding"]["what"], "LAST")
+            # 而整檔載入器也說是 LAST，所以兩者一致是**真的**，不是兩邊都錯。
+            self.assertEqual(
+                self.ui.load_qbr_ai_findings(path)["q"]["finding"]["what"], "LAST"
+            )
+
+    def test_a_replaced_file_is_not_read_as_an_append(self):
+        # 部署與重建都是把檔案換掉，不是接在後面。若把新檔當成 append，就會從舊 offset 讀到
+        # 一個不存在的位置——得到的 store 混了兩個檔案，看起來卻像正常的答案。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, ['{"candidate_key":"a","finding":{"what":"A"}}'])
+            store = self.ui.QbrAiFindingsStore(path)
+            replacement = Path(tmp) / "new.jsonl"
+            replacement.write_text(
+                '{"candidate_key":"b","finding":{"what":"B"}}\n', encoding="utf-8"
+            )
+            os.replace(replacement, path)  # 新的 inode，`rsync -a` 就是這樣做的
+            self.assertTrue(store.refresh(), "換檔必須被視為改寫")
+            self.assertEqual(sorted(store.latest), ["b"])
+
+    def test_a_truncated_file_is_not_read_as_an_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, ['{"candidate_key":"a","finding":{"what":"A"}}' * 1])
+            store = self.ui.QbrAiFindingsStore(path)
+            with path.open("r+b") as handle:
+                handle.truncate(0)
+            self.assertTrue(store.refresh(), "截斷必須被視為改寫")
+            self.assertEqual(store.latest, {})
+
+    def test_a_half_written_line_is_not_a_record_yet(self):
+        # 掃描正在寫的那一行可能只有一半。只讀到完整行，所以半行要等下一輪。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, ['{"candidate_key":"a","finding":{"what":"A"}}'])
+            store = self.ui.QbrAiFindingsStore(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"candidate_key":"b","finding":{"what":"B"}}')  # 還沒有換行
+            self.assertFalse(store.refresh(), "只有半行時 store 不該變")
+            self.assertNotIn("b", store.latest)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            self.assertTrue(store.refresh())
+            self.assertIn("b", store.latest)
+
+    def test_a_file_with_a_broken_line_does_not_crash_the_server(self):
+        # 這條在修好前**會讓整個伺服器 500**：`load_qbr_ai_findings` 用的是文字模式迭代，遇到
+        # 半個多位元字元（被截斷的檔、或正在被寫的一行）會丟 `UnicodeDecodeError`。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.jsonl"
+            path.write_bytes(b'{"candidate_key":"a","finding":{"what":"A"}}\n\xe5\xe5')
+            loaded = self.ui.load_qbr_ai_findings(path)  # 不該丟例外
+            self.assertEqual(sorted(loaded), ["a"])
+            store = self.ui.QbrAiFindingsStore(path)
+            self.assertEqual(sorted(store.latest), ["a"])
+
+    def test_a_reader_keeps_a_consistent_snapshot(self):
+        # 舊的整檔重載每一次都是換一個**新的** dict，所以一個讀者手上的參照不會邊讀邊變。
+        # 只讀尾巴若改成原地改那個 dict，讀者就可能看到一半。所以 refresh 要 copy-on-write。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, ['{"candidate_key":"a","finding":{"what":"A"}}'])
+            store = self.ui.QbrAiFindingsStore(path)
+            held = store.latest  # 一個正在畫畫面的請求手上的參照
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"candidate_key":"b","finding":{"what":"B"}}\n')
+            store.refresh()
+            self.assertIsNot(held, store.latest, "refresh 不該原地改同一個 dict")
+            self.assertEqual(sorted(held), ["a"], "舊讀者的快照不該多出新資料")
+            self.assertEqual(sorted(store.latest), ["a", "b"])
+
+    def test_the_server_keeps_the_findings_fresh_through_the_store_not_a_full_reload(self):
+        # 這條釘的是**接線**，不是函式本身：`ReviewState` 必須用 store，否則上面所有的好處都
+        # 不會發生，而程式看起來完全正常。
+        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.qbr_ai_findings_store = QbrAiFindingsStore(", source)
+        self.assertIn("self.qbr_ai_findings_store.refresh()", source)
+        # 而且 `refresh_event_logs` 裡不能再有 findings 的整檔重載（舊的那條分支）。
+        body = _function_body(source, "refresh_event_logs")
+        self.assertNotIn("load_qbr_ai_findings", body)
+        self.assertIn("qbr_ai_findings_store.refresh()", body)
+
+    def test_the_negative_control_a_full_reload_in_refresh_would_be_caught(self):
+        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        injected = source.replace(
+            "if self.qbr_ai_findings_store.refresh():\n            self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest",
+            "self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)",
+            1,
+        )
+        self.assertNotEqual(injected, source, "負對照沒有換到東西，測的是自己")
+        self.assertIn("load_qbr_ai_findings", _function_body(injected, "refresh_event_logs"))
+        self.assertNotIn("load_qbr_ai_findings", _function_body(source, "refresh_event_logs"))
+
+
+def _function_body(source: str, name: str) -> str:
+    """一個 Python 函式的活體，去掉 docstring（和 `tests/test_review_ui_areas.py` 同一個理由：
+    整檔字串搜尋會把說明文字當成規則本身）。"""
+    match = re.search(rf"def {name}\(", source)
+    assert match, f"找不到函式 {name}"
+    start = source.find("\n", match.start())
+    body = source[start:]
+    rest = re.search(r"\n    def ", body[1:])
+    if rest:
+        body = body[: rest.start() + 1]
+    return re.sub(r'""".*?"""', "", body, flags=re.S)
 
 
 if __name__ == "__main__":

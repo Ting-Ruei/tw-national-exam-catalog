@@ -989,32 +989,203 @@ QBR_AI_FINDING_FIELDS = ("candidate_key", "created_at", "model", "endpoint", "pr
                          "crop", "changes")
 
 
+def _compact_qbr_finding(record: dict[str, Any]) -> dict[str, Any]:
+    """One finding, stripped to what the screen draws.
+
+    The one place the projection lives, so the whole-file loader and the tail loader cannot
+    disagree about which fields survive.
+    """
+    compact = {field: record.get(field) for field in QBR_AI_FINDING_FIELDS}
+    compact["finding"] = record.get("finding") or {}
+    compact["evidence"] = record.get("evidence") or {}
+    return compact
+
+
 def load_qbr_ai_findings(path: Path) -> dict[str, dict[str, Any]]:
     """The latest qbr AI finding per question, stripped to what the screen draws.
 
     Append-only, last record per key wins - the same rule `load_keyed_events` uses for the human
     log, and for the same reason: a finding is a statement about the reading that was in front of
     the model, and the newest statement is the one that describes the current reading.
+
+    Read as **bytes** and decoded one line at a time. Text-mode iteration raises
+    `UnicodeDecodeError` on a file that is being appended to right now (a multi-byte character can
+    be half-written) or one that was truncated, and that crashed the whole server: the whole-file
+    loader is what a rewrite falls back to, so a damaged file took down every request instead of
+    dropping one bad line. A line that does not decode is skipped exactly like one that does not
+    parse.
     """
     latest: dict[str, dict[str, Any]] = {}
     if not path.exists():
         return latest
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not raw.strip():
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
+                record = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             key = record.get("candidate_key")
             if not key:
                 continue
-            compact = {field: record.get(field) for field in QBR_AI_FINDING_FIELDS}
-            compact["finding"] = record.get("finding") or {}
-            compact["evidence"] = record.get("evidence") or {}
-            latest[key] = compact
+            latest[key] = _compact_qbr_finding(record)
     return latest
+
+
+#: How many bytes are re-read to prove the file is still the file we read from. Two windows are
+#: compared: the head of the file and the bytes immediately before our offset. Both are `pread`s of
+#: 64 bytes, and an append can change neither - so any difference means a rewrite, however careful.
+_TAIL_ANCHOR_BYTES = 64
+
+
+class QbrAiFindingsStore:
+    """The latest AI finding per question, kept fresh by reading only what was appended.
+
+    The stream is append-only by contract, and enforced as one: the model-side writer is
+    `qbr/src/qbr/ai_findings.py::append` (a single `open(path, "a")`), the push helper appends with
+    `cat >>` and never truncates, and a rebuild carries the records forward into a fresh directory.
+    A new line at the end is therefore the only way the file can grow. Reading the whole file again
+    for each appended line cost **1.4 s per request** on the served queue (measured: 480 MB,
+    73,688 records), because every `refresh_event_logs` sees a changed signature while the corpus
+    sweep is running. Reading the tail costs the size of the new line - and the result must be
+    **identical**, which is what `test_the_tail_loader_equals_the_whole_file_loader` pins.
+
+    A rewrite must not be mistaken for an append: reading "from the old offset in a different
+    file" would silently produce a store that mixes two files, which is worse than a slow one
+    because it looks like a working answer. Three cheap tests decide it, and all of them are about
+    the bytes rather than about `mtime` (an append moves `mtime` too, so it cannot separate them):
+
+      * the file's identity (`st_dev`, `st_ino`) - changes when a deploy or a rebuild swaps the
+        file in (`rsync -a` without `--inplace` renames into place);
+      * its size - a truncated file is shorter than the offset we hold;
+      * two 64-byte windows, the head and the bytes just before our offset. An append cannot change
+        either.
+
+    What this deliberately does **not** claim: a same-inode, same-size patch of the **middle** of the
+    file is not distinguishable from the file we already read, and is not detected. No writer does
+    that - the contract is `open(path, "a")`, `cat >>`, and a rebuild that writes a **new
+    directory** - so the guard is sized to the failure modes that exist rather than to every way a
+    file could be edited. A guard that claimed more would be the kind of rule that only holds until
+    someone reads it.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._latest: dict[str, dict[str, Any]] = load_qbr_ai_findings(path)
+        self._offset = 0
+        self._identity: tuple[int, int] | None = None
+        self._anchors: list[tuple[int, bytes]] = []
+        self._observe()
+
+    def _window(self, start: int, length: int = _TAIL_ANCHOR_BYTES) -> bytes:
+        """Exactly `length` bytes at `start`, or fewer at the end of the file.
+
+        The length is passed in rather than always being `_TAIL_ANCHOR_BYTES` because an anchor must
+        be a **fixed** number of bytes: when the file starts out shorter than the window, re-reading
+        a fixed 64 bytes would return the old bytes *plus* the start of whatever was just appended,
+        and an ordinary append would look like a rewrite (found by
+        `test_a_half_written_line_is_not_a_record_yet`).
+        """
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(max(0, start))
+                return handle.read(length)
+        except OSError:
+            return b""
+
+    def _observe(self) -> None:
+        """Record the identity, size and anchor windows of the file as it is now."""
+        try:
+            stat = self.path.stat()
+        except OSError:
+            self._identity = None
+            self._offset = 0
+            self._anchors = []
+            return
+        self._identity = (stat.st_dev, stat.st_ino)
+        self._offset = stat.st_size
+        # Each anchor is `(start, bytes)`, and `len(bytes)` is the length that will be compared
+        # against later, so the comparison can never grow.
+        size = stat.st_size
+        self._anchors = [
+            (0, self._window(0, min(_TAIL_ANCHOR_BYTES, size))),
+            (max(0, size - _TAIL_ANCHOR_BYTES), self._window(size - _TAIL_ANCHOR_BYTES)),
+        ]
+
+    @property
+    def latest(self) -> dict[str, dict[str, Any]]:
+        return self._latest
+
+    def refresh(self) -> bool:
+        """Read whatever was appended since the last call. True if the store changed.
+
+        The read starts at the last complete line's end, so a line caught mid-write is simply not a
+        record yet - it becomes one on the next refresh, once its newline has arrived.
+        """
+        with self._lock:
+            try:
+                stat = self.path.stat()
+            except OSError:
+                return False
+            size = stat.st_size
+            identity = (stat.st_dev, stat.st_ino)
+            rewritten = identity != self._identity or size < self._offset
+            if not rewritten and self._offset:
+                # An append cannot change a byte that is already written. Each anchor is compared at
+                # the exact position and length it was taken at; either differing means: read the
+                # whole file again.
+                rewritten = any(
+                    self._window(start, len(expected)) != expected
+                    for start, expected in self._anchors
+                )
+            if rewritten:
+                self._latest = load_qbr_ai_findings(self.path)
+                self._observe()
+                return True
+            if size == self._offset:
+                return False
+            try:
+                with self.path.open("rb") as handle:
+                    handle.seek(self._offset)
+                    data = handle.read()
+            except OSError:
+                return False
+            # Only complete lines are records: the last one may be half-written right now.
+            end = data.rfind(b"\n")
+            if end < 0:
+                return False
+            consumed = data[: end + 1]
+            # Copy-on-write, not in-place: every reader holds the dict object it got from `latest`,
+            # and the old loader gave each new generation its own dict (an atomic reference swap).
+            # Mutating this one in place would let a request that is halfway through answering see
+            # a half-updated store. The copy is 0.35 ms for 73k records and only happens when there
+            # is something new.
+            updated = dict(self._latest)
+            changed = False
+            for raw in consumed.split(b"\n"):
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                key = record.get("candidate_key")
+                if not key:
+                    continue
+                updated[key] = _compact_qbr_finding(record)
+                changed = True
+            self._latest = updated
+            self._offset += len(consumed)
+            # The stored anchors still describe the prefix, which an append did not touch - but the
+            # one nearest the end may now be short of the new end, so it is re-taken at the fixed
+            # length we will compare next time.
+            self._anchors = [
+                (start, self._window(start, len(expected)))
+                for start, expected in self._anchors
+            ]
+            return changed
 
 
 def file_signature(path: Path) -> tuple[int, int] | None:
@@ -2286,7 +2457,13 @@ class ReviewState:
             self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
             self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
-        self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)
+        #: The findings store keeps its own file position and re-reads only the appended tail (see
+        #: `QbrAiFindingsStore`). It owns the whole-file load too, so boot reads the file once, not
+        #: twice. `latest_qbr_ai_findings` stays the attribute every reader uses; the store only
+        #: decides *how* it is kept fresh, because re-reading 480 MB for each appended line was
+        #: 1.57 s of every request while the corpus sweep was running.
+        self.qbr_ai_findings_store = QbrAiFindingsStore(self.qbr_ai_findings_log)
+        self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -2681,10 +2858,9 @@ class ReviewState:
             self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
             self._correction_feedback_log_signature = correction_feedback_signature
 
-        qbr_findings_signature = file_signature(self.qbr_ai_findings_log)
-        if qbr_findings_signature != self._qbr_ai_findings_signature:
-            self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)
-            self._qbr_ai_findings_signature = qbr_findings_signature
+        if self.qbr_ai_findings_store.refresh():
+            self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest
+        self._qbr_ai_findings_signature = file_signature(self.qbr_ai_findings_log)
 
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
