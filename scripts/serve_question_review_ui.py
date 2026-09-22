@@ -979,7 +979,14 @@ QBR_AI_FINDINGS_STREAM = "question_ai_findings.jsonl"
 #: every request heavier for text nobody sees. The `finding` dict, the model identity and the
 #: prompt generation are kept; the prompts are dropped here and remain readable from the file.
 QBR_AI_FINDING_FIELDS = ("candidate_key", "created_at", "model", "endpoint", "prompt_version",
-                         "population", "reading_sha256", "error", "seconds")
+                         "population", "reading_sha256", "error", "seconds",
+                         # The two fields a *confirmation* adds, and the whole value of it: `crop` is
+                         # the screenshot the model was shown, so the reviewer can check the note
+                         # against the same picture instead of trusting the sentence; `changes` is the
+                         # mechanical difference, which is what makes the note repairable rather than
+                         # merely a report. Dropping them here would leave the finding looking complete
+                         # while its evidence and its repair were both missing from the screen.
+                         "crop", "changes")
 
 
 def load_qbr_ai_findings(path: Path) -> dict[str, dict[str, Any]]:

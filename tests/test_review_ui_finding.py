@@ -107,6 +107,34 @@ class FindingVisibleTests(unittest.TestCase):
         self.assertNotIn("prompt_user", loaded)
         self.assertNotIn("prompt_system", loaded)
 
+    def test_a_confirmation_keeps_its_screenshot_and_its_diff(self):
+        # 這條在（b）（c）之前不存在，因為那時 finding 沒有這兩個欄位。精簡 loader 把「畫面要
+        # 用的欄位」列成一張白名單，而白名單沒跟上的話，記錄裡有 crop/changes、畫面上卻兩個都
+        # 沒有——finding 看起來很完整，其實證據和修法都被丟掉了。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "question_ai_findings.jsonl"
+            path.write_text(
+                '{"candidate_key":"q001","model":"splash","population":"dispute",'
+                '"crop":"review-ui/crops/p/q001-dispute.png",'
+                '"changes":[{"field":"option B","from":"較⻑","to":"較長",'
+                '"stored":"較⻑的OID","page":"較長的OID"}],'
+                '"finding":{"verdict":"DEFECT"},"prompt_user":"' + "大" * 5000 + '"}\n',
+                encoding="utf-8")
+            loaded = self.ui.load_qbr_ai_findings(path)["q001"]
+        self.assertEqual(loaded["crop"], "review-ui/crops/p/q001-dispute.png")
+        self.assertEqual(loaded["changes"][0]["field"], "option B")
+        # 而重的那一份仍然不進來。
+        self.assertNotIn("prompt_user", loaded)
+
+    def test_the_negative_control_a_loader_that_dropped_them_would_lose_the_repair(self):
+        # 負對照：拿掉白名單裡的兩個欄位，上面那條就會失敗。這裡把事實重算一次，證明那個失敗
+        # 是真的（欄位真的不在白名單時載不到），而不是斷言寫錯。
+        self.assertIn("crop", self.ui.QBR_AI_FINDING_FIELDS)
+        self.assertIn("changes", self.ui.QBR_AI_FINDING_FIELDS)
+        without = tuple(f for f in self.ui.QBR_AI_FINDING_FIELDS if f not in {"crop", "changes"})
+        self.assertNotIn("crop", without)
+        self.assertNotIn("changes", without)
+
     def test_the_finding_is_a_separate_field_from_the_sql_era_ai_review(self):
         # 這是這一條最重要的不變量：finding 沒有 status、沒有 recommended_action，它不是一次
         # 審核。把它併進 `ai_review` 就會讓一則筆記被讀成一次有狀態的審核。
@@ -154,17 +182,66 @@ class FindingVisibleTests(unittest.TestCase):
         self.assertIn("整庫掃描", body)
 
     # --- 意見不是決定 -------------------------------------------------------
-    def test_showing_a_finding_adds_no_button(self):
+    def test_showing_a_finding_adds_no_action_that_writes_a_decision(self):
         # `GOV-05`：AI 一律 advisory。加了 finding 之後，人類的動作集合不變。
+        #
+        # 這條在（c）之後變了形狀——要求是「爭議題直接送模型修，不是只回報」——但沒有變意思：
+        # finding 仍然不能自己產生一筆 review event。畫面多出來的那個按鈕（見下一個測試）只是
+        # 把紙本讀法填進**人工編輯框**，寫下決定的仍然是按下「儲存修正」的人。
         body = finding_html_body(self.html)
-        self.assertNotIn("<button", body)
-        self.assertNotIn("onclick", body)
+        self.assertNotIn("api/", body)
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("decide(", body)
+        self.assertNotIn("saveCorrection(", body)
 
-    def test_the_negative_control_a_finding_with_buttons_would_be_caught(self):
+    def test_the_negative_control_a_finding_that_decided_for_the_reviewer_would_be_caught(self):
         body = finding_html_body(self.html)
-        injected = body.replace("return `<div", 'return `<button></button><div', 1)
-        self.assertIn("<button", injected)
-        self.assertNotIn("<button", body)
+        injected = body.replace("return `<div", "return `<button onclick=\"decide('accept')\"></button><div", 1)
+        self.assertIn("decide(", injected)
+        self.assertNotIn("decide(", body)
+
+    def test_the_repair_button_fills_the_editor_and_does_not_save_anything(self):
+        # （c）：模型把紙本讀法帶進編輯框，但**不**代按儲存。修正是人的動作，記名的那筆 event
+        # 由檢查過的人寫下。所以這個函式只能用 `change.page` 賦值給編輯節點，不能碰後端。
+        match = re.search(r"function applyFindingChange\(button\) \{(.*?)\n\}", self.html, re.S)
+        self.assertTrue(match, "v2.html 裡找不到 applyFindingChange")
+        body = match.group(1)
+        self.assertIn("change.page", body)
+        self.assertIn("setEditMode", body)
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("api/", body)
+        self.assertNotIn("decide(", body)
+
+    def test_the_negative_control_a_repair_that_saved_itself_would_be_caught(self):
+        match = re.search(r"function applyFindingChange\(button\) \{(.*?)\n\}", self.html, re.S)
+        body = match.group(1)
+        injected = body.replace("markDirty();", "fetch('/api/answer-review', {}); markDirty();", 1)
+        self.assertIn("fetch(", injected)
+        self.assertNotIn("fetch(", body)
+
+    def test_an_edit_is_only_offered_when_the_paper_actually_disagrees(self):
+        # 一致（沒有 changes）就沒有「帶入修正」可按——否則空 diff 也會長出一個按鈕，把「紙本跟
+        # 抽取一樣」講成「有東西要修」。
+        body = finding_html_body(self.html)
+        self.assertIn("record.changes", body)
+        self.assertIn(".length", body)
+
+    def test_the_panel_shows_the_raw_pair_the_editor_will_receive(self):
+        # `compare` 決定「有沒有一樣」用的是折疊過的形式（NFKC、去空白）；但紙上印的不是那個形式。
+        # 畫面如果顯示折疊版、按鈕卻帶入原文，審題者就會**看著一個字串、同意另一個字串**——
+        # 而且畫面上那一行看起來完全合理。所以差別列要顯示 `stored`/`page`（原文成對）。
+        body = finding_html_body(self.html)
+        self.assertIn("c.stored", body)
+        self.assertIn("c.page", body)
+
+    def test_the_negative_control_showing_the_folded_pair_would_be_caught(self):
+        body = finding_html_body(self.html)
+        self.assertIn("c.stored", body)
+        # 每一處都要替換：只換第一個會漏掉後面那個（負對照要真的換掉被測的東西，
+        # 不然它測的是自己）。
+        injected = body.replace("c.stored", "c.from").replace("c.page", "c.to")
+        self.assertNotIn("c.stored", injected)
+        self.assertNotIn("c.page", injected)
 
 
 if __name__ == "__main__":

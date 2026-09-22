@@ -169,6 +169,20 @@
   .ai-finding .af-code { font-size:10.5px; background:rgba(0,0,0,.06); border-radius:3px;
     padding:1px 5px; color:#4a3f8a; }
   .ai-finding .af-hint { font-size:10.5px; color:#6d678f; font-weight:400; }
+  .ai-finding .af-crop { margin:6px 0 8px; }
+  .ai-finding .af-crop img { display:block; max-width:100%; border:1px solid #b9b1dd;
+    border-radius:6px; background:var(--paper); cursor:zoom-in; }
+  .ai-finding .af-crop figcaption { margin-top:4px; font-size:10.5px; color:#6d678f; }
+  .ai-finding .af-change { display:flex; flex-wrap:wrap; gap:6px; align-items:baseline;
+    font-size:11.5px; padding:3px 0; }
+  .ai-finding .af-change code { font-size:10.5px; background:rgba(0,0,0,.06); border-radius:3px;
+    padding:1px 5px; color:#4a3f8a; }
+  .ai-finding .af-from { color:#9b2c2c; text-decoration:line-through; text-decoration-thickness:1px; }
+  .ai-finding .af-to { color:#0b7a4b; }
+  .ai-finding .af-arrow { color:#6d678f; }
+  .ai-finding .af-apply { font-size:10.5px; padding:1px 7px; border:1px solid #b9b1dd;
+    border-radius:99px; background:var(--paper); color:#4a3f8a; cursor:pointer; }
+  .ai-finding .af-apply:hover { background:#efeaff; }
   .opts { display:flex; flex-direction:column; gap:8px; }
   .opt { display:flex; gap:10px; padding:10px 13px; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); }
   .opt.is-answer { border-color:var(--green); background:#f2fbf7; }
@@ -1122,7 +1136,8 @@ function findingHtml(candidate) {
     : verdict === 'NOT_EXTRACTION' ? '模型認為不是抽取造成的'
       : verdict === 'OK' ? '模型沒發現異常' : '模型回答了，但無法歸類';
   const who = record.population === 'corpus'
-    ? '整庫掃描（這一題沒有人類標記）' : '人類阻擋後詢問';
+    ? '整庫掃描（這一題沒有人類標記）'
+    : record.population === 'dispute' ? '爭議題對紙本確認' : '人類阻擋後詢問';
   const parts = [];
   parts.push(`<div class="af-line"><b>哪裡：</b>${esc(where || '（沒說）')}</div>`);
   parts.push(`<div class="af-line"><b>怎麼修：</b>${esc(fix || '（沒說）')}</div>`);
@@ -1131,10 +1146,78 @@ function findingHtml(candidate) {
       : f.rule_worthy === false ? ' 被判斷為個案' : '')
     + (typeof f.confidence === 'number' ? ` 信心 ${f.confidence}` : '') + '</div>');
   if (record.error) parts.push(`<div class="af-line"><b>讀取失敗：</b>${esc(record.error)}</div>`);
+  // The screenshot the model was shown, so the reader can look at the same picture the note is about.
+  // "Unseen evidence is not evidence": a note claiming the paper prints `長` is only worth reading
+  // if the page it claims that about can be seen. `fileUrl` serves it by the queue-relative path.
+  const crop = record.crop
+    ? `<figure class="af-crop"><img src="${esc(fileUrl(record.crop))}"
+         alt="模型看到的紙本截圖" loading="lazy"
+         onclick="window.open(this.src,'_blank')">
+       <figcaption>模型看到的紙本截圖</figcaption></figure>` : '';
+  // The change row shows the **raw** stored/page pair, not the folded forms `compare` measured with.
+  // The folded pair is how the subtraction decided *that* the two differ; it is not text the paper
+  // prints. Showing the folded forms and then applying the raw one would make the panel and the
+  // editor disagree about the same fix - the reviewer would approve one string and get another.
+  const raw = (c) => (c.stored !== undefined && c.stored !== null ? c.stored : c.from);
+  const rawTo = (c) => (c.page !== undefined && c.page !== null ? c.page : c.to);
+  const changes = Array.isArray(record.changes) && record.changes.length
+    ? `<div class="af-line"><b>機械比對（模型轉錄後，由程式逐字相減）：</b></div>`
+      + record.changes.map((c) => `<div class="af-change"><code>${esc(c.field)}</code>`
+        + `<span class="af-from">${esc(String(raw(c) || '').slice(0, 200))}</span>`
+        + `<span class="af-arrow">→</span>`
+        + `<span class="af-to">${esc(String(rawTo(c) || '').slice(0, 200))}</span>`
+        + `<button class="af-apply" data-field="${esc(c.field)}">帶入修正</button></div>`).join('')
+    : '';
   return `<div class="ai-finding"><div class="af-head"><span>模型意見（${esc(label)}）</span>`
     + `<span class="af-hint">${esc(record.model || '未知模型')} · ${esc(who)}`
     + `${record.prompt_version ? ` · 提示詞版本 ${esc(record.prompt_version)}` : ''}</span></div>`
-    + `${parts.join('')}</div>`;
+    + `${crop}${parts.join('')}${changes}</div>`;
+}
+
+/* Carry one of the model's mechanical changes into the manual editor.
+
+   (c) of the request was that a disputed question be **repairable, not merely reported** - and the
+   repair has to stay a *human* action. So this does not write anything: it opens the existing edit
+   form with the model's reading filled in, and the reviewer reads it, changes what they disagree
+   with, and presses 儲存修正 themselves. `GOV-05` is unchanged: the model's output is advisory, and
+   the event that records the fix is written by the person who checked it.
+
+   The changes are applied one at a time, on the button's own field, so a reviewer who trusts the
+   `⻑`→`長` fix does not also silently accept a stem rewrite they never read. */
+/* The「帶入修正」buttons are delegated from the panel.
+
+   `findingHtml` writes them into `innerHTML`, so there is no node to bind at parse time: a direct
+   `onclick` in the template would have to name a global, and the panel is re-rendered on every move.
+   One listener on the side panel handles every button and every future re-render. A change carries
+   the **raw page reading** (`page`) rather than the folded comparison string, so what lands in the
+   editor is the paper's own text - which is what a correction should store. */
+function bindFindingButtons() {
+  const side = $('textSide');
+  if (!side || side.dataset.findingBound) return;
+  side.dataset.findingBound = '1';
+  side.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest && event.target.closest('.af-apply');
+    if (button) applyFindingChange(button);
+  });
+}
+
+function applyFindingChange(button) {
+  const record = S.rows[S.index] && S.rows[S.index].candidate.qbr_ai_finding;
+  if (!record || !Array.isArray(record.changes)) return;
+  const field = button.dataset.field;
+  const change = record.changes.find((c) => c.field === field);
+  if (!change) return;
+  if (!S.editing) setEditMode(true);
+  if (field === 'stem') {
+    const node = $('editStem');
+    if (node) node.value = change.page || node.value;
+  } else {
+    const key = field.replace('option ', '');
+    const node = document.getElementById(`editOpt_${key}`);
+    if (node) node.value = change.page || node.value;
+  }
+  markDirty();
+  toast(`已把「${field}」的紙本讀法帶入編輯框；請自己確認後再儲存修正`);
 }
 
 function renderTextSide() {
@@ -1228,6 +1311,9 @@ function renderTextSide() {
       if (node) node.oninput = markDirty;
     });
   }
+  // The「帶入修正」buttons are inside the `innerHTML` just written, so they are bound by delegation
+  // once, here, rather than by naming a global in the template.
+  bindFindingButtons();
 }
 
 /* The figure crops, shown beside the text they were cut for.

@@ -89,6 +89,20 @@ POPULATIONS = {
                "請自己判斷抽取結果是否正確。**沒有發現異常是正常的答案**：這種情況 verdict 用 OK，"
                "`what` 用 NONE，不要為了有東西交而把正常的題目說成缺陷。",
     },
+    # A question that carries a dispute and that a person asked to be checked against the page.
+    #
+    # Different from both above, and the difference is what the model can see: here it is given a
+    # **crop of the paper** as well as the extracted text, so the question changes from "is this text
+    # wrong" to "does this text match that picture". That is a closed question with a checkable
+    # answer, which is the only use of a model this project has measured as reliable (Task 21).
+    # Calling it `blocked` would be a lie - the person flagged a dispute, not necessarily the
+    # question - and calling it `corpus` would hide that a crop is attached.
+    "dispute": {
+        "arrival": "使用者給你一題「已經被系統標為有爭議」的題目，並且附上紙本同一題的截圖。",
+        "ask": "上面是抽取結果，下面（或同一個訊息裡）的圖片是**紙本同一題的截圖**。"
+               "請只回答：「抽取的文字與圖片不一致的地方在哪裡、該把哪個字改成哪個字」。"
+               "看不清楚就寫 confidence 低，不要猜。圖片與文字一致時 verdict 用 OK、`what` 用 NONE。",
+    },
 }
 
 SYSTEM = """你是國考題庫抽取品管員。{arrival}
@@ -371,7 +385,7 @@ def learned_note(learned) -> str:
 
 def make_record(*, question, finding, model, endpoint, prompt_system, prompt_user,
                 raw="", usage=None, seconds=0.0, error=None, created_at=None, learned=None,
-                population="blocked") -> dict:
+                population="blocked", crop=None, changes=None) -> dict:
     """One finding, with everything needed to check it later.
 
     `prompt_user` is stored verbatim and not regenerated at read time: the point of the record is
@@ -412,6 +426,18 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         "usage": usage or {},
         "seconds": seconds,
         "error": error,
+        # The crop the model was shown, when one was shown, as a queue-relative path
+        # (`review-ui/crops/<paper>/...`) so the reviewer's screen can open it. "Unseen evidence is
+        # not evidence": a finding that says "the paper prints 長 here" is only worth reading if the
+        # reader can look at the same picture. Absent for the text-only passes, because they had no
+        # crop and an empty field would read as "the crop was lost".
+        "crop": crop,
+        # The mechanical diff between the stored text and the model's reading of the page, field by
+        # field (`[{field, from, to}]`). This is computed by `reread.compare`, **not** said by the
+        # model: the model transcribes, this subtracts. (c) of the requirement was that a disputed
+        # question be *repairable*, not merely reported, and a repair has to be exact - a prose `fix`
+        # is a description, this is the change.
+        "changes": changes or None,
     }
 
 
