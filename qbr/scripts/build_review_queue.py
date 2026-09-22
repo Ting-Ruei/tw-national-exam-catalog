@@ -257,7 +257,15 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     records = review_events_to_carry(out_dir, previous)
     live = {row.get("candidate_key") for row in candidates}
     streams = {}
+    # Where the carried records came from, counted by the queue directory itself. Printed below
+    # because auto-discovery scans *every* sibling of `--out`, and the failure mode is silent:
+    # build into `/tmp` and a leftover browser-test queue (`/tmp/ann_test`) is carried in as if it
+    # were a person's decisions. Measured 2026-09-22: 3 records from `115090:311:0704` got into a
+    # rebuild that way. Naming the sources turns an invisible over-scan into something the operator
+    # can see while it is still cheap to notice. Same reason the record keeps `_carried_from`.
+    origins = collections.Counter()
     for name, record in records:
+        origins[record.get("_carried_from") or "?"] += 1
         streams.setdefault(name, []).append(record)
         if record.get("candidate_key") in live:
             carried[name] += 1
@@ -305,6 +313,11 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     if carried or orphaned:
         print("  review records: %d carried, %d orphaned"
               % (sum(carried.values()), sum(orphaned.values())))
+        # Naming the source queues is what makes an over-broad scan visible. Auto-discovery carries
+        # every sibling of `--out`; a test queue left beside a real one is then indistinguishable
+        # from a person's work once it is inside the queue. It never is once it is listed here.
+        for origin, count in origins.most_common():
+            print("    from %s (%d)" % (origin, count))
     return index
 
 

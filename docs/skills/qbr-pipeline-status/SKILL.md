@@ -221,6 +221,11 @@ crops/       : 這個目錄不存在
 - **只審新管線的題，不與舊 SQL 合併。**（舊制度不混入。）
 - **不把視覺重讀接成 triage 佇列。** 精確率 12–16%。
 - **`--carry-from` 必須指向佇列根目錄**，不是 `review-ui/`；指錯會靜默漏帶。
+- **重建的輸出目錄要放在真佇列之間**（例如 `qbr/data/review-queues/`），**不要散在 `/tmp`。**
+  `build_review_queue.build sibling_queues_with_reviews()` 會自動掃 `--out` 的**兄弟目錄**
+  帶入審核紀錄；`/tmp` 下的瀏覽器測試殘留（如 `/tmp/ann_test` 的假事件）會被當成真人決定
+  一起帶進新佇列。2026-09-22 就發生過：新佇列多了 3 筆 `115090:311:0704` 的測試資料。
+  **驗收要找的是「新佇列獨有 = 0」，不是只看總數。** 放在真佇列之間，兄弟清單才乾淨。
 - **驗收標準 = 每個欄位都被第二個引擎在同一邊界找到**（第 6.1 節）。
 - 改進用**取代**，不是分岔；**儲存的字永不重寫**（偵測，不是轉換）。
 
@@ -851,6 +856,48 @@ size=5.5 y=550.08  '-0.5t'   → 留成平的
 「考科限定／考別限定／跨考別」，並用佇列自己的 `candidates.jsonl` 回填舊紀錄的考別
 （舊紀錄在 `category` 欄位存在之前寫的，是 append-only、**不改寫**，所以是報告時解析）。
 考別也存進每一筆新 finding（`category` 欄位）。
+
+### 重建佇列：兩個 2026-09-22 學到的陷阱
+
+`flattened_offsets` 是在 `extract.py` 裡**看著頁面幾何**算出來的，所以一旦佇列建好就無法補
+（`--reannotate-only` 也救不了——舊列根本沒有那個欄位）。要讓新偵測器出現在畫面上，
+**一定要重跑抽取**：
+
+```sh
+cd tw-national-exam-catalog/qbr
+QBR=... # 八個考別
+for C in 物理治療師 藥師 藥師一 藥師二 醫事放射師 醫事檢驗師 醫師一 醫師二; do
+  .venv/bin/python scripts/batch_package.py --catalog ... --category "${C}" --work "/tmp/rebuild/${C}" ...
+done
+# 裁圖必須在封裝之後跑，empty-option 才是權威的
+.venv/bin/python scripts/crop_run_figures.py --no-describe --work /tmp/rebuild/<八個目錄> ...
+# 輸出放在真佇列之間，不要散在 /tmp
+.venv/bin/python scripts/build_review_queue.py --work /tmp/rebuild/<八個目錄> \
+  --out data/review-queues/v6-YYYYMMDD --carry-from data/review-queues/live
+```
+
+**陷阱 1：swap `live/` 會靜默切斷正在跑的 AI pass。**
+AI pass 認的是**路徑** `data/review-queues/live/review-ui/question_ai_findings.jsonl`，
+不是 inode。把 `live/` 改名、再放新佇列上去，正在寫的那個 process 會**繼續寫新目錄**
+（路徑沒變），但舊目錄上最後那段寫入（快照之後的幾十筆）就留在備份裡。
+**做法：**換檔前先比對兩個檔的**事件身分**（去掉 `_carried_from`）的集合差，
+把「舊 live 有、新 live 沒有」的那些 append 回來，再驗「只在舊 live = 0」。
+2026-09-22 接回 44 筆。
+
+**陷阱 2：`--carry-from` 的自動發現會掃到兄弟目錄的測試殘留。**
+見第 5 節「已決定」那條。驗收要找的是**「新佇列獨有 = 0」**——只看總數會看不出來。
+
+**換檔後還有一關：孤兒。**候選清單重建後，站上累積的人類決定必須全部還指得到題目：
+
+```sh
+# 站上（家）審核事件 vs 站上候選 key
+# 孤兒必須是 0，否則重建把誰的決定弄丟了
+```
+
+**站上是筆電的嚴格超集。** 推 findings 回家時守衛拒絕了一次，那是**真訊號**不是 bug：
+站上有 248 筆比筆電新的決定（站是審題的家），正確順序是
+`pull_station_reviews.sh` 先拉、再 `push_reviews_to_station.sh`。
+驗法是「筆電有、站上沒有 = 0」——那才證明覆蓋不會弄丟東西。
 
 ---
 

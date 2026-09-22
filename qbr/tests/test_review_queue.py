@@ -293,3 +293,23 @@ def test_an_orphaned_record_is_kept_and_counted_never_dropped(tmp_path):
     carried = [r for _name, r in records if r["candidate_key"] == "k1"]
     orphaned = [r for _name, r in records if r["candidate_key"] == "gone"]
     assert len(carried) == 1 and len(orphaned) == 1
+
+
+def test_the_carry_names_its_source_queues(tmp_path):
+    """重建要說出紀錄是從哪個佇列帶來的。
+
+    自動發現會掃 `--out` 的每一個兄弟，所以把輸出放在 `/tmp` 這種滿是測試殘留的地方，
+    一個瀏覽器測試佇列（如 `/tmp/ann_test`）會被當成真人的決定帶進新佇列——這是實際發生過的，
+    3 筆 `115090:311:0704` 的假事件混進了重建。進到佇列之後就分不出來了。
+
+    負控制：把 `_carried_from` 拿掉，`origins` 就只剩 `"?"`，這個測試就會失效——
+    也就是說它真的在驗「來源被列出來」這件事，不是在驗行數。
+    """
+    builder = _builder()
+    real = tmp_path / "qbr-live-v6"
+    _write_log(real, "question_review_events.jsonl", [_event("k1")])
+    records = builder.review_events_to_carry(str(tmp_path / "qbr-live-v7"), [str(real)])
+    assert len(records) == 1
+    _name, record = records[0]
+    assert record.get("_carried_from") == str(real), \
+        "來源必須跟著紀錄走，否則沒人能說出它從哪來"
