@@ -6150,6 +6150,15 @@ filtered AS (
             limit = max(1, min(int(params.get("limit") or "500"), 1000))
         except ValueError:
             limit = 500
+        # `_count=1` asks for the two numbers and nothing else. The home page's cards need
+        # `total_count` and `reviewed_count` and draw no rows, but it used to send `limit=1000` to
+        # get them - and `_count` was **never read**, so the server built, serialised and shipped a
+        # thousand full candidate payloads (measured: 6.0 MB, 0.39 s, ~4.7 KB each) for two
+        # integers that cost 0.11 s to count. The count-only path runs the **same** filter loop and
+        # simply does not build a payload (`if len(payloads) < limit` is never true), so the numbers
+        # cannot come from a different rule than the rows do.
+        if params.get("_count") in {"1", "true", "True", "yes"}:
+            limit = 0
 
         payloads: list[dict[str, Any]] = []
         filtered_count = 0
@@ -6307,6 +6316,11 @@ filtered AS (
             limit = max(1, min(int(params.get("limit") or "500"), 1000))
         except ValueError:
             limit = 500
+        # The same `_count=1` contract as the JSONL path: two numbers, no rows. `LIMIT 0` already
+        # makes the SQL query itself count-only (the counts ride on window functions over the CTE),
+        # so there is nothing else to skip - and the counts still come from the one query.
+        if params.get("_count") in {"1", "true", "True", "yes"}:
+            limit = 0
 
         rows, filtered_count, reviewed_count, total_count = self._sql_filtered_candidate_rows_and_counts(params, limit)
         focus_key = params.get("focusKey") or ""

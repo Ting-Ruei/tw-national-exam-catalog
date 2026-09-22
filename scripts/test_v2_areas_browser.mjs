@@ -118,6 +118,23 @@ async function main() {
   check(home.bigs.every((b) => b !== '載入中…'), '首頁的數字是把端點的數讀出來印的', JSON.stringify(home.bigs));
   check(/^#首頁/.test(decodeURIComponent(home.hash)), '首頁在 hash 裡，重整會回到首頁', home.hash);
 
+  // 首頁和大每一個區一樣：**畫一次**。繞去題目區再回來不該再打一次三個端點，也不該重建 DOM。
+  // （以前 `showArea` 直接呼叫 `renderHome`，繞開 `A.rendered`，每次切回都重抓。）
+  const homeReentry = await evaluate(`(async () => {
+    const realFetch = window.fetch;
+    let api = 0;
+    window.fetch = (...args) => { if (String(args[0]).includes('/api/')) api += 1; return realFetch(...args); };
+    document.querySelector('.area-btn[data-area="question"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('.area-btn[data-area="home"]').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    window.fetch = realFetch;
+    return { api, cards: document.querySelectorAll('#homeCards .card').length };
+  })()`);
+  check(homeReentry.cards === 3, '再進首頁時卡片還在（不是被重畫掉）', String(homeReentry.cards));
+  check(homeReentry.api === 0, '再進首頁不再重打三個端點（首頁也畫一次）',
+    `${homeReentry.api} 次 /api 呼叫`);
+
   // ---------------------------------------------------------------- 答案審核區
   await goto('answer');
   const answer = await evaluate(`(async () => {

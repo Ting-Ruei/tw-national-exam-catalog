@@ -13,6 +13,28 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 import serve_question_review_ui as review_ui  # noqa: E402
 
+ROOT = PROJECT_ROOT
+
+
+def _function_body(source: str, name: str) -> str:
+    """取一個 Python 函式的活體，去掉 docstring。
+
+    整個檔案的字串搜尋會把「講這條規則的散文」當成規則本身——`filtered_candidate_payloads` 的
+    註解裡就寫著 `_count`。所以要讀實際會執行的行。
+    """
+    import re
+
+    match = re.search(rf"def {name}\(", source)
+    assert match, f"找不到函式 {name}"
+    start = source.find("\n", match.start())
+    body = source[start:]
+    # 到下一個同縮排的 `def ` 或檔尾為止。
+    rest = re.search(r"\n    def ", body[1:])
+    if rest:
+        body = body[: rest.start() + 1]
+    body = re.sub(r'""".*?"""', "", body, flags=re.S)
+    return body
+
 
 class _FakeCursor:
     def __init__(self) -> None:
@@ -86,6 +108,88 @@ class ReviewUiPerformanceTests(unittest.TestCase):
         self.assertEqual(state._sql_pipeline_payload.call_count, 1)
         self.assertEqual(first["statistics_updated_at"], second["statistics_updated_at"])
         self.assertFalse(second["statistics_stale"])
+
+
+class CountOnlyRequestTests(unittest.TestCase):
+    """`_count=1` 要兩個數字，不要一列。
+
+    首頁的卡片只讀 `total_count` 與 `reviewed_count`，不畫任何一列，但它以前送 `limit=1000`——
+    而 `_count` 伺服器從不讀。於是每一次開首頁都建、序列化、傳了一千筆完整 payload（在真實的
+    佇列上實測：gzip 後 358.4 KB、原始 6.12 MB、1,000 列）。count-only 在同一份佇列上是同一個
+    篩選迴圈、不建 payload（gzip 後 1.5 KB）。
+
+    這裡的規則是「同一個迴圈、只是不 append」，所以計數必須與有建列時**一模一樣**——包含篩選。
+    負對照：把 `_count` 拿掉，列數就回到 `limit`。
+    """
+
+    def _state(self):
+        import json
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        candidates = tmp / "candidates.jsonl"
+        rows = [
+            {"candidate_key": f"k{i}", "question_number": i, "stem": f"題{i}",
+             "options": [{"key": "A", "text": "甲"}], "answer": "A",
+             "metadata": {"normalized_category_name": "藥師(一)", "year": 108,
+                          "exam_ordinal": 1, "normalized_subject_name": "藥學(一)"}}
+            for i in range(1, 26)
+        ]
+        rows.append({"candidate_key": "other", "question_number": 99, "stem": "別的",
+                     "metadata": {"normalized_category_name": "物理治療師", "year": 115,
+                                  "exam_ordinal": 2, "normalized_subject_name": "骨科"}})
+        candidates.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8"
+        )
+        log = tmp / "question_review_events.jsonl"
+        log.write_text("", encoding="utf-8")
+        state = review_ui.ReviewState(candidates, None, log, review_backend="jsonl")
+        state.append_review({"candidate_key": "k1", "action": "accept", "reviewer": "local"})
+        state.append_review({"candidate_key": "k2", "action": "block", "reviewer": "local"})
+        return state
+
+    def test_count_only_returns_no_rows_but_the_same_numbers(self) -> None:
+        state = self._state()
+        full = state.filtered_candidate_payloads({"limit": "1000"})
+        counted = state.filtered_candidate_payloads({"limit": "1000", "_count": "1"})
+        self.assertEqual(counted["returned_count"], 0, "count-only 不該回任何一列")
+        self.assertEqual(counted["candidates"], [])
+        self.assertEqual(
+            (counted["filtered_count"], counted["reviewed_count"], counted["total_count"]),
+            (full["filtered_count"], full["reviewed_count"], full["total_count"]),
+            "count-only 的數字必須與建列時一模一樣",
+        )
+        self.assertEqual(full["returned_count"], 26)
+
+    def test_count_only_counts_the_same_filtered_subset(self) -> None:
+        state = self._state()
+        full = state.filtered_candidate_payloads({"limit": "1000", "category": "藥師(一)"})
+        counted = state.filtered_candidate_payloads(
+            {"limit": "1000", "category": "藥師(一)", "_count": "1"}
+        )
+        self.assertEqual(counted["returned_count"], 0)
+        self.assertEqual(counted["filtered_count"], 25)
+        self.assertEqual(counted["filtered_count"], full["filtered_count"],
+                         "篩選後的計數也必須一致")
+        self.assertEqual(counted["reviewed_count"], full["reviewed_count"])
+
+    def test_the_count_only_switch_is_recognised_the_same_way_in_both_backends(self) -> None:
+        """JSONL 與 SQL 兩條路必須認得同一個開關，不能一條認、一條不認。"""
+        for source in ("filtered_candidate_payloads", "filtered_candidate_payloads_sql"):
+            with self.subTest(source=source):
+                body = _function_body(
+                    Path(ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8"),
+                    source,
+                )
+                self.assertIn('params.get("_count")', body, f"{source} 沒有讀 _count")
+                self.assertIn("limit = 0", body, f"{source} 沒有把 limit 歸零")
+
+
+class CountOnlyNegativeControlTests(unittest.TestCase):
+    def test_without_the_switch_the_limit_is_still_honoured(self) -> None:
+        state = CountOnlyRequestTests()._state()
+        payload = state.filtered_candidate_payloads({"limit": "5"})
+        self.assertEqual(payload["returned_count"], 5, "沒有 _count 時 limit 必須照舊")
 
 
 if __name__ == "__main__":

@@ -197,6 +197,30 @@ class AreasTests(unittest.TestCase):
         # 三個端點並行讀，不是自己把題庫算一遍。
         self.assertIn("Promise.all", body)
 
+    def test_the_home_page_asks_for_counts_not_a_thousand_rows(self):
+        """首頁畫的是卡片，不是清單：它只讀 total_count/reviewed_count，不畫任何一列。
+
+        它以前送 `limit: 1000` 去拿兩個整數，而 `_count` 伺服器從不讀——於是每一次開首頁都
+        建、序列化、傳了一千筆完整 payload（實測 6.0 MB、0.39 s、每筆 ~4.7 KB）。
+        count-only 只花 0.11 s 跑同一個篩選迴圈。所以：首頁讀 `_count`，而且不再要 1000 筆。
+        """
+        body = function_body(self.js, "renderHome")
+        self.assertIn("_count", body, "首頁沒有用 count-only 契約")
+        self.assertNotRegex(
+            body, r"limit:\s*1000", "首頁還在要 1000 筆完整 payload"
+        )
+
+    def test_the_home_page_renders_once_like_every_other_pane(self):
+        """換區是隱藏，不是重畫。首頁以前繞過 `A.rendered`，每次切回都重抓三個端點。
+
+        首頁的 DOM 不會藏住審稿人打一半的字（那是答案區的註記），但重抓本身就是白工——
+        它每次都重建 DOM、重跑三個 fetch。走 `renderArea` 就和其他區同一條路。
+        """
+        # `showArea` 不得再直接呼叫 `renderHome`；它只能呼叫 `renderArea`。
+        self.assertNotIn("renderHome()", function_body(self.js, "showArea"))
+        # `renderArea` 要負責分派到首頁。
+        self.assertIn("renderHome()", function_body(self.js, "renderArea"))
+
     # ---------------------------------------------------------------- 4. 換區是隱藏，不是清空
     def test_switching_areas_hides_rather_than_empties(self):
         body = function_body(self.js, "showArea")
@@ -322,6 +346,28 @@ class NegativeControlTests(unittest.TestCase):
         broken = self.js.replace("/api/answer-candidates", "/api/candidates")
         self.assertNotIn("/api/answer-candidates", function_body(broken, "renderAnswers"))
         self.assertIn("/api/answer-candidates", function_body(self.js, "renderAnswers"))
+
+    def test_a_home_request_for_a_thousand_rows_would_be_caught(self):
+        # 模擬修好前的樣子：把 count-only 拿掉，換回 `limit: 1000`。
+        broken = self.js.replace(
+            "fetchAreaJson('/api/candidates', { _count: 1 })",
+            "fetchAreaJson('/api/candidates', { limit: 1000 })",
+            1,
+        )
+        body = function_body(broken, "renderHome")
+        self.assertNotIn("_count: 1", body)
+        self.assertRegex(body, r"limit:\s*1000")
+        # 正對照：原檔的 `_count: 1` 在、`limit: 1000` 不在。
+        good = function_body(self.js, "renderHome")
+        self.assertIn("_count: 1", good)
+        self.assertNotRegex(good, r"limit:\s*1000")
+
+    def test_a_home_that_rerenders_on_every_switch_would_be_caught(self):
+        broken = self.js.replace("  if (next !== 'question') renderArea(next);",
+                                 "  if (next !== 'question') renderArea(next);\n  if (next === 'home') renderHome();", 1)
+        self.assertIn("renderHome()", function_body(broken, "showArea"))
+        # 正對照。
+        self.assertNotIn("renderHome()", function_body(self.js, "showArea"))
 
 
 if __name__ == "__main__":

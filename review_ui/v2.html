@@ -1918,7 +1918,6 @@ function showArea(area, { push = true } = {}) {
   // `replaceState`, not a push: the back button should leave the area, not walk through renders of it.
   if (location.hash !== wanted) history.replaceState(null, '', wanted);
   if (next !== 'question') renderArea(next);
-  if (next === 'home') renderHome();
   if (push) $('whoami').textContent = `${AREA_LABEL[next]} · ${S.rows.length} 題`;
 }
 
@@ -1939,6 +1938,7 @@ function renderArea(area, { force = false } = {}) {
   A.rendered[area] = true;
   if (area === 'answer') renderAnswers();
   else if (area === 'discuss') renderDiscuss();
+  else if (area === 'home') renderHome();
 }
 
 //: Called by anything that writes. The answer area's eligible set and the discussion area's case
@@ -1959,7 +1959,7 @@ async function renderHome() {
   const cards = $('homeCards');
   cards.innerHTML = '<div class="empty">載入中…</div>';
   const [questions, answers, feedback] = await Promise.all([
-    fetchAreaJson('/api/candidates', { limit: 1000, _count: 1 }),
+    fetchAreaJson('/api/candidates', { _count: 1 }),
     fetchAreaJson('/api/answer-candidates', { limit: 1 }),
     fetchAreaJson('/api/correction-feedback', { limit: 500 }),
   ]);
