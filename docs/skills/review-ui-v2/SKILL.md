@@ -92,6 +92,36 @@ Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2
   `b` are ordinary letters in a discussion or an answer note; an unguarded handler writes a review
   event from a keystroke the reviewer meant as text.
 
+## Latency — what actually costs time
+
+`question_ai_findings.jsonl` is the one big stream (measured: **482 MB / 73,688 records** on the
+served queue) and it is *append-only by contract* — `qbr/src/qbr/ai_findings.py::append` is a single
+`open(path, "a")`, the push helper appends with `cat >>`, and a rebuild writes a **new directory**.
+
+- **The findings store reads only the tail.** `QbrAiFindingsStore` remembers its file position and
+  re-reads only what was appended, because re-reading the whole file for each new line cost
+  **1.4 s per request** while the corpus sweep was running (the sweep appends every second, so every
+  request saw a changed signature and reloaded). Measured after: **0.07–1.6 ms** for an append and
+  **0.1 ms** with nothing new. This is the fix for "UI 慢" — not JSONL as a format.
+- **The result must be identical, not merely fast.** `test_the_tail_loader_equals_the_whole_file_loader`
+  compares the tail store against `load_qbr_ai_findings` record by record (last-record-wins, the
+  compact whitelist, appended `crop`/`changes`). Two engines, one answer.
+- **A rewrite must not be read as an append.** Three guards, all about bytes (not `mtime` — an append
+  moves that too): file identity (`st_dev`,`st_ino`; a deploy or rebuild swaps the file in), a
+  short size (truncation), and two fixed-length 64-byte windows (head and just-before-offset). A
+  same-inode, same-size patch of the *middle* is deliberately **not** claimed to be detected — no
+  writer does that, and the promise lives in the writers, not the reader.
+- **`refresh` is copy-on-write.** The old whole-file loader assigned a fresh dict each time (an
+  atomic reference swap), so a request mid-answer held a consistent snapshot; mutating in place
+  would let it see half an update. A 73k-record copy is 0.35 ms and only happens when there is
+  something new.
+- **The whole-file loader reads bytes, not text.** Text-mode iteration raised `UnicodeDecodeError`
+  on a truncated file or a half-written multi-byte character — and that loader is the rewrite
+  fallback, so one bad line made **every** request fail. A line that does not decode is now skipped
+  like one that does not parse.
+
+## 四個區的驗收
+
 Verify the four areas end to end (needs a queue built by `build_review_queue.py`):
 
 ```sh
