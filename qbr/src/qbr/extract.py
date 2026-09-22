@@ -61,6 +61,13 @@ _OFFSET_SUB_MIN_DCY = 1.9       # measured: +2.0 for `₂`,`₃`; smaller text w
 _OFFSET_SUP_MAX_DCY_SMALL = -1.0
 _OFFSET_SUB_MIN_DCY_SMALL = 0.8
 
+#: How close two spans' sizes must be to count as the same type size, for `_body_centre`.
+#: A paper sets its body in one size and rounds the reported number to two decimals, so copies of
+#: the body agree to well under a tenth of a point; a raised run is a whole step smaller (10.83 vs
+#: 9.03) and is excluded. Half a point is comfortably between the two and is not a value any page
+#: is balanced on.
+_BODY_SIZE_TOLERANCE = 0.5
+
 _OFFSET_WHITESPACE = frozenset(" \t\u00a0")
 
 #: Characters that sit **inside a formula the paper prints as an offset**, but for which Unicode has
@@ -201,7 +208,7 @@ def _span_centre(span):
 
 
 def _body_centre(body, *, fallback=0.0):
-    """Where the line's baseline sits, measured from the body spans that carry ink.
+    """Where the line's baseline sits, measured from the spans set in the **dominant** size.
 
     Whitespace-only spans are left out, and that is a statement about paper rather than a
     threshold. A space has no ink, so it has no baseline to speak of; a run of spaces at the body
@@ -214,6 +221,20 @@ def _body_centre(body, *, fallback=0.0):
     superscript the paper prints), and across the medical-technologist papers this reads 34 more
     runs without changing which sizes are called the body.
 
+    **The dominant size, and not every span the body floor admits, and that is the correction to
+    a defect this function had been carrying.** The caller's `body` is filtered at
+    `_BODY_SIZE_RATIO` (0.75) so that a *run* well below the body is still available to be
+    compared against it - but an offset run is only a little smaller than its host, and 0.83 >
+    0.75, so those runs were being averaged into the baseline they are supposed to be measured
+    from. Measured on `1141_醫事放射師_醫學物理學與輻射安全` Q14, whose page prints `Ci-1` with the
+    `-1` at 9.03pt raised to 446.04 against 10.83pt prose at 449.93: the contaminated baseline
+    sat at 447.65, so the raised run measured **-1.61** and fell under the -1.9 threshold while
+    the page plainly raised it. Restricting the baseline to the dominant size put it back at
+    448.86 and the run measures **-2.82**, which is what the page shows. On that paper the
+    readable offset characters go 30 -> 47; over 30 sampled papers, 161 -> 176, and no run is
+    newly refused. The class this hid (`flat-offset`, `cm-1` left flat) was reported as an
+    extraction defect needing a repair rule - it was this average.
+
     Two readings of the same line would otherwise disagree about the same glyph - the cells view
     puts the stray space in a cell of its own, the line view keeps it in the body - so this is also
     what keeps `extract_cells_a` and `extract_lines_a` saying the same thing.
@@ -222,6 +243,11 @@ def _body_centre(body, *, fallback=0.0):
     measured = inked or body
     if not measured:
         return fallback
+    dominant = _body_size(measured)
+    same_size = [span for span in measured
+                 if abs(float(span.get("size") or 0.0) - dominant) < _BODY_SIZE_TOLERANCE]
+    if same_size:
+        measured = same_size
     return sum(_span_centre(span) for span in measured) / len(measured)
 
 

@@ -219,6 +219,48 @@ def test_small_print_at_a_low_baseline_is_not_a_flattened_offset():
     assert extract.refused_offsets(spans) == []
 
 
+def test_the_baseline_is_measured_from_the_dominant_size_not_the_offset_runs():
+    """The negative control for a defect that hid a whole class: the average moved the baseline.
+
+    `_body_centre` is handed every span at or above 0.75x the body size, so that a run well below
+    the body is still there to be measured against. An offset run is only a *little* smaller than
+    its host - 9.03pt against 10.83pt is 0.83, above the 0.75 floor - so the offsets were being
+    averaged into the baseline they are supposed to be measured from. The old behaviour is the
+    assertion below: with the offset spans included the centre sits at 447.65, a genuinely raised
+    run measures only -1.61 against the -1.9 threshold, and the paper reads flat.
+
+    This is the shape the queue reported as `flat-offset` (`cm-1` left flat) and it was an
+    extraction defect that no repair rule could have fixed, because the text on the page was right
+    and the reading was wrong. Measured on `1141_醫事放射師_醫學物理學與輻射安全` Q14: readable offset
+    characters go 30 -> 47 with the baseline taken from the dominant size, and over 30 sampled
+    papers 161 -> 176, with no run newly refused.
+    """
+    from qbr import extract
+    # The real geometry of Q14 option A, all seven spans as PyMuPDF reports them: the `A.` marker
+    # at 12.81pt (y-centre 445.65), the prose `0.5 R m` / ` Ci` / ` h` at 10.83pt (y-centre
+    # 449.93), and the raised `2` / `-1 ` / `-1` at 9.03pt (y-centre 446.04) - a raise of 3.89
+    # points, plainly a superscript.
+    spans = [
+        {"text": "A.", "size": 12.81, "bbox": (0, 439.2, 12, 452.0)},
+        {"text": "0.5 R m", "size": 10.83, "bbox": (12, 444.5, 52, 455.4)},
+        {"text": "2", "size": 9.03, "bbox": (52, 441.5, 57, 450.6)},
+        {"text": " Ci", "size": 10.83, "bbox": (57, 444.5, 72, 455.4)},
+        {"text": "-1 ", "size": 9.03, "bbox": (72, 441.5, 82, 450.6)},
+        {"text": "h", "size": 10.83, "bbox": (82, 444.5, 88, 455.4)},
+        {"text": "-1", "size": 9.03, "bbox": (88, 441.5, 98, 450.6)},
+    ]
+    # The negative control: the *old* behaviour was a plain mean over every span at or above the
+    # floor, which averaged the raised runs into the baseline and moved it to 447.66, so the same
+    # run measured only -1.61 and stayed flat. Recomputed here rather than called, because the
+    # function has since been fixed - a negative control that called it would pass either way.
+    old_body = [span for span in spans if span["size"] >= 10.83 * 0.75]
+    old_centre = sum(extract._span_centre(span) for span in old_body) / len(old_body)
+    old_shift = extract._span_centre(spans[4]) - old_centre
+    assert old_shift > -1.9, "the old average must be the failing case"
+    # And the reading the page justifies: `Ci-1 h-1` is the superscript the paper printed.
+    assert extract.read_spans(spans) == "A.0.5 R m\u00b2 Ci\u207b\u00b9 h\u207b\u00b9"
+
+
 # --- the paper states its own structure -----------------------------------------------------
 # The skeleton reads only what the paper prints. These tests fix the two ways it was wrong before
 # the corpus was measured, because both were silent: the first made an entire year unreadable and

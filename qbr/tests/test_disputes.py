@@ -268,6 +268,12 @@ def test_every_foreign_letter_reports_the_script_so_the_reviewer_knows_what_to_l
 def test_a_flat_unit_exponent_is_reported_with_the_printing_the_paper_used():
     """`539 cm-1` is `cm⁻¹` gone flat; the dispute names both spellings.
 
+    The fix form is `<sup>-1</sup>`, not `cm⁻₁`. A negative exponent is a **superscript**, and the
+    queue's own correct spelling measures 204 occurrences of `<sup>-1</sup>` and zero of any other
+    form (`cm\u207b\u00b9` is the paper's compressed spelling of the same thing). This test first
+    asserted `cm\u207b\u2081` - a subscript - which is the wrong character, and the apply step would
+    have written it into the question. Kept as a check on the *fix* and not only on the detection.
+
     Measured on the 2026-09-22 block pass: 34 questions carry the shape, 6 of them were judged by
     a person, all 6 were blocked -> block rate 100% against the 5.4% corpus baseline.
     """
@@ -276,8 +282,10 @@ def test_a_flat_unit_exponent_is_reported_with_the_printing_the_paper_used():
                   accepted=["D"])
     found = [d for d in disputes.of_question(question) if d["kind"] == "flat-offset"]
     assert len(found) == 1, found
-    assert found[0]["detail"] == "cm-1→" + "cm\u207b\u2081", found[0]["detail"]
+    assert found[0]["detail"] == "cm-1→cm<sup>-1</sup>", found[0]["detail"]
     assert found[0]["runs"][0]["field"] == "option D"
+    # `position` is an index into the **stored** option text, which is what a repair slices.
+    assert found[0]["runs"][0]["position"] == len("539 ")
 
     # Negative control, and the two shapes it must not answer to are the two that sit next to it
     # on the same page: a range has digits on both sides of its hyphen, a nomenclature has letters
@@ -413,13 +421,20 @@ def test_lone_offset_letter_and_digit_are_the_same_run():
 
 
 def test_flat_offset_rule_reads_the_markup_form_and_its_negative_control():
-    """正對照：`cm<sup>-1</sup>`（markup）舆 `cm-1`（壓平）同命中、同位。
-    負對照：`0-4.5`（範圍，两侧皆数字）、`IL-2`（字母前缀）→ 0 命中（舊 3 命中是過拟合）。
-    界内：`-1S`（tabs 拼）與 `-1`（numpad 拼）同值（U+207B 舆 U+0031 同理）。"""
-    from qbr import extract
-    hits = disputes.flat_offset_pairs({"stem": extract.plain_sup_sub("cm<sup>-1</sup>"), "options": []})
+    """正對照：`cm-1` 命中、`position` 在**儲存字串**坐標上。
+    負對照：`cm<sup>-1</sup>`（已標好）與 `cm\u207b\u00b9`（紙本自己的形）**不得**命中——
+    它們已經帶著上下標，不是缺點。舊版先把輸入 `plain_sup_sub` 折過再量，
+    所以這兩者都變成了「有缺點」：量到的 299 run 裡 222 個（74%）是這種誤報。
+    界內：`0-4.5`（範圍）、`IL-2`（字母前綴）→ 0 命中。"""
+    hits = disputes.flat_offset_pairs({"stem": "cm-1", "options": []})
     assert len(hits) == 1 and hits[0]["flat"] == "cm-1"
-    assert len(disputes.flat_offset_pairs({"stem": "cm-1", "options": []})) == 1
+    assert hits[0]["position"] == 0, "position 是儲存字串坐標（cm 從 0 開始）"
+
+    assert disputes.flat_offset_pairs({"stem": "cm<sup>-1</sup>", "options": []}) == \
+        [], "已經標好的不是缺點（這條是舊版錯掉的負對照）"
+    assert disputes.flat_offset_pairs({"stem": "cm\u207b\u00b9", "options": []}) == \
+        [], "紙本自己的壓縮形也不是缺點"
+
     assert disputes.flat_offset_pairs({"stem": "\u918d\u54c1 0-4.5 \u5373\u53ef", "options": []}) == []
     assert disputes.flat_offset_pairs({"stem": "IL-2 \u578b", "options": []}) == []
 

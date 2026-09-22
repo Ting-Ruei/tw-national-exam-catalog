@@ -232,16 +232,23 @@ def foreign_script_characters(question):
 
 
 def _texts(question):
-    """Every field of one question that carries printed text, with the address a reviewer can use.
+    """Every field of one question that carries printed text, **as stored**, with its address.
 
-    The fold to the compressed offset form is what keeps these measurements comparable across
-    the two spellings: the queue ships `<sup>-1</sup>` (the reader's form, UA-styled, same shape
-    as Word), the regexes below are written against `⁻¹` (the paper's form).
+    Deliberately *not* folded to the compressed offset form. The first version folded
+    (`plain_sup_sub`) so that `<sup>-1</sup>` and `\u207b\u00b9` would answer to the same pattern,
+    and that was wrong for this rule: the question `flat_offset_pairs` asks is whether the
+    **storage** spells the exponent flat, so a spelling that already carries the offset must not
+    answer to it. Measured: folding made 299 runs match where only 77 were flat (74% false
+    positives), and it also made `position` an index into the folded string, which cannot slice the
+    stored one. Positions here are storage coordinates, which is what a repair writes back.
+
+    Other detectors (`substituted-script`, `substituted-ideograph`) already read `question["stem"]`
+    and `option["text"]` directly for the same reason; this generator exists so the field list is
+    declared once instead of three times.
     """
-    plain = extract.plain_sup_sub
-    yield "stem", plain(str(question.get("stem") or ""))
+    yield "stem", str(question.get("stem") or "")
     for option in question.get("options") or []:
-        yield "option %s" % option.get("key"), plain(str(option.get("text") or ""))
+        yield "option %s" % option.get("key"), str(option.get("text") or "")
 
 
 _RE_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -249,26 +256,43 @@ _RE_TABLE_KEY = re.compile(r"(?<![A-Za-z])(?P<key>[A-D])(?=[\u4e00-\u9fff])")
 
 
 def flat_offset_pairs(question):
-    """The places one question writes a unit's negative exponent flat.
+    """The places one question writes a unit's negative exponent flat **in the stored text**.
 
-    The shape is its own evidence: a letter run, one hyphen, 1-3 digits, with a non-alphanum on
-    each side. A *range* has digits on both sides of its hyphen (`2000-4000`) and a nomenclature
-    carries letters on the left of its hyphen (`IL-2`), so neither answers to this pattern and no
-    second, comparing pass is needed (`103090:312:22 q012`, `104020:312:22 q019`).
+    The shape is its own evidence: a unit, one hyphen, 1-3 digits, with a non-alphanum on each side.
+    A *range* has digits on both sides of its hyphen (`2000-4000`) and a nomenclature carries
+    letters on the left of its hyphen (`IL-2`), so neither answers to this pattern and no second,
+    comparing pass is needed (`103090:312:22 q012`, `104020:312:22 q019`).
+
+    **This runs on the stored text, not on a folded form, and that is the whole correction.** The
+    first version measured a folded string, so a unit the queue had *already* marked up correctly
+    (`cm<sup>-1</sup>`, and likewise the paper's own `cm\u207b\u00b9`) answered to the pattern
+    meant for `cm-1`. Counted over the queue: of 299 runs, **222 (74%) pointed at text that already
+    carried the offset**, and only 77 were flat. Two things then go right by construction: a
+    spelling that carries the offset cannot match (`cm` is followed by `<`, not `-`), and `position`
+    is an index into the string a repair will actually edit.
+
+    `as_printed` is the **fix**, and it is written as the markup the corpus itself uses rather
+    than assembled from a glyph table. A negative exponent is a *superscript* (`cm\u207b\u00b9`),
+    and the corpus's own correct spelling is `<sup>-1</sup>` (204 occurrences, zero of any other
+    form). Two attempts got this wrong in different ways, and both are worth keeping written down:
+    the first spelled it with `_subscript_glyph` and produced `cm\u208b\u2081` (a subscript), and the
+    second computed digits arithmetically from `0x2070` and produced `cm<sup>-i</sup>` for 1 - because
+    the superscript digits are **not a contiguous run**: 1/2/3 are U+00B9/B2/B3 and only 4-9 are
+    U+2074-2079, with U+2071 sitting in the middle as the *letter* i. Writing the markup form
+    directly has neither failure mode and needs no table of its own.
     """
     found = []
     for field, value in _texts(question):
         for match in _RE_FLAT_EXPONENT.finditer(value):
             unit, exponent = match.group("unit"), match.group("exp")
             found.append({"field": field, "flat": match.group(),
-                          "as_printed": "%s\u207b%s" % (unit, "".join(
-                              _subscript_glyph(d) for d in exponent)),
+                          "as_printed": "%s<sup>-%s</sup>" % (unit, exponent),
                           "position": match.start()})
     return found
 
 
 def _subscript_glyph(digit) -> str:
-    """The Unicode subscript for an ASCII digit, for the `as_printed` hint."""
+    """The Unicode subscript for an ASCII digit (used where a *subscript* is meant)."""
     return "%c" % (0x2080 + int(digit))
 
 
