@@ -148,6 +148,33 @@ class NoteUiTests(unittest.TestCase):
         self.assertIn("noteOf(item.candidate_key)", self.html)
         self.assertIn("noteShown", self.html)
 
+    def test_a_note_can_only_be_attached_to_the_question_it_was_typed_on(self):
+        """註記框是同一個,但註記是屬於寫它的那一題。
+
+        缺陷(2026-09-22 瀏覽器重現):框沒有被清空,而 `decide()` 無條件讀 `reasonText.value`。
+        在第 1 題寫下 `第一題的註記ABCXYZ`、按「確認正常」前進到第 2 題、不開框直接按 B
+        阻擋 —— 第 1 題的註記就成了第 2 題的阻擋理由。真人不會知道自己被安上了別題的註記。
+
+        負對照:把決定時的 `S.noteKey === item.candidate_key` 條件拿掉(回到「無條件讀框」),
+        這個測試會失敗 —— 因為它驗的是「誰擁有它」,不是「框在不在」。
+        """
+        # 關框時要清空並忘記主人。
+        self.assertIn("$('reasonText').value = ''", self.html)
+        self.assertIn("S.noteKey = null", self.html)
+        # 開框時要記住是誰的。
+        self.assertIn("S.noteKey = item ? item.candidate_key : null", self.html)
+        # 決定時只讀「開著且是這一題的」那個框。
+        self.assertIn("S.noteKey === item.candidate_key", self.html)
+        self.assertIn(
+            "const noteHere = $('reasonBox').classList.contains('on') && S.noteKey === item.candidate_key;",
+            self.html,
+        )
+        # 負對照要針對 `decide()` 本身：它的區塊裡不可以再有「無條件讀框」那一行。
+        # （`saveNote()` 留著無條件讀是對的：它只在框開著時被呼叫。）
+        decide_body = self.html.split("async function decide(action) {", 1)[1].split("}\n", 1)[0]
+        self.assertNotIn("const notes = $('reasonText').value.trim();", decide_body)
+        self.assertIn("const notes = noteHere ? $('reasonText').value.trim() : '';", decide_body)
+
 
 if __name__ == "__main__":
     unittest.main()

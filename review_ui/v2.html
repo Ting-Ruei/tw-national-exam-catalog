@@ -312,6 +312,15 @@ const S = {
   viewPos: new Map(),  // candidate_key -> position in `view`, so the nearest row is O(1)
   byKey: new Map(), data: null, index: 0, verdict: new Map(), notes: new Map(),
   editing: false, draft: null, paperPath: null,
+  //: Which question the open note box belongs to, or `null` when it is closed.
+  //:
+  //: The box used to be a bare `<textarea>` that was never cleared, and `decide()` read it
+  //: unconditionally. So the note written on one question stayed in the box, and the next decision -
+  //: made on a different question with the box shut - was recorded **with the previous question's
+  //: note attached to it**. Measured in a browser: a note typed on q001 was written as q002's block
+  //: reason. The note is a property of the question it was written on, so the open box remembers
+  //: which key it belongs to and `decide()` refuses to attach text the reviewer did not type here.
+  noteKey: null,
   // `null` is "not chosen yet" and `''` is "all, chosen deliberately". They are different states
   // and conflating them made every 全部 option unreachable: `refreshScope` saw `''` was not among
   // the values and replaced it with the first one, so choosing 全部年度 snapped back to the newest
@@ -1347,8 +1356,13 @@ function setEditMode(on) {
 function closeNote() {
   $('reasonBox').classList.remove('on');
   $('actNote').classList.remove('on');
+  // Clear the text and forget the owner. Not clearing it was the whole defect: the box is shared by
+  // every question, so a note left in it was silently re-attached to whichever question was decided
+  // next. Forgetting the owner too, so `decide()` cannot read a stale box as this question's note.
+  $('reasonText').value = '';
   $('reasonText').disabled = false;
   $('noteFor').textContent = '';
+  S.noteKey = null;
 }
 
 /* 註記框裡的 Enter 是「存」，Shift+Enter 才是換行。
@@ -1385,6 +1399,8 @@ function toggleNote(force) {
   $('reasonText').disabled = false;
   const existing = item ? noteOf(item.candidate_key) : '';
   $('reasonText').value = existing;
+  // Remember whose box this is. `decide()` uses this to refuse stale text.
+  S.noteKey = item ? item.candidate_key : null;
   // Say what the note attaches to, because the same box is used before and after a decision and
   // those are different acts: before, the note explains the decision about to be made; after, it
   // must not look like the reviewer is changing their mind.
@@ -1438,7 +1454,13 @@ async function decide(action) {
   // is written when the reviewer knows it, not as a toll on the way past. If the note box is open,
   // whatever is typed goes with the decision; otherwise the decision is recorded bare, which is the
   // common case.
-  const notes = $('reasonText').value.trim();
+  //
+  // Read the box **only when it is open and belongs to this question**. Reading it unconditionally
+  // was the defect: the box is shared by every question and was not cleared, so the note typed on
+  // the previous question became the next question's reason. A note is written against the question
+  // it was typed on, and an empty box is a decision with no note.
+  const noteHere = $('reasonBox').classList.contains('on') && S.noteKey === item.candidate_key;
+  const notes = noteHere ? $('reasonText').value.trim() : '';
   const body = { candidate_key: item.candidate_key, action, notes, reviewer: 'local', source: 'linear_v2' };
   try {
     const response = await fetch('/api/review', {
@@ -1470,7 +1492,11 @@ async function saveCorrection() {
     text: document.getElementById(`editOpt_${option.key}`)?.value ?? option.text,
     image: option.image ?? null,
   }));
-  const notes = $('reasonText').value.trim();
+  // The same ownership rule as `decide()`: the box is the current question's only when it is open
+  // and remembers this key. Opening the 修正 editor closes the note box, so this is normally empty
+  // and the default below applies - but it must not pick up a sibling question's stale text either.
+  const notes = ($('reasonBox').classList.contains('on') && S.noteKey === item.candidate_key)
+    ? $('reasonText').value.trim() : '';
   if (stem === (candidate.stem || '') && options.every((o, i) =>
       o.text === ((candidate.options || [])[i] || {}).text)) {
     toast('沒有改動', true);
