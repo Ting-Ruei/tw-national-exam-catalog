@@ -63,6 +63,17 @@ Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2
 - **A pane reads its numbers from the server.** 首頁 calls `/api/candidates`,
   `/api/answer-candidates` and `/api/correction-feedback` and prints what they say; it computes
   nothing of its own, because a dashboard that disagrees with the page behind it is worse than none.
+- **首頁 is a count, not a list: it sends `_count=1`.** The cards read `total_count` and
+  `reviewed_count` and draw no row, so the request must not fetch one. The server honours the switch
+  in **both** backends by forcing `limit = 0` — the *same* filter loop then counts and never appends
+  (`if len(payloads) < limit` is never true), so the numbers cannot come from a different rule than
+  the rows do. Measured on the live queue (gzip): `limit=1000` = 358.4 KB / 5.27 MB raw / 1,000
+  rows; `_count=1` = 1.5 KB / 0 rows. `_count` was **never read** before this — the home page had
+  been shipping a thousand full candidate payloads for two integers.
+- **首頁 is rendered once, like the other three areas.** It goes through `renderArea`, not a direct
+  `renderHome()` call from `showArea` (which bypassed `A.rendered` and re-fetched all three endpoints
+  on every switch back). A second entry fires **0** `/api` calls. Pinned by
+  `scripts/test_v2_areas_browser.mjs`.
 - **The answer area does not decide eligibility.** `/api/answer-candidates` returns questions whose
   question review is `accept`/`unblock`, and `/api/answer-review-batch` refuses the rest — mirror
   that, don't re-implement it. The batch endpoint takes **one** `action` for the whole request
