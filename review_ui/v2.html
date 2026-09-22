@@ -45,6 +45,11 @@
   .row .mark { width:7px; height:7px; border-radius:50%; background:var(--line-strong); flex:none; }
   .row.done .mark { background:var(--green); }
   .row.flag .mark { background:var(--amber); }
+  /* AI／管線退回: a distinct mark, because "the machine sent this back" and "I sent this back"
+     must be tellable apart at a glance in the list, not just by opening the chip. Blue rather than
+     red/amber: it is not a verdict that something is wrong, it is a notice that the text changed
+     under an approval and needs reading again. */
+  .row.returned .mark { background:var(--blue); }
   .row.active .num { color:var(--ink); font-weight:700; }
 
   /* --- the crops: shown under the options, never instead of them --- */
@@ -259,7 +264,8 @@
         <label class="chip" data-view="all"><input type="radio" name="view" value="all">全部<span class="n" id="nAll"></span></label>
         <label class="chip" data-view="group"><input type="radio" name="view" value="group">題組<span class="n" id="nGroup"></span></label>
         <label class="chip" data-view="unseen"><input type="radio" name="view" value="unseen">未看<span class="n" id="nUnseen"></span></label>
-        <label class="chip" data-view="flagged"><input type="radio" name="view" value="flagged">需重看・阻擋<span class="n" id="nFlagged"></span></label>
+        <label class="chip" data-view="flagged"><input type="radio" name="view" value="flagged">我擋的・需重看<span class="n" id="nFlagged"></span></label>
+        <label class="chip" data-view="returned"><input type="radio" name="view" value="returned">AI・管線退回<span class="n" id="nReturned"></span></label>
         <label class="chip" data-view="disputed"><input type="radio" name="view" value="disputed">爭議<span class="n" id="nDisputed"></span></label>
       </div>
     </div>
@@ -331,7 +337,7 @@ const verdictOf = (key) => S.verdict.get(key) || '';
 // make a question count as 已過目. Notes are kept beside it, because a note the reviewer cannot see
 // again is a note they will write twice - or stop writing.
 const noteOf = (key) => S.notes.get(key) || '';
-const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正', comment: '只加註記' };
+const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正', comment: '只加註記', reset_review: 'AI／管線退回' };
 //: The one place that says whether an action is a *verdict on* a question or a *note about* it. The
 //: server applies the same distinction (a note reaffirms the decision it is attached to rather than
 //: replacing it); here it decides whether the question counts as 已過目.
@@ -400,7 +406,7 @@ function rowReviewAction(candidate) {
   // A reset is a recorded decision that says "look again", and it outranks an older action: the
   // events are append-only, so after a repair the old `accept` is still on the row and the newest
   // statement about the question is the reset.
-  if (review.is_reset_unreviewed) return 'needs_review';
+  if (review.is_reset_unreviewed) return 'reset_review';
   return String(review.action || '');
 }
 
@@ -844,16 +850,28 @@ const LIST_WINDOW = 400;
 /* Which of the four states a question is in, and which one the reviewer is looking at.
 
    These are **states of the question**, not of the reviewer's session: 未看 means "no decision
-   recorded", 需重看・阻擋 means "a decision was recorded that says this needs another look". The
-   two are disjoint and together with 確認正常 they cover every row, so the chips partition the
-   scope and the counts add up - which is what makes the number beside a chip trustworthy.
+   recorded", a flag means "a decision was recorded that says this needs another look". They are
+   disjoint and together with 確認正常 they cover every row, so the chips partition the scope and
+   the counts add up - which is what makes the number beside a chip trustworthy.
 
-   需重看 and 阻擋 are **one** chip deliberately. They are the two ways of saying "do not ship this as
-   it stands" and they are reviewed the same way - by reading them again - so splitting them made
-   the reviewer choose a category before they had decided what was wrong. The recorded action still
-   distinguishes them; only the filter merges them. */
+   需重看 and 阻擋 are **one** chip, because they are the same act - the reviewer saying "do not ship
+   this as it stands" - and they are reviewed the same way, by reading the question again. Splitting
+   them would make the reviewer choose a category before deciding what is wrong.
+
+   **AI／管線退回 is a different chip, because it is a different author.** A `reset_review` event is
+   not the reviewer's opinion: the pipeline changed the question's text (a repair) or the model
+   raised a finding, and the question came *back*. The reviewer never flagged it; something else
+   decided the reading it was approved under is no longer the reading on screen. Merging it with the
+   reviewer's own blocks hid that distinction on the one screen where it matters most - the reviewer
+   cannot tell whether a question is waiting because they said so or because a machine said so, and
+   the second case needs a different question answered ("is the new text right?") than the first
+   ("what is wrong?"). Measured on the served queue: 106 blocks, of which 9 are resets.
+
+   The two chips stay in the same 不要出貨 family, so nothing about the walk changes - only the
+   count and the filter. */
 function stateOf(item) {
   const v = verdictOf(item.candidate_key);
+  if (v === 'reset_review') return 'returned';
   if (v === 'needs_review' || v === 'block') return 'flagged';
   if (v) return 'done';
   return 'unseen';
@@ -929,6 +947,7 @@ function visibleRows() {
     if (mode === 'group') return isGrouped(item);
     if (mode === 'unseen') return stateOf(item) === 'unseen';
     if (mode === 'flagged') return stateOf(item) === 'flagged';
+    if (mode === 'returned') return stateOf(item) === 'returned';
     // 爭議 is what the *pipeline* could not settle, not what the reviewer decided. It is a separate
     // axis from the state chips and deliberately so: a question can be a settled `確認正常` and still
     // carry a dispute the pipeline raised, and collapsing them would hide the machine's uncertainty
@@ -949,6 +968,7 @@ function renderChips() {
   $('nGroup').textContent = n(isGrouped);
   $('nUnseen').textContent = n((item) => stateOf(item) === 'unseen');
   $('nFlagged').textContent = n((item) => stateOf(item) === 'flagged');
+  $('nReturned').textContent = n((item) => stateOf(item) === 'returned');
   $('nDisputed').textContent = n(hasDispute);
   document.querySelectorAll('#chips .chip').forEach((chip) => {
     chip.classList.toggle('on', chip.dataset.view === viewMode());
@@ -977,6 +997,7 @@ function renderList() {
     if (position === S.index) cls.push('active');
     if (v) cls.push('done');
     if (v === 'needs_review' || v === 'block') cls.push('flag');
+    if (v === 'reset_review') cls.push('returned');
     return `<button class="${cls.join(' ')}" data-pos="${position}">
       <span class="mark"></span><span class="num">${esc(item.question_number)}</span>
       <span class="fig">${item.has_figure ? '▣' : ''}</span>
@@ -1088,7 +1109,17 @@ function renderTextSide() {
   $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)}`;
   const standing = verdictOf(item.candidate_key);
   const note = noteOf(item.candidate_key);
-  $('stateHint').textContent = standing ? `已標記：${LABEL[standing] || standing}`
+  // 被退回來的題目要說出**是誰退回、為什麼**，不然「AI／管線退回」只是一個標籤。
+  // 原因就在清單自己帶的 `review.reset` 裡（退回事件的 notes／reset_notes 與 previous_action），
+  // 不是另一支 API 才有的欄位。人按的 block／needs_review 沒有這塊：原因就是審題者自己。
+  const resetEvent = (candidate.review || {}).reset || {};
+  const returnedNote = standing === 'reset_review'
+    ? [resetEvent.reset_notes || resetEvent.notes,
+       resetEvent.previous_action ? `原為：${LABEL[resetEvent.previous_action] || resetEvent.previous_action}` : '']
+        .filter(Boolean).join('｜')
+    : '';
+  $('stateHint').textContent = standing
+    ? `已標記：${LABEL[standing] || standing}${returnedNote ? `（${returnedNote}）` : ''}`
     : (note ? '只有註記・尚未決定' : '');
 
   const edited = metadata.review_status === 'human_corrected' || (candidate.review?.has_correction);

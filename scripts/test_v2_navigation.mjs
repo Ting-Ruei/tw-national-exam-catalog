@@ -44,12 +44,12 @@ for (const id of ['textSide', 'listBody', 'crumbs', 'scopeCount', 'doneCount', '
   'doneBar', 'paperSide', 'paperHint', 'paperFrame', 'reasonText', 'reasonBox', 'dirtyBox',
   'toast', 'figureNote', 'editor', 'viewStem', 'viewOpts', 'actFix', 'actSave', 'actAccept',
   'editStem', 'pickCategory', 'pickYear', 'pickSitting', 'pickSubject', 'figuresOnly',
-  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
+  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nReturned', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
   'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where']) makeElement(id);
 elements.get('figuresOnly').tagName = 'INPUT';
 
 /* The chip radios: only the chip the test selects should read as checked. */
-const chipViews = ['all', 'group', 'unseen', 'flagged', 'disputed'];
+const chipViews = ['all', 'group', 'unseen', 'flagged', 'returned', 'disputed'];
 const chipNodes = chipViews.map((view) => {
   const radio = makeElement(`radio_${view}`, 'input');
   radio.value = view;
