@@ -538,6 +538,71 @@ def test_an_or_answer_is_not_shown_as_a_multi_select_answer():
     assert ai_findings.answer_of(one) == "B"
 
 
+def test_the_blocked_prompt_does_not_ask_the_model_to_guess_where_it_is_wrong():
+    """A person's block carries no location, so the prompt must not pretend it does.
+
+    The old `blocked` ask was "請說出你認為哪裡錯了、以及該怎麼修" - *tell us where you think it is
+    wrong* - which is the corpus question wearing a badge. The reviewer deliberately does not have
+    to write a reason when blocking (annotation is a separate feature), so "a human flagged this"
+    adds **no evidence at all**: the model has the same text the person had and is told to
+    re-decide it. That is the open, unverifiable question this project measured as unreliable.
+
+    Measured against the 2,502 questions a person had already judged, findings that named a shape
+    visible in the text agreed with the person 54% of the time; findings that judged the answer
+    agreed 8%. The flag can ask for a *reading*; it cannot ask for a verdict it has no basis for.
+    """
+    system, user = ai_findings.build_prompt(_question(), population="blocked")
+    assert "沒有說錯在哪" in user
+    assert "不要重新猜一次" in user
+    # The old wording must be gone, not merely outnumbered - and the negative control is exact:
+    # every occurrence of the phrase used to be a separate place it could hide.
+    assert "請說出你認為哪裡錯了" not in user
+    assert "請說出你認為哪裡錯了" not in system
+    # A block still asks for a reading of the visible text, so the note keeps its value.
+    assert "看得見" in user
+
+
+def test_the_prompt_forbids_judging_the_answer_with_subject_knowledge():
+    """The prompt must say the answer is read, not graded - in both populations that lack the page.
+
+    `ANSWER_DISAGREES` was removed from `CODES` because it asked the model to do something the
+    pipeline gives it no evidence for (no paper, no corrections sheet, no answer key). Removing the
+    code is only half the fix: a model that still thinks it is grading the answer will report the
+    disagreement under some other code. So the instruction itself is asserted.
+    """
+    for population in ("blocked", "corpus", "dispute"):
+        system, _ = ai_findings.build_prompt(_question(), population=population)
+        assert "不要用學科知識" in system
+        assert "那不是抽取缺陷" in system
+    # `dispute` is not an exception to that rule - the crop lets the model check the text against
+    # the *page*, not against its memory - and what makes it different is asserted where it belongs,
+    # in its own ask: a closed question with a checkable answer.
+
+
+def test_the_answer_disagreement_code_is_not_in_the_vocabulary():
+    """The code whose only meaning was "I disagree with the answer key" is gone.
+
+    Measured on the 1,285 `ANSWER_DISAGREES` findings the corpus sweep produced: 39 were voided
+    questions storing `A、B、C、D` to mean everyone scores, 350 were `B或C` corrections meaning either
+    counts, and 885 were the model's own subject judgement - 92% of the whole class disagreed with a
+    person who had actually seen the question. A real extraction defect near the answer is still
+    reportable under `OPTION_TRUNCATED` / `MISSING_OPTION`, so nothing checkable was lost.
+    """
+    assert "ANSWER_DISAGREES" not in ai_findings.CODES
+    system, _ = ai_findings.build_prompt(_question())
+    assert "ANSWER_DISAGREES" not in system
+    # The parser follows the vocabulary, so a model that still emits the old code must have its note
+    # kept but its code rejected, rather than the code being silently accepted from the model's side
+    # only. This is the property `normalize_code` already promises - the removal must not break it.
+    assert ai_findings.normalize_code("ANSWER_DISAGREES") is None
+    finding = ai_findings.parse_finding(
+        '{"verdict":"DEFECT","what":"ANSWER_DISAGREES","where":"答案欄位標記為A",'
+        '"fix":"改成C","rule_worthy":false,"confidence":0.95}')
+    assert finding["what"] is None
+    assert finding["what_reported"] == "ANSWER_DISAGREES"
+    assert "答案欄位標記為A" in finding["where"]
+
+
 def test_only_the_latest_finding_decides_whether_a_question_is_stale(tmp_path):
     """A re-asked question must stop looking stale, or `--restale` re-asks it forever.
 

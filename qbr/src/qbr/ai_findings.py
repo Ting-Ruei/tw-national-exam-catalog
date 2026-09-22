@@ -47,6 +47,23 @@ SCHEMA = "qbr_ai_finding_v0.1"
 #: The vocabulary of what can be wrong. Single-sourced here rather than written again in the
 #: asking script, because two copies of a code list is two places for a code to mean two things,
 #: and a code the reader cannot act on is worse than no code.
+#:
+#: `ANSWER_DISAGREES` was here and was **removed**, not forgotten. It asked the model to judge
+#: whether the paper's answer was right, which is not something this pipeline can give it evidence
+#: for: the model sees the extracted text and nothing else - no paper, no corrections sheet, no
+#: answer key - so the only way to answer is its own subject memory, which is the "推演語意" the
+#: charter forbids. Measured against the 2,502 questions a person had already judged, findings
+#: carrying this code agreed with the person **8%** of the time (3 of 37), while findings about
+#: shapes visible in the text agreed **54%** of the time. The wrong answers were structural, not
+#: random: of 1,285 `ANSWER_DISAGREES` findings, 39 were voided questions whose stored `A、B、C、D`
+#: means "everyone scores" and 350 were `B或C` corrections meaning "either counts" - the model
+#: correctly reasoned a single-choice question cannot have several answers and blamed the paper for
+#: what the prompt had failed to explain. Answer correctness already has its own road (the answer
+#: review area); keeping the code here only invites the model to invent.
+#:
+#: A real extraction defect near the answer - an option truncated so the answer letter has nothing
+#: to point at - is still reportable, under `OPTION_TRUNCATED` / `MISSING_OPTION`. What is gone is
+#: the code whose only meaning was "I, the model, disagree with the answer key".
 CODES = {
     "SUPERSCRIPT_FLATTENED": "上下標被壓平成普通字元，公式或化學式因此讀不出層次（如 PO4 3- 應為 PO₄³⁻）",
     "OPTION_TRUNCATED": "選項被截斷，看起來只有半截（如 [Na、[K 這種沒有結尾的括號）",
@@ -56,7 +73,6 @@ CODES = {
     "STEM_TRUNCATED": "題幹在句中斷掉，語意不完整",
     "GLYPH_DAMAGE": "出現不該出現的字元（亂碼、罕用異體字、簡體字、別國字母）",
     "DROP_OUT": "紙本有內容，抽取結果裡沒有（掉字、掉符號、掉整行），且位置可以指出來",
-    "ANSWER_DISAGREES": "答案卷與題目對不上（答案少一題、答案與選項不符）",
     "FIGURE_MISSING": "題目要讀者看的圖不在這一題身上（圖沒被抽出來，或跨頁續接）",
     "NONE": "沒有發現異常",
 }
@@ -79,9 +95,23 @@ VERDICTS = ("DEFECT", "NOT_EXTRACTION", "OK")
 #: file are different questions, and the answer means something different in each case. The prompt
 #: has to say which one this is, and the version hash has to change when it does.
 POPULATIONS = {
+    # A question a person rejected.
+    #
+    # This used to say "請說出你認為哪裡錯了、以及該怎麼修" - *tell us where you think it is
+    # wrong* - which is the corpus question wearing a badge. The fact that a person flagged the
+    # question carries **no location** (the reviewer deliberately does not have to write a reason;
+    # annotation is a separate feature), so the model is handed exactly the evidence the person had
+    # and told to re-decide it. That is the open, unverifiable question this project has measured as
+    # unreliable, restated. What the flag *can* do is ask for a reading: name what is visible in the
+    # text and say plainly when the problem is not extraction at all.
     "blocked": {
-        "arrival": "使用者給你一題「已經被人類標記為有問題」的題目文字。",
-        "ask": "這個題目已經被人類標記為「有問題」。請說出你認為哪裡錯了、以及該怎麼修。",
+        "arrival": "使用者給你一題「已經被人類標記為有問題」的題目文字。"
+                   "人類標記時並沒有說錯在哪裡，所以「被標記」這件事本身沒有告訴你任何位置。",
+        "ask": "這一題已經被人類標記為有問題，但**沒有說錯在哪**——你手上只有題目文字，"
+               "和人類看到的一樣。請**不要重新猜一次這題對不對**。你只要做一件事："
+               "指出你在文字層**看得見**的具體異常（哪個字、哪個位置、什麼符號）。"
+               "若你認為問題不在抽取結果，而在紙本或題目本身（答案爭議、出題錯誤），"
+               "verdict 用 NOT_EXTRACTION 並說明理由——這比硬找一個缺陷有價值。",
     },
     "corpus": {
         "arrival": "使用者依序給你題庫裡的題目，請你檢查抽取結果有沒有問題。",
@@ -118,6 +148,11 @@ SYSTEM = """你是國考題庫抽取品管員。{arrival}
 【重要】有些題目的問題**不是抽取造成的**：可能是紙本本身的意外、答案爭議、或題目本身的錯。
 這種情況 verdict 用 NOT_EXTRACTION，並在 `where`/`fix` 說明你的理由。
 **誠實說「這不是抽取缺陷」比硬找一個缺陷有價值**，因為那會讓下一個人去修一個不存在的東西。
+
+【重要】你只能根據**文字層看得見的東西**判斷。不要用學科知識（藥理、生理、法律…）
+去判斷「這題的答案對不對」——那要看紙本、更正卷與命題者的意圖，不在你看得到的證據裡。
+答案欄位顯示什麼就照著讀：顯示「送分」就是全部給分，顯示「B或C」就是任一個都算對。
+若這一題的答案讓你的學科知識覺得奇怪，那不是抽取缺陷，不要把它寫成缺陷。
 
 【重要】有些問題是**單一個案**（只出現一次的意外），不是一類。這種情況 `rule_worthy` 用 false。
 這正是我們要的區分：**一類問題才值得寫規則，個案要單獨討論**，寫規則只會讓它變成誤傷別人的規則。
