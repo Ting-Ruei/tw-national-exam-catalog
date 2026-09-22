@@ -42,14 +42,33 @@ import unicodedata
 import urllib.error
 import urllib.request
 
-from . import vision
+from . import engines, vision
 
-#: Where the transcription model lives. A port is a parameter; the default is the local MTPLX
-#: endpoint that serves the vision model this was measured against.
-BASE_URL = os.environ.get("QBR_REREAD_BASE_URL", os.environ.get("QBR_MODEL_BASE_URL",
-                                                                "http://127.0.0.1:18120"))
-MODEL = os.environ.get("QBR_REREAD_MODEL", os.environ.get("QBR_MODEL_NAME", "ornith-1.5-mtplx-35b"))
-API_KEY = os.environ.get("QBR_REREAD_API_KEY", os.environ.get("QBR_MODEL_API_KEY", "mtplx"))
+#: Where the transcription model lives. It defaults to the **Splash** endpoint, because that is the
+#: engine the rest of the AI pass uses - and because pointing this module at an engine whose
+#: off-switch it did not know about was a real bug: `transcribe` used to send MTPLX's
+#: `chat_template_kwargs.enable_thinking`, which Splash accepts with HTTP 200 and ignores. Measured
+#: on 8088: 31.5s with 612 characters of reasoning, against 6.7s and none with the right spelling.
+#: The spelling now lives with the engine (`qbr.engines`), so it cannot be sent to the wrong one.
+#:
+#: `QBR_REREAD_*` overrides the *engine* (name and URL), not just the URL, so a caller can point
+#: this at MTPLX without the request keeping a Splash-shaped switch.
+ENGINE = os.environ.get("QBR_REREAD_ENGINE", "splash")
+BASE_URL = os.environ.get("QBR_REREAD_BASE_URL", engines.ENDPOINTS[ENGINE]["url"])
+MODEL = os.environ.get("QBR_REREAD_MODEL", engines.ENDPOINTS[ENGINE]["name"])
+API_KEY = os.environ.get("QBR_REREAD_API_KEY", engines.ENDPOINTS[ENGINE].get("key", ""))
+
+
+def endpoint():
+    """The engine to transcribe with, as the one table spells it.
+
+    Built from the table rather than kept as a module constant so that the thinking switch travels
+    with the engine. `QBR_REREAD_BASE_URL`/`_MODEL` still override the address, but the switch comes
+    from the named engine - a caller pointing this at Splash gets Splash's switch, not MTPLX's.
+    """
+    engine = dict(engines.ENDPOINTS[ENGINE])
+    engine["url"], engine["name"], engine["key"] = BASE_URL, MODEL, API_KEY
+    return engine
 
 #: The one instruction that matters is "do not correct what you see". A model that silently fixes a
 #: typo makes this whole exercise worthless, because the disagreement being looked for is exactly
@@ -229,28 +248,35 @@ def crop_rows(pdf_path, rows, *, dpi=vision.DEFAULT_DPI, margin=vision.MARGIN, g
 
 
 def transcribe(png_bytes, *, think=False, max_tokens=2000, timeout=300):
-    """Ask the model what the crop says. Returns (content, seconds); raises only on transport error."""
-    body = {
-        "model": MODEL, "temperature": 0, "max_tokens": max_tokens,
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": [
-                {"type": "text", "text": "請轉錄這張截圖。"},
-                {"type": "image_url", "image_url": {
-                    "url": "data:image/png;base64," + base64.b64encode(png_bytes).decode()}}]},
-        ]}
-    body.update(vision._thinking_on_body() if think else vision._thinking_off_body())
+    """Ask the model what the crop says. Returns `(content, seconds)`; raises only on transport error.
+
+    `think=True` is only meaningful for an engine that can think; when the engine has no on-switch
+    recorded, the request is sent as-is rather than guessed at. The default engine (Splash) is asked
+    with its own off-switch, which is what makes a transcription a five-second call rather than a
+    thirty-second one.
+    """
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": "請轉錄這張截圖。"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(png_bytes).decode()}}]},
+    ]
+    engine = endpoint()
+    if think and "thinking_on" in engine:
+        engine = {**engine, "reasoning": None, "thinking": engine["thinking_on"]}
     request = urllib.request.Request(
-        BASE_URL.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + API_KEY})
+        engines.endpoint_url(engine["url"]),
+        data=json.dumps(engines.body_for(engine, messages, max_tokens=max_tokens)).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + engine.get("key", "")})
     started = time.time()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as handle:
             payload = json.loads(handle.read().decode())
     except urllib.error.HTTPError as exc:
         raise RuntimeError("HTTP %s: %s" % (exc.code, exc.read().decode()[:200]))
-    content = (((payload.get("choices") or [{}])[0].get("message") or {}) or {}).get("content") or ""
-    return content, round(time.time() - started, 1)
+    return engines.content_of(payload), round(time.time() - started, 1)
 
 
 def reread_question(pdf_path, number, item, kept_rows, *, out_png=None, think=False,

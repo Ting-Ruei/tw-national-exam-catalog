@@ -80,35 +80,16 @@ sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
 from qbr import ai_findings  # noqa: E402
+from qbr import engines  # noqa: E402
 from qbr import vision  # noqa: E402
 import repair_loop  # noqa: E402
 
-# The engines, by name. `splash` is the default because it is the one measured to find defects the
-# smaller engine calls NONE - on `108030:305 q076` it reported `FIGURE_MISSING` where ornith said
-# NONE, and on `q049` it named the Kangxi radicals that the deterministic scan had explicitly
-# decided were harmless. One engine answering everything is also the point: two engines answering
-# the same question is how this project ends up with two records that disagree and no rule for
-# which one is right.
-#
-# `reasoning_effort: none` is not a quality setting, it is what makes the run finish: measured on
-# 8088, thinking on takes 21-54s/question (1,164-3,262 reasoning tokens), thinking off takes 3-5s
-# and still finds the same defects. The default is off for the corpus pass and can be turned back
-# on per-run for a single hard question.
-ENDPOINTS = {
-    "splash": {"url": os.environ.get("QBR_SPLASH_BASE_URL", "http://127.0.0.1:8088"),
-               "name": os.environ.get("QBR_SPLASH_MODEL", "incoai/Qwen3.8-27B-Splash"),
-               "key": os.environ.get("QBR_SPLASH_API_KEY", ""),
-               "reasoning": "none"},
-    "mtplx-35b": {"url": os.environ.get("QBR_MODEL_BASE_URL", "http://127.0.0.1:18120"),
-                  "name": os.environ.get("QBR_MODEL_NAME", "ornith-1.5-mtplx-35b"),
-                  "key": os.environ.get("QBR_MODEL_API_KEY", "mtplx"),
-                  # MTPLX turns thinking off with this spelling; `reasoning_effort` is a vLLM/Splash
-                  # control and is ignored by it, silently, which is how a "thinking off" run keeps
-                  # thinking. The spelling belongs to the engine, so it is stored with the engine.
-                  "thinking": {"chat_template_kwargs": {"enable_thinking": False}}},
-    "qwen3.8-flash-next": {"url": "http://192.168.10.90:8888", "name": "qwen3.8-flash-next",
-                           "key": "dgx-spark-local", "reasoning": "none"},
-}
+# The engines, by name. Stored in the library (`qbr.engines`) rather than here, because
+# `reread.py` also calls a model and **a second copy of "how to turn thinking off" is exactly the
+# bug that module exists to prevent**: the wrong spelling is accepted with HTTP 200 and silently
+# ignored, so a duplicate that drifts costs 4.7x the latency with no error. This name is kept as an
+# alias so existing callers and tests keep working.
+ENDPOINTS = engines.ENDPOINTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -157,40 +138,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def _endpoint(base: str) -> str:
-    base = base.rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    return base + "/chat/completions"
+    return engines.endpoint_url(base)
 
 
 def ask(messages, *, endpoint, max_tokens, timeout):
     """One call. Returns (parsed_or_None, raw, complaint, usage, seconds).
 
-    The thinking switch is a property of the engine, not of this caller: Splash takes
-    `reasoning_effort: none` (measured 21-54s -> 3-5s with the same findings), MTPLX takes
+    The request is built by `qbr.engines`, which owns the engine-specific thinking switch. Splash
+    takes `reasoning_effort: none` (measured 21-54s -> 3-5s with the same findings); MTPLX takes
     `chat_template_kwargs.enable_thinking` and **silently ignores** the other spelling - which is how
     a "thinking off" run keeps thinking and returns an empty string when the budget runs out.
     """
-    if endpoint["reasoning"]:
-        body = {"model": endpoint["name"], "messages": messages, "max_tokens": max_tokens,
-                "temperature": 0, "reasoning_effort": endpoint["reasoning"]}
-    else:
-        body = {"model": endpoint["name"], "messages": messages, "max_tokens": max_tokens,
-                "temperature": 0}
-        body.update(endpoint["thinking"])
-    request = urllib.request.Request(
-        _endpoint(endpoint["url"]), data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + endpoint["key"]})
-    started = time.time()
-    try:
-        raw = json.loads(urllib.request.urlopen(request, timeout=timeout).read().decode())
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-        return None, "", "request failed: %s" % exc, {}, time.time() - started
-    seconds = time.time() - started
-    message = (raw.get("choices") or [{}])[0].get("message") or {}
-    content = message.get("content") or ""
-    return (ai_findings.parse_finding(content), content, None, raw.get("usage") or {}, seconds)
+    raw_response, seconds = engines.ask(messages, endpoint=endpoint, max_tokens=max_tokens,
+                                        timeout=timeout)
+    if raw_response is None:
+        return None, "", "request failed", {}, seconds
+    content = engines.content_of(raw_response)
+    return (ai_findings.parse_finding(content), content, None, engines.usage_of(raw_response),
+            seconds)
 
 
 def targets(queue_dir: str, only, limit, everything=False, done=(), questions=None):
