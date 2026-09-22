@@ -43,6 +43,19 @@ def import_server():
     return module
 
 
+def js_of(html: str) -> str:
+    """v2 已拆為 `review_ui/v2/*.js`（一區一檔）。返「HTML ＋ 依序串起的 JS」單字串，
+    令正則能同檢骨架與腳本。`src` 以 `review_ui/` 為基準；檔名序＝執行序（實測一致）。
+    """
+    parts = [html]
+    for src in re.findall(r'<script src="([^"]+)"></script>', html):
+        parts.append((V2.parent / src).read_text(encoding="utf-8"))
+    for inline in re.findall(r"<script>(.*?)</script>", html, re.S):
+        if inline.strip():
+            parts.append(inline)
+    return "\n".join(parts)
+
+
 def finding_html_body(html: str) -> str:
     match = re.search(r"function findingHtml\(candidate\) \{(.*?)\n\}", html, re.S)
     assert match, "v2.html 裡找不到 findingHtml"
@@ -52,7 +65,7 @@ def finding_html_body(html: str) -> str:
 class FindingVisibleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.html = V2.read_text(encoding="utf-8")
+        cls.html = js_of(V2.read_text(encoding="utf-8"))
         cls.ui = import_server()
 
     # --- 伺服器：loading 與欄位 ---------------------------------------------

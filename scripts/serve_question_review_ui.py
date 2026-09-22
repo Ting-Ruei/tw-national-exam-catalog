@@ -62,7 +62,7 @@ except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
     )
 
 try:
-    from ai395_feedback import (
+    from review_feedback import (
         FeedbackContractError,
         NoVisibleChange,
         apply_correction as apply_feedback_correction,
@@ -71,7 +71,7 @@ try:
         question_snapshot,
     )
 except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
-    from scripts.ai395_feedback import (
+    from scripts.review_feedback import (
         FeedbackContractError,
         NoVisibleChange,
         apply_correction as apply_feedback_correction,
@@ -318,7 +318,7 @@ def load_correction_feedback_events(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def load_correction_feedback_rows(path: Path, *, limit: int = 100) -> list[dict[str, Any]]:
-    """Load an append-only feedback outbox for n8n or an operator export."""
+    """Load an append-only feedback outbox for the current local operator export."""
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
@@ -2036,6 +2036,15 @@ def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
         # questions with figures and then presses `S` must arrive at the next one with a figure.
         "/v2": ("v2.html", "text/html; charset=utf-8", "no-store"),
         "/v2/": ("v2.html", "text/html; charset=utf-8", "no-store"),
+        # 一區一檔（載入序＝檔名前綴；`v2.html` 以 `<script src>` 串起）。
+        # `no-cache`：304 由檔案 mtime 復核（本機實測 3.14 的 `os.stat().st_mtime_ns` 為整數）。
+        "/v2/01-core.js": ("v2/01-core.js", "text/javascript; charset=utf-8", "no-cache"),
+        "/v2/02-area-question.js": (
+            "v2/02-area-question.js", "text/javascript; charset=utf-8", "no-cache"),
+        "/v2/03-areas.js": ("v2/03-areas.js", "text/javascript; charset=utf-8", "no-cache"),
+        "/v2/04-area-discuss.js": (
+            "v2/04-area-discuss.js", "text/javascript; charset=utf-8", "no-cache"),
+        "/v2/05-boot.js": ("v2/05-boot.js", "text/javascript; charset=utf-8", "no-cache"),
         "/mobile/manifest.webmanifest": (
             "v1-reference/mobile.webmanifest",
             "application/manifest+json; charset=utf-8",
@@ -2220,7 +2229,7 @@ def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     issues = [issue for issue in (item.get("issues") or []) if isinstance(issue, dict)]
     answer_issues = [issue for issue in (item.get("answer_issues") or []) if isinstance(issue, dict)]
-    tags = {str(value).strip() for value in (metadata.get("ai395_scope_tags") or []) if str(value).strip()}
+    tags = {str(value).strip() for value in (metadata.get("review_scope_tags") or []) if str(value).strip()}
     checks, findings_by_lane, lane_results = workflow_lane_map(item)
     all_finding_codes = {
         code
@@ -2287,7 +2296,7 @@ def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None
         repair_status.get("active")
         or review.get("is_repair_pending")
         or review.get("is_accepted_reaudit_pending")
-        or metadata.get("ai395_staging_revision_status") not in {None, "", "active"}
+        or metadata.get("review_revision_status") not in {None, "", "active"}
     )
     if has_revision_issue:
         queue = "revision"
@@ -2662,7 +2671,7 @@ class ReviewState:
                 "ai_status": str(ai_review.get("audit_status") or "unreviewed"),
                 "human_action": str(review.get("action") or "unreviewed"),
                 "human_queue": str(review.get("queue_label") or "未看過"),
-                "revision_id": str(metadata.get("ai395_staging_revision_id") or ""),
+                "revision_id": str(metadata.get("review_revision_id") or ""),
                 "has_visual_asset": bool((item.get("visual_profile") or {}).get("has_visual_asset")),
                 "evidence_status": str((evidence or {}).get("source", {}).get("status") or ""),
             }

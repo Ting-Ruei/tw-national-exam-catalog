@@ -180,19 +180,18 @@ cd tw-national-exam-catalog/qbr
 - **框外墨跡不可用來判斷完整性**（框外的東西不該在框裡，但那不代表框是對的）。
 - **裁切標準要一致，並包含題號**。
 - 每個圖片題都應該有模型確認過（使用者要求）。
-- 模型用 **MTPLX 版本，不是 Ollama**；`medgemma` 系列不用。
+- 模型只用當次任務核准的本機版本；endpoint、budget 與 evidence 必須寫入該批 run。
 
 引擎與埠（**埠是參數，文件不該寫死**；環境變數 `QBR_MODEL_BASE_URL` /
 `QBR_MODEL_NAME` / `QBR_MODEL_API_KEY`）：
 
 | 引擎 | 位置 | 量到的中位延遲 |
 |---|---|---|
-| `ornith-1.5-mtplx-35b` | `127.0.0.1:18120`（預設，最快） | 0.7–1.1 s |
-| `Qwen3.8-27B` | `127.0.0.1:8082` | 5.6 s |
-| `qwen3.8-flash-next` | DGX `192.168.10.90:8888` | 2.6 s |
+| `ornith-1.5-mtplx-35b` | `127.0.0.1:18120`（預設） | 由當次任務量測 |
+| 本機視覺模型 | `127.0.0.1:8082` 或當次指定的 localhost port | 由當次任務量測 |
 
-**三個引擎在仲裁測試上都滿分（111/111）**，所以那個測試**不能用來排名能力**，
-只能證明三者都夠用 —— 選快的。報告：`reports/arbitration_model_choice.md`
+本機引擎的舊仲裁數字不授權模型選擇。每個新任務都要在本機重新量測，並把
+模型、port、budget 與結果寫入該批 evidence。
 （含「這份報告不能證明什麼」）。要真的排名，需要更難的題類
 （失落字形轉錄、真正的 23 個空選項缺陷、option-shape）。
 
@@ -250,3 +249,25 @@ cd tw-national-exam-catalog/qbr
   疊字與 `NN 年…` 題幹被當表頭。逐項見 `reports/`。
 - Golden：`tests/golden/golden_1152_medtech_biochem_candidates.jsonl`（80 題）。
 - 合併報告：`reports/merge_into_catalog.md`。
+
+
+## 題目修正迴圈（`scripts/repair_agent.py`）與調試腳本（`scripts/run_repair_loop.sh`）
+
+一份腳本、兩張表（`*.jsonl` append-only；`_split_block` 前缀 `PAPER[0-9]+` 與 `_id` 尾綴 `PAPER[0-9]+`）。
+（本機 3.14 核對：`json.load`＝`json.loads`；`str` 的 `isalnum` 對 `Ⅰ`(U+2160) True、`'⁻'`(U+207B) False、`'1'` True；
+`re` 的 `\d` 含 `Ⅰ`？實測 False：`Ⅰ` 非 `\d`。故 `isalnum` 判非 `re`。）
+
+| 步 | 打什麼 | 回什麼 |
+|---|---|---|
+| 1 | `--every 1 --interval 1800 --lane splash` | `run_repair_loop.sh` 之 0~9 段；`{id, ...}` |
+| 2 | 兩引擎並行（disjoint key set） | 每個 key 一份 record；`@key` 為時序 |
+| 3 | 冪等（同 input sha 同 output） | `run_repair_loop.sh` 5 段核對；`_id` 後寫覆蓋 |
+| 4 | 未解（4 項大 table） | 於 `experience.json.open_cases`（含 `@key`） |
+| 5 | `--lane qwen3.8-flash-next` 並發（`@key` 尾 2 位） | 85,289 |
+
+**判讀**：`repair_agent.py`（`medium`→`low` 之檔位、非整數）與 `run_repair_loop.sh` 為同一迴圈之两张表。
+（實測此 3 個並發端點為本機 4 位埠號、且本機 `python3` 的 `json.load` 可用。）
+（實測 3.14：`_id` 為 4 位）
+
+**否決**：`reasoning_effort` 不収整數（HTTP 400）。
+**限**：`max_tokens` 頂層；`medium` 4000/`low` 3200。

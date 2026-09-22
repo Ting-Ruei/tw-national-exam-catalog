@@ -15,6 +15,7 @@ The rules, stated so they can be checked:
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +23,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 V2 = ROOT / "review_ui" / "v2.html"
+
+
+def js_of(html: str) -> str:
+    """v2 拆檔後的單字串視圖：HTML 骨架 ＋ 依 `<script src>` 序串起的 JS（＝執行序）。
+    `src` 以 `review_ui/` 為基準（本層三檔对此一致：`V2.parent` 即 `review_ui/`）。"""
+    parts = [html]
+    for src in re.findall(r'<script src="([^"]+)"></script>', html):
+        parts.append((V2.parent / src).read_text(encoding="utf-8"))
+    for inline in re.findall(r"<script>(.*?)</script>", html, re.S):
+        if inline.strip():
+            parts.append(inline)
+    return "\n".join(parts)
 
 
 def import_review_ui():
@@ -121,7 +134,7 @@ class NoteUiTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.html = V2.read_text(encoding="utf-8")
+        cls.html = js_of(V2.read_text(encoding="utf-8"))
 
     def test_the_note_box_can_be_opened(self):
         # The defect: `.on` was only ever removed. Asserted as the class being added somewhere.

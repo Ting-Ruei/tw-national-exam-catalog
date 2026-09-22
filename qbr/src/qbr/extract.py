@@ -120,6 +120,80 @@ _SUB_LETTERS = {
 _SUP_MAP = dict(_SUP_MAP, **_SUP_LETTERS)
 _SUB_MAP = dict(_SUB_MAP, **_SUB_LETTERS)
 
+#: The two ways this corpus spells an offset, and the only two the helpers below accept.
+#: The reverse tables are derived, first spelling wins (`-` was in the literal before `≈`, and
+#: both are spelled with U+207B by the forward table - a reverse dict that overwrote would put
+#: the same codepoint under two keys and make the fold order-dependent).
+def _reverse_offset_table(table):
+    """`{offset_char: plain_char}` from a forward table, first spelling kept.
+
+    The forward tables map two ASCII spellings onto one codepoint (`-` and `−` both
+    → U+207B), so the reverse direction is not a bijection. `setdefault` keeps the first
+    (the ASCII punctuation the flattened runs actually use) instead of letting the last win.
+    """
+    out = {}
+    for plain, offset in table.items():
+        out.setdefault(offset, plain)
+    return out
+
+_TO_PLAIN_SUP = _reverse_offset_table(_SUP_MAP)
+_TO_PLAIN_SUB = _reverse_offset_table(_SUB_MAP)
+#: One pair per run, non-greedy: `…<sup>-1</sup>…` is a single fold even when two pairs touch.
+_OFFSET_TAG_RE = re.compile(r"<(sup|sub)>(.*?)</\1>", re.DOTALL)
+_TAG_PAIR_RE = re.compile(r"</?(?:sup|sub)>")
+
+
+
+def html_sup_sub(text):
+    """`cm⁻¹` → `cm<sup>-1</sup>`; `H₂O` → `H<sub>2</sub>O`. Idempotent.
+
+    The paper's own offset characters (U+2070.., U+2080.., and ¹²³) are the extraction's
+    source of truth; the markup form is what the reader gets, because a browser's
+    `sup`/`sub` renders at about 0.83em with a baseline shift - the same shape Word
+    produces, and the reason the raised/lowered runs stay legible next to body text.
+    A run of consecutive offset characters becomes one tag pair; a lone offset character is
+    one pair too, which is what keeps `D₂` from being spelled `D<sub>2</sub><sub>…`.
+    """
+    if not text:
+        return text
+    out = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in _TO_PLAIN_SUP:
+            run = [_TO_PLAIN_SUP[char]]
+            index += 1
+            while index < len(text) and text[index] in _TO_PLAIN_SUP:
+                run.append(_TO_PLAIN_SUP[text[index]])
+                index += 1
+            out.append("<sup>%s</sup>" % "".join(run))
+            continue
+        if char in _TO_PLAIN_SUB:
+            run = [_TO_PLAIN_SUB[char]]
+            index += 1
+            while index < len(text) and text[index] in _TO_PLAIN_SUB:
+                run.append(_TO_PLAIN_SUB[text[index]])
+                index += 1
+            out.append("<sub>%s</sub>" % "".join(run))
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def plain_sup_sub(text):
+    """The one form the measurements are written against: `cm<sup>-1</sup>` → `cm-1`.
+
+    Both spellings collapse to it, which is what makes the pair usable as a single
+    measurement input: the tag form comes out of `html_sup_sub`, the compressed form is what
+    `extract` stored all along, and a run with no offset at all is passed through untouched.
+    A lone tag pair keeps its inner text; the tags themselves carry no information.
+    """
+    if not text:
+        return text
+    body = _TAG_PAIR_RE.sub("", _OFFSET_TAG_RE.sub(lambda m: m.group(2), text))
+    return "".join(_TO_PLAIN_SUP.get(c, _TO_PLAIN_SUB.get(c, c)) for c in body)
+
 
 def _span_centre(span):
     box = span.get("bbox") or (0, 0, 0, 0)

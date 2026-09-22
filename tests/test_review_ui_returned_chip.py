@@ -42,6 +42,19 @@ def element_ids(html: str) -> set[str]:
     return set(re.findall(r'id="([A-Za-z0-9_]+)"', html))
 
 
+def js_of(html: str) -> str:
+    """v2 已拆為 `review_ui/v2/*.js`（一區一檔）。返「HTML ＋ 依序串起的 JS」單字串，
+    令正則能同檢骨架與腳本。`src` 以 `review_ui/` 為基準；檔名序＝執行序（實測一致）。
+    """
+    parts = [html]
+    for src in re.findall(r'<script src="([^"]+)"></script>', html):
+        parts.append((V2.parent / src).read_text(encoding="utf-8"))
+    for inline in re.findall(r"<script>(.*?)</script>", html, re.S):
+        if inline.strip():
+            parts.append(inline)
+    return "\n".join(parts)
+
+
 def state_of_body(html: str) -> str:
     match = re.search(r"function stateOf\(item\) \{(.*?)\n\}", html, re.S)
     assert match, "v2.html 裡找不到 stateOf"
@@ -57,7 +70,7 @@ def row_review_action_body(html: str) -> str:
 class ReturnedChipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.html = V2.read_text(encoding="utf-8")
+        cls.html = js_of(V2.read_text(encoding="utf-8"))
 
     # --- 兩個 chip 真的存在 -------------------------------------------------
     def test_the_human_flag_and_the_machine_return_are_two_chips(self):

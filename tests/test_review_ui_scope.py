@@ -222,7 +222,11 @@ class ReviewUiScopeTests(unittest.TestCase):
         self.assertIn("la.corrected_answer_json::text", source)
 
     def test_correction_notation_normalizer_handles_groups_symbols_and_word_boundaries(self):
-        page_script = self.ui.PAGE_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        html = self.ui.PAGE_HTML
+        parts = [p for p in re.findall(r"<script>(.*?)</script>", html, re.S) if p.strip()]
+        for src in re.findall(r'<script src="([^"]+)"></script>', html):
+            parts.append((ROOT / "review_ui" / src).read_text(encoding="utf-8"))
+        page_script = "\n".join(parts)
         start = page_script.index("const greekMap =")
         end = page_script.index("async function load()")
         harness = page_script[start:end] + r'''

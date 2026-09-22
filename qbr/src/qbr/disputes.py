@@ -44,6 +44,10 @@ writes a review event.
 """
 from __future__ import annotations
 
+import re
+
+from . import extract
+
 #: Severity, worst first, and the ranking is what the UI sorts by. `blocker` means the question
 #: cannot be trusted as it stands; `review` means it can be shown but a person should look.
 SEVERITY_ORDER = ("blocker", "review", "info")
@@ -96,7 +100,40 @@ KINDS = {
     "unresolved-mark": ("review", "紙本定義的記號無法對照"),
     "empty-option": ("review", "選項沒有文字"),
     "engine-disagreement": ("review", "兩個引擎對題數不一致"),
+    # Three shapes the 2026-09-22 block pass put names to. Each is a *text-layer* property, so all
+    # three are measurable twice with the same answer and none needs the PDF again.
+    #
+    #   flat-offset            a unit with a negative exponent arrived as `unit` `-` `digits`
+    #                          (`539 cm-1` for `cm⁻¹`). Bounded on both sides, so a range
+    #                          (`2000-4000`) and an option label (`12-5`) cannot answer to it, and
+    #                          the unit table is the paper's own (`cm`, `nm`, `s`, `min`, `L`, …).
+    #                          Measured 2026-09-22: 34 questions, 6 of them judged by a person, all
+    #                          6 blocked -> block rate 100% against the 5.4% corpus baseline.
+    #   punctuation-only-option  the option slot holds marks alone (`;`, `/`, `—`) with no alphanum
+    #                          between them: the label was read, its content was not.
+    #                          Measured 2026-09-22: 17 questions, 1 judged, blocked -> 100%.
+    #   table-flattened        a table came through as one line: the paper's own column headers
+    #                          (`A藥 B藥 …`) are in the *stem*, 3+ of them, followed by number runs,
+    #                          and no newline survived. Header-count == number-count is the check.
+    #                          Measured 2026-09-22: 22 questions, 1 judged, blocked -> 100%.
+    #                          The sample is thin on purpose: the queue only holds 4,333 judged rows
+    #                          of 79,090, so these three ratios are read as "no false alarm so far",
+    #                          not as a precision estimate.
+    "flat-offset": ("review", "單位的負指數被印成平字（cm-1 應為 cm⁻¹）"),
+    "punctuation-only-option": ("blocker", "選項只有標點，文字沒有被讀到"),
+    "table-flattened": ("review", "表格被壓成一行，欄位對不上"),
 }
+
+#: The units this corpus prints with a reciprocal exponent, taken from the papers themselves.
+#: A table rather than a regex alternation so a new unit forces a decision, same style as
+#: `FOREIGN_SCRIPT_PREFIXES`.
+UNIT_WITH_NEGATIVE_EXPONENT = ("cm", "nm", "mm", "um", "min", "s", "L", "mol", "g", "K", "Å",
+                               "Hz", "h")
+#: `unit` `-` `digits`, bounded on both sides: `539 cm-1` matches, `2000-4000` (a range) and
+#: `IL-2` (a nomenclature, letters on the left of the hyphen) do not.
+_RE_FLAT_EXPONENT = re.compile(
+    r"(?<![A-Za-z0-9])(?P<unit>" + "|".join(UNIT_WITH_NEGATIVE_EXPONENT) +
+    r")-(?P<exp>[0-9]{1,3})(?![A-Za-z0-9-])")
 
 #: Options the paper declares. A multiple-choice national-exam question is four; a handful are
 #: five or three, so the check is "the count the paper's own alphabet implies", which the caller
@@ -192,6 +229,88 @@ def foreign_script_characters(question):
                                                  character,
                                                  (value or "")[position + 1:position + 7])})
     return found
+
+
+def _texts(question):
+    """Every field of one question that carries printed text, with the address a reviewer can use.
+
+    The fold to the compressed offset form is what keeps these measurements comparable across
+    the two spellings: the queue ships `<sup>-1</sup>` (the reader's form, UA-styled, same shape
+    as Word), the regexes below are written against `⁻¹` (the paper's form).
+    """
+    plain = extract.plain_sup_sub
+    yield "stem", plain(str(question.get("stem") or ""))
+    for option in question.get("options") or []:
+        yield "option %s" % option.get("key"), plain(str(option.get("text") or ""))
+
+
+_RE_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_RE_TABLE_KEY = re.compile(r"(?<![A-Za-z])(?P<key>[A-D])(?=[\u4e00-\u9fff])")
+
+
+def flat_offset_pairs(question):
+    """The places one question writes a unit's negative exponent flat.
+
+    The shape is its own evidence: a letter run, one hyphen, 1-3 digits, with a non-alphanum on
+    each side. A *range* has digits on both sides of its hyphen (`2000-4000`) and a nomenclature
+    carries letters on the left of its hyphen (`IL-2`), so neither answers to this pattern and no
+    second, comparing pass is needed (`103090:312:22 q012`, `104020:312:22 q019`).
+    """
+    found = []
+    for field, value in _texts(question):
+        for match in _RE_FLAT_EXPONENT.finditer(value):
+            unit, exponent = match.group("unit"), match.group("exp")
+            found.append({"field": field, "flat": match.group(),
+                          "as_printed": "%s\u207b%s" % (unit, "".join(
+                              _subscript_glyph(d) for d in exponent)),
+                          "position": match.start()})
+    return found
+
+
+def _subscript_glyph(digit) -> str:
+    """The Unicode subscript for an ASCII digit, for the `as_printed` hint."""
+    return "%c" % (0x2080 + int(digit))
+
+
+def punctuation_only_options(question):
+    """Option slots whose entire content is marks: the label was read, the text was not.
+
+    `A. ;` is not "an option with a short answer" - a national-exam option is a word, a number or a
+    formula, so a slot holding only `;` or `/` is a hole (`104020:312:33 q080`). This is the sibling
+    of `empty-option`, which fires when the field is the empty string; here the field is *non-empty*
+    and still carries nothing.
+
+    The test is `isalnum()`, not a character list, because the corpus's own content sits outside
+    ASCII: `Ⅰ`, `①`, `⁻¹` and the CJK block all count as content and stay silent, while `;`, `/`,
+    `—`, `、` do not.
+    """
+    holes = []
+    for option in question.get("options") or []:
+        text = str(option.get("text") or "").strip()
+        if text and not any(char.isalnum() for char in text):
+            holes.append({"key": option.get("key"), "text": text})
+    return holes
+
+
+def flattened_table(question):
+    """A table that arrived as one line: the paper's own header row, jammed against its numbers.
+
+    The signature is the *header row* the paper prints for its columns - `A藥B藥C藥D藥` - which no
+    flowing sentence produces, because in prose these letters are option labels and each is followed
+    by a period or a space. Three of them with no separator, on a line that also carries at least
+    three standalone numbers, is the joined-table shape (measured: `104020:312:33 q048`).
+
+    A stem that still has newlines in it is not this defect at all, so the line test is part of the
+    rule rather than a note about it.
+    """
+    stem = extract.plain_sup_sub(str(question.get("stem") or ""))
+    if not stem or "\n" in stem:
+        return None
+    keys = [match.group("key") for match in _RE_TABLE_KEY.finditer(stem)]
+    numbers = [match.group() for match in _RE_NUMBER.finditer(stem)]
+    if len(keys) < 3 or len(numbers) < len(keys):
+        return None
+    return {"headers": keys, "numbers": numbers}
 
 
 def _d(kind, detail, **address):
@@ -352,6 +471,28 @@ def of_question(question, *, alphabet_size=None, engine_counts=None, option_imag
                       "、".join("%s（%s 字母，共 %d 處）" % (script.lower(), script, sum(
                           1 for item in foreign if item["script"] == script)) for script in scripts),
                       substitutions=foreign))
+
+    # 8. A unit whose negative exponent came through flat: `cm-1` for `cm⁻¹`.
+    offsets = flat_offset_pairs(question)
+    if offsets:
+        out.append(_d("flat-offset", "、".join("%s→%s" % (item["flat"], item["as_printed"])
+                                              for item in offsets[:6]), runs=offsets))
+
+    # 9. An option slot that holds only punctuation: the label read, the content did not.
+    holes = punctuation_only_options(question)
+    if holes:
+        out.append(_d("punctuation-only-option",
+                      "、".join("%s=%s" % (item["key"], item["text"]) for item in holes),
+                      options=[item["key"] for item in holes]))
+
+    # 10. A table that came through as one line.
+    table = flattened_table(question)
+    if table:
+        out.append(_d("table-flattened",
+                      "%d 個欄位表頭 %s 與 %d 個數值挤在同一行" % (
+                          len(table["headers"]), "".join(table["headers"]),
+                          len(table["numbers"])),
+                      headers=table["headers"], numbers=table["numbers"]))
 
     # 6. The two engines do not agree about the paper this question belongs to.
     if engine_counts:

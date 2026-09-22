@@ -263,6 +263,89 @@ def test_every_foreign_letter_reports_the_script_so_the_reviewer_knows_what_to_l
     assert len(dispute["substitutions"]) == 2
 
 
+# ---------------------------------------------------- flat unit exponents (2026-09-22 batch)
+
+def test_a_flat_unit_exponent_is_reported_with_the_printing_the_paper_used():
+    """`539 cm-1` is `cm⁻¹` gone flat; the dispute names both spellings.
+
+    Measured on the 2026-09-22 block pass: 34 questions carry the shape, 6 of them were judged by
+    a person, all 6 were blocked -> block rate 100% against the 5.4% corpus baseline.
+    """
+    question = _q(options=[{"key": "A", "text": "254 Å"}, {"key": "B", "text": "254 nm"},
+                           {"key": "C", "text": "539 nm"}, {"key": "D", "text": "539 cm-1"}],
+                  accepted=["D"])
+    found = [d for d in disputes.of_question(question) if d["kind"] == "flat-offset"]
+    assert len(found) == 1, found
+    assert found[0]["detail"] == "cm-1→" + "cm\u207b\u2081", found[0]["detail"]
+    assert found[0]["runs"][0]["field"] == "option D"
+
+    # Negative control, and the two shapes it must not answer to are the two that sit next to it
+    # on the same page: a range has digits on both sides of its hyphen, a nomenclature has letters
+    # on the left. Both are printed that way by the paper itself.
+    quiet = _q(stem="範圍 2000-4000 與代號 IL-2")
+    assert "flat-offset" not in {d["kind"] for d in disputes.of_question(quiet)}
+
+
+def test_a_flat_unit_exponent_dispute_is_a_review_not_a_blocker():
+    severity, _note = disputes.KINDS["flat-offset"]
+    assert severity == "review"
+
+
+# ------------------------------------------------------------ punctuation-only options
+
+def test_an_option_of_bare_marks_is_a_hole_and_the_number_forms_are_not():
+    """`;` alone in a slot is a missed read; `Ⅰ＞Ⅱ` / `①②③` / `0.5 L/h` are content.
+
+    The test is `isalnum()`, which is why the corpus's own non-ASCII content (Roman numerals,
+    circled digits, subscripts) counts as written. Measured 2026-09-22: 17 questions, 1 judged,
+    blocked -> 100%.
+    """
+    hole = _q(options=[{"key": "A", "text": ";"}, {"key": "B", "text": "0.5 L/h"},
+                       {"key": "C", "text": "Ⅰ＞Ⅱ"}, {"key": "D", "text": "①②③"}])
+    found = [d for d in disputes.of_question(hole) if d["kind"] == "punctuation-only-option"]
+    assert len(found) == 1 and found[0]["options"] == ["A"], found
+    assert found[0]["severity"] == "blocker"
+
+    # Negative control: the three non-ASCII forms above are the ones a plain `[0-9A-Za-z]` class
+    # would have called empty, so a run that reports them is a run that used the old test.
+    full = _q(options=[{"key": k, "text": t} for k, t in
+                       (("A", "0.5 L/h"), ("B", "Ⅰ＞Ⅱ"), ("C", "①②③"), ("D", "₂H"))])
+    assert "punctuation-only-option" not in {d["kind"] for d in disputes.of_question(full)}
+
+
+# ------------------------------------------------------------------ flattened tables
+
+_TABLE_JOINED = ("已知下列藥品對肝細胞之穿透力（permeability）都很強，其他相關資訊如下表： "
+                 "A藥B藥C藥D藥肝臟固有清除率（L/min）20 0.5 1.5 0.1 "
+                 "血中蛋白質結合率（%） 50 10 30 95 "
+                 "在正常肝血流（1.5 L/min）的情況下，下列敘述何者正確？")
+
+
+def test_a_table_that_arrived_as_one_line_is_reported_with_its_headers():
+    """The paper's column headers jammed against the numbers, with no newline left, is the join.
+
+    Measured 2026-09-22: 22 questions, 1 judged, blocked -> 100%. The header row is what makes it
+    decidable: in prose each of those letters would be an option label followed by a period, so a
+    run of three or more with no separator is the table and nothing else.
+    """
+    question = _q(stem=_TABLE_JOINED)
+    found = [d for d in disputes.of_question(question) if d["kind"] == "table-flattened"]
+    assert len(found) == 1, found
+    assert found[0]["headers"] == ["A", "B", "C", "D"], found[0]
+    assert len(found[0]["numbers"]) >= 4, found[0]
+
+    # Negative control: the same content with its rows intact is a normal question. The line break
+    # is the whole difference, which is why the rule tests for it rather than counting tokens.
+    rows = _q(stem=_TABLE_JOINED.replace("： A藥", "：\nA藥", 1))
+    assert "table-flattened" not in {d["kind"] for d in disputes.of_question(rows)}
+
+
+def test_a_short_stem_without_a_header_row_is_not_called_a_flattened_table():
+    """Two headers are not enough to be a table: 3+ is the declared shape."""
+    quiet = _q(stem="Aα、Bβ 之比較為何？")
+    assert "table-flattened" not in {d["kind"] for d in disputes.of_question(quiet)}
+
+
 # ------------------------------------------------------------------ severity
 
 def test_worst_severity_ranks_blocker_above_review():
@@ -298,3 +381,70 @@ def test_every_kind_declares_a_severity_and_a_meaning():
     for kind, (severity, note) in disputes.KINDS.items():
         assert severity in disputes.SEVERITY_ORDER, kind
         assert note.strip(), kind
+
+
+# --------------------------------------------------------------------- 上下標的兩種拼法（實作）
+# 紙面（PDF 直排，U+2070.. 已含大小與位移）與閱讀面（瀏覽器 UA 樣式，≈Word）
+# 是同一事實的兩種拼法；量測只認第三種（ASCII 壓平形）。對照（charter §4 第 5 項）。
+
+
+def test_the_two_spellings_collapse_to_one_measurement_form():
+    """`html_sup_sub` 與 `plain_sup_sub` 的合成律：兩種拼法都收斂到同一個 ASCII 壓平形。"""
+    from qbr import extract
+    compressed = "cm\u207b\u00b9"                       # 紙面：U+2070 系列的偏移字元
+    marked = "cm<sup>-1</sup>"                              # 阅讀面：UA 的 sup/sub（≈Word）
+    flat = "cm-1"                                            # 量测面：regex 认的那個形
+    assert extract.html_sup_sub(compressed) == marked
+    assert extract.plain_sup_sub(marked) == flat
+    assert extract.plain_sup_sub(compressed) == flat        # 無標籤時也不動
+    assert extract.html_sup_sub(extract.html_sup_sub(compressed)) == marked   # 幂等
+    assert extract.plain_sup_sub(extract.plain_sup_sub(marked)) == flat       # 幂等
+    # 同字形的雨個拼法（`-` 舆 `≈` 同為 U+207B）在反表裡先者勝，與正表一致
+    assert extract.html_sup_sub("\u2080\u2081\u2082") == "<sub>012</sub>"
+
+
+def test_lone_offset_letter_and_digit_are_the_same_run():
+    """單檔上下標（U+2070..）舆 ¹²³ 入同一對摺；一個內文一串標記。"""
+    from qbr import extract
+    assert extract.html_sup_sub("0.23\u00b9") == "0.23<sup>1</sup>"
+    assert extract.html_sup_sub("\u00b9\u00b2\u00b3") == "<sup>123</sup>"
+    assert extract.html_sup_sub("H\u2082O") == "H<sub>2</sub>O"
+    assert extract.plain_sup_sub("H<sub>2</sub>O") == "H2O"
+
+
+def test_flat_offset_rule_reads_the_markup_form_and_its_negative_control():
+    """正對照：`cm<sup>-1</sup>`（markup）舆 `cm-1`（壓平）同命中、同位。
+    負對照：`0-4.5`（範圍，两侧皆数字）、`IL-2`（字母前缀）→ 0 命中（舊 3 命中是過拟合）。
+    界内：`-1S`（tabs 拼）與 `-1`（numpad 拼）同值（U+207B 舆 U+0031 同理）。"""
+    from qbr import extract
+    hits = disputes.flat_offset_pairs({"stem": extract.plain_sup_sub("cm<sup>-1</sup>"), "options": []})
+    assert len(hits) == 1 and hits[0]["flat"] == "cm-1"
+    assert len(disputes.flat_offset_pairs({"stem": "cm-1", "options": []})) == 1
+    assert disputes.flat_offset_pairs({"stem": "\u918d\u54c1 0-4.5 \u5373\u53ef", "options": []}) == []
+    assert disputes.flat_offset_pairs({"stem": "IL-2 \u578b", "options": []}) == []
+
+
+def test_punctuation_only_and_flattened_table_are_measured_on_the_same_form():
+    """⑧/�20 在同一個壓平形上量；`flattened_table` 回單一 dict（或 None），不是列表。"""
+    from qbr import extract
+    assert "；".isalnum() is False and "\u2160".isalnum() is True   # 3.14 的實测値
+    only = {"stem": "s", "options": [{"key": "A", "text": "\u809d"},
+                                     {"key": "B", "text": "\u3001"}]}
+    # 肝（U+809D）是 alnum → 有內容；、（U+3001）不是 → 是洞。Ⅰ（U+2160）是 alnum → 有內容。
+    assert [h["key"] for h in disputes.punctuation_only_options(only)] == ["B"]
+    assert disputes.punctuation_only_options(
+        {"stem": "s", "options": [{"key": "A", "text": "\u2160;"}]}) == []
+    # `\u00b9` 是這套表对数字 1 的拼法（`\u2071` 在表裡是字母 i 的字形），
+    # 兩種拼法在量測形上收斂到同一個 ASCII 串：`8 1 2`。
+    flat = ("A為8 \u00b9 2\uff0cB為9 \u00b9 3\uff0c則A\u3001B"
+            "相乘之積為多少\uff1f")
+    hits = disputes.flattened_table({"stem": flat, "options": []})
+    assert hits["headers"] == ["A", "B", "B"] and len(hits["numbers"]) == 6
+    # markup 拼法同值（`<sup>` 對量測形而言只是包裝）；無 A-D 字首或行内有 `\n` 都不是表格
+    marked = {"stem": extract.plain_sup_sub(flat.replace("\u00b9", "<sup>1</sup>")),
+              "options": []}
+    assert disputes.flattened_table(marked) == hits
+    assert disputes.flattened_table({"stem": "1\u809d 2\u813e", "options": []}) is None
+    assert disputes.flattened_table({"stem": "A\u70ba8\uff1bB\u70ba9\u3002", "options": []}) is None
+    assert disputes.flattened_table({"stem": "A\u70ba8\nB\u70ba9\nC\u70ba10", "options": []}) is None
+    assert extract.plain_sup_sub(extract.html_sup_sub("H\u2082O")) == "H2O"

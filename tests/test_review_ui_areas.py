@@ -47,9 +47,16 @@ AREA_PREFIX = {"home": "首頁", "question": "審題", "answer": "答案", "disc
 
 
 def script_of(html: str) -> str:
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-    assert scripts, "v2.html 裡沒有 script"
-    return scripts[-1]
+    """v2 已拆成 `review_ui/v2/*.js`（一區一檔）。這裡按 `<script src>` 的出現序重組，
+    與瀏覽器同一個執行序（檔名前綴已是 01..05 的序）。`src` 以 `review_ui/` 為基準。
+    """
+    parts = [p for p in re.findall(r"<script>(.*?)</script>", html, re.S) if p.strip()]
+    for src in re.findall(r'<script src="([^"]+)"></script>', html):
+        body = (ROOT / "review_ui" / src).read_text(encoding="utf-8")
+        parts.append(body)
+    joined = "\n".join(parts)
+    assert joined.strip(), "v2.html 沒有可執行的 script（檔）"
+    return joined
 
 
 def function_body(source: str, name: str) -> str:
