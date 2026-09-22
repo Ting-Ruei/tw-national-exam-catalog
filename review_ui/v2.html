@@ -1074,6 +1074,16 @@ function disputeHtml(candidate) {
 
 function renderTextSide() {
   const item = S.rows[S.index];
+  // 一個篩選可以合法地剩下 0 列（例如「AI／管線退回」在這一卷沒有題目）。以前這條路沒有守
+  // 衛，`S.rows[S.index]` 是 undefined，`item.candidate` 直接拋錯——而丟錯的地方在 refilter 裡，
+  // 所以畫面會停在上一輪的內容、按什麼都沒反應。清單本身（renderList）已經有同樣的空集合
+  // 守衛；這裡補上，讓兩個面板對「沒有題目」用同一種行為。
+  if (!item) {
+    $('where').innerHTML = '';
+    $('stateHint').textContent = '';
+    $('textSide').innerHTML = '<div class="empty">這個篩選在目前範圍內沒有題目。</div>';
+    return;
+  }
   // The question itself comes from `/api/candidates`, which is the endpoint that returns
   // `stem`, `options` and `answer`. `/api/workflow` returns only the queue's metadata - a
   // `stem_preview` of about twelve characters and no options at all - and its `selected`

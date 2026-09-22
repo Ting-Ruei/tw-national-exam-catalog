@@ -191,6 +191,24 @@ class ReturnedChipTests(unittest.TestCase):
                                     "const returnedNote = true")
         self.assertNotIn("const returnedNote = standing === 'reset_review'", dropped)
 
+    # --- 篩出 0 列不能把畫面弄壞 --------------------------------------------
+    def test_a_filter_with_no_rows_does_not_throw(self):
+        # 新 chip 把一個潛伏 bug 照出來：這一卷的「AI／管線退回」是 0 題，一按下去就是
+        # `S.rows[S.index]` 是 undefined，`item.candidate` 直接拋錯——而那個錯在 refilter 裡，
+        # 所以畫面停在上一輪、按什麼都沒反應。清單本身有守衛，明細面板沒有。
+        body = self.html[self.html.index("function renderTextSide()"):]
+        body = body[:body.index("const candidate = item.candidate")]
+        self.assertIn("if (!item) {", body)
+
+    def test_the_negative_control_without_the_guard_the_empty_filter_throws(self):
+        stripped = self.html.replace(
+            "  if (!item) {\n    $('where').innerHTML = '';",
+            "  if (false) {\n    $('where').innerHTML = '';",
+        )
+        body = stripped[stripped.index("function renderTextSide()"):]
+        body = body[:body.index("const candidate = item.candidate")]
+        self.assertNotIn("if (!item) {", body)
+
 
 if __name__ == "__main__":
     unittest.main()
