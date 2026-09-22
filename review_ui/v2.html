@@ -153,6 +153,22 @@
   .dispute.blocker b { color:#9b2c2c; }
   .disputes:has(.dispute.blocker) { border-color:#c53030; background:#fff5f5; }
   .disputes:has(.dispute.blocker) .disputes-head { color:#9b2c2c; }
+
+  /* --- the qbr model's note: a different author from the disputes, so a different colour ---
+     The disputes above are paper measurements - the system saying "this reading cannot be trusted".
+     A finding is a **model's opinion**, written when a person blocked the question or when the
+     corpus pass reached it. It is advisory (`GOV-05`): it is drawn so the reviewer can read it, and
+     it never changes what the buttons do. Grey-violet rather than amber, so a glance at the page
+     does not mistake an opinion for a measurement. */
+  .ai-finding { margin:0 0 14px; border:1px solid #b9b1dd; background:#f7f5ff; border-radius:6px;
+    padding:9px 12px; }
+  .ai-finding .af-head { font-size:11.5px; font-weight:700; color:#4a3f8a; display:flex;
+    justify-content:space-between; gap:10px; margin-bottom:6px; }
+  .ai-finding .af-line { font-size:12.5px; color:#3a3462; padding:2px 0; }
+  .ai-finding .af-line b { color:#2f2a55; }
+  .ai-finding .af-code { font-size:10.5px; background:rgba(0,0,0,.06); border-radius:3px;
+    padding:1px 5px; color:#4a3f8a; }
+  .ai-finding .af-hint { font-size:10.5px; color:#6d678f; font-weight:400; }
   .opts { display:flex; flex-direction:column; gap:8px; }
   .opt { display:flex; gap:10px; padding:10px 13px; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); }
   .opt.is-answer { border-color:var(--green); background:#f2fbf7; }
@@ -1081,6 +1097,46 @@ function disputeHtml(candidate) {
     + `<span class="hint">以下由紙本量測，不是模型的意見</span></div>${rows}</div>`;
 }
 
+/* What the qbr pipeline's model said about this question.
+
+   This is **not** the SQL-era `ai_review` audit, which has a status and a recommended action. It is
+   the loop's finding (`qbr/src/qbr/ai_findings.py`): `verdict` / `what` / `where` / `fix` /
+   `rule_worthy` / `confidence`, with the model named and the prompt generation recorded. It is
+   advisory only, so it is drawn as a note: nothing here is clickable and nothing changes the buttons.
+
+   The distinction the reviewer needs to feel at a glance is **measurement vs opinion**. Above this
+   box, disputes are the system's own paper measurements; here it is one model's reading of the same
+   text, and it can be wrong. Naming the model and showing that a person's own block is what brought
+   the question here is what lets a reader weigh it rather than obey it. */
+function findingHtml(candidate) {
+  const record = candidate.qbr_ai_finding;
+  if (!record) return '';
+  const f = record.finding || {};
+  const verdict = f.verdict;
+  const code = f.what;
+  const where = f.where;
+  const fix = f.fix;
+  // A `NONE`/`OK` note is still shown, because "the model looked and found nothing" is a fact a
+  // person should be able to see - it is what makes a silent class of questions visibly checked.
+  const label = verdict === 'DEFECT' ? '模型認為有問題'
+    : verdict === 'NOT_EXTRACTION' ? '模型認為不是抽取造成的'
+      : verdict === 'OK' ? '模型沒發現異常' : '模型回答了，但無法歸類';
+  const who = record.population === 'corpus'
+    ? '整庫掃描（這一題沒有人類標記）' : '人類阻擋後詢問';
+  const parts = [];
+  parts.push(`<div class="af-line"><b>哪裡：</b>${esc(where || '（沒說）')}</div>`);
+  parts.push(`<div class="af-line"><b>怎麼修：</b>${esc(fix || '（沒說）')}</div>`);
+  if (code) parts.push(`<div class="af-line"><code class="af-code">${esc(code)}</code>`
+    + (f.rule_worthy === true ? ' 被判斷為一類（值得寫規則）'
+      : f.rule_worthy === false ? ' 被判斷為個案' : '')
+    + (typeof f.confidence === 'number' ? ` 信心 ${f.confidence}` : '') + '</div>');
+  if (record.error) parts.push(`<div class="af-line"><b>讀取失敗：</b>${esc(record.error)}</div>`);
+  return `<div class="ai-finding"><div class="af-head"><span>模型意見（${esc(label)}）</span>`
+    + `<span class="af-hint">${esc(record.model || '未知模型')} · ${esc(who)}`
+    + `${record.prompt_version ? ` · 提示詞版本 ${esc(record.prompt_version)}` : ''}</span></div>`
+    + `${parts.join('')}</div>`;
+}
+
 function renderTextSide() {
   const item = S.rows[S.index];
   // 一個篩選可以合法地剩下 0 列（例如「AI／管線退回」在這一卷沒有題目）。以前這條路沒有守
@@ -1148,6 +1204,7 @@ function renderTextSide() {
     <div class="side-head">抽出文字${edited ? '（已人工修正）' : ''}<span class="hint">${flags.length ? flags.map(esc).join(' · ') : '與右側紙本對照'}</span></div>
     <div class="qnum">第 ${esc(item.question_number)} 題</div>
     ${disputeHtml(candidate)}
+    ${findingHtml(candidate)}
     ${groupHtml(candidate)}
     <div class="stem" id="viewStem">${esc(candidate.stem || '（題幹空白）')}</div>
     ${lostGlyphHtml(candidate)}

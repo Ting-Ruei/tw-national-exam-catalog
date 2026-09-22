@@ -965,6 +965,51 @@ def load_keyed_events(
     return latest, counts
 
 
+#: The qbr pipeline writes its AI notes to this stream, inside the queue's `review-ui/` directory
+#: next to the human decision log (`qbr/src/qbr/ai_findings.py::STREAM`). The two are different
+#: authors and must not be confused: a finding has no `action` and no `reviewer`, so it can never be
+#: read as a decision. It is loaded here only so the reviewer can *see* what the model said.
+QBR_AI_FINDINGS_STREAM = "question_ai_findings.jsonl"
+
+#: The fields of a finding the reviewer's screen needs, and nothing else.
+#:
+#: The stream is large - measured at 371 MB for 61,178 records on the served queue - and almost all
+#: of that weight is the verbatim prompt and raw response, which are kept for audit and are not
+#: drawn. Reading the whole file at boot and holding it would make every deploy start slower and
+#: every request heavier for text nobody sees. The `finding` dict, the model identity and the
+#: prompt generation are kept; the prompts are dropped here and remain readable from the file.
+QBR_AI_FINDING_FIELDS = ("candidate_key", "created_at", "model", "endpoint", "prompt_version",
+                         "population", "reading_sha256", "error", "seconds")
+
+
+def load_qbr_ai_findings(path: Path) -> dict[str, dict[str, Any]]:
+    """The latest qbr AI finding per question, stripped to what the screen draws.
+
+    Append-only, last record per key wins - the same rule `load_keyed_events` uses for the human
+    log, and for the same reason: a finding is a statement about the reading that was in front of
+    the model, and the newest statement is the one that describes the current reading.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return latest
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = record.get("candidate_key")
+            if not key:
+                continue
+            compact = {field: record.get(field) for field in QBR_AI_FINDING_FIELDS}
+            compact["finding"] = record.get("finding") or {}
+            compact["evidence"] = record.get("evidence") or {}
+            latest[key] = compact
+    return latest
+
+
 def file_signature(path: Path) -> tuple[int, int] | None:
     if not path.exists():
         return None
@@ -2210,6 +2255,9 @@ class ReviewState:
         self.ai_feedback_log = self.review_log.parent / "question_ai_feedback_events.jsonl"
         self.ai_learning_log = self.review_log.parent / "question_ai_learning_events.jsonl"
         self.correction_feedback_log = self.review_log.parent / "question_correction_feedback_events.jsonl"
+        # The qbr pipeline's AI notes live beside the human decisions, and are loaded separately so a
+        # note can never be mistaken for a decision: the record has no `action` and no `reviewer`.
+        self.qbr_ai_findings_log = self.review_log.parent / QBR_AI_FINDINGS_STREAM
         self.preference_path = self.review_log.parent / "review_ui_preferences.json"
         if self.sql_review_enabled:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = {}, {}, {}
@@ -2231,6 +2279,7 @@ class ReviewState:
             self.latest_ai_feedbacks = load_ai_feedback_events(self.ai_feedback_log)
             self.latest_ai_learnings = load_ai_learning_events(self.ai_learning_log)
             self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
+        self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -2239,6 +2288,7 @@ class ReviewState:
         self._ai_feedback_log_signature = file_signature(self.ai_feedback_log)
         self._ai_learning_log_signature = file_signature(self.ai_learning_log)
         self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
+        self._qbr_ai_findings_signature = file_signature(self.qbr_ai_findings_log)
         if self.defer_formal_sync:
             try:
                 self._ensure_formal_sync_queue_schema()
@@ -2623,6 +2673,11 @@ class ReviewState:
         if correction_feedback_signature != self._correction_feedback_log_signature:
             self.latest_correction_feedbacks = load_correction_feedback_events(self.correction_feedback_log)
             self._correction_feedback_log_signature = correction_feedback_signature
+
+        qbr_findings_signature = file_signature(self.qbr_ai_findings_log)
+        if qbr_findings_signature != self._qbr_ai_findings_signature:
+            self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)
+            self._qbr_ai_findings_signature = qbr_findings_signature
 
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
@@ -5510,6 +5565,14 @@ filtered AS (
             "feedback": question_feedback,
             "learning": question_learning,
         }
+        # What the qbr pipeline's model said about this question, if it has been asked at all.
+        #
+        # Deliberately a separate field from `ai_review` above: that one is the SQL-era audit record
+        # (`question_ai_review_events.jsonl`), which is a human-supervised review with a status and a
+        # recommended action. This is the qbr loop's note - no status, no action, no reviewer - and
+        # folding them into one field would let a note be read as a review. The screen draws it as a
+        # note under its own heading, with the model named, so a reader can weigh it.
+        copy["qbr_ai_finding"] = (getattr(self, "latest_qbr_ai_findings", {}) or {}).get(key)
         copy["source_files"] = {
             "official_pdf": metadata.get("question_pdf_relative") or metadata.get("question_pdf"),
             "mineru_layout_pdf": sibling_pdf(metadata.get("question_markdown_relative") or metadata.get("question_markdown") or "", "_layout"),
