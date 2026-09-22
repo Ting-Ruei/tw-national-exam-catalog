@@ -9,8 +9,8 @@
 
 目前已驗證可同步的 MinerU 環境版本、freeze 清單與安裝順序，另見：
 
-- [docs/mineru-environment-sync.md](/Users/tim/tw-national-exam-catalog/docs/mineru-environment-sync.md)
-- [requirements/mineru-3.3.1-py314-freeze.txt](/Users/tim/tw-national-exam-catalog/requirements/mineru-3.3.1-py314-freeze.txt)
+- [docs/mineru-environment-sync.md](mineru-environment-sync.md)
+- [requirements/mineru-3.3.1-py314-freeze.txt](../requirements/mineru-3.3.1-py314-freeze.txt)
 
 ## 角色與網路位置
 
