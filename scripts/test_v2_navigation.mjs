@@ -45,7 +45,14 @@ for (const id of ['textSide', 'listBody', 'crumbs', 'scopeCount', 'doneCount', '
   'toast', 'figureNote', 'editor', 'viewStem', 'viewOpts', 'actFix', 'actSave', 'actAccept',
   'editStem', 'pickCategory', 'pickYear', 'pickSitting', 'pickSubject', 'figuresOnly',
   'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nReturned', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
-  'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where']) makeElement(id);
+  'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where',
+  // The four-area shell. The navigation contract is about the *question* area's walk, which this
+  // harness drives directly by calling `go`/`next` - it never clicks an area button. But the
+  // script still wires the shell's elements at load time (the area buttons and the three other
+  // panes), so those nodes must exist or the script throws before the harness can reach it. The
+  // behaviour of the areas themselves is pinned by `test_v2_areas_browser.mjs` against real Chrome.
+  'whoami', 'homeCards', 'homeScope', 'sheetList', 'answerMain', 'discussMain', 'discussSide',
+  'areaHome', 'areaQuestion', 'areaAnswer', 'areaDiscuss']) makeElement(id);
 elements.get('figuresOnly').tagName = 'INPUT';
 
 /* The chip radios: only the chip the test selects should read as checked. */
@@ -67,11 +74,15 @@ const document_ = {
       return hit || null;
     }
     if (sel === '#chips .chip') return chipNodes[0];
+    // The area buttons are wired at load time; return none, so the loop is a no-op.
+    if (sel === '.area-btn') return null;
     if (sel === '.row.active') return null;
     return null;
   },
   querySelectorAll(sel) {
     if (sel === '#chips .chip') return chipNodes;
+    // `for (const button of document.querySelectorAll('.area-btn'))` is the load-time wiring.
+    if (sel === '.area-btn') return [];
     if (sel === '.row') return [];
     return [];
   },
@@ -83,14 +94,23 @@ const history_ = { replaceState() {} };
 const location_ = { hash: '' };
 
 const sandbox = {
-  document: document_, window: {}, history: history_, location: location_,
+  document: document_,
+  // `window` needs `addEventListener`/`removeEventListener`: the areas shell registers `hashchange`
+  // at load time. The harness drives the walk by calling `go`/`next` directly, so the listener is
+  // never fired here - it only has to exist.
+  window: { addEventListener() {}, removeEventListener() {} },
+  history: history_, location: location_,
   console, setTimeout, clearTimeout, Math, JSON, Object, Array, Map, Set, Number, String, Boolean,
-  Promise, URLSearchParams, fetch: async () => { throw new Error('no network in the harness'); },
+  Promise, URLSearchParams, decodeURIComponent,
+  CSS: { escape: (value) => String(value).replace(/["\\]/g, '\\$&') },
+  fetch: async () => { throw new Error('no network in the harness'); },
 };
 
-/* Expose the internals the harness drives. The script ends with `boot()`, which fetches; that is
-   replaced with a no-op so the harness can build the state itself from the JSONL. */
-const wrapped = script.replace(/\nboot\(\);\s*$/, '\n')
+/* Expose the internals the harness drives. The script ends with
+   `boot().then(() => showArea(areaFromHash(), { push: false }))`, which fetches; that is replaced
+   with a no-op so the harness can build the state itself from the JSONL. The pattern is anchored on
+   the boot call only, so the rest of the shell (including `showArea`) stays in place. */
+const wrapped = script.replace(/\nboot\(\)[^\n]*\n?\s*$/, '\n')
   + '\n;globalThis.__qbr = { S, rebuildRows, visibleRows, viewMode, isGrouped, stateOf, hasDispute, '
   + 'go, next, renderList, renderChips };';
 

@@ -40,6 +40,59 @@ Routes:
 `/v2` is served `no-store` — **editing `v2.html` goes live without restarting the server**, and the
 review log is opened append-only (`"a"`), never truncated.
 
+## The four areas (首頁 / 題目審核區 / 答案審核區 / 錯題討論區)
+
+v2 is **one page with a mode switch**, not four pages. Four pages would mean four loaders of the same
+198 MB `candidates.jsonl`, and so four chances for them to disagree about what is in the queue. The
+topbar switches the pane; the mode is in the hash so each area is linkable and a reload reopens it.
+
+| Area | Hash prefix | Does | Writes |
+|---|---|---|---|
+| 題目審核區 | none (bare `#類科/年/次/科目`) | reads the paper beside the extracted text | `/api/review` |
+| 首頁 | `#首頁/…` | counts only; every number comes from the three endpoints below | **nothing** |
+| 答案審核區 | `#答案/…` | reads the answer sheet, one sheet at a time | `/api/answer-review-batch` |
+| 錯題討論區 | `#錯題/…` | shows each human fix and its `change_class` | **nothing** |
+
+Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2_areas_browser.mjs`):
+
+- **An empty hash is the question area, never 首頁.** The bare `#類科/年/次/科目/qNNN` spelling is a
+  bookmark contract; the question area strips any area prefix back off, so old links keep working.
+- **Switching areas hides, never empties.** The answer pane keeps the sheet and the half-typed note;
+  a pane is rendered once (`renderArea` checks `A.rendered[area]`) and `invalidateAreas()` is called
+  only by something that actually changed the data (a question decision, an answer write).
+- **A pane reads its numbers from the server.** 首頁 calls `/api/candidates`,
+  `/api/answer-candidates` and `/api/correction-feedback` and prints what they say; it computes
+  nothing of its own, because a dashboard that disagrees with the page behind it is worse than none.
+- **The answer area does not decide eligibility.** `/api/answer-candidates` returns questions whose
+  question review is `accept`/`unblock`, and `/api/answer-review-batch` refuses the rest — mirror
+  that, don't re-implement it. The batch endpoint takes **one** `action` for the whole request
+  (`action = payload.get("action")` then every event is stamped with it), so `answerSheetAction`
+  groups rows by the action they each earned; sending one batch with a per-row action would write 79
+  decisions nobody made.
+- **Clicking an answer option drafts; it does not save.** A stray click on a 4-row table must not
+  rewrite an answer. The draft (`A.answerDraft`) is sent only by the buttons under the table.
+- **The discussion area learns nothing by itself and writes nothing.** The lesson is already
+  recorded when a person presses 儲存修正 (`_record_question_correction_feedback`) or corrects an
+  answer (`_record_answer_correction_feedback`), which build a `question_correction_feedback_events`
+  row with a `diff` and a `change_class`. **`change_class` is measured, not chosen** —
+  `ai395_feedback.classify_change` reads the changed field names and the diff shape — so a type on
+  this page really is a type. **Do not build a second store for it.**
+- **The question shortcuts (`W`/`S`/`A`/`R`/`B`/`E`/`C`) fire only in the question area.** `w`, `a`,
+  `b` are ordinary letters in a discussion or an answer note; an unguarded handler writes a review
+  event from a keystroke the reviewer meant as text.
+
+Verify the four areas end to end (needs a queue built by `build_review_queue.py`):
+
+```sh
+REVIEW_UI_ADDITIONAL_ASSET_ROOTS=<queue> python3 scripts/serve_question_review_ui.py \
+    --candidate-jsonl <queue>/review-ui/candidates.jsonl \
+    --issue-csv <queue>/review-ui/issues.csv \
+    --review-log <queue>/review-ui/question_review_events.jsonl \
+    --review-backend jsonl --host 127.0.0.1 --port 8897 &
+node scripts/test_v2_areas_browser.mjs http://127.0.0.1:8897
+python3 -m unittest tests.test_review_ui_areas
+```
+
 ## Keyboard — all left hand
 
 | Key | Action |

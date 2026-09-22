@@ -25,7 +25,117 @@
   button:disabled { cursor:not-allowed; opacity:.45; }
 
   /* --- one narrow list, then the comparison: text | paper --- */
-  .app { display:grid; grid-template-columns:238px minmax(0,1fr); height:100vh; }
+  /* The area is 100vh minus the topbar (41px); `min-height:0` is what keeps the two inner panes
+     scrollable instead of growing the page. Getting this wrong is visible, not theoretical: a grid
+     child without it refuses to shrink and the bottom action bar is pushed off screen. */
+  .app { grid-template-columns:238px minmax(0,1fr); min-height:0; }
+
+  /* ------------------------------------------------------------------ the four areas
+     The request was 首頁 / 題目審核區 / 答案審核區 / 錯題討論區. They are *one page* with a mode
+     switch, not four pages, because they are four views of one queue and the alternative is four
+     copies of the queue loader drifting apart.
+
+     Routing is by hash prefix (`#審題/…`, `#答案/…`, `#錯題/…`) so every area is linkable and
+     reloadable, and so a bookmark from any area opens the area it was made in. The bare `#類科/年/次/科目`
+     form is still parsed as the question area, because those bookmarks are a contract.
+
+     A mode that is not chosen is hidden by `hidden`, not by clearing `innerHTML`: the answer and
+     discussion panels keep their own state (the sheet being read, the note being typed), and a
+     round-trip through another area must not throw that away. */
+  .topbar {
+    display:flex; align-items:center; gap:6px; padding:7px 13px; background:var(--navy);
+    color:#fff; border-bottom:1px solid var(--navy);
+  }
+  .topbar .brand { font-weight:800; letter-spacing:-.01em; margin-right:10px; font-size:13.5px; }
+  .area-btn {
+    border:1px solid rgba(255,255,255,.28); border-radius:99px; padding:4px 13px;
+    background:transparent; color:#dce6f1; font-size:12.5px;
+  }
+  .area-btn:hover { background:rgba(255,255,255,.12); }
+  .area-btn.on { background:#fff; color:var(--navy); border-color:#fff; font-weight:700; }
+  .topbar .spacer { flex:1; }
+  .topbar .who { font-size:11.5px; color:#b9c9da; }
+  .area { display:none; height:calc(100vh - 41px); min-height:0; }
+  .area.on { display:grid; }
+
+  /* --- 首頁: where to go, and what is where --- */
+  .home { grid-template-columns:minmax(0,1fr) 320px; }
+  .home-main { overflow-y:auto; padding:26px 30px; }
+  .home h1 { margin:0 0 4px; font-size:23px; letter-spacing:-.02em; }
+  .home .lede { color:var(--muted); font-size:13.5px; margin:0 0 22px; max-width:70ch; line-height:1.6; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(238px,1fr)); gap:13px; }
+  .card {
+    border:1px solid var(--line); border-radius:var(--radius); background:var(--paper);
+    padding:15px 16px; box-shadow:var(--shadow); text-align:left;
+  }
+  .card:hover { border-color:var(--navy); }
+  .card h2 { margin:0 0 5px; font-size:15px; }
+  .card p { margin:0 0 11px; color:var(--muted); font-size:12.5px; line-height:1.55; }
+  .card .go { font-size:12.5px; font-weight:700; color:var(--blue); }
+  .card .big { font-size:26px; font-weight:800; letter-spacing:-.03em; display:block; }
+  .home-side { border-left:1px solid var(--line); background:var(--paper); overflow-y:auto; padding:20px 18px; }
+  .home-side h3 { margin:0 0 9px; font-size:12.5px; color:var(--muted); text-transform:none; }
+  .home-side ul { margin:0 0 20px; padding-left:18px; font-size:12.5px; line-height:1.75; color:var(--ink); }
+
+  /* --- 答案審核區: one answer sheet at a time --- */
+  .answers { grid-template-columns:262px minmax(0,1fr); }
+  .sheet-list { border-right:1px solid var(--line); background:var(--paper); overflow-y:auto; padding:6px; }
+  .sheet-row {
+    display:block; width:100%; text-align:left; border:1px solid transparent; border-radius:7px;
+    padding:7px 9px; background:none; font-size:12px; color:var(--ink); line-height:1.45;
+  }
+  .sheet-row:hover { background:var(--canvas); }
+  .sheet-row.active { border-color:var(--navy); background:var(--paper); box-shadow:var(--shadow); }
+  .sheet-row .t { display:block; font-weight:600; }
+  .sheet-row .m { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  .sheet-row.done .t::after { content:' ✓'; color:var(--green); }
+  .answer-main { overflow-y:auto; padding:18px 24px; }
+  .answer-main h1 { margin:0 0 3px; font-size:18px; }
+  .answer-sub { color:var(--muted); font-size:12.5px; margin:0 0 15px; }
+  .atable { width:100%; border-collapse:collapse; font-size:13.5px; background:var(--paper);
+    border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+  .atable th, .atable td { border-bottom:1px solid var(--line); padding:8px 10px; text-align:left;
+    vertical-align:top; }
+  .atable th { position:sticky; top:0; background:#fbfcff; font-size:12px; color:var(--muted); z-index:1; }
+  .atable tr.blocked { background:#fff6f5; }
+  .atable tr.done { background:#f6fdf9; }
+  .atable .qnum { font-weight:700; color:var(--navy); font-variant-numeric:tabular-nums; }
+  .atable .stem { color:#344054; font-size:12.5px; line-height:1.45; }
+  .atable .opts { color:var(--muted); font-size:11.5px; margin-top:4px; line-height:1.5; }
+  .atable .ans { white-space:nowrap; }
+  .ans-btn { border:1px solid var(--line); border-radius:6px; min-width:32px; height:29px; padding:0 7px;
+    background:#fff; font-weight:700; cursor:pointer; }
+  .ans-btn:hover { border-color:var(--navy); }
+  .ans-btn.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .ans-current { font-size:19px; font-weight:800; color:var(--navy); }
+  .ans-warn { color:var(--amber); font-size:11.5px; display:block; margin-top:3px; }
+  .ans-note { width:100%; min-height:34px; border:1px solid var(--line); border-radius:6px;
+    padding:5px 7px; font-size:12px; resize:vertical; }
+  .answer-bar { position:sticky; bottom:0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+    padding:11px 0 2px; margin-top:13px; background:linear-gradient(transparent,var(--canvas) 32%); }
+
+  /* --- 錯題討論區: the case I fixed, and what should be learned from it --- */
+  .discuss { grid-template-columns:minmax(0,1fr) 340px; }
+  .discuss-main { overflow-y:auto; padding:22px 26px; }
+  .discuss h1 { margin:0 0 3px; font-size:20px; }
+  .discuss .lede { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.6; max-width:74ch; }
+  .case { border:1px solid var(--line); border-radius:var(--radius); background:var(--paper);
+    padding:14px 16px; margin-bottom:12px; box-shadow:var(--shadow); }
+  .case h2 { margin:0 0 4px; font-size:14px; }
+  .case .meta { color:var(--muted); font-size:11.5px; margin-bottom:9px; }
+  .case .diff { font-size:13px; line-height:1.7; }
+  .case .from { color:var(--red); text-decoration:line-through; text-decoration-thickness:1px; }
+  .case .to { color:var(--green); }
+  .case .kind { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px;
+    background:#efeaff; color:#4a3f8a; margin-left:6px; }
+  .case .fields { color:var(--muted); font-size:11.5px; margin-top:7px; }
+  .discuss-side { border-left:1px solid var(--line); background:var(--paper); overflow-y:auto; padding:20px 18px; }
+  .discuss-side h3 { margin:0 0 8px; font-size:12.5px; color:var(--muted); }
+  .discuss-side .n { font-size:22px; font-weight:800; letter-spacing:-.02em; }
+  .discuss-side .row { display:flex; justify-content:space-between; gap:8px; font-size:12.5px;
+    padding:5px 0; border-bottom:1px solid var(--line); }
+  .empty-area { display:grid; place-items:center; height:60%; color:var(--muted); font-size:14px;
+    text-align:center; padding:20px; line-height:1.7; }
   .list { display:flex; flex-direction:column; border-right:1px solid var(--line); background:var(--paper); min-height:0; }
   .list-head { padding:11px 13px; border-bottom:1px solid var(--line); }
   .progress { display:flex; align-items:baseline; gap:5px; }
@@ -276,7 +386,18 @@
 </style>
 </head>
 <body>
-<div class="app">
+<nav class="topbar">
+  <span class="brand">國考題庫 · 審題</span>
+  <button class="area-btn" data-area="home">首頁</button>
+  <button class="area-btn on" data-area="question">題目審核區</button>
+  <button class="area-btn" data-area="answer">答案審核區</button>
+  <button class="area-btn" data-area="discuss">錯題討論區</button>
+  <span class="spacer"></span>
+  <span class="who" id="whoami"></span>
+</nav>
+
+<!-- ------------------------------------------------ 題目審核區 (the existing baseline) -->
+<div class="app area on" id="areaQuestion">
   <aside class="list">
     <div class="list-head">
       <div class="progress"><b id="doneCount">0</b><span id="totalCount">／0 已過目</span></div>
@@ -331,6 +452,39 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- ------------------------------------------------------------------ 首頁 -->
+<div class="area home" id="areaHome">
+  <div class="home-main">
+    <h1>這一輪要審什麼</h1>
+    <p class="lede">四區各自是一件事：題目審核區讀紙本對照抽取文字；答案審核區只讀答案卡；
+      錯題討論區是把人工修過的個案依「類型」累積起來，讓下一批的 AI 審核提示詞能學到方向。
+      首頁只負責告訴你哪一區還沒做完，以及進去哪裡。</p>
+    <div class="cards" id="homeCards"><div class="empty">載入中…</div></div>
+  </div>
+  <aside class="home-side">
+    <h3>這一卷的來源</h3>
+    <ul id="homeScope"><li>載入中…</li></ul>
+    <h3>這些數字的意義</h3>
+    <ul>
+      <li>題目 <b>已過目</b>＝有任何人類決定（確認、修正、阻擋、需重看）或管線退回，註記不算。</li>
+      <li>答案 <b>可審</b>＝題目已被接受，答案卡才能審（沒過的題目審答案沒有意義）。</li>
+      <li>錯題 <b>個案</b>＝人工修正過、且前後有可見差異的紀錄；同一題重複修只算最新一次。</li>
+    </ul>
+  </aside>
+</div>
+
+<!-- --------------------------------------------------------------- 答案審核區 -->
+<div class="area answers" id="areaAnswer">
+  <aside class="sheet-list" id="sheetList"><div class="empty">載入中…</div></aside>
+  <main class="answer-main" id="answerMain"><div class="empty">載入中…</div></main>
+</div>
+
+<!-- --------------------------------------------------------------- 錯題討論區 -->
+<div class="area discuss" id="areaDiscuss">
+  <main class="discuss-main" id="discussMain"><div class="empty">載入中…</div></main>
+  <aside class="discuss-side" id="discussSide"><div class="empty">載入中…</div></aside>
 </div>
 <div class="toast off" id="toast"></div>
 
@@ -1613,6 +1767,10 @@ async function decide(action) {
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     S.verdict.set(item.candidate_key, action);
     if (notes) S.notes.set(item.candidate_key, notes);
+    // A question decision changes what the answer area is allowed to show (its eligible set is
+    // "questions whose question review is accept/unblock"), so the other panes are now stale. This
+    // is the one place a question decision is written, hence the one place to say so.
+    invalidateAreas();
     renderList();
     closeNote();
     toast(`第 ${item.question_number} 題：${LABEL[action]}`);
@@ -1658,6 +1816,10 @@ async function saveCorrection() {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     S.verdict.set(item.candidate_key, 'correct');
+    // A correction is what the 錯題討論區 exists to show, and it is recorded server-side as a
+    // `question_correction_feedback_events` row. Mark the panes stale so the new case appears without
+    // a reload.
+    invalidateAreas();
     $('reasonText').value = '';
     toast(`第 ${item.question_number} 題：修正已儲存`);
     setEditMode(false);
@@ -1692,6 +1854,457 @@ async function next() {
   if (target < S.rows.length) { await go(target); return; }
   renderList();
   renderTextSide();
+}
+
+/* ==================================================================== 四個區
+   The request named four areas: 首頁 / 題目審核區 / 答案審核區 / 錯題討論區. They are one page with a
+   mode switch, not four pages, because they are four readings of **one** queue: the answer area's
+   eligible set is defined by the question area's decisions, and the discussion area reads the
+   corrections those two produced. Four pages would mean four loaders of the same 198 MB
+   `candidates.jsonl`, and four chances for them to disagree about what is in the queue.
+
+   What each area is allowed to do is the whole point of separating them:
+
+     題目審核區   reads the paper beside the extracted text. Decisions: 確認／修正／需重看／阻擋.
+     答案審核區   reads the answer sheet only, and **only for questions already accepted** - the
+                 server refuses otherwise (`/api/answer-review` answers 409 with the question's
+                 action), because reviewing the answer of a question nobody accepted is reviewing
+                 something that may not survive.
+     錯題討論區   reads what a person changed and what class of change it was. It writes nothing:
+                 the lesson is already recorded by the correction itself (see below), and this area
+                 only makes it visible.
+
+   The mode is in the hash (`#答案/…`) so each area is linkable and a reload reopens it. The bare
+   `#類科/年/次/科目` form keeps meaning the question area, because those bookmarks exist. */
+const AREA_BY_NAME = { home: 'home', question: 'question', answer: 'answer', discuss: 'discuss' };
+//: The hash prefix for each area. `審題` is the question area's own name and is accepted too, so a
+//: link written either way works.
+const AREA_PREFIX = { home: '首頁', question: '審題', answer: '答案', discuss: '錯題' };
+const PREFIX_AREA = { 首頁: 'home', 審題: 'question', 題目: 'question', 答案: 'answer', 錯題: 'discuss' };
+const AREA_LABEL = { home: '首頁', question: '題目審核區', answer: '答案審核區', discuss: '錯題討論區' };
+
+//: One fetch of each area's payload per session, invalidated when a decision could have changed it.
+const A = { area: 'question', sheets: null, sheetIndex: 0, sheet: null, answerDraft: new Map(),
+            noteDraft: new Map(), feedback: null, error: {}, rendered: {} };
+
+function areaFromHash() {
+  const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  if (!raw) return 'question';  // the baseline is the question area; an empty hash is not the home page
+  const head = raw.split('/')[0];
+  return PREFIX_AREA[head] || 'question';
+}
+
+function showArea(area, { push = true } = {}) {
+  const next = AREA_BY_NAME[area] ? area : 'question';
+  A.area = next;
+  for (const button of document.querySelectorAll('.area-btn')) {
+    button.classList.toggle('on', button.dataset.area === next);
+  }
+  // A mode that is not chosen is **hidden**, never emptied: the answer area keeps the sheet the
+  // reviewer was reading and the note they were typing, and a trip through 首頁 must not discard it.
+  const nodes = { home: 'areaHome', question: 'areaQuestion', answer: 'areaAnswer', discuss: 'areaDiscuss' };
+  for (const [name, id] of Object.entries(nodes)) {
+    const node = $(id);
+    if (node) node.classList.toggle('on', name === next);
+  }
+  // The hash carries a mode prefix whenever we are not in the question area, so a reload reopens
+  // the same area. The suffix (the scope, and an optional `qNNN`) is preserved as it is: the answer
+  // and discussion areas have no scope of their own, and the question area's existing
+  // `#類科/年/次/科目/qNNN` spelling must survive a trip out and back.
+  const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  const head = raw.split('/')[0];
+  const rest = PREFIX_AREA[head] ? raw.split('/').slice(1).join('/') : raw;
+  const wanted = next === 'question' ? `#${rest}` : `#${AREA_PREFIX[next]}${rest ? '/' + rest : ''}`;
+  // `replaceState`, not a push: the back button should leave the area, not walk through renders of it.
+  if (location.hash !== wanted) history.replaceState(null, '', wanted);
+  if (next !== 'question') renderArea(next);
+  if (next === 'home') renderHome();
+  if (push) $('whoami').textContent = `${AREA_LABEL[next]} · ${S.rows.length} 題`;
+}
+
+for (const button of document.querySelectorAll('.area-btn')) {
+  button.onclick = () => showArea(button.dataset.area);
+}
+window.addEventListener('hashchange', () => {
+  const area = areaFromHash();
+  if (area !== A.area) showArea(area, { push: false });
+  else if (area === 'question') applyScope();
+});
+
+function renderArea(area, { force = false } = {}) {
+  // Render **once** per area. Re-entering a pane must not rebuild its DOM: the reviewer's half-typed
+  // answer note lives in that DOM and there is no other copy of it. The pane's data is invalidated
+  // only by something that actually changed it (a decision, an answer write), via `invalidateAreas()`.
+  if (A.rendered[area] && !force) return;
+  A.rendered[area] = true;
+  if (area === 'answer') renderAnswers();
+  else if (area === 'discuss') renderDiscuss();
+}
+
+//: Called by anything that writes. The answer area's eligible set and the discussion area's case
+//: list are both derived from decisions taken in the question area, so a question decision makes
+//: all three panes stale.
+function invalidateAreas() {
+  A.rendered = {};
+  A.sheets = null;
+  A.feedback = null;
+}
+
+/* --------------------------------------------------------------- 首頁
+   The home page answers one question - "what is left" - from three endpoints that already exist.
+   It computes nothing of its own: every number here is the server's count of the same thing the
+   area it links to will show, because a dashboard that disagrees with the page behind it is worse
+   than no dashboard. */
+async function renderHome() {
+  const cards = $('homeCards');
+  cards.innerHTML = '<div class="empty">載入中…</div>';
+  const [questions, answers, feedback] = await Promise.all([
+    fetchAreaJson('/api/candidates', { limit: 1000, _count: 1 }),
+    fetchAreaJson('/api/answer-candidates', { limit: 1 }),
+    fetchAreaJson('/api/correction-feedback', { limit: 500 }),
+  ]);
+  const total = questions ? Number(questions.total_count ?? questions.filtered_count ?? 0) : null;
+  const answered = questions ? Number(questions.reviewed_count ?? 0) : null;
+  const eligible = answers ? Number(answers.eligible_count ?? 0) : null;
+  const answerReviewed = answers ? Number(answers.reviewed_count ?? 0) : null;
+  const cases = feedback && Array.isArray(feedback.events) ? feedback.events.length : null;
+  const card = (title, big, note, area, action) => `
+    <div class="card" data-go="${area}">
+      <h2>${esc(title)}</h2>
+      <span class="big">${big === null ? '—' : big}</span>
+      <p>${esc(note)}</p>
+      <span class="go">${esc(action)} →</span>
+    </div>`;
+  cards.innerHTML = [
+    card('題目審核區', total === null ? null : `${answered ?? 0}／${total}`,
+         '一題一題讀紙本對照抽取文字。還沒過目的題目會擋住它的答案。', 'question', '開始審題'),
+    card('答案審核區', eligible === null ? null : `${answerReviewed ?? 0}／${eligible}`,
+         '只審已通過題目的答案卡。沒通過的題目不能審答案，伺服器會直接拒繪。', 'answer', '審答案'),
+    card('錯題討論區', cases === null ? null : `${cases}`,
+         '人工修過的個案，依「修改的類型」排列：這一區是把修正累積成可學的東西的地方。', 'discuss', '看個案'),
+  ].join('');
+  for (const node of cards.querySelectorAll('[data-go]')) {
+    node.onclick = () => showArea(node.dataset.go);
+  }
+  const scope = $('homeScope');
+  const crumbs = S.scope.category ? ['', S.scope.year, S.scope.sitting, S.scope.subject]
+    .filter((v, i) => i === 0 || v) : [];
+  const where = [S.scope.category || '（未選）', S.scope.year || '', S.scope.sitting || '',
+                 S.scope.subject || ''].filter(Boolean).join(' · ');
+  scope.innerHTML = [
+    `<li>目前範圍：<b>${esc(where || '（未選）')}</b></li>`,
+    `<li>這個範圍的題目：<b>${S.rows.length}</b> 題（清單正在顯示的數）</li>`,
+    `<li>分類樹是伺服器從 <code>queue_index.json</code> 給的，不是這裡算的。</li>`,
+  ].join('');
+}
+
+/* --------------------------------------------------------------- 共用的小工具 */
+async function fetchAreaJson(path, params = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, value);
+  }
+  try {
+    const response = await fetch(`${path}?${query}`, { cache: 'no-store' });
+    if (!response.ok) {
+      A.error[path] = `HTTP ${response.status}`;
+      return null;
+    }
+    delete A.error[path];
+    return await response.json();
+  } catch (error) {
+    A.error[path] = String(error.message || error);
+    return null;
+  }
+}
+
+/* --------------------------------------------------------------- 答案審核區
+
+   The gate is the server's, and this area only mirrors it: `/api/answer-candidates` returns
+   questions whose question review is `accept`/`unblock`, and `/api/answer-review` refuses to pass an
+   item whose question has not been accepted. Both are read from the same place, so a reviewer never
+   sees an answer card the server would reject.
+
+   The area is a **sheet** at a time, because that is the unit the paper is: one answer PDF covers
+   one subject of one sitting, and the answers are read off it row by row. Reading it question by
+   question would mean re-finding the sheet on every step.
+
+   A correction is written through `/api/answer-review` with the reviewer's own `corrected_answer`,
+   which is what makes the server record a `question_correction_feedback_events` row with
+   `scope=answer` and `change_class=answer_rule` (see `_record_answer_correction_feedback`). That row
+   is the lesson the 錯題討論區 shows - so this area does not have to learn anything itself. */
+async function renderAnswers() {
+  const list = $('sheetList');
+  const main = $('answerMain');
+  if (!A.sheets) {
+    list.innerHTML = '<div class="empty">載入中…</div>';
+    const payload = await fetchAreaJson('/api/answer-candidates', { limit: 1000 });
+    if (!payload) {
+      list.innerHTML = `<div class="empty">讀不到答案候選（${esc(A.error['/api/answer-candidates'] || '')}）</div>`;
+      return;
+    }
+    A.sheets = payload.candidates || [];
+  }
+  if (!A.sheets.length) {
+    list.innerHTML = '<div class="empty">這一卷沒有可審的答案卡。答案卡只收「題目已通過」的題目。</div>';
+    main.innerHTML = '<div class="empty">沒有可審的答案。</div>';
+    return;
+  }
+  if (A.sheetIndex >= A.sheets.length) A.sheetIndex = 0;
+  list.innerHTML = A.sheets.map((sheet, index) => {
+    const meta = sheet.metadata || {};
+    const done = Number(sheet.reviewed_count || 0);
+    const count = Number(sheet.reviewable_question_count ?? sheet.question_count ?? 0);
+    return `<button class="sheet-row${index === A.sheetIndex ? ' active' : ''}${done && done >= count ? ' done' : ''}" data-sheet="${index}">
+      <span class="t">${esc(meta.normalized_subject_name || sheet.sheet_key || '(未知科目)')}</span>
+      <span class="m">${esc([meta.normalized_category_name, meta.year && `${meta.year} 年`,
+        meta.exam_ordinal && `第 ${meta.exam_ordinal} 次`, `${done}／${count}`].filter(Boolean).join(' · '))}</span>
+    </button>`;
+  }).join('');
+  for (const row of list.querySelectorAll('[data-sheet]')) {
+    row.onclick = () => { A.sheetIndex = Number(row.dataset.sheet); renderAnswers(); };
+  }
+  renderAnswerSheet();
+}
+
+function renderAnswerSheet() {
+  const main = $('answerMain');
+  const sheet = A.sheets[A.sheetIndex];
+  if (!sheet) { main.innerHTML = '<div class="empty">沒有這一張答案卡。</div>'; return; }
+  const meta = sheet.metadata || {};
+  const rows = sheet.rows || [];
+  const head = `
+    <h1>${esc(meta.normalized_subject_name || '(未知科目)')}</h1>
+    <p class="answer-sub">${esc([meta.normalized_category_name, meta.year && `${meta.year} 年`,
+      meta.exam_ordinal && `第 ${meta.exam_ordinal} 次`, sheet.answer_role_label &&
+      `來源：${sheet.answer_role_label}`].filter(Boolean).join(' · '))}
+      ｜ 已審 ${Number(sheet.reviewed_count || 0)}／${Number(sheet.reviewable_question_count ?? rows.length)}</p>`;
+  const body = rows.map((row) => answerRowHtml(row)).join('');
+  main.innerHTML = `${head}
+    <table class="atable"><thead><tr>
+      <th style="width:52px">題</th><th>題幹</th><th style="width:210px">答案</th><th style="width:120px">審核</th>
+    </tr></thead><tbody>${body}</tbody></table>
+    <div class="answer-bar">
+      <button class="ans-btn" data-sheet-action="accept">整份通過</button>
+      <button class="ans-btn" data-sheet-action="needs_review">整份保留疑問</button>
+      <button class="ans-btn" data-sheet-action="block">整份阻擋</button>
+      <span class="hint" id="answerSaved"></span>
+    </div>`;
+  bindAnswerSheet();
+}
+
+function answerRowHtml(row) {
+  if (row.is_placeholder) {
+    return `<tr class="blocked"><td class="qnum">${esc(row.question_number)}</td>
+      <td class="stem" colspan="3">${esc(row.placeholder_reason || '題目尚未通過審核')}</td></tr>`;
+  }
+  const review = row.answer_review || {};
+  const hint = row.answer_hint || {};
+  const done = review.status === 'reviewed';
+  const blocked = review.action === 'block';
+  const options = (row.options || []).map((option) =>
+    `<span class="ans-btn${String(review.correction?.answer ?? row.answer ?? '') === option.key ? ' on' : ''}"
+       data-answer="${esc(option.key)}" data-key="${esc(row.candidate_key)}">${esc(option.key)}</span>`).join(' ');
+  const stem = String(row.stem || '').slice(0, 240);
+  return `<tr class="${blocked ? 'blocked' : done ? 'done' : ''}" data-key="${esc(row.candidate_key)}">
+    <td class="qnum">${esc(row.question_number)}</td>
+    <td class="stem">${esc(stem)}
+      <div class="opts">${(row.options || []).map((o) => `${esc(o.key)}. ${esc(String(o.text || '').slice(0, 60))}`).join('　')}</div></td>
+    <td class="ans"><span class="ans-current" id="ansNow_${esc(row.question_number)}">${esc(review.correction?.answer ?? row.answer ?? '—')}</span>
+      <div>${options}</div>
+      ${hint.severity === 'warning' ? `<span class="ans-warn">${esc(hint.message || '答案有疑慮')}</span>` : ''}</td>
+    <td>${done ? `<span class="hint">${esc(LABEL[review.action] || review.action || '已審')}</span>` : '<span class="hint">未審</span>'}
+      <textarea class="ans-note" data-note="${esc(row.candidate_key)}" placeholder="註記（可留空）">${esc(A.noteDraft.get(row.candidate_key) ?? review.notes ?? '')}</textarea></td>
+  </tr>`;
+}
+
+function bindAnswerSheet() {
+  const main = $('answerMain');
+  // A typed note is kept in memory as it is typed, so switching to another sheet and back - or
+  // switching to 首頁 - does not throw away a note the reviewer was in the middle of writing. It is
+  // a draft, not a decision: nothing is sent until one of the buttons below is pressed.
+  for (const node of main.querySelectorAll('[data-note]')) {
+    node.addEventListener('input', () => A.noteDraft.set(node.dataset.note, node.value));
+  }
+  // Clicking an option **drafts** the answer; it does not save. A stray click on a 4-row table must
+  // not silently rewrite an answer, so the change is only sent by one of the buttons below, which is
+  // also where the note and the reviewer are read from.
+  for (const button of main.querySelectorAll('[data-answer]')) {
+    button.onclick = () => {
+      const key = button.dataset.key;
+      A.answerDraft.set(key, button.dataset.answer);
+      const row = main.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
+      if (row) {
+        const now = row.querySelector('.ans-current');
+        if (now) now.textContent = button.dataset.answer;
+        for (const sibling of row.querySelectorAll('[data-answer]')) {
+          sibling.classList.toggle('on', sibling === button);
+        }
+      }
+    };
+  }
+  for (const button of main.querySelectorAll('[data-sheet-action]')) {
+    button.onclick = () => answerSheetAction(button.dataset.sheetAction);
+  }
+}
+
+async function answerSheetAction(action) {
+  const sheet = A.sheets[A.sheetIndex];
+  if (!sheet) return;
+  const main = $('answerMain');
+  const notes = {};
+  for (const node of main.querySelectorAll('[data-note]')) {
+    notes[node.dataset.note] = node.value;
+    A.noteDraft.set(node.dataset.note, node.value);
+  }
+  // One request per row that has something to say. `needs_review` and `block` are per row as well,
+  // because an answer sheet's defects are per answer - one wrong key does not make the other 79
+  // wrong, and marking them so would be recording a decision nobody made.
+  const entries = [];
+  for (const row of sheet.rows || []) {
+    if (row.is_placeholder || !row.candidate_key) continue;
+    const drafted = A.answerDraft.get(row.candidate_key);
+    const review = row.answer_review || {};
+    const note = notes[row.candidate_key] ?? A.noteDraft.get(row.candidate_key) ?? review.notes ?? '';
+    const already = review.status === 'reviewed';
+    let rowAction = action;
+    if (drafted && drafted !== String(row.answer ?? '')) rowAction = 'correct';
+    else if (!drafted && action === 'correct') continue;
+    else if (action === 'accept' && already && rowAction === review.action && !note) continue;
+    const entry = {
+      candidate_key: row.candidate_key, action: rowAction, notes: note, reviewer: 'local',
+      // `reviewed_answer` is what the server stores as "the answer this reviewer accepted"; omitting it
+      // would store `{"answer": null}` and silently blank the answer the sheet is being judged
+      // against. It is sent from the row, not from the draft, because it means "what was on the paper".
+      reviewed_answer: { answer: row.answer ?? null },
+      answer_source_registry_key: (row.answer_payload || {}).answer_source_registry_key
+        || row.answer_source_registry_key || '',
+      sheet_key: sheet.sheet_key || '',
+      sheet_action: action,
+    };
+    if (drafted) entry.corrected_answer = drafted;
+    entries.push(entry);
+  }
+  if (!entries.length) {
+    const saved = $('answerSaved');
+    if (saved) saved.textContent = '沒有要寫入的項目（沒有改答案、也沒有註記）。';
+    return;
+  }
+  // `/api/answer-review-batch` takes **one** action for the whole request and ignores a per-entry
+  // `action` (see the handler: `action = payload.get("action")` then every event is stamped with
+  // it). So the rows are grouped by the action they actually earned and sent as one request per
+  // group. Sending one batch with a per-row action would have silently written the sheet's action
+  // onto the rows that disagreed with it - i.e. recorded 79 decisions nobody made.
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entry.action;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  let savedTotal = 0;
+  let failure = null;
+  for (const [groupAction, groupEntries] of groups) {
+    const response = await fetch('/api/answer-review-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: groupAction, entries: groupEntries, reviewer: 'local',
+                             sheet_key: sheet.sheet_key || '', sheet_action: action }),
+    });
+    const data = await response.json().catch(() => ({ ok: false, error: '回應不是 JSON' }));
+    if (!data.ok) { failure = data; break; }
+    savedTotal += Number(data.saved_count ?? groupEntries.length);
+  }
+  const saved = $('answerSaved');
+  if (failure) {
+    if (saved) saved.textContent = `寫入失敗：${failure.error || ''}`;
+    toast(`答案審核寫入失敗：${failure.error || ''}`, true);
+    return;
+  }
+  if (saved) saved.textContent = `已寫入 ${savedTotal} 筆。`;
+  toast(`已寫入 ${savedTotal} 筆答案審核`);
+  A.answerDraft.clear();
+  A.noteDraft.clear();
+  invalidateAreas();
+  await renderAnswers();
+}
+
+/* --------------------------------------------------------------- 錯題討論區
+
+   Where the per-type treatments accumulate. This area **learns nothing by itself and writes
+   nothing**: every case shown here was already recorded when a person pressed 儲存修正 in the
+   question area or a correction in the answer area, because those two calls go through
+   `_record_question_correction_feedback` / `_record_answer_correction_feedback`, which build a
+   `question_correction_feedback_events` row with a `diff` and a `change_class`.
+
+   That is the design choice worth stating: the "type" of a fix is **classified by measurement**
+   (`ai395_feedback.classify_change` reads the changed field names and the diff shape), not by the
+   model and not by asking the reviewer to name it. So the area displays `change_class` rather than
+   inviting a taxonomy, and the lesson is whatever the diffs actually have in common.
+
+   The `ai_task` on each event is the bounded packet that a guardrail candidate would be built from,
+   and its `instruction` already says the one thing that matters here: propose only, never modify the
+   question and never declare a rule active. */
+async function renderDiscuss() {
+  const main = $('discussMain');
+  const side = $('discussSide');
+  main.innerHTML = '<div class="empty">載入中…</div>';
+  const payload = await fetchAreaJson('/api/correction-feedback', { limit: 500 });
+  if (!payload) {
+    main.innerHTML = `<div class="empty">讀不到修正紀錄（${esc(A.error['/api/correction-feedback'] || '')}）</div>`;
+    return;
+  }
+  const events = Array.isArray(payload.events) ? payload.events.slice().reverse() : [];
+  A.feedback = events;
+  const byClass = new Map();
+  const byScope = new Map();
+  for (const event of events) {
+    const kind = event.change_class || '（未分類）';
+    byClass.set(kind, (byClass.get(kind) || 0) + 1);
+    const scope = event.scope || 'question';
+    byScope.set(scope, (byScope.get(scope) || 0) + 1);
+  }
+  main.innerHTML = `
+    <h1>錯題討論區</h1>
+    <p class="lede">這裡每一張卡都是一次<b>人工</b>修正留下的前後差異。分類（<code>change_class</code>）是程式從
+      「改了哪些欄位、差異長什麼形狀」算出來的，不是模型說的、也不是人選的——所以同一類的個案是真的
+      同一類。這一頁只讀不寫：把一個類型變成規則，是拿這裡的證據去寫偵測器，然後重掃、再看退回率。</p>
+    ${events.length ? events.map((event) => discussCaseHtml(event)).join('')
+      : '<div class="empty-area">還沒有任何人工修正紀錄。<br>在題目審核區按「修正」儲存、或在答案審核區改答案，就會出現在這裡。</div>'}`;
+  const classRows = [...byClass.entries()].sort((a, b) => b[1] - a[1])
+    .map(([kind, count]) => `<div class="row"><span>${esc(kind)}</span><b>${count}</b></div>`).join('');
+  const scopeRows = [...byScope.entries()].sort((a, b) => b[1] - a[1])
+    .map(([scope, count]) => `<div class="row"><span>${esc(scope)}</span><b>${count}</b></div>`).join('');
+  side.innerHTML = `
+    <h3>個案總數</h3><div class="n">${events.length}</div>
+    <h3 style="margin-top:18px">依修改類型</h3>${classRows || '<div class="row">—</div>'}
+    <h3 style="margin-top:18px">依範圍</h3>${scopeRows || '<div class="row">—</div>'}
+    <h3 style="margin-top:18px">這些紀錄去哪</h3>
+    <div style="font-size:12px;color:var(--muted);line-height:1.7">
+      append-only 檔：<code>question_correction_feedback_events.jsonl</code>，
+      與人類決定、AI finding 同一個目錄、同一套搬運（重建會帶、同步會推）。
+      <br>模型只能提案（<code>ai_task.instruction</code>），不能改題、不能宣告規則生效。
+    </div>`;
+}
+
+function discussCaseHtml(event) {
+  const diff = Array.isArray(event.diff) ? event.diff : [];
+  const lines = diff.map((row) => {
+    const field = row.field || row.path || '? ';
+    const before = row.before === undefined ? '' : row.before;
+    const after = row.after === undefined ? '' : row.after;
+    return `<div><code>${esc(field)}</code>：
+      <span class="from">${esc(String(before).slice(0, 160))}</span> →
+      <span class="to">${esc(String(after).slice(0, 160))}</span></div>`;
+  }).join('');
+  const fields = (event.changed_fields || []).map(esc).join('、');
+  return `<div class="case">
+    <h2>${esc(event.question_number ? `第 ${event.question_number} 題` : (event.candidate_key || ''))}
+      <span class="kind">${esc(event.change_class || '（未分類）')}</span></h2>
+    <div class="meta">${esc([event.reviewer && `由 ${event.reviewer}`, event.created_at,
+      event.scope && `範圍 ${event.scope}`, event.lane && `lane ${event.lane}`].filter(Boolean).join(' · '))}</div>
+    <div class="diff">${lines || '（沒有逐欄差異）'}</div>
+    <div class="fields">改了：${esc(fields || '—')}
+      ${event.feedback_id ? ` · 紀錄編號 ${esc(event.feedback_id)}` : ''}</div>
+  </div>`;
 }
 
 /* ---------------------------------------------------------------- boot */
@@ -1732,6 +2345,10 @@ $('btnLast').onclick = () => go(S.rows.length - 1);
 /* W/S walk the paper so the left hand never leaves the keyboard; the right hand stays on
    the mouse for scrolling the two panes. */
 document.addEventListener('keydown', (event) => {
+  // The question area's shortcuts belong to the question area. `w`/`s`/`a`/`b` are ordinary letters
+  // in the 錯題討論區 and in an answer note, and firing a decision there would write a review event
+  // from a keystroke the reviewer meant as text.
+  if (A.area !== 'question') return;
   if (event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT') {
     // `Esc` closes the editor and the note box. `Enter` saves a note - handled by the box's own
     // `keydown` listener (`noteKeydown`), not here, because this handler must not also prevent the
@@ -1753,7 +2370,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 
-boot();
+boot().then(() => showArea(areaFromHash(), { push: false }));
 </script>
 </body>
 </html>
