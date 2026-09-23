@@ -1151,6 +1151,61 @@ SQL_DISCUSS_PREDICATE = "(" + " OR ".join((
     "(is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending)",
 )) + ")"
 
+
+def _paper_of_candidate(row: dict[str, Any]) -> str:
+    """The paper a candidate row belongs to, spelled exactly as the browser's `paperOf()`.
+
+    One spelling, because the review UI's scope walk (`whereOfPaper`) matches a tree entry's
+    `papers` list against *this* string. A second server-side spelling that differed by a character
+    - a full-width bracket, a trailing `.pdf` - would produce a taxonomy whose papers the browser
+    can never find, and the picker would offer a choice that opens nothing. The two spellings are
+    pinned together by `tests/test_review_ui_discuss.py`.
+    """
+    metadata = row.get("metadata") or {}
+    source = metadata.get("question_pdf_relative") or metadata.get("question_pdf") or ""
+    name = str(source).split("/")[-1]
+    return name[:-4] if name.lower().endswith(".pdf") else name
+
+
+def paper_entries_for(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One taxonomy entry per paper, built from the rows themselves.
+
+    `questions` counts the rows **passed in**, not the paper's whole size. In the 錯題討論區 the rows
+    are the stuck ones, so the count beside a subject is how many stuck questions it holds - which
+    is the number a reviewer choosing that subject can then act on. The whole paper's count is a
+    second number the picker cannot act on, and showing it would make a filter look empty.
+
+    Handed to `review_queue.taxonomy_of`, which is the **single** tree implementation - the one that
+    exists because a second copy once shipped a different shape and blanked the question area.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    order: list[dict[str, Any]] = []
+    for row in rows:
+        paper = _paper_of_candidate(row)
+        if not paper:
+            continue
+        entry = seen.get(paper)
+        if entry is None:
+            metadata = row.get("metadata") or {}
+            exam_code = str(metadata.get("exam_code") or "")
+            year = metadata.get("year")
+            if year in (None, "") and len(exam_code) >= 3 and exam_code[:3].isdigit():
+                year = int(exam_code[:3])
+            entry = {
+                "paper": paper,
+                "questions": 0,
+                "category": metadata.get("normalized_category_name")
+                or metadata.get("group_name") or metadata.get("official_category_name") or "",
+                "subject": metadata.get("normalized_subject_name")
+                or metadata.get("official_subject_name") or "",
+                "year": year,
+                "ordinal": metadata.get("exam_ordinal"),
+            }
+            seen[paper] = entry
+            order.append(entry)
+        entry["questions"] += 1
+    return order
+
 #: The fields of a finding the reviewer's screen needs, and nothing else.
 #:
 #: The stream is large - measured at 371 MB for 61,178 records on the served queue - and almost all
@@ -9011,6 +9066,64 @@ filtered_sheets AS (
         self.repair_questions_events.append(event)
         return event
 
+    def discuss_taxonomy(self) -> tuple[dict[str, Any], int]:
+        """The taxonomy of the **stuck** papers only, and how many stuck questions there are.
+
+        The 錯題討論區's pickers must offer the branches that exist *in this area*. A whole-queue
+        taxonomy would offer 類科/科目 with no stuck questions in them, and a control that leads
+        nowhere is worse than no control: it looks like the filter is broken rather than empty.
+
+        Built over the **unfiltered** stuck set, always. If it were built over the current filter,
+        selecting 科目 = A would drop every other subject from the picker and the reviewer could not
+        get back to them - the collapsing picker the question area already fixed once.
+
+        The tree itself comes from `review_queue.taxonomy_of` (the single implementation) via
+        `paper_entries_for`; this method only decides *which* papers are in it. Membership uses
+        `is_discuss_bucket`, the same predicate the list filter and both SQL CTEs use, so the tree
+        cannot offer a branch the list will not fill.
+        """
+        signature = (
+            file_signature(self.candidate_path),
+            file_signature(self.review_log),
+            bool(self.sql_review_enabled),
+        )
+        cached = getattr(self, "_discuss_taxonomy_cache", None)
+        if cached is not None and cached[0] == signature:
+            return cached[1], cached[2]
+        if self.sql_review_enabled:
+            rows = self._sql_discuss_candidate_rows()
+        else:
+            rows = [
+                item for item in self.candidates
+                if is_discuss_bucket(review_projection(
+                    self.latest_reviews.get(item.get("candidate_key")),
+                    self.latest_reset_reviews.get(item.get("candidate_key")),
+                    item.get("metadata") or {},
+                ))
+            ]
+        tree = review_queue.taxonomy_of(paper_entries_for(rows))
+        self._discuss_taxonomy_cache = (signature, tree, len(rows))
+        return tree, len(rows)
+
+    def _sql_discuss_candidate_rows(self) -> list[dict[str, Any]]:
+        """Every stuck candidate row on the SQL backend, with no limit.
+
+        Runs the **shared** full CTE with `reviewStatus=discuss`, so the rows are selected by
+        `SQL_DISCUSS_PREDICATE` - the same string the list filter uses. Selecting the taxonomy's
+        rows by a second hand-written clause is exactly how a picker and a list come to disagree.
+        """
+        cte, values = self._sql_candidate_filter_parts({"reviewStatus": "discuss"})
+        with self._sql_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"{cte} SELECT raw_candidate_json FROM filtered", values)
+                rows: list[dict[str, Any]] = []
+                for (raw_candidate,) in cur.fetchall():
+                    if isinstance(raw_candidate, dict):
+                        rows.append(raw_candidate)
+                    elif isinstance(raw_candidate, str):
+                        rows.append(json.loads(raw_candidate))
+                return rows
+
     def discuss_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
         """Everything the 錯題討論區 draws, in one response.
 
@@ -9023,8 +9136,14 @@ filtered_sheets AS (
         # the rows are taken as they are - a second attachment here would be a second place the
         # finding could differ from the one the question area shows.
         rows = self.filtered_candidate_payloads(params).get("candidates") or []
+        # The pickers' tree is the stuck population's own, computed over everything stuck and never
+        # over the current filter (see `discuss_taxonomy`). `stuck_total` is the tree's own count, so
+        # the "卡住的題" number and the branches the pickers offer are the same measurement.
+        taxonomy, stuck_total = self.discuss_taxonomy()
         return {
             "candidates": rows,
+            "taxonomy": taxonomy,
+            "stuck_total": stuck_total,
             "principles": principles_projection(self.principles_events),
             "repair_questions": repair_questions_projection(self.repair_questions_events),
             "buckets": list(DISCUSS_BUCKETS),

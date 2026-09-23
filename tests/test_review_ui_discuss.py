@@ -388,5 +388,103 @@ discuss is excluded from the light query (`_sql_can_use_light_candidate_query` r
                       self.ui.SQL_DISCUSS_PREDICATE)
 
 
+class DiscussTaxonomyTests(unittest.TestCase):
+    """The 錯題討論區's pickers must be built from the stuck papers, not the whole queue.
+
+    A whole-queue tree offers branches with zero stuck questions (measured: eight categories in the
+    queue, seven of them holding a stuck question), and a picker option that opens nothing reads as a
+    broken filter rather than an empty one. The tree must also be the **same** tree whatever filter
+    is applied, or choosing a subject collapses every other subject out of the picker.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ui = load_ui_module()
+
+    def test_the_paper_spelling_matches_the_browser(self):
+        """The server's `_paper_of_candidate` and the browser's `paperOf()` are one key.
+
+        If they disagree, `whereOfPaper()` cannot find the paper in the tree and the picker offers a
+        choice that opens nothing. Read from both sources so a change to either is caught here.
+        """
+        core = (Path(__file__).resolve().parents[1] / "review_ui" / "v2" / "01-core.js")\
+            .read_text(encoding="utf-8")
+        self.assertIn("official_pdf", core)
+        self.assertIn("question_pdf_relative", core)
+        self.assertIn("replace(/\\.pdf$/i, '')", core)
+        row = {"metadata": {"question_pdf_relative": "a/b/1152_藥師(一)_藥劑學.pdf"}}
+        self.assertEqual("1152_藥師(一)_藥劑學", self.ui._paper_of_candidate(row))
+        # No `.pdf`, no crash, same answer as the browser's `.replace(/\.pdf$/i, '')`.
+        self.assertEqual("paper", self.ui._paper_of_candidate({"metadata": {"question_pdf": "p/paper"}}))
+
+    def test_the_tree_offers_no_branch_with_nothing_in_it(self):
+        """Every category/year/sitting/subject in the tree holds at least one stuck question.
+
+        This is the property the whole-queue tree fails. Measured on the live corpus: the queue's
+        tree holds `藥師` (0 stuck questions); the discuss tree does not.
+        """
+        rows = [
+            {"metadata": {"question_pdf_relative": "p/1152_藥師(一)_藥劑學.pdf",
+                          "normalized_category_name": "藥師(一)",
+                          "normalized_subject_name": "藥劑學", "year": "115", "exam_ordinal": "2"}},
+            {"metadata": {"question_pdf_relative": "p/1152_藥師(一)_藥劑學.pdf",
+                          "normalized_category_name": "藥師(一)",
+                          "normalized_subject_name": "藥劑學", "year": "115", "exam_ordinal": "2"}},
+        ]
+        entries = self.ui.paper_entries_for(rows)
+        # One entry per paper, and `questions` is the number of stuck rows in it, not the paper's
+        # whole size: the reviewer can only act on the rows in the list.
+        self.assertEqual(1, len(entries))
+        self.assertEqual(2, entries[0]["questions"])
+        tree = self.ui.review_queue.taxonomy_of(entries)
+        for category, bucket in tree.items():
+            self.assertGreater(bucket["questions"], 0, category)
+            for year, year_bucket in bucket["years"].items():
+                self.assertGreater(year_bucket["questions"], 0, f"{category}/{year}")
+                for sitting, sitting_bucket in year_bucket["sittings"].items():
+                    self.assertGreater(sitting_bucket["questions"], 0, f"{category}/{year}/{sitting}")
+                    for subject, leaf in sitting_bucket["subjects"].items():
+                        self.assertTrue(leaf["papers"], f"{category}/{year}/{sitting}/{subject}")
+                        self.assertGreater(leaf["questions"], 0)
+
+    def test_the_tree_is_the_same_whatever_filter_is_applied(self):
+        """`discuss_payload` returns one taxonomy, not one per scope.
+
+        Negative control for the collapse: a tree built from the *filtered* rows would lose the
+        branches a filter excluded. Here the same tree object comes back for a narrow and a wide
+        `params`, which is the contract `refreshScope` needs to keep every subject on offer.
+        """
+        state = object.__new__(self.ui.ReviewState)
+        state.sql_review_enabled = False
+        state.candidate_path = Path("nonexistent-candidates.jsonl")
+        state.issue_path = None
+        state.review_log = Path("nonexistent-review.jsonl")
+        state.candidates = [
+            {"candidate_key": "k1", "metadata": {"question_pdf_relative": "p/1152_藥師(一)_藥劑學.pdf",
+                                                     "normalized_category_name": "藥師(一)",
+                                                     "normalized_subject_name": "藥劑學",
+                                                     "year": "115", "exam_ordinal": "2"}},
+            # A row that is *reviewed and fine*, in a different category. It must NOT be in the
+            # discuss tree: the tree is the stuck population, and this is the negative control for
+            # "the filter was dropped". Measured on the live corpus, the whole-queue tree holds
+            # `藥師` (0 stuck questions) and this is the same shape of mistake.
+            {"candidate_key": "k2", "metadata": {"question_pdf_relative": "p/1151_藥師_藥事行政.pdf",
+                                                     "normalized_category_name": "藥師",
+                                                     "normalized_subject_name": "藥事行政",
+                                                     "year": "115", "exam_ordinal": "1"}},
+        ]
+        state.latest_reviews = {"k1": {"action": "block"}, "k2": {"action": "accept"}}
+        state.latest_reset_reviews = {}
+        state.principles_events = []
+        state.repair_questions_events = []
+        state.filtered_candidate_payloads = lambda params: {"candidates": []}
+        state.candidate_data_status = lambda: {}
+        wide = state.discuss_payload({"reviewStatus": "discuss", "limit": "500"})
+        narrow = state.discuss_payload({"reviewStatus": "discuss", "limit": "500", "category": "藥師(一)"})
+        self.assertEqual(["藥師(一)"], list(wide["taxonomy"]))
+        self.assertEqual(wide["taxonomy"], narrow["taxonomy"])
+        self.assertEqual(1, wide["stuck_total"])
+
+
 if __name__ == "__main__":
     unittest.main()
