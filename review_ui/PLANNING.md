@@ -31,7 +31,8 @@
 - [x] P3 討論區版面：`238px | 1fr | 1fr`，與題目區同一個算式（實測 PDF 欄 330→721px）
 - [x] P4 討論區加入：③ 原題（唯讀、走 `richText`）、④ 擷圖／抽換（沿用 `/api/manual-asset`）、
       字級控制（一個 CSS 變數）、⑥ 註解（`comment` 事件）、統計移到左欄
-- [x] P5 全部按鈕真瀏覽器測過：`test_v2_ui_audit.mjs` 四區 213 個控制項 + `test_v2_note_keeps_question.mjs`
+- [x] P5 全部按鈕真瀏覽器測過：`test_v2_ui_audit.mjs` 四區控制項（P5 當時 213；P7 加篩選後 218）
+      + `test_v2_note_keeps_question.mjs`
 - [x] P5b 修掉由此暴露的真缺陷：寫註解會把題目踢出討論區（`_note_annotates_pending_reset`）
 - [x] P6 文件：`docs/skills/review-ui-v2/SKILL.md`、`review_ui/AGENTS.md`、`docs/ROUTE_HISTORY.md`
 

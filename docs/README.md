@@ -27,6 +27,7 @@
 | **管線現在到哪了**（穩定／待優化／待決策） | [skill](skills/qbr-pipeline-status/SKILL.md) |
 | 修抽取／切題的缺陷（讀錯題數、文字重複、選項被截斷） | [skill](skills/repair-qbr-extraction/SKILL.md) |
 | 審題介面 | [`../review_ui/AGENTS.md`](../review_ui/AGENTS.md) ＋ [skill](skills/review-ui-v2/SKILL.md) |
+| 修審題介面的缺陷、新增面板／控制項 | [skill](skills/repair-review-ui-v2/SKILL.md) |
 | **把審題介面開成常駐服務**（Docker、LAN、開機自動起） | [skill](skills/deploy-qbr-review/SKILL.md) |
 | 舊介面為什麼被換掉 | [`ROUTE_HISTORY.md`](ROUTE_HISTORY.md) |
 | 管線最佳化的兩個方向 | [`PIPELINE_OPTIMIZATION_DIRECTIONS.md`](PIPELINE_OPTIMIZATION_DIRECTIONS.md) |

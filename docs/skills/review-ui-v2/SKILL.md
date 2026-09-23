@@ -12,6 +12,12 @@ v1 (`mobile.html`, `workflow.html`) is **reference-only, no longer maintained** 
 The rule behind everything here: **improve by replacing, never by forking.** A second console that
 shows the same questions is a second place a reviewer's records can be lost.
 
+> **This skill is how to *operate* the console. To *repair* it — a wrong render, a picker that moves
+> another picker, a dead button, an empty or self-emptying 錯題討論區 — read
+> [`repair-review-ui-v2`](../repair-review-ui-v2/SKILL.md).** It holds the measurement discipline, the
+> three verification harnesses, the catalogue of the ten defects already found and fixed, and the
+> open items a next round can optimise.
+
 ## Run it
 
 ```sh
@@ -259,8 +265,9 @@ node scripts/test_v2_ui_audit.mjs http://127.0.0.1:8897 --json /tmp/audit.json
 
 腳本也驗「打的字＝送出的字」：把 `fetch` 換成只做紀錄的替身，在框裡打字、按「儲存修正」，
 檢查送出的 payload 帶著那些字。替身不發請求，所以這條驗收**一筆紀錄都不會寫**。最後一輪走訪
-四個區，斷言每個可見動作控制項不是有 handler 就是有真的 href（實測 213 個：home 3 / question 93 /
-answer 100 / discuss 17），並且驗「四個區都真的抓到夠多控制項」，否則空畫面會假裝通過。
+四個區，斷言每個可見動作控制項不是有 handler 就是有真的 href（實測 218 個：home 3 / question 93 /
+answer 100 / discuss 22——P5 當時是 213，discuss 17，後來篩選器加了 5 個），並且驗「四個區都真的
+抓到夠多控制項」，否則空畫面會假裝通過。
 
 註解與佇列的關係另有一支端到端瀏覽器驗收（自己在隔離的候選與事件檔上開一個 server）：
 

@@ -65,7 +65,7 @@ v1 仍然服務，**不是因為它還被維護**，而是因為既有書籤、�
 # 導覽：抽真的 <script>，用最小 DOM，跑真的 rebuildRows/visibleRows/go/next
 node scripts/test_v2_navigation.mjs review_ui/v2.html <workdir>/review-ui/candidates.jsonl
 
-# 每一個按鈕都真的按一遍（使用者指定的驗收標準；四區 213 個控制項）
+# 每一個按鈕都真的按一遍（使用者指定的驗收標準；四區 218 個控制項，見 repair-review-ui-v2）
 node scripts/test_v2_ui_audit.mjs http://127.0.0.1:8897 --json /tmp/audit.json
 
 # 註解與佇列的關係（自己開隔離的 server，不碰 live 事件檔）

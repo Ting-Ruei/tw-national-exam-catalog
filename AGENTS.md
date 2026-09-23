@@ -42,6 +42,7 @@ Two working procedures cross those tracks and are worth having open while doing 
 |---|---|
 | A paper reads the wrong number of questions, shipped text is doubled/truncated, or you are adding a rule to `extract.py`/`repair.py` | [`docs/skills/repair-qbr-extraction/SKILL.md`](docs/skills/repair-qbr-extraction/SKILL.md) |
 | Bringing the review server up on the LAN, opened from another device, verified, or restarted after a rebuild | [`docs/skills/deploy-qbr-review/SKILL.md`](docs/skills/deploy-qbr-review/SKILL.md) |
+| A review-UI pane renders wrong, a dropdown moves another dropdown, a button does nothing, or the 錯題討論區 is empty / loses a question | [`docs/skills/repair-review-ui-v2/SKILL.md`](docs/skills/repair-review-ui-v2/SKILL.md) |
 
 ### `qbr/` — the build pipeline
 
