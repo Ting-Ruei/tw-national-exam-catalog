@@ -255,6 +255,10 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     carried = collections.Counter()
     orphaned = collections.Counter()
     records = review_events_to_carry(out_dir, previous)
+    # The evidence, not just the claim. A finding says "紙本這頁印的是 長", and the crop is that
+    # page; carrying the record without the picture leaves a note that still reads like a note with
+    # a basis, pointing at a 404. See `_adopt_finding_crops` for the measured loss.
+    _adopt_finding_crops(records, previous, crops_root, copied, queue_root=queue_root)
     live = {row.get("candidate_key") for row in candidates}
     streams = {}
     # Where the carried records came from, counted by the queue directory itself. Printed below
@@ -310,6 +314,12 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     print("%d papers, %d questions, %d issue rows" % (len(runs), len(candidates), len(issues)))
     if copied:
         print("  crops: %d copied, %d missing" % (copied["copied"], copied["missing"]))
+    if copied["finding_crop_copied"] or copied["finding_crop_missing"]:
+        # Naming this separately matters because it is the difference between a queue that holds a
+        # finding's evidence and one that holds only its claim.
+        print("  finding crops: %d copied, %d missing (already present: %d)"
+              % (copied["finding_crop_copied"], copied["finding_crop_missing"],
+                 copied["finding_crop_present"]))
     if carried or orphaned:
         print("  review records: %d carried, %d orphaned"
               % (sum(carried.values()), sum(orphaned.values())))
@@ -406,6 +416,54 @@ def _adopt_crops(refs, run, paper, crops_root, copied, *, queue_root):
             copied["copied"] += 1
         relative = os.path.relpath(target, queue_root)
         adopted.append({**ref, "path": relative, "exists": True})
+    return adopted
+
+
+def _adopt_finding_crops(records, previous, crops_root, copied, *, queue_root):
+    """Copy the crops that carried findings point at, so their evidence survives the rebuild.
+
+    A finding is a statement about a page ("紙本這裡是 長"), and the crop is the page it was read
+    from. `review_events_to_carry` carries the *record* - so after a rebuild the queue holds the
+    claim - but nothing carried the *picture*. A rebuild therefore kept every finding and silently
+    destroyed what it was about: measured 2026-09-23, after the extractor-fix rebuild the live
+    queue held 21 dispute crops, the old queue held 23, and two findings pointed at files that no
+    longer existed. Serving that queue answers 404 where the evidence should be, and the failure is
+    worse than a missing image - the note still reads like a note with a basis.
+
+    The rule is the same as `_adopt_crops`: the reference is made queue-relative and the file is
+    copied inside, so the queue is self-contained. Only crops that are actually referenced are
+    copied, and only from the queues the records were carried from (`previous`).
+    """
+    sources = [os.path.abspath(item) for item in previous]
+    adopted = 0
+    for _name, record in records:
+        crop = record.get("crop")
+        if not crop:
+            continue
+        # The carried reference is already queue-relative (`review-ui/crops/<paper>/<name>`), which
+        # is the spelling that resolves against any root - so it is kept as-is and only the bytes
+        # are brought along. Absolute references from an older queue are normalised the same way.
+        if os.path.isabs(crop):
+            crop = os.path.relpath(crop, queue_root)
+            record["crop"] = crop
+        target = os.path.join(queue_root, crop)
+        if os.path.isfile(target):
+            adopted += 1
+            copied["finding_crop_present"] += 1
+            continue
+        for source in sources:
+            candidate = os.path.join(source, crop)
+            if os.path.isfile(candidate):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(candidate, target)
+                adopted += 1
+                copied["finding_crop_copied"] += 1
+                break
+        else:
+            # A finding whose crop cannot be found anywhere is still carried - dropping the record
+            # would lose the statement to save the picture - but it is counted, because "the claim
+            # survived and its evidence did not" is something the operator has to be able to see.
+            copied["finding_crop_missing"] += 1
     return adopted
 
 

@@ -313,3 +313,69 @@ def test_the_carry_names_its_source_queues(tmp_path):
     _name, record = records[0]
     assert record.get("_carried_from") == str(real), \
         "來源必須跟著紀錄走，否則沒人能說出它從哪來"
+
+
+def test_a_carried_finding_brings_the_crop_it_is_about(tmp_path):
+    """A carried finding must bring the page it is about, not just the claim.
+
+    Measured 2026-09-23: the extractor-fix rebuild carried every finding (85,291 of them) but copied
+    no finding crops, so the live queue held 21 dispute crops while the old queue held 23 - and two
+    findings pointed at files that no longer existed. A finding says "紙本這裡印的是 長" and the crop
+    is the 長; keeping the sentence and destroying the evidence leaves a note that still reads like a
+    note with a basis, answering 404 where the page should be. The rebuild was the thing that did
+    it, silently, which is why the assertion is on the file inside the *new* queue.
+
+    Negative control: remove the `_adopt_finding_crops` call and the copied file is absent; this
+    test is written against that behaviour (it does not touch `image_refs`, so it cannot pass by
+    the figure-crop path already under test).
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    crop = "review-ui/crops/paper-x/q004-dispute.png"
+    full = source / crop
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    # A question the finding is about, so the record is carried (not orphaned) and the queue is a
+    # real one rather than an empty run set.
+    work = tmp_path / "work"
+    run = work / "paper-x"
+    (run / "review-ui").mkdir(parents=True)
+    with open(run / "review-ui" / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": "k1", "question_number": 4}) + "\n")
+    _write_log(source, "question_ai_findings.jsonl", [
+        {"candidate_key": "k1", "crop": crop, "population": "dispute",
+         "reading_sha256": "abc", "finding": {"verdict": "DEFECT"}}])
+
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+
+    written = out / "review-ui" / "question_ai_findings.jsonl"
+    stored = json.loads(written.read_text(encoding="utf-8").splitlines()[0])
+    assert stored["crop"] == crop, "reference stays queue-relative"
+    assert (out / crop).is_file(), \
+        "finding 的截圖必須跟著紀錄一起被帶進新佇列，否則證據在重建時被靜默刪掉"
+
+
+def test_a_finding_whose_crop_cannot_be_found_is_still_kept_and_counted(tmp_path):
+    """A missing crop is counted, not silently ignored, and never drops the finding.
+
+    Dropping the record to save the picture loses a statement about a page irrecoverably. Keeping
+    the record without saying the evidence is gone would report completion over a hole - so the
+    count is part of the contract, and this is the negative control for a version that only copies.
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    work = tmp_path / "work"
+    run = work / "paper-x"
+    (run / "review-ui").mkdir(parents=True)
+    with open(run / "review-ui" / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": "k1", "question_number": 4}) + "\n")
+    _write_log(source, "question_ai_findings.jsonl", [
+        {"candidate_key": "k1", "crop": "review-ui/crops/gone/q004-dispute.png",
+         "population": "dispute", "reading_sha256": "abc",
+         "finding": {"verdict": "DEFECT"}}])
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+    written = (out / "review-ui" / "question_ai_findings.jsonl").read_text(encoding="utf-8")
+    assert written.strip(), "截圖找不到也不能把 finding 丟掉"
+    assert not (out / "review-ui/crops/gone/q004-dispute.png").exists()

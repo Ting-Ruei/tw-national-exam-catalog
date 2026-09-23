@@ -193,6 +193,102 @@ for stream in "${STREAMS[@]}"; do
   push_stream "${stream}" || FAILED=1
 done
 
+# ── 找到 finding 指向的截圖，一起推過去 ────────────────────────────────────────────
+#
+# 一筆 finding 說「紙本這裡是 長」，而證據是那張截圖。finding 推上去了、截圖沒推，
+# 站上就只是一個 404——**沒看過的證據不是證據**，而且更糟：它長得像一筆有憑據的筆記。
+# 實測 2026-09-23：常駐機有 4,588 張圖形截圖、**0 張 dispute 截圖**，而推上去的 26 筆
+# finding 有 23 張不同的 dispute 截圖指向那裡。
+#
+# 只推 finding 真的指到的那些檔，不推整棵 862 MB 的 crops/：圖形截圖本來就跟著佇列
+# 部署（`deploy_station.sh --queue`），dispute 截圖是筆電的常駐迴圈當場產生的，
+# 只有它們需要補。用 `--relative` 保留 `review-ui/crops/<paper>/` 的目錄結構，
+# 而且**不帶 `--delete`**：站上的圖形截圖一張都不動。
+push_referenced_crops() {
+  local local_findings="${LOCAL_DIR}/question_ai_findings.jsonl"
+  echo ""
+  echo "── dispute 截圖（finding 的證據）"
+  if [[ ! -f "${local_findings}" ]]; then
+    echo "   筆電上沒有 findings——沒有截圖要推"
+    return 0
+  fi
+
+  local list
+  list="$(mktemp -t qbr-crops.XXXXXX)"
+  # 佇列相對路徑（`review-ui/crops/...`），因為那才是兩邊都解析得到的拼法，
+  # 也是 finding 自己存的路徑。去重、排序，讓 dry-run 可讀、推送可重現。
+  "${PYTHON}" - "${local_findings}" > "${list}" <<'PICK_CROPS'
+import json, sys
+seen = set()
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        crop = record.get("crop")
+        if crop:
+            seen.add(crop)
+for crop in sorted(seen):
+    print(crop)
+PICK_CROPS
+
+  local wanted
+  wanted="$(wc -l < "${list}" | tr -d ' ')"
+  if [[ "${wanted}" == "0" ]]; then
+    echo "   沒有任何 finding 指向截圖——沒有東西要推"
+    rm -f "${list}"
+    return 0
+  fi
+  echo "   finding 指向 ${wanted} 張截圖"
+
+  # 來源根目錄是佇列根目錄（`live/`），不是 review-ui/：清單裡的路徑已含 `review-ui/` 前綴。
+  local queue_root
+  queue_root="$(dirname "${LOCAL_DIR}")"
+  local remote_queue_root
+  remote_queue_root="$(dirname "${REMOTE_DIR}")"
+
+  # 缺少的張數（站上有、筆電有、但站上沒有的）。先量再推，因為「推送成功」不證明檔案到了。
+  # 注意**不要用 `-n`**：那會把這支 ssh 的 stdin 換成 /dev/null，而我正把清單餵進去，
+  # 結果就是每個檔都讀不到、`wc -l` 永遠是 0——一個「站上什麼都不缺」的假象。
+  local before
+  before="$(ssh -o BatchMode=yes "${STATION}" \
+    "cd ${remote_queue_root} 2>/dev/null && while read -r f; do [ -f \"\$f\" ] || echo missing; done | wc -l" \
+    < "${list}" 2>/dev/null | tr -d ' ' || true)"
+  if [[ -z "${before}" ]]; then
+    echo "   連不上常駐機 ${STATION}，或讀不到佇列目錄。" >&2
+    rm -f "${list}"
+    return 1
+  fi
+  echo "   站上缺 ${before} / ${wanted} 張"
+  if [[ "${DRY_RUN}" == 1 ]]; then
+    echo "   （dry-run）會把這 ${before} 張推上去（不帶 --delete，站上其他截圖不動）"
+    rm -f "${list}"
+    return 0
+  fi
+
+  # --files-from 的路徑相對來源根目錄；--relative 讓它照著建 review-ui/crops/<paper>/
+  # 的目錄。不帶 --delete：站上的圖形截圖不該因為這一步而消失。
+  rsync -a --relative --files-from="${list}" \
+    "${queue_root}/" "${STATION}:${remote_queue_root}/"
+  local after
+  after="$(ssh -o BatchMode=yes "${STATION}" \
+    "cd ${remote_queue_root} 2>/dev/null && while read -r f; do [ -f \"\$f\" ] || echo missing; done | wc -l" \
+    < "${list}" 2>/dev/null | tr -d ' ' || true)"
+  rm -f "${list}"
+  if [[ "${after}" != "0" ]]; then
+    echo "   推完還缺 ${after} 張——請看上面的 rsync 輸出。" >&2
+    return 1
+  fi
+  echo "   已推回：站上不缺任何 finding 指到的截圖"
+  return 0
+}
+
+push_referenced_crops || FAILED=1
+
 echo ""
 if [[ "${FAILED}" != 0 ]]; then
   echo "有事件流沒有推成功——看上面的訊息。" >&2
