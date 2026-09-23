@@ -21,7 +21,10 @@
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -29,6 +32,49 @@ from test_review_ui_areas import V2, function_body, script_of
 # One loader for the server module, not a second copy: two loaders would be two module objects and
 # the class-level `object.__new__` stubs below would be built against the wrong one.
 from test_review_ui_scope import import_review_ui as load_ui_module
+# The runner that executes an expression against the real v2 scripts in node. Imported rather than
+# copied, so the stub DOM the JS needs and the "run the real file, not a rewrite" rule stay one thing.
+import test_review_ui_v2_scope as _v2scope  # noqa: F401  (kept so a rename breaks loudly here)
+
+
+def run_node(expression: str) -> object:
+    """Run an expression against **all** the v2 scripts, in load order.
+
+    `run_node` from `test_review_ui_v2_scope` loads only `01-core.js`, which is right for the scope
+    contract it pins. A helper that lives in `04-area-discuss.js` (`mergedBucket`) needs the other
+    files too, and "the real files, in the order `v2.html` loads them" is the only version of this
+    that cannot drift - so the file list is read from `v2.html` rather than written out again.
+    """
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest("node 不在這台機器上")
+    html = V2.read_text(encoding="utf-8")
+    sources = [
+        (V2.parent / src).read_text(encoding="utf-8")
+        for src in re.findall(r'<script src="([^"]+)"></script>', html)
+    ]
+    assert sources, "v2.html 沒有載入任何 script"
+    stub = """
+      globalThis.document = {
+        getElementById: () => ({ value:'', options:[], innerHTML:'', textContent:'', style:{},
+                                  classList:{add(){},remove(){},toggle(){},contains(){return false}},
+                                  addEventListener(){}, querySelectorAll: () => [] }),
+        querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
+        createElement: () => ({ style:{}, classList:{add(){},remove(){}}, appendChild(){} }),
+        body: { appendChild(){} },
+      };
+      globalThis.location = { hash:'' };
+      globalThis.history = { replaceState(){} };
+      globalThis.window = { addEventListener(){}, localStorage:{ getItem:()=>null, setItem(){} } };
+      globalThis.localStorage = globalThis.window.localStorage;
+      globalThis.fetch = async () => ({ ok:false, status:0, json: async () => ({}) });
+      globalThis.setTimeout = () => 0; globalThis.clearTimeout = () => {};
+    """
+    script = stub + "\n" + "\n".join(sources) + f"\nconsole.log(JSON.stringify({expression}));"
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"node 執行失敗：{result.stderr[-2000:]}")
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 class DiscussLayoutTests(unittest.TestCase):
@@ -484,6 +530,157 @@ class DiscussTaxonomyTests(unittest.TestCase):
         self.assertEqual(["藥師(一)"], list(wide["taxonomy"]))
         self.assertEqual(wide["taxonomy"], narrow["taxonomy"])
         self.assertEqual(1, wide["stuck_total"])
+
+
+class DiscussScopeFilterTests(unittest.TestCase):
+    """使用者回報 #2：「錯題討論區要有篩選，比較好審核。」
+
+    兩件事要同時成立，而它們很容易互相拉扯：
+      1. 四層篩選要真的把清單收窄（伺服器過濾），而且**預設全部**——不能先把別科的卡住題藏起來。
+      2. 改一層不可以動到其他層。使用者的原話是「每次都跳來跳去」，那一條在題目區已經修過，
+         這一區沿用同一組純函式，所以不應該再出現一次。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = V2.read_text(encoding="utf-8")
+        cls.js = script_of(cls.html)
+
+    def test_the_picker_offers_four_levels_and_defaults_to_all(self):
+        state = re.search(r"const D = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(state, "找不到 D 狀態")
+        body = state.group(1)
+        # Four levels, each defaulting to `''` (deliberate 全部), not `null` (not chosen yet).
+        self.assertRegex(body, r"scope:\s*\{[^}]*category:\s*''")
+        self.assertRegex(body, r"scope:\s*\{[^}]*year:\s*''")
+        self.assertRegex(body, r"scope:\s*\{[^}]*sitting:\s*''")
+        self.assertRegex(body, r"scope:\s*\{[^}]*subject:\s*''")
+        # And the picker draws all four selects.
+        picker = function_body(self.js, "discussScopeHtml")
+        for picker_id in ("dPickCategory", "dPickYear", "dPickSitting", "dPickSubject"):
+            self.assertIn(picker_id, picker)
+        # All four default to 全部 (the empty option) rather than to the first value.
+        for label in ("全部類科", "全部年度", "全部考次", "全部科目"):
+            self.assertIn(label, picker)
+
+    def test_the_filter_goes_to_the_server_not_the_browser(self):
+        """篩選是伺服器的：卡住的題散在整個題庫，瀏覽器只拿得到 500 題的上限視窗。"""
+        load = function_body(self.js, "loadDiscuss")
+        # Every level maps to the same parameter name the question area uses.
+        for param in ("params.category", "params.year", "params.ordinal", "params.subject"):
+            self.assertIn(param, load)
+        # `''` (全部) drops the parameter entirely - the server reads a missing parameter as
+        # "no filter", and sending `''` would be a second translation of the same meaning.
+        self.assertRegex(load, r"if \(D\.scope\.category\) params\.category")
+        # The server does the filtering, so nothing filters `D.rows` in the browser.
+        self.assertNotIn("D.rows.filter", load)
+
+    def test_changing_one_level_does_not_touch_the_others(self):
+        """與題目區同一條契約：每個 `onchange` 只寫自己那一格。
+
+        舊版是「設下層為 `null`」，`resolveLevel` 於是替它挑一個**具體**值——使用者的
+        「跳來跳去」。這裡把那些歸零拿掉。
+        """
+        bind = function_body(self.js, "bindDiscussScope")
+        for gone in ("D.scope.year = null", "D.scope.sitting = null", "D.scope.subject = null",
+                     "D.scope.category = null"):
+            self.assertNotIn(gone, bind, f"{gone} 還在討論區的篩選裡")
+        # Each handler writes exactly its own level and then reloads.
+        self.assertRegex(bind, r"(?s)dPickCategory'\).*?category\.onchange.*?D\.scope\.category = category\.value")
+        self.assertRegex(bind, r"(?s)dPickYear'\).*?year\.onchange.*?D\.scope\.year = year\.value")
+        self.assertRegex(bind, r"(?s)dPickSitting'\).*?sitting\.onchange.*?D\.scope\.sitting = sitting\.value")
+        self.assertRegex(bind, r"(?s)dPickSubject'\).*?subject\.onchange.*?D\.scope\.subject = subject\.value")
+        # Each handler's body must call the reload - a filter that redraws nothing is a filter that
+        # does nothing.
+        self.assertEqual(4, bind.count("discussReload()"))
+
+    def test_the_picker_reuses_the_question_areas_pure_helpers(self):
+        """一個做同一件事的第二次實作，就是第二個會不一致的地方。
+
+        所以這一區的選單用題目區的同一組純函式，不重寫一份。
+        """
+        picker = function_body(self.js, "discussScopeHtml")
+        for helper in ("availableSittings", "availableSubjects", "countPapers", "countQuestions"):
+            self.assertIn(helper, picker, f"沒有重用 {helper}")
+        # And it is not a second, independent implementation.
+        self.assertNotIn("function discussSittings", self.js)
+        self.assertNotIn("function discussSubjects", self.js)
+
+    def test_a_collapsed_picker_would_be_caught(self):
+        # 負對照：把類科的 onchange 改成同時歸零下層（舊行為），上面那條必須失敗。
+        broken = self.js.replace(
+            "D.scope.category = category.value; discussReload();",
+            "D.scope.category = category.value; D.scope.year = null; D.scope.sitting = null; "
+            "D.scope.subject = null; discussReload();", 1)
+        self.assertNotEqual(broken, self.js, "負對照必須真的改到東西")
+        self.assertIn("D.scope.year = null", function_body(broken, "bindDiscussScope"))
+
+    def test_all_categories_still_offers_the_three_levels_below_it(self):
+        """全部類科 是一個真的 bucket，不是 `undefined`。
+
+        四個共用純函式（`availableSittings` 等）只吃**一個**類科的 bucket，因為題目區只問它們
+        這個。但這一區預設全部類科，所以需要一個合併的 bucket，否則年度／考次／科目三個下拉會
+        是空的——一排篩選只有第一層能用。實測過的缺陷：修正前 `optCounts` 是 `[8,1,1,1]`
+        （只有全部的那一個選項），修正後 `[8,16,3,37]`。
+        """
+        picker = function_body(self.js, "discussScopeHtml")
+        self.assertIn("mergedBucket(tree)", picker,
+                      "全部類科 沒有合併 bucket，下面三層會是空的")
+        merged = function_body(self.js, "mergedBucket")
+        # 形狀要與一棵正常的 tree 一致，否則共用純函式認不得。
+        for field in ("years", "sittings", "subjects", "papers", "questions"):
+            self.assertIn(field, merged)
+
+    def test_the_merged_bucket_is_checked_against_the_real_helpers(self):
+        """用真的 `availableSittings`／`availableSubjects` 驅動合併後的 bucket。
+
+        文字斷言只證明"有呼叫"；這一條證明合併出來的形狀真的能讓那些函式讀出值。
+        """
+        tree = {
+            "藥師(一)": {"papers": 1, "questions": 3, "years": {"115": {"papers": 1, "questions": 3,
+                "sittings": {"2": {"papers": 1, "questions": 3,
+                    "subjects": {"藥劑學": {"papers": ["p1"], "questions": 3}}}}}}},
+            "醫師(一)": {"papers": 1, "questions": 2, "years": {"108": {"papers": 1, "questions": 2,
+                "sittings": {"1": {"papers": 1, "questions": 2,
+                    "subjects": {"生理學": {"papers": ["p2"], "questions": 2}}}}}}},
+        }
+        result = run_node(f"(() => {{ const tree = {json.dumps(tree)};"
+                          " const merged = mergedBucket(tree); return {"
+                          " sittings: availableSittings(merged, ''),"
+                          " subjects: availableSubjects(merged, '', ''),"
+                          " papers: countPapers(merged, '', '', ''),"
+                          " questions: countQuestions(merged, '', '', ''),"
+                          " pick115: availableSubjects(merged, '115', ''),"
+                          " }; })()")
+        self.assertEqual(["1", "2"], result["sittings"], "合併後看不到另一個類科的考次")
+        self.assertEqual(["生理學", "藥劑學"], result["subjects"])
+        self.assertEqual(2, result["papers"])
+        self.assertEqual(5, result["questions"])
+        # 選了年度之後，科目就只剩那一年有的。
+        self.assertEqual(["藥劑學"], result["pick115"])
+
+    def test_a_stale_value_falls_back_to_all_instead_of_filtering_to_nothing(self):
+        """一個值「上層換了之後就不存在」時，落點是 全部，不是另一個具體值。
+
+        這與題目區是同一條契約（`resolveLevel`）。沒有它，`D.scope.subject` 會留在一個新類科
+        沒有的科目上，送給伺服器，把清單過濾成空的——而下拉顯示的是別的東西。
+        """
+        picker = function_body(self.js, "discussScopeHtml")
+        for expr in ("resolveLevel(D.scope.year", "resolveLevel(D.scope.sitting",
+                     "resolveLevel(D.scope.subject"):
+            self.assertIn(expr, picker, f"{expr} 沒有被調用")
+        # And the category itself is dropped when the tree no longer holds it.
+        self.assertRegex(picker, r"categories\.includes\(D\.scope\.category\)")
+
+    def test_the_tree_is_the_discuss_areas_own_not_the_whole_queue(self):
+        """選單只能提供「卡住的那一群」的分支。整份佇列的樹會提供 0 題的選項。"""
+        load = function_body(self.js, "loadDiscuss")
+        # The tree comes from the server's response, not recomputed from the (capped) local rows.
+        self.assertIn("payload.taxonomy", load)
+        self.assertIn("payload.stuck_total", load)
+        # The browser must not rebuild the tree from the rows it received - those are filtered and
+        # capped, and a tree from them would collapse the moment a filter is applied.
+        self.assertNotIn("treeFrom(", load)
 
 
 if __name__ == "__main__":

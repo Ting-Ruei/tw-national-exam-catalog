@@ -151,6 +151,21 @@
   .discuss-side .n { font-size:22px; font-weight:800; letter-spacing:-.02em; }
   .discuss-side .row { display:flex; justify-content:space-between; gap:8px; font-size:12.5px;
     padding:5px 0; border-bottom:1px solid var(--line); }
+  /* The discuss area's own four-level filter. Reuses the question area's `.scope select` look so the
+     two areas read as one console - a reviewer should not have to learn a second picker to filter a
+     second list. The values and the "changing one level leaves the others alone" rule come from the
+     same pure helpers (`availableSittings`/`resolveLevel`), not a second implementation. */
+  .discuss-scope { padding:10px 12px; border-bottom:1px solid var(--line); background:var(--canvas); }
+  .discuss-scope .ds-head { display:flex; align-items:baseline; gap:6px; font-size:12.5px;
+    color:var(--muted); margin-bottom:6px; }
+  .discuss-scope select { width:100%; margin-bottom:5px; padding:4px 6px; font-size:12px;
+    border:1px solid var(--line); border-radius:6px; background:var(--paper); color:var(--ink); }
+  .discuss-scope .ds-crumbs { display:flex; flex-wrap:wrap; gap:4px; margin-top:2px; }
+  .discuss-scope .ds-crumbs .crumb { font-size:11px; padding:1px 7px; border-radius:99px;
+    background:var(--paper); border:1px solid var(--line); color:var(--muted); }
+  .discuss-scope .ds-crumbs .crumb.on { background:var(--accent); border-color:var(--accent);
+    color:#fff; }
+  .discuss-scope .ds-count { font-size:11.5px; color:var(--muted); margin-top:6px; }
   /* --- 錯題討論區 v2: 原題、擷圖／抽換、字體、註解、基本原則、代理反問 --- */
   /* The original question, read exactly as the question area reads it: the paper's own inline markup
      rendered (see `richText`), the shared stem of a group above it, and the crops below. A stuck

@@ -169,12 +169,24 @@ function yearOf(candidate) {
   return /^\d{5}/.test(code) ? Number(code.slice(0, 3)) : '';
 }
 
+/* One category's name, with the brackets folded so two spellings are one entry.
+
+   The catalog spells `藥師（一）` with full-width brackets in some years and `藥師(一)` in others,
+   and they are **one** category: measured on the live queue, the index's own `categories` list holds
+   all ten spellings and `queue_index.json`'s `taxonomy` holds four categories after folding. The
+   server folds with `review_queue._fold_category`; this is the same replacement on the client, so a
+   `category` filter the picker writes matches the folded key the server serves. Without it the
+   browser would show six categories where there are four and split 藥師(一) into two choices. */
+function foldCategory(name) {
+  return String(name || '').replace(/（/g, '(').replace(/）/g, ')');
+}
+
 /* The same tree the queue builder computes, rebuilt in the browser. Only reached when the index
    is unavailable; the two must agree, and a disagreement is a reason to look at the index. */
 function treeFrom(items) {
   const tree = {};
   items.forEach((item) => {
-    const category = item.category || '(未分類)';
+    const category = foldCategory(item.category) || '(未分類)';
     const year = String(item.year || '(未知)');
     const subject = item.subject || item.paper || '(未知)';
     const bucket = (tree[category] = tree[category] || { years: {}, papers: 0, questions: 0 });

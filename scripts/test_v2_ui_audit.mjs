@@ -306,6 +306,43 @@ async function main() {
   const dVisible = (controls || []).filter((c) => c.visible);
   check(dVisible.length >= 10, 'discuss', '討論區有足夠多的可見控制項', `${dVisible.length} 個`);
 
+  // 篩選（使用者回報 #2）：四個 `select` 要有選項，而且**改一層不能動到其他層**。
+  // 這一條要用真的 UI 量：選一個年度，其他三個 select 的 value 必須**一個字都沒變**。
+  // 使用者的原話是「每次都跳來跳去」，所以「沒跳」就是要量的那個性質。
+  const scope = await evaluate(`(async () => {
+    const ids = ['dPickCategory', 'dPickYear', 'dPickSitting', 'dPickSubject'];
+    const selects = ids.map((id) => document.getElementById(id));
+    if (selects.some((s) => !s)) return { ok: false, why: '四個篩選 select 不齊' };
+    const options = selects.map((s) => Array.from(s.options).map((o) => o.value));
+    const before = selects.map((s) => s.value);
+    // 選一個「年度」，其他三個都不該動。
+    const year = selects[1];
+    const pick = Array.from(year.options).find((o) => o.value && o.value !== before[1]);
+    if (!pick) return { ok: false, why: '年度沒有可選的值' };
+    year.value = pick.value;
+    year.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 2600));
+    const after = ids.map((id) => (document.getElementById(id) || {}).value);
+    const listCount = document.querySelectorAll('#discussList [data-i]').length;
+    return {
+      ok: before[0] === after[0] && before[2] === after[2] && before[3] === after[3],
+      before, after, picked: pick.value, listCount, selectCount: selects.length,
+      hasAllOptions: options.every((o) => o.length >= 2),
+    };
+  })()`);
+  check(!!scope.ok, 'discuss', '改「年度」不會動到類科／考次／科目（其他三格一字未動）',
+    JSON.stringify({ before: scope.before, after: scope.after, picked: scope.picked }));
+  check((scope.selectCount || 0) === 4 && scope.hasAllOptions, 'discuss',
+    '四個篩選各自都有選項（不是空下拉）', `${scope.selectCount} 個 select`);
+  check((scope.listCount || 0) >= 1, 'discuss', '收窄年度之後清單還有題目',
+    `${scope.listCount} 列`);
+  // 放回全部，讓下面的檢查從完整的清單開始。
+  await evaluate(`(async () => {
+    const year = document.getElementById('dPickYear');
+    if (year) { year.value = ''; year.dispatchEvent(new Event('change', { bubbles: true })); }
+    await new Promise((r) => setTimeout(r, 2600));
+  })()`);
+
   // 每一個**可見的動作控制項**都要有接上東西：不是 handler，就是一個真的 href。
   // 「讀值型」控制項（文字框、核取方塊、選檔）不在此列——它們的值由儲存函式讀；
   // 它們由下面的 read-at-save 檢查逐個對名字驗證。

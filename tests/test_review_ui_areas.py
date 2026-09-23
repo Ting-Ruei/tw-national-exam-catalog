@@ -187,10 +187,18 @@ class AreasTests(unittest.TestCase):
         所以 JSONL 與兩條 SQL 路徑不會漂移。
         """
         body = function_body(self.js, "renderDiscuss")
-        self.assertIn("/api/discuss", body)
+        # The fetch itself moved into `loadDiscuss` when the area gained its four-level filter
+        # (`discussScopeHtml`/`discussReload`). The contract did not move - the area still reads
+        # exactly one endpoint and has no second store - so it is pinned on the function that reads,
+        # and `renderDiscuss` is pinned to going through it rather than calling `fetch` by hand.
+        load = function_body(self.js, "loadDiscuss")
+        self.assertIn("/api/discuss", load)
+        self.assertIn("loadDiscuss()", body)
         # 而且它只讀不寫：沒有第二個 store。
         self.assertNotIn("fetch(", body.replace("fetchAreaJson", ""))
+        self.assertNotIn("fetch(", load.replace("fetchAreaJson", ""))
         self.assertNotRegex(body, r"/api/(review|answer-review|ai-feedback|correction-feedback)\\b")
+        self.assertNotRegex(load, r"/api/(review|answer-review|ai-feedback|correction-feedback)\\b")
 
     def test_the_changed_class_is_displayed_not_invented(self):
         """機器量到的東西顯示機器量到的值；這一區不得自己發明一個類型名稱。

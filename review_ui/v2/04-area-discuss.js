@@ -14,6 +14,16 @@ const D = {
   rows: [],            // candidate_key，依伺服器回的序（卡住的題）
   byKey: new Map(),
   index: 0,
+  //: 這一區自己的範圍篩選（類科／年度／考次／科目）。四個層級，與題目區同一組語意：
+  //: `''`＝全部（刻意的），`null`＝還沒選。**預設四層都是全部**，因為卡住的題散在整個題庫，
+  //: 預設一個具體範圍會把其他範圍的卡住題藏起來，而這一區存在的理由就是要把卡住的題找出來。
+  scope: { category: '', year: '', sitting: '', subject: '' },
+  //: 樹是**卡住的那一群紙本**的分類樹，由伺服器的 `discuss_taxonomy()` 給（不是整份佇列）。
+  tree: {},
+  //: 這棵樹自己的卡住題數，與樹來自同一次量測。
+  stuckTotal: 0,
+  //: 這一輪伺服器回的符合數與回傳數。`filtered > returned` 時清單被上限截掉了，要說出來。
+  filteredCount: null,
   //: 編輯草稿（題幹與選項）。以 candidate_key 為鍵，切題再回來還在。
   draft: new Map(),
   //: 這一區自己的「已載入」狀態。`A.rendered` 由 `invalidateAreas()` 清，這裡只記這一區的資料。
@@ -58,40 +68,33 @@ async function renderDiscuss(force) {
   if (force) D.loaded = false;
   if (!D.loaded) {
     list.innerHTML = '<div class="empty">載入中…</div>';
-    // 這一區沒有自己的 scope：卡住的題散在整個題庫，讓使用者先選科目只會把別的科目的卡住題藏起來。
-    // 伺服器預設就會套 `reviewStatus=discuss`（見 `discuss_payload`），這裡只給上限。
-    const payload = await fetchAreaJson('/api/discuss', { limit: '500' });
-    if (!payload) {
-      list.innerHTML = `<div class="empty">讀不到討論區（${esc(A.error['/api/discuss'] || '')}）</div>`;
-      return;
-    }
-    D.byKey = new Map();
-    D.rows = [];
-    for (const candidate of (payload.candidates || [])) {
-      if (candidate && candidate.candidate_key) {
-        D.byKey.set(candidate.candidate_key, candidate);
-        D.rows.push(candidate.candidate_key);
-      }
-    }
-    D.principles = payload.principles || D.principles;
-    D.questions = payload.repair_questions || D.questions;
-    D.loaded = true;
+    await loadDiscuss();
   }
   const total = D.rows.length;
-  // 左欄是這一區的側邊資訊：先說「這裡有幾題、怎麼壞的」，再列題。統計本來被放在中欄卡片的
-  // 最下面，要滾到最底才看得到，而且會被誤讀成「這一題的」數字——它其實是整個佇列的。
-  const side = discussSideHtml();
+  // 左欄是這一區的側邊資訊：先給四層篩選，再說「這裡有幾題、怎麼壞的」，再列題。統計本來被放在
+  // 中欄卡片的最下面，要滾到最底才看得到，而且會被誤讀成「這一題的」數字——它其實是整個佇列的。
+  const side = discussScopeHtml() + discussSideHtml();
   if (!total) {
-    list.innerHTML = side + '<div class="list-head">卡住的題<b>0</b></div>';
-    main.innerHTML = '<div class="empty-area">這個佇列目前沒有卡住的題。<br>'
-      + '（人按「阻擋」或管線／AI 退回的題會出現在這裡。）</div>';
+    list.innerHTML = side
+      // The scope picker is drawn even with no rows, so an empty result is something the reviewer
+      // can widen rather than a dead end. The four selects are the only way back out of a filter.
+      + '<div class="list-head">卡住的題<b>0</b></div>';
+    main.innerHTML = '<div class="empty-area">這個範圍沒有卡住的題。<br>'
+      + '（把上面四層放寬，或人按「阻擋」、管線／AI 退回的題會出現在這裡。）</div>';
     pdf.innerHTML = '<div class="empty-area">（無）</div>';
+    bindDiscussScope();
     return;
   }
   D.index = Math.min(Math.max(0, D.index), total - 1);
+  const scopeKey = `${D.scope.category}\u0000${D.scope.year}\u0000${D.scope.sitting}\u0000${D.scope.subject}`;
+  const returned = D.rows.length;
+  const filtered = D.filteredCount === null ? returned : D.filteredCount;
   list.innerHTML = side
-    + `<div class="list-head">卡住的題<b>${total}</b>`
+    + `<div class="list-head">卡住的題<b>${filtered > returned ? `${returned} / ${filtered}` : filtered}</b>`
     + '<span class="hint">人阻擋或 AI／管線退回</span></div>'
+    + (filtered > returned
+      ? `<div class="hint" style="padding:0 10px 6px">這個範圍有 ${filtered} 題，清單只畫前 ${returned} 題。`
+        + '收窄上面的篩選才看得到全部。</div>' : '')
     + D.rows.map((key, i) => {
       const candidate = D.byKey.get(key) || {};
       const bucket = ((candidate.review || {}).queue_bucket) || '';
@@ -108,6 +111,45 @@ async function renderDiscuss(force) {
   main.innerHTML = discussCenterHtml(candidate, key);
   pdf.innerHTML = discussPdfHtml(candidate);
   bindDiscuss(key);
+  bindDiscussScope();
+}
+
+/* 用這一區目前的篩選向伺服器要資料。
+
+   篩選是**伺服器的**，不是拿回 500 題後在瀏覽器過濾：卡住的題散在整個題庫，而伺服器才能看到
+   全部。四個層級與題目區同名（`category`/`year`/`ordinal`/`subject`），所以兩個區域的網址與
+   語意一致。"全部" 的那一層**不送參數**，而不是送空字串——伺服器把缺參數讀成"不篩"，送空字串
+   多一層翻譯。 */
+async function loadDiscuss() {
+  const params = { limit: '500' };
+  if (D.scope.category) params.category = D.scope.category;
+  if (D.scope.year) params.year = D.scope.year;
+  if (D.scope.sitting) params.ordinal = D.scope.sitting;
+  if (D.scope.subject) params.subject = D.scope.subject;
+  const payload = await fetchAreaJson('/api/discuss', params);
+  if (!payload) {
+    $('discussList').innerHTML = `<div class="empty">讀不到討論區（${esc(A.error['/api/discuss'] || '')}）</div>`;
+    return;
+  }
+  D.byKey = new Map();
+  D.rows = [];
+  for (const candidate of (payload.candidates || [])) {
+    if (candidate && candidate.candidate_key) {
+      D.byKey.set(candidate.candidate_key, candidate);
+      D.rows.push(candidate.candidate_key);
+    }
+  }
+  // The tree and its count come back on **every** response and are always the unfiltered stuck
+  // population (see `discuss_taxonomy`). Assigning them here rather than only on the first load is
+  // what keeps the pickers complete: the same tree arrives whatever filter is in force, so choosing
+  // a subject cannot collapse the other subjects out of the picker.
+  if (payload.taxonomy) D.tree = payload.taxonomy;
+  if (payload.stuck_total !== undefined) D.stuckTotal = Number(payload.stuck_total) || 0;
+  D.filteredCount = payload.filtered_count === undefined || payload.filtered_count === null
+    ? null : Number(payload.filtered_count);
+  D.principles = payload.principles || D.principles;
+  D.questions = payload.repair_questions || D.questions;
+  D.loaded = true;
 }
 /* 佇列桶 → 中文標籤。與伺服器 `review_projection` 的 `display_label` 同義，但這裡只認 bucket，
    因為 bucket 是穩定的鍵、label 是給人看的字；照 label 認會在改字時默默壞掉。 */
@@ -427,7 +469,130 @@ function focusDiscuss(n) {
   if (el && el.focus) el.focus();
 }
 
-/* 側欄統計。每一個數字都從同一次 `/api/discuss` 的資料算出來，不另外打端點。 */
+/* Every category's bucket merged into one, so a level below 全部類科 can still be chosen.
+
+   The shared helpers (`availableSittings`/`availableSubjects`/`countPapers`/`countQuestions`) take
+   **one** category's bucket, because that is what the question area asks them. But the 錯題討論區
+   defaults to 全部類科 on purpose (stuck questions are scattered across the whole corpus, and
+   hiding 90% of them by default was the reason this area was rebuilt). With no single bucket,
+   `bucket` was `undefined` and the year/sitting/subject pickers came out empty — a filter row where
+   only the first level works.
+
+   So 全部類科 gets a *merged* bucket: same shape, counts added, subject `papers` concatenated. The
+   helpers walk it unchanged, which is the point — this aggregates the tree, it does not re-define
+   it, and it does not touch `treeFrom` (the queue builder's browser fallback). */
+function mergedBucket(tree) {
+  const merged = { years: {}, papers: 0, questions: 0 };
+  for (const bucket of Object.values(tree || {})) {
+    merged.papers += bucket.papers || 0;
+    merged.questions += bucket.questions || 0;
+    for (const [year, yearBucket] of Object.entries(bucket.years || {})) {
+      const mergedYear = (merged.years[year] = merged.years[year]
+        || { sittings: {}, papers: 0, questions: 0 });
+      mergedYear.papers += yearBucket.papers || 0;
+      mergedYear.questions += yearBucket.questions || 0;
+      for (const [sitting, sittingBucket] of Object.entries(yearBucket.sittings || {})) {
+        const mergedSitting = (mergedYear.sittings[sitting] = mergedYear.sittings[sitting]
+          || { subjects: {}, papers: 0, questions: 0 });
+        mergedSitting.papers += sittingBucket.papers || 0;
+        mergedSitting.questions += sittingBucket.questions || 0;
+        for (const [subject, leaf] of Object.entries(sittingBucket.subjects || {})) {
+          const mergedLeaf = (mergedSitting.subjects[subject] = mergedSitting.subjects[subject]
+            || { papers: [], questions: 0 });
+          mergedLeaf.papers.push(...(leaf.papers || []));
+          mergedLeaf.questions += leaf.questions || 0;
+        }
+      }
+    }
+  }
+  return merged;
+}
+
+/* 這一區的四層篩選：類科／年度／考次／科目。
+
+   使用者回報 #2：「要有篩選，比較好審核」。這一區原本沒有篩選，理由是「卡住的題散在整個題庫」
+   ——那個顧慮是對的，但結論錯了：**預設全部**（四層都 `''`）就不會把任何卡住的題藏起來，而想
+   收窄的人可以收窄。
+
+   四層的值、下拉的內容、以及「改一層不動其他層」的契約，全部重用題目區的 **純函式**：
+   `availableSittings`／`availableSubjects`／`countPapers`／`countQuestions`／`resolveLevel`。
+   不重寫一份，因為重寫的那份會與題目區不一致——而一致性正是使用者要的。
+
+   樹是**卡住的那一群**的分類樹（伺服器的 `discuss_taxonomy()`），所以每一個選項至少有一題卡住；
+   整份佇列的樹會提供 0 題的分支（實測：`藥師` 卡住 0 題）。 */
+function discussScopeHtml() {
+  const tree = D.tree || {};
+  const categories = Object.keys(tree).sort();
+  // 全部類科 is a real bucket here (the merge), not `undefined`: otherwise the three levels below it
+  // would offer nothing and only the top filter would work.
+  const bucket = D.scope.category ? tree[D.scope.category] : mergedBucket(tree);
+  // Each level is reconciled against what is actually on offer, in order, with the **same**
+  // `resolveLevel` the question area uses. Without it a value that stops existing (a subject that
+  // is not in the newly chosen category) would stay in `D.scope`, be sent to the server, and filter
+  // the list down to nothing while the select showed a different option - the two disagreeing about
+  // what is being asked. `''` (全部) survives; a stale specific value falls back to 全部.
+  D.scope.category = categories.includes(D.scope.category) ? D.scope.category : '';
+  const years = bucket ? Object.keys(bucket.years).filter((y) => /^\d+$/.test(y))
+    .sort((a, b) => Number(b) - Number(a)) : [];
+  D.scope.year = resolveLevel(D.scope.year, years);
+  const sittings = availableSittings(bucket, D.scope.year);
+  D.scope.sitting = resolveLevel(D.scope.sitting, sittings);
+  const subjects = availableSubjects(bucket, D.scope.year, D.scope.sitting);
+  D.scope.subject = resolveLevel(D.scope.subject, subjects);
+  const papers = countPapers(bucket, D.scope.year, D.scope.sitting, D.scope.subject);
+  const questions = countQuestions(bucket, D.scope.year, D.scope.sitting, D.scope.subject);
+  const crumbs = [D.scope.category, D.scope.year && `${D.scope.year} 年`,
+                  D.scope.sitting && `第 ${D.scope.sitting} 次`, D.scope.subject].filter(Boolean);
+  return '<div class="discuss-scope">'
+    + '<div class="ds-head">篩選<span class="hint">四層可各自設定，改一層不會動其他層</span></div>'
+    + `<select id="dPickCategory" title="類科">`
+    + (categories.length > 1 ? '<option value="">全部類科</option>' : '')
+    + categories.map((c) => `<option value="${esc(c)}"${c === D.scope.category ? ' selected' : ''}>`
+        + `${esc(c)}（${tree[c].papers} 卷）</option>`).join('') + '</select>'
+    + `<select id="dPickYear" title="年度">`
+    + (years.length > 1 ? '<option value="">全部年度</option>' : '')
+    + years.map((y) => `<option value="${y}"${y === D.scope.year ? ' selected' : ''}>`
+        + `${y} 年（${bucket.years[y].papers} 卷）</option>`).join('') + '</select>'
+    + `<select id="dPickSitting" title="考次">`
+    + (sittings.length > 1 ? '<option value="">全部考次</option>' : '')
+    + sittings.map((n) => `<option value="${esc(n)}"${n === D.scope.sitting ? ' selected' : ''}>`
+        + `第 ${esc(n)} 次（${countPapers(bucket, D.scope.year, n, '')} 卷）</option>`).join('') + '</select>'
+    + `<select id="dPickSubject" title="科目">`
+    + (subjects.length > 1 ? '<option value="">全部科目</option>' : '')
+    + subjects.map((name) => `<option value="${esc(name)}"${name === D.scope.subject ? ' selected' : ''}>`
+        + `${esc(name)}（${countQuestions(bucket, D.scope.year, D.scope.sitting, name)} 題）</option>`).join('')
+    + '</select>'
+    + `<div class="ds-crumbs">${crumbs.map((part) => `<span class="crumb on">${esc(part)}</span>`).join('')
+        || '<span class="crumb">全部</span>'}</div>`
+    + `<div class="ds-count">這個範圍 <b>${questions}</b> 題卡住／<b>${papers}</b> 卷`
+    + `<span class="hint">（整個討論區 ${D.stuckTotal} 題）</span></div></div>`;
+}
+
+/* 篩選的綁定：每個 `onchange` **只寫自己那一格**，再重畫選單與重抓清單。
+
+   這與題目區是同一條契約（見 `buildScope`）：選了類科不可以把年度／考次／科目清成「還沒選」而讓
+   `resolveLevel` 去挑一個具體值。使用者的原話是「每次都跳來跳去」——那一條在題目區已經修過，
+   這一區沿用同一條。 */
+function bindDiscussScope() {
+  const category = $('dPickCategory');
+  if (category) category.onchange = () => { D.scope.category = category.value; discussReload(); };
+  const year = $('dPickYear');
+  if (year) year.onchange = () => { D.scope.year = year.value; discussReload(); };
+  const sitting = $('dPickSitting');
+  if (sitting) sitting.onchange = () => { D.scope.sitting = sitting.value; discussReload(); };
+  const subject = $('dPickSubject');
+  if (subject) subject.onchange = () => { D.scope.subject = subject.value; discussReload(); };
+}
+
+/* 篩選改變＝重新問伺服器。清單是伺服器過濾的，不是拿回 500 題在瀏覽器過濾。
+
+   `D.index` 歸零：新的範圍是不同的問題集，指著舊集合的第 37 題沒有意義。
+   樹（`D.tree`）**不動**，它每一輪都一樣，所以選單不會因為篩選而塌陷。 */
+async function discussReload() {
+  D.index = 0;
+  D.loaded = false;
+  await renderDiscuss();
+}
 function discussSideHtml() {
   const total = D.rows.length;
   const withAi = D.rows.filter((k) => (D.byKey.get(k) || {}).qbr_ai_finding).length;
