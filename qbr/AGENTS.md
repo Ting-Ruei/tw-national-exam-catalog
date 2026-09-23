@@ -251,23 +251,91 @@ cd tw-national-exam-catalog/qbr
 - 合併報告：`reports/merge_into_catalog.md`。
 
 
-## 題目修正迴圈（`scripts/repair_agent.py`）與調試腳本（`scripts/run_repair_loop.sh`）
+## 修理代理：常駐迴圈、錯題討論區、以及「哪一種修復才可以自動套用」
 
-一份腳本、兩張表（`*.jsonl` append-only；`_split_block` 前缀 `PAPER[0-9]+` 與 `_id` 尾綴 `PAPER[0-9]+`）。
-（本機 3.14 核對：`json.load`＝`json.loads`；`str` 的 `isalnum` 對 `Ⅰ`(U+2160) True、`'⁻'`(U+207B) False、`'1'` True；
-`re` 的 `\d` 含 `Ⅰ`？實測 False：`Ⅰ` 非 `\d`。故 `isalnum` 判非 `re`。）
+一條完整的路是四段，每一段的作者不同，混在一起就會壞：
 
-| 步 | 打什麼 | 回什麼 |
-|---|---|---|
-| 1 | `--every 1 --interval 1800 --lane splash` | `run_repair_loop.sh` 之 0~9 段；`{id, ...}` |
-| 2 | 兩引擎並行（disjoint key set） | 每個 key 一份 record；`@key` 為時序 |
-| 3 | 冪等（同 input sha 同 output） | `run_repair_loop.sh` 5 段核對；`_id` 後寫覆蓋 |
-| 4 | 未解（4 項大 table） | 於 `experience.json.open_cases`（含 `@key`） |
-| 5 | `--lane qwen3.8-flash-next` 並發（`@key` 尾 2 位） | 85,289 |
+```
+偵測（腳本，紙張的性質）→ 讀紙本（模型，advisory）→ 套用（機械，有錨）→ 人的決定
+`disputes.py`                    `confirm_dispute.py`      `apply_dispute_repairs.py`   錯題討論區
+```
 
-**判讀**：`repair_agent.py`（`medium`→`low` 之檔位、非整數）與 `run_repair_loop.sh` 為同一迴圈之两张表。
-（實測此 3 個並發端點為本機 4 位埠號、且本機 `python3` 的 `json.load` 可用。）
-（實測 3.14：`_id` 為 4 位）
+### 常駐迴圈 `scripts/repair_daemon.sh`（G2）
 
-**否決**：`reasoning_effort` 不収整數（HTTP 400）。
-**限**：`max_tokens` 頂層；`medium` 4000/`low` 3200。
+每 `INTERVAL`（預設 1800s）對「人已 block、且帶著一個**可以看紙本確認的爭議**」的那批題目，
+截圖問地端模型，寫下機械差異（advisory finding）。`WINDOW=5` 是一輪的題數。
+
+- **工作清單不是「沒有任何偵測器解釋的 block」。** 三條新爭議規則上線後，304 題全部都有偵測器，
+  於是每一輪都選不到題（實測每輪都印「本批沒有待問的 candidate_key / 累計 0 題」）。一個
+  30 分鐘迴圈一直跑卻什麼都不做，比沒有迴圈更糟——它看起來像在做事。誠實的清單是「帶著一個
+  可以看紙本確認的爭議」，那是一個**不會縮到零**的集合。
+- `--skip-confirmed` 以 `reading_sha256` 判斷「這一段讀法已經問過紙本了」，所以同一題不會每輪
+  重拍重問；文字真的被修好而改變時，它會自動重新排進來。
+- `--principles` 讀審題者在討論區寫下的基本原則（預設就是 queue 自己那一份）。
+- `--escalate`：紙本讀不到、或紙本與抽取一致但人仍然阻擋時，寫一筆 `ask` 到
+  `question_repair_questions.jsonl`，**不是**再問同一個模型一次，也不是替人做決定。
+- **它只寫 advisory finding，不寫任何 review event、不改任何題目文字，所以停在 G2。**
+  它不會自動 accept/block。
+
+### 錯題討論區（`review_ui/v2/04-area-discuss.js`）
+
+- 過濾條件是 `reviewStatus=discuss`，桶位在伺服器定義一次：
+  `DISCUSS_BUCKETS = block / repair_pending / accepted_reaudit / reset_review`。
+  **不是整條佇列**——先前那一版把 79,090 列全拉進來，卡住的題就找不到了。
+- **基本原則只在提示詞裡消費**：一句人寫的話，原封不動貼進去（`ai_findings.principles_note`），
+  不是編譯成規則。這是這個專案量到的教訓（規則 → 腳本 → 新問題 → 更多規則的跑步機）。
+  `principles` 與 `learned` 是分開的提示詞區塊（限制 vs 觀察），而「沒寫」與「寫了空字串」不同
+  （`prompt_version` 以渲染後文字計 hash）。
+- 兩條流（`question_review_principles.jsonl`、`question_repair_questions.jsonl`）是 append-only，
+  摺疊規則在 `qbr/src/qbr/discuss.py` 一處，伺服器 import 它而不是自己再寫一份。
+
+### 哪一種修復可以自動套用：`apply_dispute_repairs.py`
+
+兩條進來的路，可信度不同，規則必須不同：
+
+1. **dispute 自己帶著目標字元**（`substituted-ideograph`：`⻑` → `長`）。目標在爭議裡，
+   所以這是代換，不是決定。`APPLICABLE = ("substituted-ideograph",)`。
+2. **紙本判讀**（模型轉錄的截圖，`--page-read`）。這是**意見的來源**，而這個專案量過模型會在
+   轉錄時重寫公式、截斷、甚至編造圖片說明。`anchored_page_changes` 的每一條都是一個量到的拒絕：
+   * **每個 run 等長**——改變字元數的讀法不是代換，是把後面每個位置都移了
+     （實測 `115090 q053` 插入 93 字並清空四個選項）。
+   * **只能 replace**——`insert`/`delete` 是同一種失敗的另一種寫法（實測 `113020 q076` 附了一張表，
+     `105020 q045` 附了整張有編造箭頭標籤的圖）。
+   * **每個被改的位置都必須是偵測器已標記的，且每個標記位置都要改到**——改到沒人懷疑的字元
+     就是模型在改寫散文；漏掉一個被懷疑的，就是把題目重新打開、缺陷還在裡面。
+     實測：`flattened-offset` 類（`C=5e-0.4t` → `C=5e⁻⁰·⁴ᵗ`）**沒有任何**被標記的位置，
+     那靠讀法本身修（`extract._body_centre`），不是靠代換。
+
+套用寫一筆 `reset_review`（帶著 `correction`），題目以「修復後待複核」回到討論區。
+**不是 `correct`**：機器不宣告任何人的判定。
+
+三個踩過的坑（每個都有測試與負對照）：
+
+- **`candidates.jsonl` 的文字刻意不改寫**，所以同一筆 `⻑ → 長` 每輪都會再被找到。
+  沒有簽章比對就會把自己修過的再修一次（實測日誌裡已有 192 筆）。以「編輯集合」比對，
+  不是記一個旗標——文字真的移動時簽章會不同，那就該再修一次。
+- **人的決定可能排在修復之後**（常駐機時鐘是 UTC、筆電是 UTC+8；實測有人 `accept` 蓋在
+  `11:25:44` 的修復之後）。投影是最後一筆贏，於是「上一筆修復」的記憶被洗掉，下一輪會
+  再套一次同樣的修復、把剛被接受的題目重新打開。所以簽章來自**掃描最後一筆 `qbr_dispute_apply`**，
+  不是最後一筆事件（`last_repair_signature`）。
+- **修好的文字不能再顯示那個剛被修掉的爭議**：`disputes` 是從**當時的文字**量的，而文字不會被
+  修復改寫。實測 304 題已修復的題目裡有 **204 題**的爭議是舊的，討論區於是顯示一個已經不存在
+  的字元的爭議，就寫在修好文字的正上方。修法是在伺服器疊 `correction` 時用**同一個**
+  `review_queue.disputes_for_paper` 重量——只改變**什麼時候**跑，沒有第二套規則。
+
+### 量到的現況（2026-09-23）
+
+- 卡住 269 題；其中 174 題**沒有任何爭議**（人的判斷阻擋，模型給不了答案），
+  其餘為 `lost-glyph 37`、`flattened-offset 35`、`substituted-script 8`、`empty-option 7`、
+  `option-shape 5`、`table-flattened 2`、`punctuation-only-option 1`。
+- 已確認的紙本判讀 49 筆，其中 **18 筆**滿足錨定規則（已全數套用），31 筆被拒。
+- **自動修復不可能吃掉全部**：`lost-glyph`／`substituted-script`／`flattened-offset` 的其餘部分
+  需要重讀紙本或人。這是這條線誠實的邊界，不是待辦清單。
+
+### 思考開關的拼法
+
+**錯的拼法會靜默成功**：HTTP 200、無作用。一個拼法只能靠「移除確實存在的推理」來證明有效。
+`reasoning_effort` **不收整數**（HTTP 400 `invalid reasoning_effort`）。
+實測（Splash `8088`）：`high` 會吃滿預算（`content_len=0`）；`medium`（`max_tokens` 4000）→
+`completion_tokens=1295`、其中 `reasoning_tokens=1102`，可解析；`low`（3200）→ `920/834`。
+MTPLX 用 `chat_template_kwargs={"enable_thinking": True}`。

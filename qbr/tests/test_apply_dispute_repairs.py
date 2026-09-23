@@ -147,6 +147,61 @@ def test_a_different_repair_on_the_same_question_is_not_skipped():
     assert apply_mod.applied_signature({"action": "block"}) is None
 
 
+def test_a_human_decision_after_a_repair_does_not_erase_the_memory_of_it():
+    # Measured 2026-09-23: the station's clock is UTC, the laptop's is UTC+8, so a person's `accept`
+    # stamped `03:28:55` was appended after a repair stamped `11:25:44` on the same question. The
+    # projection is last-line-wins, so `latest_events` returned the `accept` and the signature check
+    # read `None` from it. The next `--page-read` run would then have appended a *second* identical
+    # `reset_review`, re-opening a question a person had just accepted - silently undoing a human
+    # decision. The signature must come from the tool's own last repair event, not the last event.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "events.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "candidate_key": "moex:q1", "action": "reset_review",
+                "source": "qbr_dispute_apply", "created_at": "2026-09-23T11:25:44",
+                "changes": [{"field": "stem", "from": "഻", "to": "長"}]}) + "\n")
+            # A human decision, appended later in the file because the station clock is behind.
+            handle.write(json.dumps({
+                "candidate_key": "moex:q1", "action": "accept", "reviewer": "local",
+                "created_at": "2026-09-23T03:28:55"}) + "\n")
+        repairs = apply_mod.last_repair_signature(path)
+    assert "moex:q1" in repairs, "人的決定不該把修理的記憶洗掉"
+    subs = [{"field": "stem", "position": 7, "before": "഻", "after": "長", "rule": "page-read"}]
+    assert apply_mod.applied_signature(repairs["moex:q1"]) == apply_mod.repair_signature(subs), \
+        "比對必須拿工具自己的上一筆修復，而不是最後一筆事件"
+
+
+def test_the_negative_control_the_latest_event_alone_would_lose_the_repair():
+    # 負對照，寫成獨立一條：拿同一份檔，用「最後一筆事件」而不是「最後一筆修復」來比對，
+    # 就會得到 None，於是重跑會多出一筆重複修復。實作上就是把 `last_repair_signature` 與
+    # 一個只取最後一筆的讀法相比。
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "events.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "candidate_key": "moex:q1", "action": "reset_review",
+                "source": "qbr_dispute_apply", "created_at": "2026-09-23T11:25:44",
+                "changes": [{"field": "stem", "from": "഻", "to": "長"}]}) + "\n")
+            handle.write(json.dumps({
+                "candidate_key": "moex:q1", "action": "accept", "reviewer": "local",
+                "created_at": "2026-09-23T03:28:55"}) + "\n")
+        last_event = {}
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    event = json.loads(line)
+                    last_event[event["candidate_key"]] = event
+        # 在 `with` 内取值：離開 TemporaryDirectory 後檔案已經不在了（那是這條測試第一次寫錯的地方）。
+        last_event_signature = apply_mod.applied_signature(last_event["moex:q1"])
+        repair_signature = apply_mod.applied_signature(
+            apply_mod.last_repair_signature(path)["moex:q1"])
+    assert last_event_signature is None
+    assert repair_signature is not None
+
+
 def test_the_page_read_repairs_are_exempt_from_the_substitution_whitelist():
     # `--page-read` is how the confirmed readings reach the apply step; the `APPLICABLE` tuple is the
     # *dispute-carried* whitelist and deliberately does not contain `substituted-script`. If the two

@@ -30,6 +30,47 @@ description: 人工審核完一批題目之後，在 tw-national-exam-catalog/ �
 **不能反向跑**：人的沉默不是核准；`needs_review`（我無法判斷）**不是輸入**——
 無法從「我不確定」長出一條規則。
 
+### 常駐的那一半（不必人在看）
+
+上面是「有人在看的一次工作」。日常跑的是**常駐修理代理**：每 30 分鐘對「人已 block、
+且帶著一個可以看紙本確認的爭議」的那批題，截圖問地端模型，寫下機械差異（advisory）。
+它與人在介面上做的事共用同一批資料：
+
+```
+錯題討論區（人在看的那一頁）
+  ├─ 只放卡住的題（block / 修復後待複核 / 已通過後待複核 / 退回未審）
+  ├─ ①機器偵測（disputes）②AI 意見（finding，含模型看過的截圖與機械 diff）③編輯框
+  ├─ 基本原則：人寫一句 → 原封不動進下一輪提示詞（不是編譯成規則）
+  └─ 代理的反問：紙本讀不到、或紙本與抽取一致但人仍然阻擋 → 寫一筆 `ask`，人回答 ↓
+                 ↓ 回答進下一輪提示詞
+修理代理 ─► 機械 diff（G2）─► 人確認 ─► 套用（G3，見下）
+```
+
+**哪一種修復才可以自動套用**，兩條路可信度不同：
+
+| 來源 | 例子 | 可不可以套用 |
+|---|---|---|
+| dispute 自己帶著目標字元 | `substituted-ideograph`：`⻑` → `長` | 可以（代換，不是決定）|
+| 紙本判讀（模型轉錄） | 截圖轉錄的差異 | **只有錨定的才可**：每個被改的位置都必須是偵測器已標記的，且每個標記位置都要改到 |
+
+`flattened-offset`（`C=5e-0.4t` → `C=5e⁻⁰·⁴ᵗ`）**不是**代換：它沒有任何被標記的位置，靠讀法本身
+修（`extract._body_centre`）。模型讀法裡的重寫、截斷、編造圖片說明都會被 `anchored_page_changes` 拒絕。
+
+套用寫一筆 `reset_review`（帶著 `correction`），題目以「修復後待複核」回到討論區；
+**不是 `correct`**——機器不宣告任何人的判定。
+
+### 這條線上的治理界線（不可越過）
+
+| 誰 | 做什麼 | 等級 |
+|---|---|---|
+| 常駐修理代理 | 只寫 advisory finding；不寫 review event、不改題目文字 | **G2** |
+| 套用修復（`apply_dispute_repairs.py --apply`） | 寫 `reset_review` + `correction` | G3，要當次明示核准 |
+| 討論區的原則／回答 | 人的句子寫進 append-only 流 | 人的輸入，不是決定 |
+| accept / block | 只有人能寫 | **G4** |
+
+代理**不得冒充人類審核者**：它的證據留在 `question_ai_findings.jsonl`，人類決定留在
+`question_review_events.jsonl`，兩個檔永遠不同。
+
 ## 每一步打什麼
 
 ```bash
@@ -64,6 +105,28 @@ cd qbr
 # 6. 把新的 AI 紀錄推回家（append-only；守衛會拒絕「站上有筆電解釋不了的事件」的情形）
 cd .. && bash scripts/push_reviews_to_station.sh
 ```
+
+### 常駐迴圈與套用修復（新，2026-09-23）
+
+```bash
+cd tw-national-exam-catalog/qbr
+
+# 常駐：每 30 分鐘，對「可看紙本確認的爭議」看圖轉錄，寫 advisory finding（G2）
+#   --skip-confirmed 以 reading_sha256 去重，所以文字改了就自動重新排隊
+#   --principles 讀討論區那條流；--escalate 讀不到時寫 ask 反問人
+nohup env ONCE=0 bash scripts/repair_daemon.sh > /tmp/repair_daemon_main.log 2>&1 < /dev/null &
+
+# 看它這一輪做了什麼（log 每輪一個檔）
+ls -t runs/repair_daemon-*.log | head -1 | xargs tail -30
+
+# 套用「機械證據決定」的修復（dry-run 預設）。--page-read 才把紙本判讀納入，
+#   而紙本判讀只有錨定在偵測器已標記位置上的才會被套用。
+.venv/bin/python scripts/apply_dispute_repairs.py --queue data/review-queues/live --page-read
+.venv/bin/python scripts/apply_dispute_repairs.py --queue data/review-queues/live --page-read --apply
+```
+
+套用後題目以「修復後待複核」出現在討論區（`/v2` 的錯題討論區），機器**不**宣告任何判定；
+人能在那裡看到已修好的文字、模型看過的截圖、機械 diff，以及「帶入」到編輯框再存。
 
 ## 模型：只用當次核准的本機引擎
 

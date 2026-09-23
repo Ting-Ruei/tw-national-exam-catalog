@@ -51,7 +51,47 @@ topbar switches the pane; the mode is in the hash so each area is linkable and a
 | 題目審核區 | none (bare `#類科/年/次/科目`) | reads the paper beside the extracted text | `/api/review` |
 | 首頁 | `#首頁/…` | counts only; every number comes from the three endpoints below | **nothing** |
 | 答案審核區 | `#答案/…` | reads the answer sheet, one sheet at a time | `/api/answer-review-batch` |
-| 錯題討論區 | `#錯題/…` | shows each human fix and its `change_class` | **nothing** |
+| 錯題討論區 | `#錯題/…` | the stuck questions — what a detector measured, what a model read off the page, and what the text should say | `/api/review` (the reviewer's own save), `/api/principles`, `/api/repair-question` |
+
+### 錯題討論區 (the stuck-questions area)
+
+The area exists for the questions **that are stuck**, and nothing else: a question a person rejected
+(`block`) or one the pipeline returned for a fresh look (`repair_pending`, `accepted_reaudit`,
+`reset_review`). It deliberately does **not** list the queue — measured: the first build pulled all
+**79,090** rows and the stuck ones became unfindable. The filter is `reviewStatus=discuss`, defined
+**once** server-side as `DISCUSS_BUCKETS` and used by the JSONL path *and* both SQL paths, so the
+three backends cannot disagree about what is stuck.
+
+The pane has three columns, and each column has one author:
+
+| Column | Shows | Author |
+|---|---|---|
+| 中 · ① 機器偵測 | `disputes` — what the deterministic layers measured | `disputes.py` |
+| 中 · ② AI 意見 | the model's note, **with the screenshot it was shown** and the mechanical diff | `question_ai_findings.jsonl` (advisory) |
+| 中 · ③ 編輯框 | the stem and each option, on top of the effective (corrected) text | the reviewer |
+| 右 | the question sheet, decoupled | — |
+| 左 | the stuck list | — |
+
+- **The screenshot is what makes the note evidence.** 「沒看過的證據不算證據」: a finding's crop is
+  its evidence, so a missing crop is drawn as a failure (「這一筆意見沒有截圖，無法核對。」), never
+  silently skipped. The crop must survive both a rebuild (`_adopt_finding_crops`) and a push
+  (`push_referenced_crops`) — see the AGENTS.md rules.
+- **「帶入」 fills the editor; it never writes.** `applyFindingChange` copies a mechanical diff into
+  the textarea so the reviewer can accept part of it. Pressing it writes nothing; only 儲存修正 does,
+  and that is the reviewer's own decision (the same `/api/review` path as the question area).
+- **基本原則 (basic principles) is a field the reviewer adds to, and its only consumer is the
+  prompt.** A sentence a person writes is pasted **verbatim** into the next repair round's prompt —
+  not compiled into rules. That is this project's measured lesson (rules → scripts → new problems →
+  more rules is a treadmill), and it is why the principle lives in an append-only stream
+  (`question_review_principles.jsonl`) with its folding rule in `qbr/src/qbr/discuss.py`, which the
+  server imports rather than re-implementing. A removal is an append-only `remove` event, not a
+  deletion.
+- **The agent asks the reviewer back instead of guessing.** When a page read fails, or the page
+  agrees while a person still blocked it, `confirm_dispute.py --escalate` appends one `ask` to
+  `question_repair_questions.jsonl` (idempotent per reading) rather than asking the same model twice;
+  the reviewer answers it in this pane, and the answer reaches the next prompt. **The agent never
+  impersonates a reviewer**: its evidence stays in the finding stream and the human's decisions stay
+  in the event stream.
 
 Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2_areas_browser.mjs`):
 
@@ -82,12 +122,12 @@ Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2
   decisions nobody made.
 - **Clicking an answer option drafts; it does not save.** A stray click on a 4-row table must not
   rewrite an answer. The draft (`A.answerDraft`) is sent only by the buttons under the table.
-- **The discussion area learns nothing by itself and writes nothing.** The lesson is already
-  recorded when a person presses 儲存修正 (`_record_question_correction_feedback`) or corrects an
-  answer (`_record_answer_correction_feedback`), which build a `question_correction_feedback_events`
-  row with a `diff` and a `change_class`. **`change_class` is measured, not chosen** —
-  `ai395_feedback.classify_change` reads the changed field names and the diff shape — so a type on
-  this page really is a type. **Do not build a second store for it.**
+- **The discussion area writes only the reviewer's own words.** Two of them: a 基本原則 sentence and
+  an answer to the agent's question. Both are append-only streams with no SQL mirror (the area reads
+  the whole file; a table would be a second representation with nothing reading it back). It does
+  **not** learn anything by itself — the `change_class` that the old discussion area showed is still
+  recorded by `_record_question_correction_feedback` when a person saves a correction. **Do not build
+  a second store for it.**
 - **The question shortcuts (`W`/`S`/`A`/`R`/`B`/`E`/`C`) fire only in the question area.** `w`, `a`,
   `b` are ordinary letters in a discussion or an answer note; an unguarded handler writes a review
   event from a keystroke the reviewer meant as text.
@@ -232,6 +272,16 @@ carried 0), and the dedup key included `_carried_from`, so every rebuild re-adde
   the question, not after deciding.
 - If a dispute looks wrong, it is a measurement to check, not an opinion to argue with:
   `qbr/src/qbr/disputes.py`. `null` means "none computed"; `[]` never occurs.
+- **A correction is text, so the disputes must be re-measured after it is applied.** `disputes` is
+  derived from the text *at the time it was measured*, and the queue's `candidates.jsonl` text is
+  **never** rewritten by a repair (a correction is an event overlay, so the original reading
+  survives). Left alone, a repaired question shows the dispute the repair just fixed, right above
+  the fixed text — the two panels contradict each other while looking perfectly plausible.
+  Measured 2026-09-23: **204 of 304** repaired questions still carried the stale dispute. The fix is
+  in `candidate_payload`: when a `correction` is applied, re-run the **same**
+  `review_queue.disputes_for_paper` — one rule, a different *moment* — and mark the payload
+  `disputes_recomputed` so a reader can tell a dispute that survived the repair from one nobody
+  re-checked. Pinned by `tests/test_review_ui_repaired_text.py`.
 
 ## 註記（只加註記，C）—— 一個「不是決定」的事件
 
@@ -268,3 +318,13 @@ node scripts/test_v2_note_browser.mjs http://127.0.0.1:<port>   # 真 Chrome，�
 
 The UI shows what the pipeline built. When a question looks wrong here, the fix usually belongs in
 `qbr` — see the `build-exam-question-bank` skill. Bring back the **paper**, not the screenshot.
+
+<!-- project-map:belongs-to -->
+## 這一層在哪（回上層的路）
+
+> **這是本子專屬技能**：只服務這個子專案。其他子專案要用同一件事時，先確認是不是該變成全域共通技能。
+
+- 本層入口：[`../../../AGENTS.md`](../../../AGENTS.md)
+- 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
+- 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
+<!-- /project-map:belongs-to -->

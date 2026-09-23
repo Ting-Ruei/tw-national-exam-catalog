@@ -429,6 +429,35 @@ def applied_signature(event: dict):
                      for c in event.get("changes") or [])
 
 
+def last_repair_signature(path) -> dict:
+    """`candidate_key -> edits` of the **most recent `qbr_dispute_apply`** event for that question.
+
+    Not the latest event overall, and the difference was measured. A person can review a question
+    after the repair - the station's clock is UTC while the laptop's is UTC+8, so a human `accept`
+    stamped `03:28:55` is appended **after** a repair stamped `11:25:44` - and the projection is
+    last-line-wins, so the repair stops being the latest event. Reading the signature off the latest
+    event then returned `None`, and the next `--page-read` run would have appended a *second*
+    identical repair, re-resetting a question a person had just accepted. That is the one outcome
+    this tool must never produce: it would silently undo a human decision.
+
+    Scanning for the last repair event instead of the last event keeps the check about the tool's own
+    work, and a human decision in between no longer erases the memory of it.
+    """
+    out = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = event.get("candidate_key")
+            if key and event.get("source") == "qbr_dispute_apply":
+                out[key] = event
+    return out
+
+
 def repair_signature(subs: list[dict]):
     return frozenset((str(s["field"]), str(s["before"]), str(s["after"])) for s in subs)
 
@@ -460,6 +489,11 @@ def main() -> int:
                 page_findings[key] = record
 
     latest = latest_events(events_path)
+    # The tool's own past repairs, found by scanning for `qbr_dispute_apply` rather than reading the
+    # latest event. A human decision appended after a repair (their clock, or just their turn) must
+    # not erase the memory that the repair already happened - otherwise the next run duplicates it
+    # and re-resets a question a person just accepted. See `last_repair_signature`.
+    prior_repairs = last_repair_signature(events_path)
     before = sha256_file(events_path)
     created_at = datetime.now().isoformat(timespec="seconds")
 
@@ -484,7 +518,7 @@ def main() -> int:
         # Already repaired, with exactly these edits. The candidate text is not rewritten (by
         # design), so the same substitution is found again every run; without this the tool would
         # duplicate its own past work. A different edit set - the text moved since - is not skipped.
-        if applied_signature(previous) == repair_signature(subs):
+        if applied_signature(prior_repairs.get(question["candidate_key"])) == repair_signature(subs):
             continue
         correction = build_correction(question, subs)
         planned.append({"candidate_key": question["candidate_key"], "subs": subs,
