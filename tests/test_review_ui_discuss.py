@@ -71,7 +71,7 @@ def run_node(expression: str) -> object:
       globalThis.setTimeout = () => 0; globalThis.clearTimeout = () => {};
     """
     script = stub + "\n" + "\n".join(sources) + f"\nconsole.log(JSON.stringify({expression}));"
-    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    result = subprocess.run([node, "-"], input=script, capture_output=True, text=True)
     if result.returncode != 0:
         raise AssertionError(f"node 執行失敗：{result.stderr[-2000:]}")
     return json.loads(result.stdout.strip().splitlines()[-1])
