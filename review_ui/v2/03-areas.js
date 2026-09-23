@@ -234,8 +234,8 @@ function answerRowHtml(row) {
   const stem = String(row.stem || '').slice(0, 240);
   return `<tr class="${blocked ? 'blocked' : done ? 'done' : ''}" data-key="${esc(row.candidate_key)}">
     <td class="qnum">${esc(row.question_number)}</td>
-    <td class="stem">${esc(stem)}
-      <div class="opts">${(row.options || []).map((o) => `${esc(o.key)}. ${esc(String(o.text || '').slice(0, 60))}`).join('　')}</div></td>
+    <td class="stem">${richText(stem)}
+      <div class="opts">${(row.options || []).map((o) => `${esc(o.key)}. ${richText(String(o.text || '').slice(0, 60))}`).join('　')}</div></td>
     <td class="ans"><span class="ans-current" id="ansNow_${esc(row.question_number)}">${esc(review.correction?.answer ?? row.answer ?? '—')}</span>
       <div>${options}</div>
       ${hint.severity === 'warning' ? `<span class="ans-warn">${esc(hint.message || '答案有疑慮')}</span>` : ''}</td>

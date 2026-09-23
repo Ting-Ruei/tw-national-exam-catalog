@@ -156,7 +156,7 @@ function renderList() {
       <span class="mark"></span><span class="num">${esc(item.question_number)}</span>
       <span class="fig">${item.has_figure ? '▣' : ''}</span>
       <span class="grp">${isGrouped(item) ? '組' : ''}</span>
-      <span>${esc((item.stem_preview || '').slice(0, 12))}</span></button>`;
+      <span>${esc(String(item.stem_preview || '').replace(/<[^>]*>/g, '').slice(0, 12))}</span></button>`;
   }).join('')
     + (to < rows_.length ? `<div class="empty">… 下面還有 ${rows_.length - to} 題</div>` : '');
   body.querySelectorAll('.row').forEach((node) => { node.onclick = () => go(Number(node.dataset.pos)); });
@@ -404,11 +404,11 @@ function renderTextSide() {
     ${disputeHtml(candidate)}
     ${findingHtml(candidate)}
     ${groupHtml(candidate)}
-    <div class="stem" id="viewStem">${esc(candidate.stem || '（題幹空白）')}</div>
+    <div class="stem" id="viewStem">${richText(candidate.stem || '（題幹空白）')}</div>
     ${lostGlyphHtml(candidate)}
     <div class="opts" id="viewOpts">${options.map((option) => `
       <div class="opt${answer.has(option.key) ? ' is-answer' : ''}">
-        <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${esc(option.text)}</span>
+        <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${richText(option.text)}</span>
       </div>`).join('')}</div>
     ${figureHtml(candidate)}
     ${note ? `<div class="noteShown">註記：${esc(note)}</div>` : ''}
@@ -494,7 +494,7 @@ function groupHtml(candidate) {
   }
   return `<div class="shared-stem"><div class="shared-head">共用題幹（${esc(where)}）`
     + `<span class="hint">本題延續上方題組</span></div>`
-    + `<div class="shared-body">${esc(shared)}</div></div>`;
+    + `<div class="shared-body">${richText(shared)}</div></div>`;
 }
 
 function editorHtml(candidate, options) {

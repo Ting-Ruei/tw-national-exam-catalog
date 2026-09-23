@@ -27,6 +27,48 @@ const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fileUrl = (path) => path ? `/file?path=${encodeURIComponent(path)}` : '';
 
+/* Text that carries the paper's own inline markup, rendered as markup - but only the markup the
+   paper is allowed to carry.
+
+   The queue's text keeps the inline markup the extractor read off the page (`α<sub>1</sub>`,
+   `e<sup>-0.35t</sup>`, `R<sub>1</sub>`, `<sup>99m</sup>Tc`), and escaping it whole made the reviewer
+   read the tags themselves: v2 drew the literal characters `<sub>1</sub>` right beside the PDF that
+   prints a subscript. Measured on the served queue: **6,652 rows** carry `<sub>`/`<sup>`
+   (`<sub>2</sub>` 2,563, `<sup>99m</sup>` 1,594, …, plus `<sup>®</sup>` from the builder). The
+   legacy consoles normalised this and v2 dropped it when it replaced them, so the regression is
+   exactly "improve by replacing" done halfway.
+
+   This is a **whitelist, not a pass-through**. Only `sub`, `sup`, `u`, `b`, `i` and a bare `<br>`
+   survive; every attribute is discarded because the un-escaping never matches one. Everything else
+   that looked like a tag stays escaped. The text comes from an official PDF, but it arrives over
+   the network and `innerHTML` is `innerHTML`: a `<img onerror=...>` in a stem would be an
+   execution, not a rendering. Negative controls: `tests/test_review_ui_rich_text.py`.
+
+   Unbalanced tags are repaired (opens appended with their closers) because a dropped `</sub>` in
+   one option would otherwise shrink every character after it - a silent, whole-question styling
+   defect that no reviewer would report as a bug in the text. */
+const RICH_TAGS = ['sub', 'sup', 'u', 'b', 'i'];
+function richText(value) {
+  let out = esc(value)
+    .replace(/&lt;(\/?)(sub|sup|u|b|i)&gt;/g, (match, slash, tag) => `<${slash}${tag}>`)
+    .replace(/&lt;br\s*\/?&gt;/g, '<br>');
+  for (const tag of RICH_TAGS) {
+    const opens = (out.match(new RegExp(`<${tag}>`, 'g')) || []).length;
+    const closes = (out.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+    // An unmatched opener is closed at the end, so a dropped `</sub>` cannot style the rest of the
+    // question. An unmatched closer is **put back into the escaped form**, not deleted: it is text
+    // the whitelist did not accept, so it must stay text. A `<sub class="big">1</sub>` has its
+    // opener refused (attributes are never un-escaped) and its closer refused with it, which is what
+    // lets the pair read as literal text instead of half-rendering.
+    if (opens > closes) out += `</${tag}>`.repeat(opens - closes);
+    else if (closes > opens) {
+      let extra = closes - opens;
+      out = out.replace(new RegExp(`</${tag}>`, 'g'), (m) => (extra > 0 ? (extra -= 1, `&lt;/${tag}&gt;`) : m));
+    }
+  }
+  return out;
+}
+
 function toast(message, bad) {
   const el = $('toast');
   el.textContent = message;
@@ -200,9 +242,21 @@ function buildScope(tree) {
   // choice the reviewer would only ever make by accident.
   S.scope.category = resolveLevel(S.scope.category, categories);
   category.value = S.scope.category;
+  // Changing a level **does not touch the levels below it**.
+  //
+  // It used to null all three of them here (`S.scope.year = S.scope.sitting = S.scope.subject =
+  // null`), which made `resolveLevel` re-pick the first offered value for each - so choosing a
+  // category silently replaced a 全部考次 the reviewer had chosen with a specific sitting, and a
+  // 全部科目 with a specific subject. Measured in a browser: setting 考次 back to 全部考次 moved
+  // 科目 from `''` to `藥學(一)(包括藥理學與藥物化學)` in the same event. The reviewer loses the
+  // filter they set, and the only way to notice is to open the picker and see it moved.
+  //
+  // The values are left as they are and `refreshScope` resolves each of them **against what is
+  // actually offered under the new parent**: a value that still exists is kept exactly, and one
+  // that does not is replaced by 全部 (see `resolveLevel`), never by a sibling the reviewer never
+  // asked for.
   category.onchange = () => {
     S.scope.category = category.value;
-    S.scope.year = null; S.scope.sitting = null; S.scope.subject = null;
     refreshScope();
   };
   refreshScope();
@@ -224,17 +278,14 @@ function refreshScope() {
     + years.map((y) => `<option value="${y}">${y} 年（${bucket.years[y].papers} 卷）</option>`).join('');
   S.scope.year = resolveLevel(S.scope.year, years);
   year.value = S.scope.year;
-  year.onchange = () => {
-    S.scope.year = year.value; S.scope.sitting = null; S.scope.subject = null;
-    refreshScope();
-  };
+  year.onchange = () => { S.scope.year = year.value; refreshScope(); };
 
   const sittings = availableSittings(bucket, S.scope.year);
   sitting.innerHTML = (sittings.length > 1 ? '<option value="">全部考次</option>' : '<option value="">—</option>')
     + sittings.map((n) => `<option value="${esc(n)}">第 ${esc(n)} 次（${countPapers(bucket, S.scope.year, n, '')} 卷）</option>`).join('');
   S.scope.sitting = resolveLevel(S.scope.sitting, sittings);
   sitting.value = S.scope.sitting;
-  sitting.onchange = () => { S.scope.sitting = sitting.value; S.scope.subject = null; refreshScope(); };
+  sitting.onchange = () => { S.scope.sitting = sitting.value; refreshScope(); };
 
   const subjects = availableSubjects(bucket, S.scope.year, S.scope.sitting);
   subject.innerHTML = (subjects.length > 1 ? '<option value="">全部科目</option>' : '<option value="">—</option>')
@@ -357,11 +408,18 @@ function countQuestions(bucket, year, sitting, subject) {
 
    Collapsing `''` into "invalid" is what made every 全部 option unreachable: choosing 全部年度 set
    the picker to `''`, the next redraw saw `''` was not among the years and replaced it with the
-   newest one, and the same thing happened to a link that named only a category. */
+   newest one, and the same thing happened to a link that named only a category.
+
+   A value that is **no longer offered** falls back to `''` (全部) when 全部 is on offer, not to the
+   first value. The distinction is who chose it: `null` is the app choosing a sensible default, so
+   the first value is right; a value that exists and then stops existing was chosen by the reviewer,
+   and quietly replacing it with a *different* specific value is the jump that made the pickers
+   untrustworthy. 全部 is the one replacement that does not claim a choice nobody made. */
 function resolveLevel(value, offered) {
   if (value === null || value === undefined) return offered[0] ?? '';
   if (value === '') return offered.length > 1 ? '' : (offered[0] ?? '');
-  return offered.includes(value) ? value : (offered[0] ?? '');
+  if (offered.includes(value)) return value;
+  return offered.length > 1 ? '' : (offered[0] ?? '');
 }
 
 /* Every paper the scope names, honouring "all" at each level.
