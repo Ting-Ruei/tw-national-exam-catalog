@@ -219,6 +219,38 @@ def test_small_print_at_a_low_baseline_is_not_a_flattened_offset():
     assert extract.refused_offsets(spans) == []
 
 
+def test_the_flattened_formula_predicate_has_exactly_one_implementation():
+    """「這個 run 是不是壓平的公式」只能有一個答案。
+
+    這個判準被拆出来（`_flattened_offset`）而不是寫在 `refused_offsets` 裡面，因為第二個用它
+    的地方一定會出現：佇列現在**報告**這個 run，而修法是在**閱讀層拼出 markup**（紙張把
+    `-0.17t` 抬高，只是 Unicode 沒有上標句點；markup 有）。兩份「看起來像公式」的判準會
+    漂移，然後就會出現同一種缺陷的兩種說法——量到的實例就是 204 題顯示了一個已經被修掉的爭議。
+
+    負對照：把判定搬回 `refused_offsets` 自己寫（只把 `_flattened_offset` 當空殼），這條測試
+    就要紅。这里直接比較兩者對同一組 span 的答案。
+    """
+    from qbr import extract
+    spans = [
+        {"text": "C=80e", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "-0.35t", "size": 7.0, "bbox": (40, 1, 60, 8)},
+    ]
+    body_size = extract._body_size(spans)
+    body = [s for s in spans if s["size"] >= body_size * extract._BODY_SIZE_RATIO]
+    centre = extract._body_centre(body)
+    direct = extract._flattened_offset(spans, 1, body_centre=centre, body_size=body_size)
+    reported = extract.refused_offsets(spans)
+    assert direct is not None and len(reported) == 1
+    assert direct == reported[0]
+    # 負對照：不是公式就不可以通過（小字、低基線的表格詞）。
+    words = [{"text": "glucose", "size": 11.0, "bbox": (0, 0, 40, 11)},
+             {"text": "dextrose", "size": 7.0, "bbox": (40, 8, 70, 15)}]
+    centre = extract._body_centre([words[0]])
+    assert extract._flattened_offset(words, 1, body_centre=centre,
+                                     body_size=11.0) is None
+    assert extract.refused_offsets(words) == []
+
+
 def test_the_baseline_is_measured_from_the_dominant_size_not_the_offset_runs():
     """The negative control for a defect that hid a whole class: the average moved the baseline.
 

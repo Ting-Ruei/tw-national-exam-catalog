@@ -383,6 +383,62 @@ def _offset_kind(span, *, body_centre, body_size):
     return kind if _mappable_offset(text, kind) else None
 
 
+def _flattened_offset(spans, index, *, body_centre, body_size):
+    """This span is a formula the page raised and the offset table cannot spell, or None.
+
+    One predicate, and it is only used by `refused_offsets` today. The split is deliberate: the
+    question "is this run a flattened formula?" must have exactly one answer, because the review
+    queue reports the run and any future repair **spells** the run, and two answers would drift -
+    the queue would report a defect that had already been repaired (the stale-dispute failure
+    measured on 204 questions). The predicate lives here so a second caller must reuse it rather
+    than re-derive "looks like a formula" from scratch.
+
+    The run is a flattened offset only when it **looks like a formula** - it contains a digit, every
+    character the table refuses is one a formula contains, and it hangs off a host to its left. A
+    run blocked by an ordinary letter (`dextrose`, `P`, `D`, `M`, `β`) is small print at a low
+    baseline, not a flattened offset; a line-initial `41.` is a question numeral, not a superscript.
+    Both negative controls live on this function now instead of being duplicated.
+
+    **Still flat in the reading.** `read_spans` does not yet spell these runs, because it feeds the
+    structure parser and the model's skeleton check, and markup there is a second measurement nobody
+    has taken. Measured 2026-09-23: 185 questions / 334 runs corpus-wide, 35 of them blocked - the
+    largest mechanically-attackable class left, and the next lever.
+    """
+    span = spans[index]
+    text = (span.get("text") or "").strip()
+    kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
+    if kind is None or not text:
+        return None
+    if _mappable_offset(text, kind):
+        return None
+    table = _SUP_MAP if kind == "sup" else _SUB_MAP
+    blockers = [char for char in text
+                if char not in table and char not in _OFFSET_WHITESPACE]
+    if not blockers:
+        return None
+    # The run has to be a formula for this to be a flattened offset rather than small print.
+    if not any(char.isdigit() for char in text):
+        return None
+    if not all(char in _OFFSET_BLOCKING_PUNCTUATION for char in blockers):
+        return None
+    # And it has to **hang off something**. This condition was added after the first version of
+    # this rule over-fired by 67x: measured over 36 papers it returned 1,806 questions instead
+    # of 27, because a question's own number sits in a smaller face and is shifted, and `4.`
+    # blocked by `.` passed every test above. Every one of those was *line-initial* - measured
+    # on `1062_物理治療師_心肺疾病與小兒物理治療學`: 39 of 39 line-initial, 0 attached - while
+    # every genuine flattened formula hangs off a host with a span to its left (`-1.5t` after
+    # `= 70e`; `1/2` after `t`). A margin number is a label for the line it begins; a superscript
+    # is part of an expression, and an expression has something on its left. That is geometry,
+    # not meaning, so it belongs here.
+    if index == 0:
+        return None
+    return {"text": text, "kind": kind, "blockers": blockers,
+            "bbox": list(span.get("bbox") or (0, 0, 0, 0)),
+            "size": float(span.get("size") or 0.0),
+            "host": (spans[index - 1].get("text") or "")[-12:],
+            "why": "offset-table-cannot-express"}
+
+
 def refused_offsets(spans):
     """Runs the page's geometry calls offsets and the offset table cannot say, with their address.
 
@@ -395,12 +451,10 @@ def refused_offsets(spans):
     It is the same shape as `lost_glyphs`: a defect whose evidence is on the paper, reported at the
     position it occurs, with the character never guessed at.
 
-    The run is returned **only when it looks like a formula** - it contains a digit, and every
-    character blocking it is one Unicode prints no offset for but a formula contains. A run blocked
-    by an ordinary letter (`dextrose`, `P`, `D`, `M`, `β`) is small print at a low baseline, not a
-    flattened offset, and reporting it would make the class fire on every table in the corpus.
-    Measured on the pharmacist paper above: six runs kept (`-1.5t`, `-1.386t`, `-0.0866t`, `-0.1t`,
-    `-0.46t`, `1/2`), five refused (`dextrose`, `P`, `D`, `M`, `β`).
+    The predicate that decides "is this a flattened formula" is `_flattened_offset`, shared so the
+    report and any later spelling of the run cannot disagree. Measured on the pharmacist paper
+    above: six runs kept (`-1.5t`, `-1.386t`, `-0.0866t`, `-0.1t`, `-0.46t`, `1/2`), five refused
+    (`dextrose`, `P`, `D`, `M`, `β`).
     """
     if not spans:
         return []
@@ -411,39 +465,10 @@ def refused_offsets(spans):
         return []
     body_centre = _body_centre(body)
     found = []
-    for index, span in enumerate(spans):
-        text = (span.get("text") or "").strip()
-        kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
-        if kind is None or not text:
-            continue
-        if _mappable_offset(text, kind):
-            continue
-        table = _SUP_MAP if kind == "sup" else _SUB_MAP
-        blockers = [char for char in text
-                    if char not in table and char not in _OFFSET_WHITESPACE]
-        if not blockers:
-            continue
-        # The run has to be a formula for this to be a flattened offset rather than small print.
-        if not any(char.isdigit() for char in text):
-            continue
-        if not all(char in _OFFSET_BLOCKING_PUNCTUATION for char in blockers):
-            continue
-        # And it has to **hang off something**. This condition was added after the first version of
-        # this rule over-fired by 67x: measured over 36 papers it returned 1,806 questions instead
-        # of 27, because a question's own number sits in a smaller face and is shifted, and `4.`
-        # blocked by `.` passed every test above. Every one of those was *line-initial* - measured
-        # on `1062_物理治療師_心肺疾病與小兒物理治療學`: 39 of 39 line-initial, 0 attached - while
-        # every genuine flattened formula hangs off a host with a span to its left (`-1.5t` after
-        # `= 70e`; `1/2` after `t`). A margin number is a label for the line it begins; a superscript
-        # is part of an expression, and an expression has something on its left. That is geometry,
-        # not meaning, so it belongs here.
-        if index == 0:
-            continue
-        found.append({"text": text, "kind": kind, "blockers": blockers,
-                      "bbox": list(span.get("bbox") or (0, 0, 0, 0)),
-                      "size": float(span.get("size") or 0.0),
-                      "host": (spans[index - 1].get("text") or "")[-12:],
-                      "why": "offset-table-cannot-express"})
+    for index in range(len(spans)):
+        item = _flattened_offset(spans, index, body_centre=body_centre, body_size=body_size)
+        if item:
+            found.append(item)
     return found
 
 
