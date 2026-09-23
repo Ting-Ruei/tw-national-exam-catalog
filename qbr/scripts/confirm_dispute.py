@@ -101,6 +101,12 @@ def parse_args() -> argparse.Namespace:
                              "against a truncated JSON, which loses the whole answer")
     parser.add_argument("--report", action="store_true",
                         help="read back the confirmations recorded so far instead of asking")
+    parser.add_argument("--blocked-only", action="store_true",
+                        help="only questions a person has marked `block` (the resident loop's work "
+                             "list; without this every disputed question is asked again)")
+    parser.add_argument("--skip-confirmed", action="store_true",
+                        help="skip a question whose current reading already has a confirmation, "
+                             "so a 30-minute loop does not re-render what it already read")
     return parser.parse_args()
 
 
@@ -155,7 +161,88 @@ def dispute_reasons(question, wanted):
     return out
 
 
-def disputed_questions(queue_dir, only, kinds, limit):
+def blocked_keys(queue_dir):
+    """The candidate keys a person has marked `block`, latest decision wins.
+
+    The loop's work list used to be "every blocked question that no detector explains", which is
+    empty by construction once a detector has fired on all of them - measured 2026-09-23: after the
+    three new dispute kinds landed, all 304 blocked questions had a detector and the resident loop
+    selected **nothing** on every round (`本批沒有待問的 candidate_key`). A loop whose work list is
+    "what nobody can classify" empties itself the moment classification succeeds, and then reports
+    silence as if it were completion.
+
+    What remains for a *model* to do is narrower and does not vanish: confirm the disputes against
+    the page. So the work list is "blocked, carrying a page-confirmable dispute", which is exactly
+    the set `confirm_dispute` can answer with a crop and a subtraction.
+    """
+    path = os.path.join(queue_dir, "question_review_events.jsonl")
+    latest = {}
+    if not os.path.isfile(path):
+        return set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            key = event.get("candidate_key")
+            if key and event.get("action") not in GROUP_ACTIONS:
+                latest[key] = event
+    return {key for key, event in latest.items() if event.get("action") == "block"}
+
+
+#: Group-scope actions that are not decisions about one question. Kept in step with
+#: `serve_question_review_ui.GROUP_REVIEW_ACTIONS` by name rather than importing the server module
+#: (this script must stay loadable without the server's dependencies).
+GROUP_ACTIONS = {"group_accept", "group_block", "group_needs_review", "group_reviewed",
+                 "group_unreviewed"}
+
+
+def confirmed_keys(store_path):
+    """Keys whose *current reading* already has a dispute confirmation.
+
+    Idempotence by construction, not by hope: a finding is a statement about one reading
+    (`reading_sha256`), so a finding whose hash still matches the row means this exact text has
+    already been put to the page. The resident loop re-runs every 30 minutes forever, so without
+    this the same 95 questions would be re-rendered and re-transcribed every round - 95 crop
+    renders and 95 inferences an hour for an answer that cannot have changed.
+
+    Returns `{key: reading_sha256}`, not a bare set. The loop re-opens a question whose reading has
+    moved by comparing the hash the last confirmation was made against with the row's hash *now* -
+    so a rebuild that changes a question's text (a real repair) re-opens it automatically, instead
+    of relying on someone remembering to clear a flag. A bare set could not express that and would
+    have to be rebuilt by hand after every repair.
+
+    A record whose page read **failed** does not count as confirmed. This was a real defect: the
+    first version only asked for a non-empty `finding`, and every error path still writes a finding
+    (`finding_from` builds one with `error` set), so five questions whose crop the model could not
+    read were marked done and would never have been asked again - a transient endpoint outage
+    permanently dropping work, and doing it silently, because "skipped" and "already read" looked
+    identical. The record has to carry a transcription to count.
+    """
+    if not store_path or not os.path.isfile(store_path):
+        return {}
+    current = ai_findings.latest_by_question(store_path)
+    confirmed = {}
+    for key, record in current.items():
+        if record.get("population") != "dispute":
+            continue
+        if record.get("error") or (record.get("finding") or {}).get("error"):
+            continue
+        finding = record.get("finding") or {}
+        # A transcription was actually obtained when the model returned one. `seen` is the model's
+        # reading of the crop; a `changes` list can legitimately be empty (that is "the page agrees"),
+        # so emptiness of either is not the test - the presence of a reading is. The error path sets
+        # neither, which is exactly how an unreadable crop stays out of `confirmed`.
+        if finding.get("transcription") is None:
+            continue
+        confirmed[key] = record.get("reading_sha256")
+    return confirmed
+
+
+def disputed_questions(queue_dir, only, kinds, limit, *, blocked=None, already=None):
     candidates = os.path.join(queue_dir, "candidates.jsonl")
     if not os.path.isfile(candidates):
         print("找不到 candidates.jsonl：%s" % queue_dir, file=sys.stderr)
@@ -164,10 +251,20 @@ def disputed_questions(queue_dir, only, kinds, limit):
     wanted_numbers = None
     if only:
         wanted_numbers = {str(item).lower().lstrip("q").lstrip("0") or "0" for item in only}
+    blocked = set() if blocked is None else set(blocked)
+    already = {} if already is None else already
     rows = []
     for question in repair_loop.load_candidates(candidates):
         number = str(question.get("question_number")).lstrip("0") or "0"
         if wanted_numbers is not None and number not in wanted_numbers:
+            continue
+        key = question.get("candidate_key")
+        if blocked and key not in blocked:
+            continue
+        # Already read *and the reading has not moved*. A key whose text changed since it was
+        # confirmed is selected again - that is what makes skipping safe rather than a silent
+        # way to lose a question after a repair.
+        if key in already and already[key] == ai_findings.reading_fingerprint(question):
             continue
         found = wanted_kinds.intersection(dispute_kinds(question))
         if not found:
@@ -268,7 +365,15 @@ def finding_from(changes, *, seen, error):
                 "rule_worthy": False, "confidence": None, "error": error}
     if not changes:
         return {"verdict": "OK", "what": "NONE", "where": "紙本與抽取一致",
-                "fix": "不需要修", "rule_worthy": False, "confidence": 0.9}
+                "fix": "不需要修", "rule_worthy": False, "confidence": 0.9,
+                # The reading is kept on the *agreeing* path too, and that is not decoration. Without
+                # it, "the page agreed" and "the page could not be read" produce the same record
+                # shape (`changes == []`, no transcription), and the resident loop - which skips a
+                # question whose reading already has a confirmation - cannot tell them apart. It
+                # then either re-asks forever or, worse, counts an outage as agreement (both were
+                # measured on 2026-09-23). The transcription is what makes "someone looked"
+                # checkable, so it travels on both paths.
+                "transcription": seen}
     where = "；".join("%s：紙本是「%s」，抽取成「%s」" % (c["field"], c["to"], c["from"])
                       for c in changes)
     fix = "；".join("把 %s 從「%s」改成「%s」" % (c["field"], c["from"], c["to"])
@@ -343,7 +448,10 @@ def main() -> int:
     if args.report:
         return report(out)
 
-    questions = disputed_questions(queue_dir, args.only, args.kind, args.limit)
+    blocked = blocked_keys(queue_dir) if args.blocked_only else None
+    already = confirmed_keys(out) if args.skip_confirmed else None
+    questions = disputed_questions(queue_dir, args.only, args.kind, args.limit,
+                                   blocked=blocked, already=already)
     if not questions:
         print("沒有符合條件的爭議題（沒有 dispute、--only 沒對上，或 --kind 不對）。")
         return 0

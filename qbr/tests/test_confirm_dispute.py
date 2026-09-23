@@ -229,3 +229,133 @@ def test_the_transcription_module_keeps_its_refusal_to_judge():
     # subtraction below would be a diff against an opinion and the whole design would silently change.
     assert "不要修正" in reread.SYSTEM or "轉錄" in reread.SYSTEM
     assert "錯誤" not in reread.SYSTEM.replace("不要修正", "")
+
+
+# --------------------------------------------------- the resident loop's work list
+
+#: The shape `_append_finding` writes when the page read **failed**. `finding_from` builds a finding
+#: on every path - the error one has `error` set and `transcription` absent - so "has a finding" is not
+#: the same question as "was the page read".
+def _error_record(question):
+    finding = confirm_dispute.finding_from([], seen=None, error="request failed")
+    return ai_findings.make_record(
+        question=question, finding=finding, model="m", endpoint="u", prompt_system="s",
+        prompt_user="u", population="dispute", error="request failed", changes=[])
+
+
+def _ok_record(question, seen):
+    _report, changes = confirm_dispute.changes_between(question, seen)
+    finding = confirm_dispute.finding_from(changes, seen=seen, error=None)
+    return ai_findings.make_record(
+        question=question, finding=finding, model="m", endpoint="u", prompt_system="s",
+        prompt_user="u", population="dispute", changes=changes)
+
+
+def test_a_failed_page_read_is_not_counted_as_confirmed(tmp_path=None):
+    # The defect this is the negative control for: the first version asked only for a non-empty
+    # `finding`, and every error path writes one. Five questions whose crop the model could not read
+    # (a transient endpoint outage) were therefore marked done and would never be asked again -
+    # silently, because "skipped" and "already read" looked identical. With the old rule this list
+    # would contain the key and the loop would empty itself while work remained.
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), ai_findings.STREAM)
+    question = _question()
+    ai_findings.append(path, _error_record(question))
+    assert confirm_dispute.confirmed_keys(path) == {}, \
+        "讀不到不是確認：一個暫時的端點故障不該讓題目永久跳過"
+
+
+def test_a_page_that_was_actually_read_counts_as_confirmed(tmp_path=None):
+    # The other half, so the previous test cannot be satisfied by counting nothing at all. A page the
+    # model read and agreed with (`changes == []`) is confirmed just as much as one it disagreed with.
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), ai_findings.STREAM)
+    question = _question()
+    ai_findings.append(path, _ok_record(question, _seen()))
+    confirmed = confirm_dispute.confirmed_keys(path)
+    assert set(confirmed) == {question["candidate_key"]}
+    # The value is the reading the confirmation was made against, which is what lets the loop
+    # re-open the question automatically when a repair changes the text underneath it.
+    assert confirmed[question["candidate_key"]] == ai_findings.reading_fingerprint(question)
+
+
+def test_the_work_list_is_blocked_and_confirmable_and_not_yet_read(tmp_path=None):
+    # The resident loop selected nothing for a whole evening because its list was "blocks no detector
+    # explains", and after three new dispute kinds landed every block had a detector. The honest list
+    # is "a person blocked it, and a page read can settle its dispute", which does not shrink to zero
+    # just because classification succeeded.
+    import tempfile
+    root = tempfile.mkdtemp()
+    queue_dir = os.path.join(root, "review-ui")
+    os.makedirs(queue_dir, exist_ok=True)
+    blocked_row = _question(number=4)
+    other_row = _question(number=5)
+    with open(os.path.join(queue_dir, "candidates.jsonl"), "w", encoding="utf-8") as handle:
+        for row in (blocked_row, other_row):
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with open(os.path.join(queue_dir, "question_review_events.jsonl"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": blocked_row["candidate_key"],
+                                 "action": "block", "reviewer": "local"}) + "\n")
+        handle.write(json.dumps({"candidate_key": other_row["candidate_key"],
+                                 "action": "accept", "reviewer": "local"}) + "\n")
+
+    blocked = confirm_dispute.blocked_keys(queue_dir)
+    assert blocked == {blocked_row["candidate_key"]}, "只有 block 的，accept 的不算"
+    rows = confirm_dispute.disputed_questions(queue_dir, None, None, 0, blocked=blocked)
+    assert [r["candidate_key"] for r in rows] == [blocked_row["candidate_key"]]
+
+
+def test_a_question_whose_reading_already_has_a_confirmation_is_skipped(tmp_path=None):
+    # Idempotence by construction: the loop re-runs every 30 minutes forever, so without this the same
+    # questions would be re-rendered and re-transcribed every round for an answer that cannot change.
+    import tempfile
+    root = tempfile.mkdtemp()
+    queue_dir = os.path.join(root, "review-ui")
+    os.makedirs(queue_dir, exist_ok=True)
+    row = _question(number=4)
+    with open(os.path.join(queue_dir, "candidates.jsonl"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    store = os.path.join(queue_dir, ai_findings.STREAM)
+    ai_findings.append(store, _ok_record(row, _seen()))
+    already = confirm_dispute.confirmed_keys(store)
+    rows = confirm_dispute.disputed_questions(queue_dir, None, None, 0, already=already)
+    assert rows == [], "已讀過的讀法不該每輪重拍重問"
+    # And a *changed* reading re-opens it: that is the property that makes the skip safe rather than a
+    # way to lose a question. The stored text moves, the fingerprint no longer matches, and the
+    # question is selected again without anyone remembering to reset a flag.
+    moved = dict(row)
+    moved["stem"] = row["stem"] + "（重新抽取過）"
+    with open(os.path.join(queue_dir, "candidates.jsonl"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(moved, ensure_ascii=False) + "\n")
+    rows = confirm_dispute.disputed_questions(queue_dir, None, None, 0, already=already)
+    assert len(rows) == 1, "讀法變了就要重新問（不是靠人去記得重設一個旗標）"
+
+
+def test_the_resident_loop_is_pinned_to_the_work_list_that_will_not_empty_itself():
+    # A shell script is the one part of this system no unit test runs, and the defect it carried was
+    # invisible from the outside: the loop started every 30 minutes, printed a log line, and did
+    # nothing. The fix is two flags; if a future edit drops one, the loop silently returns to
+    # "select nothing and report completion". So the flags are asserted against the script text and
+    # against the argument parser, which is the only kind of test that can catch a regression in a
+    # file that is never imported.
+    import subprocess
+    daemon = os.path.join(PKG, "scripts", "repair_daemon.sh")
+    with open(daemon, encoding="utf-8") as handle:
+        text = handle.read()
+    assert "--blocked-only" in text, \
+        "常駐迴圈的工作清單必須限於人已 block 的題，否則它會回到「選不到題卻說完成」"
+    assert "--skip-confirmed" in text, \
+        "一個 30 分鐘迴圈必須跳過已讀過的讀法，否則每輪重拍重問同一批"
+    assert "--model" in text and "${LANE}" in text, \
+        "lane 宣告了就要真的傳下去，不然 LANE=... 等於裝飾"
+    # And the flags exist: a script mentioning a flag the parser does not define fails at run time,
+    # in a loop, where nobody is watching the stderr.
+    args = subprocess.run([sys.executable, "-c",
+                           "import sys; sys.argv=['x','--queue','/nonexistent']\n"
+                           "sys.path[:0]=['%s','%s']\n"
+                           "import confirm_dispute as c, json; print(json.dumps(sorted(\n"
+                           "    a for a in vars(c.parse_args()) if a.startswith('blocked') or a.startswith('skip'))))\n"
+                           % (os.path.join(PKG, "src"), os.path.join(PKG, "scripts"))],
+                          capture_output=True, text=True)
+    assert args.returncode == 0, args.stderr
+    assert json.loads(args.stdout) == ["blocked_only", "skip_confirmed"]
