@@ -45,12 +45,24 @@ v1 仍然服務，**不是因為它還被維護**，而是因為既有書籤、�
 8. **清單的主鍵是卷，不是題號。** 題號每卷重數；任何單調性檢查必須以卷為單位。
 9. **爭議畫在題幹之上。** 審題者必須在讀題**之前**看到機器的不確定性。
 10. **每個檢查都要有負對照** —— 必須在舊行為上失敗的那個案例。
+11. **每個按鈕都要真的按過才交付。** 用 `scripts/test_v2_ui_audit.mjs`。一個沒接 handler 的按鈕
+    在截圖上與成功的按鈕一模一樣；只有真的按下去、看狀態有沒有變才測得出來。
+12. **錯題討論區的版面與題目審核區同一個算式**（`238px | 1fr | 1fr`）。改一格就要改另一格。
+13. **討論區的 ③ 原題是讀的，⑤ 手動修改是改的。** 兩者不可混成一個框。
+14. **寫入型／判決型控制項的驗法不同。** 寫入型的按**空**的驗守門；判決型的**不按**（那是
+    append-only 的人工紀錄，`GOV-05`／G4）。詳見 skill 的「每一個按鈕都要真的按過」。
 
 ## 驗證
 
 ```sh
 # 導覽：抽真的 <script>，用最小 DOM，跑真的 rebuildRows/visibleRows/go/next
 node scripts/test_v2_navigation.mjs review_ui/v2.html <workdir>/review-ui/candidates.jsonl
+
+# 每一個按鈕都真的按一遍（使用者指定的驗收標準；四區 213 個控制項）
+node scripts/test_v2_ui_audit.mjs http://127.0.0.1:8897 --json /tmp/audit.json
+
+# 註解與佇列的關係（自己開隔離的 server，不碰 live 事件檔）
+node scripts/test_v2_note_keeps_question.mjs
 
 # 伺服器路由
 python3 -c "import ast;ast.parse(open('scripts/serve_question_review_ui.py',encoding='utf-8').read())"

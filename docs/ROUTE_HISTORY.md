@@ -128,6 +128,36 @@ v2 早期的設計：chips 只縮小**被畫出來**的清單，`W`/`S` 走**整
 
 ---
 
+## 錯題討論區：為什麽曾經「愈解釋愈消失」
+
+這個區的成員資格不是「這題壞掉」，而是「**這題最新的狀態是一個待複核的重置**」
+（`reviewStatus=discuss` 對應 `repair_pending` / `accepted_reaudit` / `reset_review`，
+再加上人按的 `block`）。而事件紀錄把**最後一筆事件**當成題目的狀態。
+
+註解是 `action=comment`。伺服器有一個 `_reaffirm_standing_action`，它會把註解的 action 改回它
+底下那個決定——但只限 `STANDING_ACTIONS` 裡的动作，而 `reset_review` **不在裡面**。
+
+所以：`reset_review` → 題目進入討論區 → 審題者寫下「我為什麼卡住」 → 那筆 `comment` 成為最新事件
+→ 待複核的重置被清掉 → **題目離開卡住的清單**。你愈解釋，它愈消失。而且畫面上看起來就是
+「我寫完註解，它就不見了」，沒有任何錯誤訊息。
+
+修法是把「這是待複核重置上的一則註解」寫成**一個**函式（`_note_annotates_pending_reset`），
+每一個折疊點都用它：JSONL 載入、SQL 載入、以及兩個記憶體內更新路徑。註解**併入**待複核的重置，
+人的字在 `notes`、修復的標記留在 `reset_notes`（`review_projection` 先讀 `reset_notes`，所以
+`repair_pending` 仍然成立）。真正的判決仍然會清掉重置——修好的是「註解不是判決」這件事。
+
+負對照：`scripts/test_v2_note_keeps_question.mjs` 在隔離的 server 上真的按「儲存註解」；把修法還原，
+那一題就從 1 題變成 0 題（實測）。`tests/test_review_ui_note.py` 另外釘 SQL 折疊那一半。
+
+## 錯題討論區的版面：跟題目審核區同一個算式
+
+舊版面是 `214px | 1fr | 330px`——右邊的紙本只有題目區給同一份文件的大約四分之一。
+而這一區的工作（拿抽取文字對紙本、缺圖就裁）比題目區**更需要**那張紙。
+題目區是 `238px` 清單 + `.compare` 的 `1fr 1fr`，所以討論區改成同一個算式：
+`238px | 1fr | 1fr`。實測 1680 寬的視窗：紙本欄從 330px 變成 721px，與題目區的 721px 一致。
+
+這一條只有實測才算數：`scripts/test_v2_ui_audit.mjs` 會量出兩個區的紙本框寬度。
+
 ## 未解
 
 1. **重建進「正在服務」的目錄時，列表與候選檔會短暫不一致。** 重建期間應暫停服務。

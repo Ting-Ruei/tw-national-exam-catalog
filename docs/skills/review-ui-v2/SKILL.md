@@ -62,20 +62,57 @@ The area exists for the questions **that are stuck**, and nothing else: a questi
 **once** server-side as `DISCUSS_BUCKETS` and used by the JSONL path *and* both SQL paths, so the
 three backends cannot disagree about what is stuck.
 
-The pane has three columns, and each column has one author:
+The pane has three columns, and the layout is **the same arithmetic as 題目審核區**: `238px` of list,
+the rest split in two (`.compare` is `1fr 1fr`). So the paper pane is the same width the question
+area gives the same document. Measured before: `214px | 1fr | 330px` — the paper was about a quarter
+of the question area's, while this area needs it *more* (a stuck question is the one you have to read
+against the page). **Change the two grids together; never one alone.**
 
-| Column | Shows | Author |
+The middle column is a reading order, and each block has one author:
+
+| Block | Shows | Author |
 |---|---|---|
-| 中 · ① 機器偵測 | `disputes` — what the deterministic layers measured | `disputes.py` |
-| 中 · ② AI 意見 | the model's note, **with the screenshot it was shown** and the mechanical diff | `question_ai_findings.jsonl` (advisory) |
-| 中 · ③ 編輯框 | the stem and each option, on top of the effective (corrected) text | the reviewer |
+| 爲什麼在這 | the reset reason and the previous action | `review_projection` |
+| ① 機器偵測 | `disputes` — what the deterministic layers measured | `disputes.py` |
+| ② AI 意見 | the model's note, **with the screenshot it was shown** and the mechanical diff | `question_ai_findings.jsonl` (advisory) |
+| ③ 原題 | the extracted question, **read** (not an editor) | the parser |
+| ④ 擷圖／抽換 | paste (⌘V) / drop / file, placement, replace | the reviewer |
+| ⑤ 手動修改 | the stem and each option, on top of the effective (corrected) text | the reviewer |
+| ⑥ 註解 | what the reviewer changed and why — **for the AI to read** | the reviewer |
+| ⑦ 基本原則 | a sentence the reviewer adds to, pasted into the next prompt | the reviewer |
+| ⑧ 反問 | the agent's open questions | `question_repair_questions.jsonl` |
 | 右 | the question sheet, decoupled | — |
-| 左 | the stuck list | — |
+| 左 | 統計 ＋ the stuck list | — |
 
+- **③ 原題 is drawn with `richText()`, not `esc()`.** The paper's inline markup is rendered (so
+  `<sub>` is a real subscript); a stuck question must not be shown with *less* of itself than a normal
+  one. It is deliberately **not** a textarea: 原題 is what the paper says, ⑤ is what you intend to
+  change it to, and mixing them loses the only thing this area accumulates. Pinned by
+  `tests/test_review_ui_discuss.py`.
+- **The font control is one CSS variable (`--reading-size`), not eight `font-size`s.** The extracted
+  text and the PDF must each be zoomable (the browser's PDF viewer has its own 52%), so they cannot
+  share one. `setDiscussFont` writes the variable and **does not re-render** — a re-render would throw
+  away the draft and the cursor. Persisted to `localStorage`; base `15px` is the question area's stem.
 - **The screenshot is what makes the note evidence.** 「沒看過的證據不算證據」: a finding's crop is
   its evidence, so a missing crop is drawn as a failure (「這一筆意見沒有截圖，無法核對。」), never
   silently skipped. The crop must survive both a rebuild (`_adopt_finding_crops`) and a push
   (`push_referenced_crops`) — see the AGENTS.md rules.
+- **④ writes through the existing `/api/manual-asset`,** with `placement` (`stem`/`option`/`table`/
+  `group`), `target_option`, `replace_existing`, `caption`, `notes`. No new write path: that endpoint
+  already writes the file and embeds the `asset_ref` into the correction, and a correction is an
+  append-only event. An empty save is refused before any request is made.
+- **⑥ 註解 is a `comment` event, the same kind the question area's 「只加註記 C」 writes,** so the two
+  areas see each other's notes (both read `review.notes` from the one append-only stream). It is **not
+  a verdict**: `_reaffirm_standing_action` keeps whatever decision it is attached to.
+- **A note must not lift a question out of this area.** This was a real defect: the area's membership
+  is "the latest state is a pending reset", and `_reaffirm_standing_action` only re-states actions in
+  `STANDING_ACTIONS` — `reset_review` is not one. So a note on a stuck question popped the reset and
+  the question left the stuck list: **the more you explained, the more it vanished.** The rule now
+  lives in **one** function, `_note_annotates_pending_reset`, used by every fold (JSONL load, SQL load,
+  and both in-memory update paths); the note merges into the pending reset with the person's words in
+  `notes` and the repair marker preserved in `reset_notes` (`review_projection` reads `reset_notes`
+  first). A real verdict still clears the reset. Pinned by `tests/test_review_ui_note.py` and
+  `scripts/test_v2_note_keeps_question.mjs`.
 - **「帶入」 fills the editor; it never writes.** `applyFindingChange` copies a mechanical diff into
   the textarea so the reviewer can accept part of it. Pressing it writes nothing; only 儲存修正 does,
   and that is the reviewer's own decision (the same `/api/review` path as the question area).
@@ -122,12 +159,13 @@ Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2
   decisions nobody made.
 - **Clicking an answer option drafts; it does not save.** A stray click on a 4-row table must not
   rewrite an answer. The draft (`A.answerDraft`) is sent only by the buttons under the table.
-- **The discussion area writes only the reviewer's own words.** Two of them: a 基本原則 sentence and
-  an answer to the agent's question. Both are append-only streams with no SQL mirror (the area reads
-  the whole file; a table would be a second representation with nothing reading it back). It does
-  **not** learn anything by itself — the `change_class` that the old discussion area showed is still
-  recorded by `_record_question_correction_feedback` when a person saves a correction. **Do not build
-  a second store for it.**
+- **The discussion area writes only the reviewer's own words.** Three of them: a 基本原則 sentence,
+  an answer to the agent's question, and a ⑥ 註解 (the same `comment` event the question area's
+  「只加註記」 writes — one stream, not two). The two agent streams are append-only with no SQL mirror
+  (the area reads the whole file; a table would be a second representation with nothing reading it
+  back). It does **not** learn anything by itself — the `change_class` that the old discussion area
+  showed is still recorded by `_record_question_correction_feedback` when a person saves a
+  correction. **Do not build a second store for it.**
 - **The question shortcuts (`W`/`S`/`A`/`R`/`B`/`E`/`C`) fire only in the question area.** `w`, `a`,
   `b` are ordinary letters in a discussion or an answer note; an unguarded handler writes a review
   event from a keystroke the reviewer meant as text.
@@ -172,6 +210,36 @@ REVIEW_UI_ADDITIONAL_ASSET_ROOTS=<queue> python3 scripts/serve_question_review_u
     --review-backend jsonl --host 127.0.0.1 --port 8897 &
 node scripts/test_v2_areas_browser.mjs http://127.0.0.1:8897
 python3 -m unittest tests.test_review_ui_areas
+```
+
+### 每一個按鈕都要真的按過（使用者的驗收標準）
+
+「UI 做完要用 browse use / computer use 檢查——每一個按鈕都要測過才能交付。」那不是建議，
+是驗收條件。這幾個缺陷的形狀完全一樣：控制項畫出來了、看起來可以按，卻沒有任何 handler 接上去
+（圖片擷圖的四個位置、字體的三個鍵、儲存補圖、儲存註解全都曾是死的）。**截圖看不出來**，因為
+一個死按鈕與一個成功按鈕長得一模一樣；只有真的按下去、再看狀態有沒有變才測得出來。
+
+```sh
+node scripts/test_v2_ui_audit.mjs http://127.0.0.1:8897 --json /tmp/audit.json
+```
+
+三種控制項，三種驗法——不要用同一種驗法驗這三種：
+
+| 種類 | 例子 | 怎麼驗 |
+|---|---|---|
+| 唯讀／純前端 | 字體、切區、走清單、聚焦、篩選 | **真按**，量一個具體變化（CSS 變數、可見區 id、游標位置）。沒變化就是 BAD |
+| 有寫入但可安全觸發 | 儲存補圖、儲存註解、新增原則 | 按**空的**，斷言守門出來且**沒送出任何東西**（守門本身就是要測的行為） |
+| 會改動審核紀錄 | 確認正常／阻擋／退回未審／儲存修正 | 只驗「有 handler、沒 disabled」，**不按**——那是寫 append-only 的人工紀錄（`GOV-05`／G4） |
+
+腳本也驗「打的字＝送出的字」：把 `fetch` 換成只做紀錄的替身，在框裡打字、按「儲存修正」，
+檢查送出的 payload 帶著那些字。替身不發請求，所以這條驗收**一筆紀錄都不會寫**。最後一輪走訪
+四個區，斷言每個可見動作控制項不是有 handler 就是有真的 href（實測 213 個：home 3 / question 93 /
+answer 100 / discuss 17），並且驗「四個區都真的抓到夠多控制項」，否則空畫面會假裝通過。
+
+註解與佇列的關係另有一支端到端瀏覽器驗收（自己在隔離的候選與事件檔上開一個 server）：
+
+```sh
+node scripts/test_v2_note_keeps_question.mjs   # 寫完註解，那一題必須還在錯題討論區
 ```
 
 ## Keyboard — all left hand

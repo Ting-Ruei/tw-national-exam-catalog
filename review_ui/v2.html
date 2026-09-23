@@ -114,15 +114,26 @@
   .answer-bar { position:sticky; bottom:0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;
     padding:11px 0 2px; margin-top:13px; background:linear-gradient(transparent,var(--canvas) 32%); }
 
-  /* --- 錯題討論區: the case I fixed, and what should be learned from it --- */
-  .discuss { grid-template-columns:214px minmax(0,1fr) 330px; }   /* 左：題目欄｜中：資訊｜右：紙本 */
+  /* --- 錯題討論區: the case I fixed, and what should be learned from it ---
+  /* Three columns, and the two panes on the right are **the same halves the question area uses**:
+     `238px | 1fr | 1fr`. The request was 「整題介面應該跟題目審核區一致…右邊 PDF 應該跟題目審核區一樣
+     大」, and the only way to be that is to be the same arithmetic: the question area spends
+     `238px` on the list and splits the rest in two (`.compare` is `1fr 1fr`), so this does too.
+     Measured before: the PDF pane was `330px` of a 1680px window - about a quarter of what the
+     question area gives the same document. */
+  .discuss { grid-template-columns:238px minmax(0,1fr) minmax(0,1fr); }
   .discuss > .list { overflow-y:auto; min-height:0; }
-  .discuss-pdf { border-left:1px solid var(--line); background:var(--paper); overflow-y:auto;
-    padding:12px 12px; min-height:0; display:flex; flex-direction:column; gap:8px; }
-  .discuss-pdf .pdf-head { font-size:12.5px; color:var(--muted); }
-  .discuss-frame { flex:1 1 auto; min-height:440px; width:100%; border:1px solid var(--line);
-    border-radius:8px; background:#fff; }
-  .discuss-main { overflow-y:auto; padding:22px 26px; }
+  .discuss-pdf {
+    border-left:1px solid var(--line); background:var(--paper);
+    min-height:0; display:flex; flex-direction:column;
+  }
+  .discuss-pdf .pdf-head {
+    display:flex; align-items:baseline; gap:9px; flex-wrap:wrap;
+    padding:9px 16px; border-bottom:1px solid var(--line); background:var(--paper);
+    font-size:12px; color:var(--muted);
+  }
+  .discuss-frame { flex:1; width:100%; min-height:0; border:0; display:block; background:#eef2f6; }
+  .discuss-main { overflow-y:auto; overflow-x:hidden; padding:18px 20px 120px; }
   .discuss h1 { margin:0 0 3px; font-size:20px; }
   .discuss .lede { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.6; max-width:74ch; }
   .case { border:1px solid var(--line); border-radius:var(--radius); background:var(--paper);
@@ -135,12 +146,68 @@
   .case .kind { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px;
     background:#efeaff; color:#4a3f8a; margin-left:6px; }
   .case .fields { color:var(--muted); font-size:11.5px; margin-top:7px; }
-  .discuss-side { border-left:1px solid var(--line); background:var(--paper); overflow-y:auto; padding:20px 18px; }
+  .discuss-side { border-bottom:1px solid var(--line); background:var(--paper); padding:14px 14px 10px; }
   .discuss-side h3 { margin:0 0 8px; font-size:12.5px; color:var(--muted); }
   .discuss-side .n { font-size:22px; font-weight:800; letter-spacing:-.02em; }
   .discuss-side .row { display:flex; justify-content:space-between; gap:8px; font-size:12.5px;
     padding:5px 0; border-bottom:1px solid var(--line); }
-  /* --- 錯題討論區 v2: 編輯框、基本原則、代理反問 --- */
+  /* --- 錯題討論區 v2: 原題、擷圖／抽換、字體、註解、基本原則、代理反問 --- */
+  /* The original question, read exactly as the question area reads it: the paper's own inline markup
+     rendered (see `richText`), the shared stem of a group above it, and the crops below. A stuck
+     question is *harder* to judge than a normal one, so it must not be shown with less of itself. */
+  .case .orig { margin:10px 0 4px; }
+  .case .orig .qnum { font-size:11.5px; font-weight:700; color:var(--muted); letter-spacing:.06em; }
+  .case .orig .stem { margin:6px 0 12px; font-size:16px; line-height:1.75; white-space:pre-wrap; }
+  .case .orig .opts { display:flex; flex-direction:column; gap:8px; }
+  .case .orig .opt { display:flex; gap:10px; padding:10px 13px; border:1px solid var(--line);
+    border-radius:var(--radius); background:var(--paper); }
+  .case .orig .opt .k { width:16px; flex:none; color:var(--muted); font-weight:800; }
+  .case .orig .opt .t { line-height:1.65; white-space:pre-wrap; }
+  /* A per-pane font control. The reviewer reported needing to resize the text; the extracted text is
+     the thing being compared against a PDF they can zoom independently, so the two must be
+     adjustable independently too. The size lives in a CSS variable on the pane, so it is one number
+     and not eight font sizes kept in step. */
+  .fontctl { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted); }
+  .fontctl button { width:22px; height:22px; border:1px solid var(--line); border-radius:6px;
+    background:var(--paper); font-size:11px; line-height:1; }
+  .fontctl button:hover { border-color:var(--navy); }
+  /* The reading text follows the control: 16px is the question area's stem size, so "+ twice" is the
+     reviewer's own 1.25x rather than a different base. */
+  .case .orig, .case .edit-block, .case .note-block, .case .principles, .case .repair-qs,
+  .case .af-line, .case .dispute { font-size:var(--reading-size,15px); }
+  .case .orig .stem { font-size:calc(var(--reading-size,15px) + 1px); }
+  /* The note about this question: what is wrong, or what was changed. It sits **above 基本原則**
+     because that is the order the two are written in - this question first, the general rule it
+     suggests second. Stored as a `comment` event (append-only, and reaffirms rather than replaces
+     any decision already on the question), never as a verdict. */
+  .case .note-block { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  .case .note-block label { display:block; font-size:11.5px; color:var(--muted); margin:0 0 4px; }
+  .case .note-block textarea { width:100%; min-height:64px; border:1px solid var(--amber);
+    border-radius:6px; padding:7px 9px; font-size:12.5px; resize:vertical; font-family:inherit; }
+  .case .note-hist { margin-top:6px; }
+  .case .note-hist .n { font-size:11.5px; color:var(--ink); background:#fbf9f2;
+    border-left:3px solid var(--amber); border-radius:0 6px 6px 0; padding:5px 8px; margin:4px 0;
+    white-space:pre-wrap; }
+  .case .note-hist .n .when { color:var(--muted); font-size:10.5px; margin-right:6px; }
+  /* 擷圖／抽換: cut a region out of the paper (or paste any image) and bind it to the stem, one
+     option, a table or the whole group. The server already had `/api/manual-asset`; the question
+     area never exposed it and v2 dropped it entirely, which is the feature the reviewer remembered
+     from the legacy console. */
+  .case .crop-block { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  .case .crop-block .drop { border:2px dashed var(--line-strong); border-radius:8px; padding:11px;
+    text-align:center; color:var(--muted); font-size:12px; background:var(--canvas); cursor:copy; }
+  .case .crop-block .drop.hot { border-color:var(--blue); color:var(--blue); background:#eef5fd; }
+  .case .crop-block .place { display:flex; flex-wrap:wrap; gap:5px; margin:8px 0; }
+  .case .crop-block .place button { font-size:11.5px; padding:3px 10px; border:1px solid var(--line);
+    border-radius:99px; background:var(--paper); }
+  .case .crop-block .place button.on { border-color:var(--navy); background:var(--navy); color:#fff; }
+  .case .crop-block img.preview { display:block; max-width:100%; max-height:220px; margin:6px 0;
+    border:1px solid var(--line); border-radius:6px; background:#fff; }
+  .case .crop-block input[type=text] { width:100%; margin:4px 0; padding:5px 8px;
+    border:1px solid var(--line); border-radius:6px; font-size:12px; }
+  .case .crop-block .rowbtn { display:flex; gap:6px; align-items:center; margin-top:7px; }
+  .case .crop-list { font-size:11.5px; color:var(--muted); margin-top:7px; }
+  .case .crop-list a { color:var(--blue); }
   .case .edit-block { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
   .case .edit-block label { display:block; font-size:11.5px; color:var(--muted); margin:8px 0 3px; }
   .case .edit-block textarea, .case textarea { width:100%; border:1px solid var(--line);
@@ -532,8 +599,7 @@
   <div class="list" id="discussList"><div class="empty">載入中…</div></div>
   <main class="discuss-main" id="discussMain"><div class="empty">載入中…</div></main>
   <div class="discuss-pdf" id="discussPdf"><div class="empty">載入中…</div></div>
-</div>
-<div class="toast off" id="toast"></div>
+</div><div class="toast off" id="toast"></div>
 
 <script src="v2/01-core.js"></script>
 <script src="v2/02-area-question.js"></script>

@@ -28,7 +28,28 @@ const D = {
   //: A note of "I have looked at this question" per key, so the list can show progress without
   //: the server having to be asked again.
   seen: new Map(),
+  //: The notes the reviewer typed in this pane, per key, kept so a re-render does not lose a
+  //: sentence that has not been saved yet. The **recorded** note is read from the row itself
+  //: (`review.notes`), which is the same field the question area shows - so there is one source for
+  //: "what the last person said" rather than a second copy that can drift.
+  noteDraft: new Map(),
+  //: The reading size of the extracted text, in px. Persisted in `localStorage` because it is a
+  //: preference about the reviewer's own eyes, not about a question.
+  fontSize: 15,
+  //: The image about to be pasted in, as a data URL, and where it will be placed.
+  pendingCrop: '',
+  cropPlacement: 'stem',
+  cropOption: '',
 };
+
+// The reading size survives a reload. It is a preference about the reviewer's eyes, not about a
+// question, so it belongs beside them rather than in the queue. Restored once, at load time, and
+// clamped to the same range `setDiscussFont` enforces - a value from an older build (or a hand-edited
+// `localStorage`) must not be able to render the pane unreadable.
+try {
+  const saved = Number(window.localStorage.getItem('v2.discuss.fontSize'));
+  if (Number.isFinite(saved) && saved >= 11 && saved <= 26) D.fontSize = saved;
+} catch (error) { /* 私密模式沒有 localStorage */ }
 
 /* 重新載入這一區。`force`＝連資料一起重抓（剛寫入過東西）。 */
 async function renderDiscuss(force) {
@@ -57,15 +78,20 @@ async function renderDiscuss(force) {
     D.loaded = true;
   }
   const total = D.rows.length;
+  // 左欄是這一區的側邊資訊：先說「這裡有幾題、怎麼壞的」，再列題。統計本來被放在中欄卡片的
+  // 最下面，要滾到最底才看得到，而且會被誤讀成「這一題的」數字——它其實是整個佇列的。
+  const side = discussSideHtml();
   if (!total) {
-    list.innerHTML = '<div class="list-head">卡住的題<b>0</b></div>';
+    list.innerHTML = side + '<div class="list-head">卡住的題<b>0</b></div>';
     main.innerHTML = '<div class="empty-area">這個佇列目前沒有卡住的題。<br>'
       + '（人按「阻擋」或管線／AI 退回的題會出現在這裡。）</div>';
     pdf.innerHTML = '<div class="empty-area">（無）</div>';
     return;
   }
   D.index = Math.min(Math.max(0, D.index), total - 1);
-  list.innerHTML = `<div class="list-head">卡住的題<b>${total}</b></div>`
+  list.innerHTML = side
+    + `<div class="list-head">卡住的題<b>${total}</b>`
+    + '<span class="hint">人阻擋或 AI／管線退回</span></div>'
     + D.rows.map((key, i) => {
       const candidate = D.byKey.get(key) || {};
       const bucket = ((candidate.review || {}).queue_bucket) || '';
@@ -83,7 +109,6 @@ async function renderDiscuss(force) {
   pdf.innerHTML = discussPdfHtml(candidate);
   bindDiscuss(key);
 }
-
 /* 佇列桶 → 中文標籤。與伺服器 `review_projection` 的 `display_label` 同義，但這裡只認 bucket，
    因為 bucket 是穩定的鍵、label 是給人看的字；照 label 認會在改字時默默壞掉。 */
 const DISCUSS_BUCKET_LABEL = {
@@ -222,25 +247,34 @@ function discussQuestionsHtml() {
     + `<ul class="rq-list">${body}</ul></div>`;
 }
 
-/* 中欄：依序是「為什麼卡住 → ① 機器 → ② AI → ③ 編輯 → ④ 原則 → ⑤ 反問」。
-   順序就是閱讀順序：先知道它為什麼在這裡，再看機器量到什麼、模型說了什麼，然後才是自己的編輯。 */
+/* 中欄：依序是「為什麼卡住 → ① 機器 → ② AI → ③ 原題 → ④ 擷圖／抽換 → ⑤ 手動修改 → ⑥ 註解 → ⑦ 原則 → ⑧ 反問」。
+   順序就是閱讀順序：先知道它為什麼在這裡，再看機器量到什麼、模型說了什麼，然後**讀一遍原題**，
+   把缺的圖補上，最後才動手改文字、寫下「這題錯在哪」的註解，以及從它歸納出來的原則。
+
+   「讀一遍原題」與「註解」是使用者的回報裡具體缺的兩塊：
+   「我需要的是可以看到原題，可以有圖片擷圖與抽換的區域，可以調整字體的區域以及把我的做法
+   給 AI 參考的註解區，這些你都沒有做到」。這四項現在各有自己的一段，而且在同一個滾動流裡。 */
 function discussCenterHtml(candidate, key) {
   const number = candidate.question_number ?? '?';
   const subject = ((candidate.metadata || {}).normalized_subject_name)
     || (candidate.metadata || {}).group_name || candidate.paper_id || '';
-  return '<div class="case">'
-    + `<h2>第 ${esc(number)} 題 <span class="kind">${esc(subject)}</span></h2>`
+  return '<div class="case" id="discussCase" style="--reading-size:' + D.fontSize + 'px">'
+    + `<h2>第 ${esc(number)} 題 <span class="kind">${esc(subject)}</span>`
+    + discussFontHtml() + '</h2>'
     + `<div class="meta">為什麼在這裡：${discussWhyHtml(candidate)}</div>`
     + `<div class="diff"><b>① 機器偵測</b>${discussDisputesHtml(candidate.disputes)}</div>`
     + `<div class="diff" style="margin-top:10px"><b>② AI 意見</b>${discussFindingHtml(candidate)}</div>`
-    + '<div class="edit-block"><b>③ 手動修改（照紙本打，錯字才改）</b>'
+    + '<div class="orig"><b>③ 原題（照紙本讀一遍）</b>'
+    + discussOriginalHtml(candidate) + '</div>'
+    + discussCropHtml(candidate)
+    + '<div class="edit-block"><b>⑤ 手動修改（照紙本打，錯字才改）</b>'
     + '<label>題幹</label>' + discussStem(candidate, key)
     + '<label>選項</label>' + discussOptions(candidate, key)
     + '<div class="dirty" id="dDirty" style="display:none">已改動，按「儲存修正」寫入。</div>'
     + '</div>'
+    + discussNoteHtml(candidate)
     + discussPrinciplesHtml()
     + discussQuestionsHtml()
-    + discussSideHtml()
     + '<div class="answer-bar">'
     + '<button class="ghost" data-focus="8">8 紙本</button>'
     + '<button class="act" id="dSave">儲存修正 E</button>'
@@ -249,12 +283,134 @@ function discussCenterHtml(candidate, key) {
     + '</div>';
 }
 
+/* 字體調整。
+
+   使用者回報要「可以調整字體的區域」。這不是裝飾：左邊的抽取文字要跟右邊的 PDF 對照，
+   而瀏覽器內建的 PDF viewer 有自己的縮放（52%），所以兩邊的字級必須各自可調，
+   否則把一邊調到看得到細節的時候另一邊就不再對得上。
+
+   大小是一個 CSS 變數，不是八個字級——一條規則，一個地方。`15px` 是題目區題幹的基準，
+   所以按兩次「+」是審題者自己的 1.25 倍，而不是另一套基準。 */
+function discussFontHtml() {
+  const size = D.fontSize;
+  return `<span class="fontctl" title="抽取文字的字級（不影響右邊的 PDF）">`
+    + `<button type="button" data-font="down" title="縮小">A−</button>`
+    + `<span>${size}px</span>`
+    + `<button type="button" data-font="up" title="放大">A＋</button>`
+    + `<button type="button" data-font="reset" title="回到預設">重設</button></span>`;
+}
+
+/* ③ 原題：這題**照紙本讀一遍**的樣子。
+
+   跟題目審核區讀的是同一個 `stem`／`options`，也走同一個 `richText()`（所以上下標真的是上下標），
+   但**不是編輯框**：使用者的回報是「可以看到原題」。編輯框裡的東西是將要寫入的修正，
+   把它當作原題讀，就分不出「紙本這樣印」與「我把它改成這樣」——而這兩件事正是這一區要累積的知識。
+   所以原題是一個獨立的區塊，在編輯框之前。 */
+function discussOriginalHtml(candidate) {
+  const options = candidate.options || [];
+  const answer = new Set(
+    ((candidate.answer_payload || {}).accepted_values || [])
+      .map((v) => String(v).trim().toUpperCase()).filter(Boolean));
+  if (!answer.size) {
+    String(candidate.answer || '').split(/[,，或]/).map((v) => v.trim().toUpperCase())
+      .filter(Boolean).forEach((v) => answer.add(v));
+  }
+  const shared = candidate.shared_stem;
+  const size = Number(candidate.group_size || 1);
+  const groupNote = size > 1
+    ? `<div class="hint">題組 ${size} 題${shared ? '｜共用題幹如下' : ''}</div>` : '';
+  return groupNote
+    + (shared ? `<div class="shared-stem"><div class="shared-head">共用題幹</div>`
+        + `<div class="shared-body">${richText(shared)}</div></div>` : '')
+    + `<div class="stem">${richText(candidate.stem || '（題幹空白）')}</div>`
+    + `<div class="opts">${options.map((option) => `
+        <div class="opt${answer.has(option.key) ? ' is-answer' : ''}">
+          <span class="k">${esc(option.key)}</span><span class="t">${richText(option.text)}</span>
+        </div>`).join('') || '<span class="hint">（沒有抽到選項）</span>'}</div>`
+    + `<div class="hint" style="margin-top:8px">答案：${esc(candidate.answer || '—')}</div>`;
+}
+
+/* ④ 擷圖／抽換。
+
+   這一段是使用者的回報裡最明確的缺項：「可以有圖片擷圖與抽換的區域」。舊的 `/legacy` 有完整的
+   「補圖與綁定」（貼上人工修正圖片、選題幹／A–D／表格／題組共用、補圖說明、補圖註記、
+   取代既有圖片），v2 把它整段丟掉——而「機器裁切不完整」是實測會發生的事，沒有這一段就無從修。
+
+   寫入走既有 `/api/manual-asset`，不是新路徑：它已經會把圖存成檔案、把 `asset_ref`
+   嵌進 correction 的 `stem`／`options`／`answer`（見 `save_manual_image_asset`），
+   而 correction 是 append-only 的事件。這一區只提供介面。 */
+function discussCropHtml(candidate) {
+  const refs = (candidate.image_refs || []).filter((r) => r && typeof r === 'object');
+  const existing = refs.length
+    ? `<div class="crop-list">這一題目前有 ${refs.length} 張圖：`
+      + refs.map((r) => `<a href="${esc(fileUrl(r.path))}" target="_blank" rel="noopener">`
+          + `${esc(r.asset_role || 'image')}</a>`).join('、') + '</div>'
+    : '<div class="crop-list">這一題目前沒有圖。若紙本有圖而抽取沒有，在這裡貼上。</div>';
+  return '<div class="crop-block"><b>④ 擷圖／抽換</b>'
+    + '<label style="display:block;font-size:11.5px;color:var(--muted);margin:6px 0 4px">'
+    + '在 PDF 或截圖工具框好範圍，複製後貼上（⌘V），或選圖檔。</label>'
+    + '<div class="drop" id="dCropDrop">貼上圖片（⌘V），或把圖檔拖進來、<label style="display:inline">'
+    + '<input type="file" id="dCropFile" accept="image/*" style="display:none">'
+    + '<u style="cursor:pointer">選擇檔案</u></label>。</div>'
+    + '<img class="preview" id="dCropPreview" style="display:none" alt="待補的圖">'
+    + '<div class="place" id="dCropPlace">'
+    + ['stem', 'A', 'B', 'C', 'D', 'table', 'group'].map((p) =>
+        `<button type="button" data-place="${p}">${p === 'stem' ? '題幹' : p === 'table' ? '表格'
+          : p === 'group' ? '題組共用' : `選項 ${p}`}</button>`).join('')
+    + '</div>'
+    + '<input type="text" id="dCropCaption" placeholder="補圖說明，例如：第 53 題結構圖，人工裁切補上">'
+    + '<input type="text" id="dCropNotes" placeholder="補圖註記，例如：MinerU 原圖裁切不完整">'
+    + '<div class="rowbtn"><button class="ghost" id="dCropSave">儲存補圖</button>'
+    + '<label class="hint"><input type="checkbox" id="dCropReplace"> 取代既有圖片</label>'
+    + '<span class="hint" id="dCropStatus"></span></div>'
+    + existing + '</div>';
+}
+
+/* ⑥ 註解：給 AI 參考、也給下一個審題者參考的一段話。
+
+   使用者的回報：「基本原則的上面應該要有一個註解，這樣我才能說哪裡錯了或是我改了哪裡」。
+   所以它就在 基本原則 之上——先說這題，再說從它歸納出來的通則。
+
+   它寫的是 `comment` 事件，與題目區的「只加註記 C」是同一種寫法，理由也一樣：
+   註解是**關於**一題的話，不是對它的判決。伺服器的 `_reaffirm_standing_action`
+   會在存註解時重申底下那個決定，所以在這裡寫字不會把已經通過的題目踢回未審。 */
+function discussNoteHtml(candidate) {
+  // The note the question area would show for this question, from the same field it reads
+  // (`review.notes` → `item.note` → `S.notes` → the 註記 box). Consistency here is not cosmetic: a
+  // reviewer who annotated a question in the 題目審核區 and then opens it in 錯題討論區 must see the
+  // same sentence in both, or the two areas disagree about what the last person said.
+  //
+  // It is drawn as **the previous note**, not pre-filled into the box, because the box is a draft of
+  // the *next* note: putting the old text in it and saving would append a duplicate of a note that
+  // is already recorded.
+  const previous = String((candidate.review || {}).notes || '').trim();
+  return '<div class="note-block">'
+    + '<label>⑥ 註解（哪裡錯了／我改了什麼；會存進 append-only 紀錄）</label>'
+    + '<textarea id="dNote" placeholder="例如：題幹的 1,25-雙羥維生素D 在紙本是 1,25-(OH)<sub>2</sub>D；'
+    + '我改成紙本的拼法，AI 再看時請照這個。">'
+    + `${esc(D.noteDraft.get(candidate.candidate_key) ?? '')}</textarea>`
+    + '<div class="rowbtn" style="display:flex;gap:6px;align-items:center;margin-top:6px">'
+    + '<button class="act" id="dNoteSave">儲存註解</button>'
+    + '<span class="hint">不是判決：不會把題目算成已過目，也不會蓋掉已有決定。</span></div>'
+    + (previous
+        ? `<div class="note-hist"><div class="n"><span class="when">已存</span>`
+          + `${esc(previous)}</div></div>`
+        : '')
+    + '</div>';
+}
+
 /* 右欄：紙本原卷（題目卷），與左欄脫鉤。 */
 function discussPdfHtml(candidate) {
   const pdf = (candidate.source_files || {}).official_pdf
     || (candidate.metadata || {}).question_pdf_relative;
-  const head = `<div class="pdf-head">紙本 第 ${esc(candidate.question_number ?? '?')} 題`
-    + `<span class="hint">${esc(candidate.paper_id || '')}</span></div>`;
+  const head = `<div class="pdf-head">紙本（題目卷）　第 ${esc(candidate.question_number ?? '?')} 題`
+    + `<span class="hint">${esc(candidate.paper_id || '')}</span>`
+    + '<span class="spacer"></span>'
+    + '<span class="hint">用滾輪找第 ' + esc(candidate.question_number ?? '?') + ' 題（要擷圖就框好按 ⌘C 再貼到左邊）</span></div>';
+  // The frame is **not** re-created when the paper has not changed: re-assigning `src` - even to the
+  // same file - reloads the viewer and throws the scroll position away, which is the jump the
+  // question area documented and this pane has to respect for the same reason (the reviewer scrolls
+  // once to the questions and keeps it there while stepping through them).
   const body = pdf
     ? `<iframe id="dPdf" class="discuss-frame" title="官方題目 PDF"
          src="${esc(fileUrl(pdf))}#view=FitH"></iframe>`
@@ -322,6 +478,184 @@ function bindDiscuss(key) {
   // 模型機械比對的「帶入」：只把那一欄的紙本讀法填進編輯框，不自己寫入任何東西。
   for (const button of document.querySelectorAll('#discussMain .af-apply')) {
     button.onclick = () => applyFindingChange(button);
+  }
+  // 字體：一個 CSS 變數，套在整個 .case 上。不呼叫 renderDiscuss()——重畫會丟掉還沒存檔的
+  // 編輯草稿與游標位置；字級只是看的人的眼睛，不該讓題目重新載入。
+  for (const button of document.querySelectorAll('#discussMain [data-font]')) {
+    button.onclick = () => setDiscussFont(button.dataset.font);
+  }
+  // `8 紙本`：把焦點送進右側的 PDF 框，與 `1..6` 聚焦選項同一排鍵。
+  for (const button of document.querySelectorAll('#discussMain [data-focus]')) {
+    button.onclick = () => focusDiscuss(Number(button.dataset.focus));
+  }
+  bindDiscussCrop(key);
+  const noteSave = $('dNoteSave');
+  if (noteSave) noteSave.onclick = () => saveDiscussNote(key);
+  const noteBox = $('dNote');
+  if (noteBox) {
+    noteBox.oninput = () => D.noteDraft.set(key, noteBox.value);
+    noteBox.onkeydown = (e) => {
+      // Enter 存、Shift+Enter 換行——與題目區的註記框同一條規則（見 `noteKeydown`）。
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveDiscussNote(key); }
+    };
+  }
+}
+
+/* 字體大小：一次一階，限制在 11–26px。下限是為了還讀得到，上限是為了還對得上紙本；
+   超出這個範圍就不是調整字體，是把畫面拉壞。
+
+   游標位置要保住：只改 CSS 變數、不重畫 DOM，所以正在打字的人不會被打斷。 */
+const DISCUSS_FONT_MIN = 11;
+const DISCUSS_FONT_MAX = 26;
+function setDiscussFont(direction) {
+  if (direction === 'reset') D.fontSize = 15;
+  else if (direction === 'up') D.fontSize = Math.min(DISCUSS_FONT_MAX, D.fontSize + 1);
+  else if (direction === 'down') D.fontSize = Math.max(DISCUSS_FONT_MIN, D.fontSize - 1);
+  const pane = $('discussCase');
+  if (pane) pane.style.setProperty('--reading-size', D.fontSize + 'px');
+  const readout = document.querySelector('#discussMain .fontctl span');
+  if (readout) readout.textContent = D.fontSize + 'px';
+  try { window.localStorage.setItem('v2.discuss.fontSize', String(D.fontSize)); } catch (error) { /* 私密模式 */ }
+}
+
+/* ④ 擷圖／抽換的綁定。
+
+   三種輸入都收：剪貼簿（⌘V，這是主要用法——在 PDF 上框好就複製）、拖進來、選檔。
+   三者最後都走同一個 `pendingCrop`，所以「貼上」「拖入」「選檔」不可能各自實作出不同的結果。
+
+   位置按鈕決定 `placement`／`target_option`，與伺服器 `save_manual_image_asset` 的參數同名，
+   不另外發明一套詞。選項的位置會轉成 `option`＋目標字母（伺服器要的是這兩個）。 */
+function bindDiscussCrop(key) {
+  const drop = $('dCropDrop');
+  const file = $('dCropFile');
+  if (drop) {
+    // 貼上：只有在這一區、且焦點不在輸入框時才算。貼進註解框的文字不該被當成圖。
+    drop.onclick = () => { if (file) file.click(); };
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('hot'); };
+    drop.ondragleave = () => drop.classList.remove('hot');
+    drop.ondrop = (e) => {
+      e.preventDefault(); drop.classList.remove('hot');
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) readDiscussCrop(f);
+    };
+  }
+  if (file) file.onchange = () => { if (file.files && file.files[0]) readDiscussCrop(file.files[0]); file.value = ''; };
+  for (const button of document.querySelectorAll('#discussMain [data-place]')) {
+    button.onclick = () => {
+      const place = button.dataset.place;
+      D.cropPlacement = /^[A-D]$/.test(place) ? 'option' : (place === 'stem' ? 'stem' : place);
+      D.cropOption = /^[A-D]$/.test(place) ? place : '';
+      for (const other of document.querySelectorAll('#discussMain [data-place]')) {
+        other.classList.toggle('on', other === button);
+      }
+    };
+  }
+  const save = $('dCropSave');
+  if (save) save.onclick = () => saveDiscussCrop(key);
+  restoreDiscussCropPreview();
+}
+
+/* 讀一張圖成 data URL。`FileReader` 是唯一一條瀏覽器給的路，不經過伺服器——圖還沒決定要不要留。 */
+function readDiscussCrop(file) {
+  if (!file || !String(file.type || '').startsWith('image/')) {
+    toast('那不是圖片檔', true);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    D.pendingCrop = String(reader.result || '');
+    restoreDiscussCropPreview();
+    const status = $('dCropStatus');
+    if (status) status.textContent = `已讀到圖（${Math.round(D.pendingCrop.length / 1365)} KB），確認位置後按「儲存補圖」。`;
+  };
+  reader.onerror = () => toast('讀圖失敗', true);
+  reader.readAsDataURL(file);
+}
+
+function restoreDiscussCropPreview() {
+  const preview = $('dCropPreview');
+  if (!preview) return;
+  if (D.pendingCrop) { preview.src = D.pendingCrop; preview.style.display = 'block'; }
+  else { preview.removeAttribute('src'); preview.style.display = 'none'; }
+}
+
+/* 貼上的事件掛在 document 上，因為焦點可能在區塊外的任何地方（PDF iframe 拿不到鍵盤）。
+   只認這一區、且焦點不在輸入框的貼上——否則在註解框貼一段文字會變成補圖。 */
+document.addEventListener('paste', (event) => {
+  if (A.area !== 'discuss') return;
+  const target = event.target;
+  if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) return;
+  const items = Array.from((event.clipboardData || {}).items || []);
+  const image = items.find((item) => String(item.type || '').startsWith('image/'));
+  if (!image) return;
+  event.preventDefault();
+  readDiscussCrop(image.getAsFile());
+});
+
+/* 儲存補圖。走既有的 `/api/manual-asset`，事件是 append-only 的 correction。 */
+async function saveDiscussCrop(key) {
+  if (!key) return;
+  const status = $('dCropStatus');
+  if (!D.pendingCrop) {
+    if (status) status.textContent = '請先貼上或選擇一張圖。';
+    toast('還沒有圖', true);
+    return;
+  }
+  if (D.cropPlacement === 'option' && !D.cropOption) {
+    if (status) status.textContent = '請先選擇要補到哪一個選項。';
+    return;
+  }
+  const payload = {
+    candidate_key: key,
+    data_url: D.pendingCrop,
+    reviewer: 'local',
+    notes: ($('dCropNotes') || {}).value || '',
+    caption: ($('dCropCaption') || {}).value || '',
+    placement: D.cropPlacement,
+    target_option: D.cropOption,
+    replace_existing: !!($('dCropReplace') || {}).checked,
+  };
+  if (status) status.textContent = '補圖寫入中…';
+  try {
+    const response = await fetch('/api/manual-asset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    D.pendingCrop = '';
+    D.seen.set(key, true);
+    invalidateAreas();
+    toast('補圖已寫入（append-only 的 correction）');
+    renderDiscuss(true);
+  } catch (error) {
+    if (status) status.textContent = `補圖失敗：${error.message || error}`;
+    toast(`補圖失敗：${error.message || error}`, true);
+  }
+}
+
+/* ⑥ 註解。與題目區的「只加註記 C」寫的是同一種 `comment` 事件，所以兩邊的註解會互相看得到
+   （兩邊都讀同一份 append-only 事件流投影出來的 `review.notes`，不是各自另存一份）。 */
+async function saveDiscussNote(key) {
+  if (!key) return;
+  const box = $('dNote');
+  const notes = box ? box.value.trim() : '';
+  if (!notes) { toast('沒有寫任何註解', true); return; }
+  try {
+    const response = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_key: key, action: 'comment', notes, reviewer: 'local',
+        source: 'linear_v2_discuss',
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    D.noteDraft.delete(key);
+    toast('註解已存（append-only；底下已有的決定不變）');
+    renderDiscuss(true);
+  } catch (error) {
+    toast(`註解儲存失敗：${error.message || error}`, true);
   }
 }
 

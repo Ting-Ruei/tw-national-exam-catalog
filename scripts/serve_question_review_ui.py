@@ -903,6 +903,55 @@ def data_url_to_bytes(data_url: str) -> tuple[bytes, str, str]:
     return data, mime_type, extension
 
 
+def _is_note_event(event: dict[str, Any]) -> bool:
+    """A note *about* a question, as opposed to a verdict on it.
+
+    `comment` is the action a note is written with; `note_action` is the marker
+    `_reaffirm_standing_action` leaves behind when it re-states the decision the note is attached to
+    (in which case `action` is that decision, and the event is still a note).
+    """
+    return event.get("action") in NOTE_ACTIONS or event.get("note_action") == "note"
+
+
+def _note_annotates_pending_reset(
+    event: dict[str, Any],
+    key: str,
+    latest: dict[str, Any],
+    latest_reset: dict[str, Any],
+) -> bool:
+    """True when this event is a note for a question whose latest state is a pending reset.
+
+    This is the *one* place the condition lives, because it has to hold in every fold: the JSONL
+    load and the SQL load, for questions and for answers. Six hand-written copies of one condition
+    is six chances for the 錯題討論區 to keep a different set of stuck questions than `review_projection`
+    describes.
+    """
+    return _is_note_event(event) and key not in latest and key in latest_reset
+
+
+def _merge_note_into_reset(reset_event: dict[str, Any], note_event: dict[str, Any]) -> dict[str, Any]:
+    """Attach a note to a pending reset **without** letting the note clear the reset.
+
+    The defect this exists for: a repair/accepted-reaudit reset is what puts a question into the
+    錯題討論區, and a note is what the 註解 box writes. Because the event log keeps the latest event as
+    the question's state, an unreaffirmed note popped the pending reset - so writing the very 註解
+    that explains a stuck question **removed that question from the stuck list**. Measured 2026-09-23
+    through the real `append_review` + fold path.
+
+    The reset's own `notes` is preserved as `reset_notes`, because that is where a repair marker like
+    「修復後待複核」 lives and `review_projection` reads `reset_notes` before `notes`. The person's note
+    then becomes the visible `notes` (what the UI shows), and neither has to overwrite the other.
+    """
+    merged = dict(reset_event)
+    original_notes = merged.get("notes")
+    if original_notes and not merged.get("reset_notes"):
+        merged["reset_notes"] = original_notes
+    note = note_event.get("notes")
+    if note:
+        merged["notes"] = note
+    return merged
+
+
 def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, int], dict[str, dict[str, Any]]]:
     latest: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
@@ -935,6 +984,10 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                     event["correction"] = previous["correction"]
                 latest.pop(key, None)
                 latest_reset[key] = event
+                continue
+            if _note_annotates_pending_reset(event, key, latest, latest_reset):
+                latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
+                counts[key] = counts.get(key, 0) + 1
                 continue
             # A human decision must not drop the repaired text a previous human decision was made
             # against. The correction can be sitting in `latest_reset`: a repair reopens the
@@ -993,6 +1046,10 @@ def load_latest_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 counts[key] = counts.get(key, 0) + 1
                 latest.pop(key, None)
                 latest_reset[key] = event
+                continue
+            if _note_annotates_pending_reset(event, key, latest, latest_reset):
+                latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
+                counts[key] = counts.get(key, 0) + 1
                 continue
             counts[key] = counts.get(key, 0) + 1
             latest[key] = event
@@ -4510,6 +4567,11 @@ filtered AS (
                     previous = latest.get(key) or latest_reset.get(key)
                     if not event.get("correction") and previous and previous.get("correction"):
                         event["correction"] = previous["correction"]
+                    # A note on a question whose latest state is a pending reset must merge into
+                    # that reset, not replace it - the SQL half of the 錯題討論區 rule.
+                    if _note_annotates_pending_reset(event, key, latest, latest_reset):
+                        latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
+                        continue
                     latest[key] = event
                     latest_reset.pop(key, None)
         return latest, counts, latest_reset
@@ -4679,6 +4741,9 @@ filtered AS (
                     if event.get("action") in reset_actions:
                         latest.pop(key, None)
                         latest_reset[key] = event
+                        continue
+                    if _note_annotates_pending_reset(event, key, latest, latest_reset):
+                        latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
                         continue
                     latest[key] = event
                     latest_reset.pop(key, None)
@@ -8573,6 +8638,9 @@ filtered_sheets AS (
             elif event.get("action") in RESET_REVIEW_ACTIONS:
                 self.latest_reviews.pop(key, None)
                 self.latest_reset_reviews[key] = event
+            elif _note_annotates_pending_reset(event, key, self.latest_reviews, self.latest_reset_reviews):
+                # In-memory half of the same rule: a note on a stuck question keeps it stuck.
+                self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], event)
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
@@ -8617,6 +8685,8 @@ filtered_sheets AS (
             if event.get("action") in RESET_REVIEW_ACTIONS:
                 self.latest_reviews.pop(key, None)
                 self.latest_reset_reviews[key] = event
+            elif _note_annotates_pending_reset(event, key, self.latest_reviews, self.latest_reset_reviews):
+                self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], event)
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
