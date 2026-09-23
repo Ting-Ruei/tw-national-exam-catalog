@@ -44,13 +44,16 @@
 | 3 | 「類科，維持目前四層」 | 四層是 類科／年度／考次／科目 |
 | 4 | 逐題 comment 自己讀，是原本沒有的規則才加入 | 讀完 10 筆註解 → 只有新規則才進基本原則（未做） |
 
-- [ ] P7 討論區 scope 篩選器：左欄加四層下拉，與題目區**共用** `resolveLevel`／`availableSittings`／
-      `availableSubjects`／`countQuestions` 與 `scopePickerHtml`（不重寫一份）。分類樹只含討論區的題
-      （伺服器只回卡住的題），預設全部
-      - 契約：改一層不動別層；負對照沿用 `test_review_ui_v2_scope.py` 的案例
-      - 真 Chrome：改考次後科目不變；篩選後清單只含該科
-- [ ] P8 逐題註解 → 基本原則：讀 10 筆 `comment`，比對既有原則，只把**新的**規則寫成 `add` 事件
-      - 不可把一次性的事實（「Ae-αt＋Be-βt 沒改到」）當成通則
+- [x] P7 討論區 scope 篩選器：左欄加四層下拉，與題目區**共用** `resolveLevel`／`availableSittings`／
+      `availableSubjects`／`countQuestions`（不重寫一份）。分類樹只含討論區的題
+      （`discuss_taxonomy`，在未篩選的卡住集上算），預設全部
+      - 契約：改一層不動別層（真 Chrome 量過）；負對照會咬（拿掉 `mergedBucket`／`resolveLevel` 各掛一條）
+      - 實測：修正前後年度下拉選項 `[8,1,1,1]` → `[8,16,3,37]`；選年度 115 後清單 495 → 24 題
+- [x] P8 逐題註解 → 基本原則：讀 9 筆 `comment`（7 個題號），只把**新的**規則寫成 `add`
+      - 判讀：`qbr/reports/comment_to_principles.md`（9 筆逐一對照）；只有 q071「表格要用紙本圖」是新的
+      - 寫入：`qbr/scripts/curate_principles_from_comments.py`（dry-run 預設、去重、來源對帳、
+        reviewer 不得是 `local`）；負對照三條都會咬
+      - 實測：寫入 1 條 `p1`；已驗它真的進到轉錄／審核提示詞，且在真 Chrome 畫面上看得到
 
 
 ## 不能違反的規則

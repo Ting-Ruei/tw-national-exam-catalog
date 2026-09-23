@@ -82,7 +82,7 @@ The middle column is a reading order, and each block has one author:
 | ⑦ 基本原則 | a sentence the reviewer adds to, pasted into the next prompt | the reviewer |
 | ⑧ 反問 | the agent's open questions | `question_repair_questions.jsonl` |
 | 右 | the question sheet, decoupled | — |
-| 左 | 統計 ＋ the stuck list | — |
+| 左 | 統計 ＋ 四層篩選 ＋ the stuck list | — |
 
 - **③ 原題 is drawn with `richText()`, not `esc()`.** The paper's inline markup is rendered (so
   `<sub>` is a real subscript); a stuck question must not be shown with *less* of itself than a normal
@@ -123,12 +123,38 @@ The middle column is a reading order, and each block has one author:
   (`question_review_principles.jsonl`) with its folding rule in `qbr/src/qbr/discuss.py`, which the
   server imports rather than re-implementing. A removal is an append-only `remove` event, not a
   deletion.
+- **This area has its own four-level filter, and it shares the question area's contract.** It sends
+  `category`/`year`/`ordinal`/`subject` to `/api/discuss` — the **same names** the question area uses —
+  and, like `buildScope`, each `onchange` writes **only its own level**. The user's complaint was
+  「每次都跳來跳去」, so "the other three selects did not move" is the property that is measured (in a
+  real browser, in `scripts/test_v2_ui_audit.mjs`). Two things are easy to get wrong and both are
+  pinned: the filter is **server-side** (the stuck rows are scattered across the whole queue and the
+  client only sees the capped window, so filtering in the browser would filter a sample), and
+  **全部類科 is a merged bucket, not `undefined`** (`mergedBucket`) — without it the year/sitting/
+  subject pickers come out empty and only the top level works. Each level is then reconciled with the
+  question area's own `resolveLevel`, so a value that stops existing falls back to 全部 rather than
+  staying in the request and filtering the list to nothing.
+- **The tree the pickers offer is the stuck set's own tree** (`ReviewState.discuss_taxonomy`,
+  built over the **unfiltered** stuck rows through the one `review_queue.taxonomy_of`), not the whole
+  queue's — a reviewer must not be able to aim a stuck-question filter at a category with no stuck
+  questions in it. It comes back on **every** response, so choosing one level can never collapse the
+  options of another.
 - **The agent asks the reviewer back instead of guessing.** When a page read fails, or the page
   agrees while a person still blocked it, `confirm_dispute.py --escalate` appends one `ask` to
   `question_repair_questions.jsonl` (idempotent per reading) rather than asking the same model twice;
   the reviewer answers it in this pane, and the answer reaches the next prompt. **The agent never
   impersonates a reviewer**: its evidence stays in the finding stream and the human's decisions stay
   in the event stream.
+- **A per-question comment only becomes a principle if it is a rule nobody had.** The reviewer's rule
+  is 「逐題 comment 自己讀，是原本沒有的規則才加入」. That reading is a person's job, recorded in
+  `qbr/reports/comment_to_principles.md` (9 comments over 7 questions were read; **one** was a rule
+  that did not already exist). The write half is
+  `qbr/scripts/curate_principles_from_comments.py`: dry-run by default, dedup by text, every added
+  principle must point at a `comment` event that really exists (**ungrounded principles are refused,
+  not written**), and `reviewer` may not be `local` or a person's name (governance: an agent must not
+  impersonate a reviewer). The trap this guards: `reset_review`'s machine-generated note was
+  **prefilled into the 註解 box**, so a comment event can carry a machine sentence verbatim — the
+  same sentence on three different questions is the tell, and it is not a principle.
 
 Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2_areas_browser.mjs`):
 
