@@ -59,6 +59,9 @@
 保留的理由：`qbr/PROPOSED_WORKFLOW.md` §1／§4 用它們當**對照組**，
 刪掉就消滅了「為什麼要換」的量測。**這些是證據，不是規範。**
 
+`qbr` 自身的逐輪量測史見 [`../qbr/ENGINE_STRATEGY.md`](../qbr/ENGINE_STRATEGY.md)；
+其中早期提案可能被後續實測推翻，**不是**現行操作入口。
+
 - [`sustainable-question-bank-workflow-todo.md`](sustainable-question-bank-workflow-todo.md) — 舊目標流程圖
 - [`parser-rule-inventory.md`](parser-rule-inventory.md) — 舊「規則三層」
 - [`text-normalization-rules.md`](text-normalization-rules.md) — 舊字形修正 registry

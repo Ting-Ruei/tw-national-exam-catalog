@@ -9,7 +9,7 @@
 #
 # 它記三件事：
 #   1. 部署時間、來源機器、來源 repo 的 HEAD 與 dirty 狀態；
-#   2. 服務本身（server + v2.html + queue）的 sha256——這樣「介面變了」可以歸因；
+#   2. 服務本身（server + v2.html + legacy.html + queue）的 sha256——這樣「介面變了」可以歸因；
 #   3. 佇列與審核紀錄的筆數——「畫得出來」要用數字講，不是用感覺。
 set -euo pipefail
 
@@ -22,6 +22,7 @@ sha() { [[ -f "$1" ]] && shasum -a 256 "$1" | awk '{print $1}' || echo null; }
 QUEUE="${HOME_DIR}/queue/review-ui"
 SERVER="${HOME_DIR}/code/scripts/serve_question_review_ui.py"
 V2="${HOME_DIR}/code/review_ui/v2.html"
+LEGACY="${HOME_DIR}/code/review_ui/v1-reference/legacy.html"
 
 # 來源 repo 的狀態。
 #
@@ -49,6 +50,7 @@ cat > "${OUT}" <<JSON
   "note": "站上跑的是工作樹鏡射。source_head 由送部署的那台提供；source_dirty_files > 0 代表它含未提交的改動（實測：一筆 content_type_of 修正，讓圖能顯示）。這台上的 ~/tw-national-exam-catalog 是舊 checkout，不是本部署的來源。",
   "server_sha256": "$(sha "${SERVER}")",
   "v2_sha256": "$(sha "${V2}")",
+  "legacy_sha256": "$(sha "${LEGACY}")",
   "candidates_sha256": "$(sha "${QUEUE}/candidates.jsonl")",
   "review_log_sha256": "$(sha "${QUEUE}/question_review_events.jsonl")",
   "review_events": $(wc -l < "${QUEUE}/question_review_events.jsonl" | tr -d ' '),

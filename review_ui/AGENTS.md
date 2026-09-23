@@ -14,6 +14,7 @@ v2.html                    **基準線**。線性審題：一份清單、一題�
 v1-reference/              僅供參考，不再維護
   mobile.html                舊的手機快速分流介面
   workflow.html              舊的八線道工作台
+  legacy.html                `/legacy` 的舊審題頁；由 server 讀取，僅保留相容性
   mobile-sw.js / mobile.webmanifest / mobile-icon.png.b64
 ```
 
@@ -24,6 +25,7 @@ v1-reference/              僅供參考，不再維護
 | `/v2` | `v2.html` | **基準線** |
 | `/mobile` | `v1-reference/mobile.html` | 參考 |
 | `/workflow`、`/mobile/workflow` | `v1-reference/workflow.html` | 參考 |
+| `/legacy` | `v1-reference/legacy.html` | 參考 |
 
 v1 仍然服務，**不是因為它還被維護**，而是因為既有書籤、已安裝的 PWA、以及會送
 `mobile_defer` / `mobile_resume` 事件的消費者都是契約 —— 一個更好的介面沒有權利因為它更好
