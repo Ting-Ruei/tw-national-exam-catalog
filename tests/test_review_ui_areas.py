@@ -178,24 +178,37 @@ class AreasTests(unittest.TestCase):
         # 每個 event 都被蓋上**同一個** action（所以客戶端必須先按 action 分組）。
         self.assertRegex(segment, r'"action": action,')
 
-    def test_the_discussion_area_reads_the_existing_correction_feedback_endpoint(self):
+    def test_the_discussion_area_reads_the_stuck_questions_endpoint(self):
+        """錯題討論區只讀一個端點：`/api/discuss`（卡住的題＋兩條人的流）。
+
+        它**不是**「每筆修正紀錄」那一區了。舊契約讀 `/api/correction-feedback`，而那一區
+        顯示的是「人修過什麼」；新契約是「題目卡在哪裡」——兩者不同。舊版把 79,090 列
+        全拉進來，卡住的題反而找不到。過濾條件在伺服器定義一次（`DISCUSS_BUCKETS`），
+        所以 JSONL 與兩條 SQL 路徑不會漂移。
+        """
         body = function_body(self.js, "renderDiscuss")
-        self.assertIn("/api/correction-feedback", body)
+        self.assertIn("/api/discuss", body)
         # 而且它只讀不寫：沒有第二個 store。
         self.assertNotIn("fetch(", body.replace("fetchAreaJson", ""))
-        self.assertNotRegex(body, r"/api/(review|answer-review|ai-feedback)\b")
+        self.assertNotRegex(body, r"/api/(review|answer-review|ai-feedback|correction-feedback)\\b")
 
     def test_the_changed_class_is_displayed_not_invented(self):
-        body = function_body(self.js, "discussCaseHtml")
-        self.assertIn("change_class", body)
-        # 這一區不能自己發明一個類型名稱。
-        self.assertNotRegex(body, r"function classify")
+        """機器量到的東西顯示機器量到的值；這一區不得自己發明一個類型名稱。
+
+        `queue_bucket` 是伺服器 `review_projection` 產的鍵，`bucketLabel` 負責把鍵轉成中文。
+        照**字**認會在一改字時默默壞掉，所以讀的是鍵。
+        """
+        self.assertIn("queue_bucket", function_body(self.js, "discussRowLabel"),
+                      "列標籤沒有讀伺服器量到的桶位")
+        self.assertIn("DISCUSS_BUCKET_LABEL", function_body(self.js, "bucketLabel"))
+        # 這一區不能自己發明一個分類函式。
+        self.assertNotRegex(self.js, r"function classify")
 
     def test_zero_cases_is_stated_not_left_blank(self):
-        """0 個個案是**合法**狀態（修正紀錄要人按儲存修正或改答案才會產生），但 0 不能是一片空白。"""
+        """0 個個案是**合法**狀態（大家都審完了），但 0 不能是一片空白。"""
         body = function_body(self.js, "renderDiscuss")
         self.assertIn("empty-area", body, "沒有案子時沒有說法")
-        self.assertRegex(body, r"events\.length \?")
+        self.assertRegex(body, r"if \(!total\)")
 
     def test_the_home_page_computes_nothing_itself(self):
         body = function_body(self.js, "renderHome")
@@ -342,11 +355,13 @@ class NegativeControlTests(unittest.TestCase):
         )
         self.assertIn("A.area !== 'question'", match.group(1))
 
-    def test_a_retyped_type_name_instead_of_change_class_would_be_caught(self):
-        # 每一處都要換掉：函式裡出現兩次 `event.change_class`（標題與側欄語意都讀同一個欄位）。
-        broken = self.js.replace("event.change_class", "'我的分類'")
-        self.assertNotIn("event.change_class", function_body(broken, "discussCaseHtml"))
-        self.assertIn("event.change_class", function_body(self.js, "discussCaseHtml"))
+    def test_a_retyped_label_instead_of_the_measured_bucket_would_be_caught(self):
+        # 列標籤必須從伺服器量到的 `queue_bucket` 推出來，不能自己寫死一個類型名稱。
+        broken = self.js.replace("queue_bucket", "'我的分類'")
+        self.assertNotIn("queue_bucket", function_body(broken, "discussRowLabel"))
+        self.assertIn("queue_bucket", function_body(self.js, "discussRowLabel"))
+        # 負對照：拿掉桶位標籤表，翻譯就會變成空的，而不是自己編一個。
+        self.assertIn("DISCUSS_BUCKET_LABEL", function_body(self.js, "bucketLabel"))
 
     def test_a_client_side_eligibility_rule_would_be_caught(self):
         # 每一處都要換掉：`/api/answer-candidates` 在 `renderAnswers` 裡出現兩次（請求與錯誤訊息）。
