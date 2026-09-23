@@ -195,19 +195,28 @@ async function main() {
   }
 
   // ---------------------------------------------------------------- 錯題討論區
+  //
+  // 這一區的契約在這一輪被**換掉**（不是修補）：它以前畫的是 `question_correction_feedback`
+  // 的每個個案（人工修正的前後差異），而那讓「真正卡住的題」找不到。現在它只放卡住的題
+  // ——人按過「阻擋」，或管線／AI 退回待複核——且每一題都給得起修的能力（編輯框、紙本、
+  // AI 意見與它的截圖），以及兩個只有人能寫的面板：基本原則與代理的反問。
   await goto('discuss');
   const discuss = await evaluate(`(async () => {
-    for (let i = 0; i < 40 && document.querySelectorAll('#discussMain .case').length === 0
+    for (let i = 0; i < 60 && document.querySelectorAll('#discussMain .case').length === 0
             && !document.querySelector('#discussMain .empty-area') && !document.querySelector('#discussMain .empty') ; i += 1) {
       await new Promise((r) => setTimeout(r, 200));
     }
+    const listRows = Array.from(document.querySelectorAll('#discussList .row'));
     return {
       shown: Array.from(document.querySelectorAll('.area.on')).map((n) => n.id),
       cases: document.querySelectorAll('#discussMain .case').length,
-      kinds: Array.from(document.querySelectorAll('#discussMain .case .kind')).map((n) => n.textContent.trim()),
-      diffs: document.querySelectorAll('#discussMain .case .from').length,
-      // 0 個個案是**合法**的狀態：修正紀錄是人工按「儲存修正」或改答案才會產生的。一個還沒有
-      // 任何修正的佇列（例如剛上線、只有確認與阻擋）就是 0，而 0 必須有說法，不能是空白。
+      listRows: listRows.length,
+      firstRow: listRows.length ? listRows[0].textContent.trim().slice(0, 30) : '',
+      stemBoxes: document.querySelectorAll('#discussMain #dStem').length,
+      optionBoxes: document.querySelectorAll('#discussMain .opt textarea').length,
+      principles: document.querySelectorAll('#discussMain .principles').length,
+      repairQs: document.querySelectorAll('#discussMain .repair-qs').length,
+      pdf: document.querySelectorAll('#discussPdf').length,
       emptyNote: (document.querySelector('#discussMain .empty-area') || {}).textContent || '',
       side: (document.querySelector('#discussSide .n') || {}).textContent || '',
       hash: location.hash,
@@ -216,16 +225,43 @@ async function main() {
   check(discuss.shown.length === 1 && discuss.shown[0] === 'areaDiscuss', '按錯題討論區真的切過去', JSON.stringify(discuss.shown));
   // 有案子就驗案子；沒有案子就驗「沒有案子」有被說出來。兩者都要能通過。
   if (discuss.cases > 0) {
-    console.log(`  討論區有 ${discuss.cases} 個人工作業個案`);
-    check(discuss.kinds.every((k) => k.length > 0), '每一個個案都標出它的類型（change_class）', JSON.stringify(discuss.kinds));
-    check(discuss.diffs >= 1, '每一個個案都看得見前後差異', `${discuss.diffs} 欄差異`);
+    console.log(`  討論區有 ${discuss.cases} 題卡住（列表 ${discuss.listRows} 列）`);
+    check(discuss.listRows >= discuss.cases, '左欄的列數涵蓋中間的每個個案', `${discuss.listRows} 列`);
+    check(discuss.stemBoxes === 1, '每一題都給得起題幹編輯框（這一區能修，不只是報告）', `${discuss.stemBoxes} 個`);
+    check(discuss.optionBoxes >= 1, '選項也有編輯框', `${discuss.optionBoxes} 個`);
   } else {
-    console.log('  討論區 0 個個案（這個佇列還沒有人工修正）');
+    console.log('  討論區 0 題卡住（這個佇列沒有阻擋或退回）');
     check(discuss.emptyNote.trim().length > 0,
-      '沒有個案時會說出來，不是一片空白', discuss.emptyNote.trim().slice(0, 40));
+      '沒有卡住的題時會說出來，不是一片空白', discuss.emptyNote.trim().slice(0, 40));
   }
-  check(discuss.side !== '', '側欄印出這一區的統計', `總數 ${discuss.side}`);
+  check(discuss.principles === 1, '基本原則面板在（可加可減，會編進提示詞）');
+  check(discuss.repairQs === 1, '修理代理的反問面板在（模型讀不懂時反問這裡）');
+  check(discuss.pdf === 1, '右欄紙本在');
+  check(discuss.side !== '', '側欄印出這一區的統計', `卡住 ${discuss.side} 題`);
   check(/^#錯題/.test(decodeURIComponent(discuss.hash)), '錯題討論區在 hash 裡', discuss.hash);
+
+  // 討論區**只**放卡住的題。這一條是這一輪的核心修正：以前它畫整個可見佇列（79,090 題），
+  // 真正卡住的幾百題反而找不到。用伺服器端的數量對照畫出來的列數。
+  const discussScope = await evaluate(`(async () => {
+    const api = await (await fetch('/api/discuss?limit=500', { cache: 'no-store' })).json();
+    return {
+      serverRows: (api.candidates || []).length,
+      drawnRows: document.querySelectorAll('#discussList .row').length,
+      buckets: api.buckets || [],
+      anyUnstuck: (api.candidates || []).some((c) => {
+        const r = c.review || {};
+        return !(r.action === 'block' || r.is_repair_pending || r.is_accepted_reaudit_pending
+                 || (r.is_reset_unreviewed && !r.is_repair_pending && !r.is_accepted_reaudit_pending));
+      }),
+    };
+  })()`);
+  check(!discussScope.anyUnstuck, '討論區只放卡住的題（沒有把整條佇列拉進來）',
+    JSON.stringify(discussScope.buckets));
+  if (discussScope.serverRows > 0) {
+    // 上限 500；伺服器回多少就畫多少（不套範圍，所以不該被 scope 砍掉）。
+    check(discussScope.drawnRows >= Math.min(discussScope.serverRows, 500) - 5,
+      '畫出來的列數跟著伺服器回的卡住題數', `${discussScope.drawnRows} vs ${discussScope.serverRows}`);
+  }
 
   // ---------------------------------------------------------------- 題目審核區不能被弄壞
   await goto('question');

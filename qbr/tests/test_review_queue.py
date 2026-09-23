@@ -379,3 +379,52 @@ def test_a_finding_whose_crop_cannot_be_found_is_still_kept_and_counted(tmp_path
     written = (out / "review-ui" / "question_ai_findings.jsonl").read_text(encoding="utf-8")
     assert written.strip(), "截圖找不到也不能把 finding 丟掉"
     assert not (out / "review-ui/crops/gone/q004-dispute.png").exists()
+
+
+# ---------------------------------------------------------------- the navigation tree
+
+def test_the_taxonomy_is_the_shape_the_review_ui_walks():
+    # This is a regression test for a defect that shipped and was invisible to every test: a *second*
+    # implementation of this tree lived in `refresh_queue_text.py`, with the year and sitting levels
+    # collapsed (`category -> year -> sitting -> subject` without the `years`/`sittings` wrappers),
+    # and running it overwrote the live queue's `queue_index.json`. `scopePapers()` then read
+    # `bucket.years`, got `undefined` from a node keyed by year numbers, and
+    # `Object.keys(undefined)` threw before the first question was drawn - the whole question area
+    # failed to boot. A test could not have caught it, because the *build* path was correct and only
+    # the second copy was wrong. So the shape asserted here is the UI's contract, and there is now
+    # exactly one implementation to keep in it.
+    per_paper = [
+        {"paper": "1152_藥師(一)_p", "questions": 80, "category": "藥師(一)", "year": 115,
+         "ordinal": 2, "subject": "藥學(二)"},
+        {"paper": "1151_藥師（一）_p", "questions": 78, "category": "藥師（一）", "year": 115,
+         "ordinal": 1, "subject": "藥學(二)"},
+    ]
+    tree = review_queue.taxonomy_of(per_paper)
+    # The two spellings of one category fold to one entry: measured, unfolded they split 63 and 12
+    # papers and a reviewer choosing one sees a quarter of the papers.
+    assert set(tree) == {"藥師(一)"}
+    bucket = tree["藥師(一)"]
+    assert bucket["papers"] == 2 and bucket["questions"] == 158
+    assert "years" in bucket, "UI 走 bucket.years；少了這一層就是整區開不起來"
+    year = bucket["years"]["115"]
+    assert "sittings" in year
+    assert year["papers"] == 2 and year["questions"] == 158
+    # The sitting is its own level because the same subject is set twice a year and the two settings
+    # share a subject name and nothing else.
+    assert set(year["sittings"]) == {"1", "2"}
+    sitting_two = year["sittings"]["2"]["subjects"]["藥學(二)"]
+    assert sitting_two["papers"] == ["1152_藥師(一)_p"]
+    assert sitting_two["questions"] == 80
+
+
+def test_both_queue_writers_use_the_one_taxonomy_implementation():
+    # The negative control for the defect above. If either script grows its own tree again, this
+    # fails - and a shell-side check cannot: the divergence was a different *shape*, not a missing
+    # call, so the test has to assert that neither file defines one.
+    root = os.path.abspath(os.path.join(PKG, ".."))
+    for name in ("build_review_queue.py", "refresh_queue_text.py"):
+        path = os.path.join(PKG, "scripts", name)
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        assert "def _taxonomy" not in text, "%s 自己又寫了一份樹" % name
+        assert "review_queue.taxonomy_of" in text, "%s 要用共用實作" % name

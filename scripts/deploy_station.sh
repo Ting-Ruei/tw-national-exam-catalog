@@ -39,6 +39,11 @@ EVENT_STREAMS=(
   # 沒人能一眼分類的個案。保護它的理由與保護人類紀錄完全相同：一次同步或一次重建
   # 把它靜默刪掉，就沒有第二次。這個名字與 `qbr/src/qbr/ai_findings.py` 的 `STREAM` 同一個。
   question_ai_findings.jsonl
+  # 錯題討論區的兩條人工／代理流。基本原則是**提示詞的約束**，代理的反問記的是模型卡在哪；
+  # 兩者都只存在於使用者敲下的那一次，無法從題庫重建。名字與 `serve_question_review_ui.py`
+  # 的 `PRINCIPLES_STREAM`／`REPAIR_QUESTIONS_STREAM` 一致。
+  question_review_principles.jsonl
+  question_repair_questions.jsonl
 )
 # 還有人類的偏好設定與任何非事件檔的人工產物。
 PROTECTED_EXTRA=(review_ui_preferences.json)
@@ -106,7 +111,8 @@ found=0
 for name in question_review_events.jsonl answer_review_events.jsonl \
             question_ai_review_events.jsonl question_ai_feedback_events.jsonl \
             question_ai_learning_events.jsonl question_correction_feedback_events.jsonl \
-            question_ai_findings.jsonl \
+            question_ai_findings.jsonl question_review_principles.jsonl \
+            question_repair_questions.jsonl \
             review_ui_preferences.json; do
   [ -f "${Q}/${name}" ] || continue
   cp "${Q}/${name}" "${D}/${name}.${T}.bak"

@@ -80,6 +80,30 @@ except ModuleNotFoundError:  # pragma: no cover - importlib-based test loading
         question_snapshot,
     )
 
+# The two 錯題討論區 streams' folding rule, and the one writer for them, live in the pipeline package
+# (`qbr/src/qbr/discuss.py`) rather than here. Three readers share the rule - this server, the repair
+# agent's prompt, and the push/deploy/carry name lists - and the failure this prevents was measured:
+# a second `_taxonomy` implementation in `refresh_queue_text.py` wrote a queue index in a different
+# shape and the whole question area failed to boot. `qbr` imports nothing third-party at module level
+# (the image installs only psycopg), so this import is safe inside the review container, where the
+# repository is mounted at `/workspace`.
+#
+# The path must go in **before** the import, and any cached `qbr` namespace package must be dropped.
+# Doing it inside the `except` does not work: once `import qbr` has resolved to the repository's own
+# `qbr/` directory it is cached in `sys.modules` as a namespace package with no `discuss` in it, and
+# adding `qbr/src` to `sys.path` afterwards cannot change a module that is already resolved. Measured
+# 2026-09-23: the retry inside `except ImportError` re-raised the identical `ImportError` for all 19
+# tests in `test_review_ui_scope.py`.
+_QBR_SRC = str(Path(__file__).resolve().parents[1] / "qbr" / "src")
+if _QBR_SRC not in sys.path:
+    sys.path.insert(0, _QBR_SRC)
+_cached_qbr = sys.modules.get("qbr")
+if _cached_qbr is not None and not getattr(_cached_qbr, "__file__", None):
+    # A namespace package with no `__file__` is the repository directory, not the library.
+    del sys.modules["qbr"]
+from qbr import discuss  # noqa: E402
+from qbr import review_queue  # noqa: E402
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料夾")).expanduser()
@@ -291,6 +315,36 @@ def load_ai_learning_events(
                 continue
             latest.setdefault(key, {})[scope] = event
     return latest
+
+
+def load_append_only_events(path: Path) -> list[dict[str, Any]]:
+    """Every record of an append-only stream, in file order, skipping damaged lines.
+
+    Delegates to `qbr.discuss.load_events`. The folding rule for these streams (add/remove, ask/answer)
+    has three readers - this server, the repair agent's prompt, and the push/deploy/carry name lists -
+    and the one that must not be duplicated is the *interpretation*. `refresh_queue_text.py` carried a
+    second `_taxonomy` and a queue index in a different shape broke the whole question area; the same
+    mistake here would make the principles the agent is given differ from the ones the person sees.
+    """
+    return discuss.load_events(path)
+
+
+def principles_projection(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """The principles currently in force, from the append-only add/remove stream.
+
+    Delegates to `qbr.discuss.principles_projection`; see `load_append_only_events` for why the rule
+    has exactly one implementation.
+    """
+    return discuss.principles_projection(events)
+
+
+def repair_questions_projection(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """The repair agent's questions and the person's answers, newest question first.
+
+    Delegates to `qbr.discuss.repair_questions_projection`; see `load_append_only_events` for why the
+    rule has exactly one implementation.
+    """
+    return discuss.repair_questions_projection(events)
 
 
 def load_correction_feedback_events(path: Path) -> dict[str, dict[str, Any]]:
@@ -970,6 +1024,32 @@ def load_keyed_events(
 #: authors and must not be confused: a finding has no `action` and no `reviewer`, so it can never be
 #: read as a decision. It is loaded here only so the reviewer can *see* what the model said.
 QBR_AI_FINDINGS_STREAM = "question_ai_findings.jsonl"
+
+#: The 錯題討論區's two human-authored streams. Both are **append-only**, for the same reason the
+#: review log is: an instruction to the repair agent and the agent's question back to the person are
+#: both statements about a particular reading of a particular question, and rewriting one would
+#: erase the only record of why a repair was attempted.
+#:
+#: `question_review_principles.jsonl` - the 基本原則 the person writes. These are not a second copy
+#: of a rule: each one is a *constraint on the prompt*, and the point of keeping them in a file
+#: beside the corrections is that they can be handed to the repair agent verbatim instead of being
+#: remembered by whoever last ran it. `add` and `remove` are separate events, so removing a
+#: principle does not delete the fact that it was once applied.
+#:
+#: `question_repair_questions.jsonl` - the agent asking the person back. The repair loop is measured
+#: to be reliable on closed questions ("does this text match that picture") and unreliable on open
+#: ones ("what is wrong with this question"). When it lands on an open one it must stop and ask
+#: rather than guess; that question, and the person's answer, live here so the next run reads them
+#: instead of asking again.
+PRINCIPLES_STREAM = discuss.PRINCIPLES_STREAM
+REPAIR_QUESTIONS_STREAM = discuss.REPAIR_QUESTIONS_STREAM
+
+#: The review buckets the 錯題討論區 exists for. A question belongs there when a person rejected it
+#: (`block`) or when the pipeline/AI returned it for a fresh look (`repair_pending`,
+#: `accepted_reaudit`, `reset_review`). It deliberately does **not** include the whole queue: the
+#: discussion area is for questions that are stuck, and a list of every question would make the
+#: stuck ones unfindable (measured: the previous build pulled all 79,090 rows).
+DISCUSS_BUCKETS = ("block", "repair_pending", "accepted_reaudit", "reset_review")
 
 #: The fields of a finding the reviewer's screen needs, and nothing else.
 #:
@@ -2445,6 +2525,11 @@ class ReviewState:
         # The qbr pipeline's AI notes live beside the human decisions, and are loaded separately so a
         # note can never be mistaken for a decision: the record has no `action` and no `reviewer`.
         self.qbr_ai_findings_log = self.review_log.parent / QBR_AI_FINDINGS_STREAM
+        # The 錯題討論區's two human/agent streams. Both are append-only and both are protected
+        # from a `--delete` deploy for the same reason the review log is: nothing outside them
+        # can rebuild them. See the constants at the top of this file.
+        self.principles_log = self.review_log.parent / PRINCIPLES_STREAM
+        self.repair_questions_log = self.review_log.parent / REPAIR_QUESTIONS_STREAM
         self.preference_path = self.review_log.parent / "review_ui_preferences.json"
         if self.sql_review_enabled:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = {}, {}, {}
@@ -2473,6 +2558,10 @@ class ReviewState:
         #: 1.57 s of every request while the corpus sweep was running.
         self.qbr_ai_findings_store = QbrAiFindingsStore(self.qbr_ai_findings_log)
         self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest
+        # The 錯題討論區's streams are small (a person writes handfuls, not tens of thousands), so
+        # they are re-read whole when their signature changes rather than tailed like the findings.
+        self.principles_events = load_append_only_events(self.principles_log)
+        self.repair_questions_events = load_append_only_events(self.repair_questions_log)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -2482,6 +2571,8 @@ class ReviewState:
         self._ai_learning_log_signature = file_signature(self.ai_learning_log)
         self._correction_feedback_log_signature = file_signature(self.correction_feedback_log)
         self._qbr_ai_findings_signature = file_signature(self.qbr_ai_findings_log)
+        self._principles_log_signature = file_signature(self.principles_log)
+        self._repair_questions_log_signature = file_signature(self.repair_questions_log)
         if self.defer_formal_sync:
             try:
                 self._ensure_formal_sync_queue_schema()
@@ -2870,6 +2961,16 @@ class ReviewState:
         if self.qbr_ai_findings_store.refresh():
             self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest
         self._qbr_ai_findings_signature = file_signature(self.qbr_ai_findings_log)
+
+        principles_signature = file_signature(self.principles_log)
+        if principles_signature != self._principles_log_signature:
+            self.principles_events = load_append_only_events(self.principles_log)
+            self._principles_log_signature = principles_signature
+
+        repair_questions_signature = file_signature(self.repair_questions_log)
+        if repair_questions_signature != self._repair_questions_log_signature:
+            self.repair_questions_events = load_append_only_events(self.repair_questions_log)
+            self._repair_questions_log_signature = repair_questions_signature
 
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
@@ -3865,7 +3966,7 @@ filtered AS (
             and not (params.get("visualStatus") or "")
             # `repair_pending` depends on repair_kind inside the latest event;
             # the lightweight query intentionally does not load that payload.
-            and (params.get("reviewStatus") or "") != "repair_pending"
+            and (params.get("reviewStatus") or "") not in {"repair_pending", "discuss"}
         )
 
     def _sql_light_candidate_filter_parts(self, params: dict[str, str]) -> tuple[str, list[Any]]:
@@ -3898,6 +3999,16 @@ filtered AS (
             clauses.append("review_action IN ('accept', 'unblock')")
         elif review_status == "repair_pending":
             clauses.append("is_repair_pending")
+        elif review_status == "discuss":
+            # The 錯題討論區's own filter: a question a person rejected, or one the pipeline returned
+            # for a fresh look. Expressed here rather than assembled from four requests so the
+            # bucket definition lives in one place and the three SQL paths cannot drift from it.
+            clauses.append("(" + " OR ".join((
+                "COALESCE(review_action, '') = 'block'",
+                "is_repair_pending",
+                "is_accepted_reaudit_pending",
+                "(is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending)",
+            )) + ")")
         elif review_status == "accepted_reaudit":
             clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
@@ -5592,6 +5703,17 @@ filtered AS (
                     copy[field] = correction[field]
             if "options" in correction:
                 copy["options"] = correction["options"]
+            # The correction **is text**, and every dispute was measured from the text that was just
+            # replaced. Leaving them meant a reviewer was shown a dispute about a character that is
+            # no longer in the field: measured 2026-09-23, all 204 repaired questions still displayed
+            # the `substituted-script` dispute the repair had already fixed, so the 錯題討論區's own
+            # "① 機器偵測" panel contradicted the text directly above it. Re-measured here with the
+            # same function the build path uses, so there is still one rule for what a dispute is -
+            # this changes only *when* the rule runs. `disputes_recomputed` records that it ran, so
+            # the UI (and any reader) can tell a dispute that survived the repair from one that was
+            # never re-checked.
+            review_queue.disputes_for_paper([copy])
+            copy["disputes_recomputed"] = True
         display_stem, table_suppressed = strip_structured_tables(str(copy.get("stem") or ""))
         if table_suppressed:
             copy["stem_with_tables"] = copy.get("stem")
@@ -6391,6 +6513,17 @@ filtered AS (
                 review_match = bool(latest_review and normalized_correction(latest_review.get("correction")))
             elif review_status == "repair_pending":
                 review_match = review["is_repair_pending"]
+            elif review_status == "discuss":
+                # The 錯題討論區's own filter: a question a person rejected, or one the pipeline
+                # returned for a fresh look. Same buckets as the SQL path (`DISCUSS_BUCKETS`), so
+                # the JSONL and SQL backends cannot disagree about what is stuck.
+                review_match = bool(
+                    review["action"] == "block"
+                    or review["is_repair_pending"]
+                    or review["is_accepted_reaudit_pending"]
+                    or (review["is_reset_unreviewed"] and not review["is_repair_pending"]
+                        and not review["is_accepted_reaudit_pending"])
+                )
             elif review_status == "accepted_reaudit":
                 review_match = review["is_accepted_reaudit_pending"]
             elif review_status == "reset_review":
@@ -8680,6 +8813,109 @@ filtered_sheets AS (
                 snapshot["options"] = correction["options"]
         return snapshot
 
+    # ------------------------------------------------------------------ 錯題討論區 streams
+    #
+    # These two writers are deliberately plain `open(path, "a")` appends with no SQL mirror.
+    # The other five event streams have SQL tables because they are read back per-question by
+    # queries; these two are read whole by the discuss area (a person writes handfuls), so a table
+    # would be a second representation of the same fact with nothing reading it back. The failure
+    # mode that matters here is *loss*, and an append-only JSONL in a directory the deploy protects
+    # is the same protection the review log relies on.
+    def append_principle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add or remove one 基本原則. Append-only: a removal is an event, not a deletion."""
+        action = str(payload.get("action") or "add").strip().lower()
+        if action not in {"add", "remove"}:
+            raise ValueError("action must be add or remove")
+        text = str(payload.get("text") or "").strip()
+        principle_id = str(payload.get("principle_id") or "").strip()
+        if action == "add" and not text:
+            raise ValueError("text is required")
+        if action == "remove" and not principle_id:
+            raise ValueError("principle_id is required")
+        reviewer = str(payload.get("reviewer") or "local").strip() or "local"
+        if action == "add":
+            # An id derived from the text would collide for two identical principles, which is
+            # correct (they are one principle) but would make removing one remove both. A counted
+            # id in the writer keeps each add a distinct, retractable statement. `discuss.next_id`
+            # counts the events rather than keeping a counter file, which is a second state that can
+            # drift out of step and hand two adds the same id.
+            principle_id = principle_id or discuss.next_id(self.principles_events, "p")
+        event = {
+            "schema": "qbr_review_principle_v0.1",
+            "action": action,
+            "principle_id": principle_id,
+            "text": text,
+            "scope": str(payload.get("scope") or "question").strip() or "question",
+            "reviewer": reviewer,
+        }
+        if action == "remove":
+            event["reason"] = str(payload.get("reason") or "").strip()[:2000]
+        # Written through the shared writer, so the line format (sorted keys, one `open("a")`) cannot
+        # differ between the server and the agent that reads the same file.
+        event = discuss.append_event(self.principles_log, event)
+        self._principles_log_signature = file_signature(self.principles_log)
+        self.principles_events.append(event)
+        return event
+
+    def append_repair_question(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The repair agent asks the person back, or the person answers. Append-only."""
+        action = str(payload.get("action") or "ask").strip().lower()
+        if action not in {"ask", "answer"}:
+            raise ValueError("action must be ask or answer")
+        question_id = str(payload.get("question_id") or "").strip()
+        candidate_key = str(payload.get("candidate_key") or "").strip()
+        question = str(payload.get("question") or "").strip()
+        answer = str(payload.get("answer") or "").strip()
+        if action == "ask":
+            if not question:
+                raise ValueError("question is required")
+            if not candidate_key:
+                raise ValueError("candidate_key is required")
+        else:
+            if not question_id:
+                raise ValueError("question_id is required")
+            if not answer:
+                raise ValueError("answer is required")
+        reviewer = str(payload.get("reviewer") or "repair_agent").strip() or "repair_agent"
+        if action == "ask":
+            question_id = question_id or discuss.next_id(self.repair_questions_events, "rq")
+        event = {
+            "schema": "qbr_repair_question_v0.1",
+            "action": action,
+            "question_id": question_id,
+            "candidate_key": candidate_key,
+            "question": question,
+            "answer": answer if action == "answer" else "",
+            "reason": str(payload.get("reason") or "").strip()[:2000],
+            "model": str(payload.get("model") or "").strip(),
+            "endpoint": str(payload.get("endpoint") or "").strip(),
+            "reviewer": reviewer,
+        }
+        event = discuss.append_event(self.repair_questions_log, event)
+        self._repair_questions_log_signature = file_signature(self.repair_questions_log)
+        self.repair_questions_events.append(event)
+        return event
+
+    def discuss_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
+        """Everything the 錯題討論區 draws, in one response.
+
+        The candidate rows come from the *same* `filtered_candidate_payloads` the question area
+        uses, so the two cannot disagree about what a question is or what its disputes are. Only
+        the bucket filter differs: see `DISCUSS_BUCKETS`.
+        """
+        params = dict(params or {})
+        # `candidate_payload` already attaches `qbr_ai_finding` (the question area draws it too), so
+        # the rows are taken as they are - a second attachment here would be a second place the
+        # finding could differ from the one the question area shows.
+        rows = self.filtered_candidate_payloads(params).get("candidates") or []
+        return {
+            "candidates": rows,
+            "principles": principles_projection(self.principles_events),
+            "repair_questions": repair_questions_projection(self.repair_questions_events),
+            "buckets": list(DISCUSS_BUCKETS),
+            "storage": self.candidate_data_status(),
+        }
+
     def append_ai_learning(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Append a human-selected training example bound to one exact AI audit."""
         candidate_key = str(payload.get("candidate_key") or "").strip()
@@ -9664,6 +9900,18 @@ class Handler(BaseHTTPRequestHandler):
             params = {key: values[0] for key, values in query.items() if values}
             self.send_json(self.state.correction_feedback_payload(params))
             return
+        if parsed.path == "/api/discuss":
+            # One request carries the whole 錯題討論區: the stuck rows, the principles in force, and
+            # the agent's open questions. They are read together because they are one screen's
+            # state, and a second round trip per panel is three places the screen can disagree
+            # with itself about which questions are stuck.
+            self.state.refresh_event_logs()
+            query = urllib.parse.parse_qs(parsed.query)
+            params = {key: values[0] for key, values in query.items() if values}
+            params.setdefault("reviewStatus", "discuss")
+            params.setdefault("limit", "500")
+            self.send_json(self.state.discuss_payload(params))
+            return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
             path = safe_file_path(query.get("path", [""])[0])
@@ -9704,7 +9952,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "Too many write requests"}, status=429)
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/ai-feedback", "/api/ai-learning", "/api/preferences", "/api/reload-candidates"}:
+        if parsed.path not in {"/api/review", "/api/mobile-review", "/api/review-batch-accept", "/api/group-confirm-not-group", "/api/group-confirm-group", "/api/group-reset-review", "/api/manual-asset", "/api/answer-review", "/api/answer-review-batch", "/api/ai-question-audit", "/api/ai-question-audit-reset", "/api/ai-feedback", "/api/ai-learning", "/api/principles", "/api/repair-question", "/api/preferences", "/api/reload-candidates"}:
             self.send_error(404, "Not found")
             return
         if self.writes_are_blocked():
@@ -9961,6 +10209,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"SQL write failed: {exc}"}, status=500)
                 return
             self.send_json({"ok": True, "ai_learning_log": str(self.state.ai_learning_log), "event": event})
+            return
+        if parsed.path == "/api/principles":
+            try:
+                event = self.state.append_principle(payload)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+                return
+            self.send_json({
+                "ok": True,
+                "principles_log": str(self.state.principles_log),
+                "event": event,
+                **principles_projection(self.state.principles_events),
+            })
+            return
+        if parsed.path == "/api/repair-question":
+            try:
+                event = self.state.append_repair_question(payload)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+                return
+            self.send_json({
+                "ok": True,
+                "repair_questions_log": str(self.state.repair_questions_log),
+                "event": event,
+                **repair_questions_projection(self.state.repair_questions_events),
+            })
             return
         if parsed.path == "/api/answer-review":
             action = payload.get("action")

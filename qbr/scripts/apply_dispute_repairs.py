@@ -74,6 +74,7 @@ Governance
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -86,12 +87,11 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import extract  # noqa: E402
+from qbr import ai_findings, extract  # noqa: E402
 
 #: Kinds whose target character is carried by the dispute itself.
 #: `flat-offset` is deliberately absent - it is repaired in `extract._body_centre`, at the reading.
 APPLICABLE = ("substituted-ideograph",)
-
 #: The actions a person's decision can stand at. Used only to *report* the previous state; the
 #: write path does not branch on it (a `reset_review` is correct for a judged and an unjudged
 #: question alike, because it never claims a verdict).
@@ -110,6 +110,11 @@ def parse_args() -> argparse.Namespace:
                         help="question numbers (q004 or 4); default is every applicable question")
     parser.add_argument("--kind", nargs="*", default=None,
                         help="restrict to these dispute kinds (default: %s)" % (APPLICABLE,))
+    parser.add_argument("--page-read", action="store_true",
+                        help="also apply the repairs confirmed by a **page reading** against the "
+                             "question's own disputes (advisory findings, population=dispute). "
+                             "The model transcribes and this script subtracts; only substitutions "
+                             "anchored on a detector's own flagged positions are applied")
     parser.add_argument("--limit", type=int, default=0, help="repair at most this many (0 = all)")
     parser.add_argument("--reviewer", default="repair_dispute_apply",
                         help="who is recorded as making the repair. Must carry the server's "
@@ -192,6 +197,122 @@ def substitutions_for(question: dict) -> list[dict]:
                     continue
                 out.append({"field": sub.get("field"), "position": int(sub["position"]),
                             "before": sub["char"], "after": sub["means"], "rule": kind})
+    return out
+
+
+def flagged_positions(question: dict, field: str) -> dict:
+    """`position -> substitution` for one field, from the question's own disputes.
+
+    This is the anchor the page-read path is allowed to edit: the places a detector *already measured*
+    as carrying a character that is not what the paper prints. Everything else in the field is text
+    nobody has doubted, and a repair has no business rewriting it.
+    """
+    out = {}
+    for dispute in question.get("disputes") or []:
+        if not isinstance(dispute, dict):
+            continue
+        for sub in dispute.get("substitutions") or []:
+            if sub.get("field") == field and sub.get("position") is not None:
+                out[int(sub["position"])] = sub
+    return out
+
+
+def _without_whitespace(text: str):
+    """The text's non-whitespace characters, each with the index it came from.
+
+    Whitespace is dropped because the page read is a second *reading* of the same line: a model that
+    collapses the two spaces the extractor kept between numbered items has not changed the content,
+    and refusing the whole repair over a space would put the one character that does matter out of
+    reach. The original indices are kept so the anchor check compares positions on the stored text.
+    """
+    chars, origins = [], []
+    for index, char in enumerate(text):
+        if char.isspace():
+            continue
+        chars.append(char)
+        origins.append(index)
+    return chars, origins
+
+
+def anchored_page_changes(stored: str, page: str, flagged: set) -> list[dict] | None:
+    """The substitutions a page reading implies, or `None` if it is not a repair but a rewrite.
+
+    The rule, and every clause of it is a measured refusal from this corpus:
+
+    * **Equal length per run.** A run that changes the *number* of characters is not a substitution:
+      it moved every later position, and the diff that follows it is about a line that has become a
+      different line. Measured: `115090 q053`'s read inserted 93 characters and deleted the four
+      options, `114020 q060` inserted 80.
+    * **Replace only.** An `insert`/`delete` run is the same failure expressed as a boundary instead
+      of a length change. Measured: `113020 q076`'s read appended a table, `113020 q050` a figure
+      description, `105020 q045` a whole compartment diagram with invented arrow labels.
+    * **Every position must already be flagged, and every flagged position fixed.** Touching a
+      character no detector doubted is the model editing prose; leaving a doubted one untouched is a
+      partial repair that would reopen the question with the defect still in it. Both measured: the
+      `flattened-offset` class (`C=5e-0.4t` -> `C=5e⁻⁰·⁴ᵗ`) has **no** flagged position at all, and
+      reading it as a repair would rewrite physics formulas on a model's word alone - it is repaired
+      at the reading, not here.
+    """
+    if not stored or not page:
+        return None
+    if stored == page:
+        return None
+    stored_chars, stored_origins = _without_whitespace(stored)
+    page_chars, _ = _without_whitespace(page)
+    matcher = difflib.SequenceMatcher(None, "".join(stored_chars), "".join(page_chars),
+                                      autojunk=False)
+    touched, changes = set(), []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            return None
+        touched |= set(range(i1, i2))
+        changes.append({"positions": (i1, i2), "from": "".join(stored_chars[i1:i2]),
+                        "to": "".join(page_chars[j1:j2])})
+    if not changes:
+        return None
+    if {stored_origins[i] for i in touched} != set(flagged):
+        return None
+    # Back to the stored field's own coordinates. `verify` and `apply_substitutions` slice the
+    # original text, not the folded one - a position in the folded text would edit the wrong
+    # character whenever the field contains a space, which the corpus's formulas and numbered
+    # option lists always do. A run whose original indices are not contiguous cannot be expressed as
+    # one `{position, before}` pair, so it is refused rather than silently split.
+    located = []
+    for change in changes:
+        i1, i2 = change["positions"]
+        originals = [stored_origins[i] for i in range(i1, i2)]
+        if originals != list(range(originals[0], originals[-1] + 1)):
+            return None
+        located.append({"position": originals[0],
+                        "before": stored[originals[0]:originals[-1] + 1],
+                        "after": change["to"]})
+    return located
+
+
+def page_read_substitutions(question: dict, changes: list[dict]) -> list[dict]:
+    """The `{field, position, before, after}` list a *confirmed page reading* justifies.
+
+    Only for fields the reading covers and only where every edit is anchored on a detector's own
+    measurement - see `anchored_page_changes`. The `before` text is taken from the stored field, not
+    from the finding, so a stale finding (the text moved since it was written) refuses in `verify`
+    instead of applying an edit to the wrong place.
+    """
+    out = []
+    for change in changes or []:
+        field = change.get("field")
+        if not field:
+            continue
+        flagged = set(flagged_positions(question, field))
+        anchored = anchored_page_changes(field_text(question, field),
+                                         str(change.get("page") or ""), flagged)
+        if not anchored:
+            return []
+        for edit in anchored:
+            out.append({"field": field, "position": edit["position"],
+                        "before": edit["before"], "after": edit["after"],
+                        "rule": "page-read"})
     return out
 
 
@@ -292,6 +413,26 @@ def build_repair_event(question_key: str, subs: list[dict], correction: dict,
     }
 
 
+def applied_signature(event: dict):
+    """What a repair event already changed, as an order-independent frozenset of edits.
+
+    The queue's candidate text is **not** rewritten by design - a correction is an event that overlays
+    the field, so the original reading survives. That means `substitutions_for` still finds the same
+    `⻑ -> 長` on the next run, and without this the tool would append a second identical repair for
+    every question it had already fixed (measured: 192 such events were already in the log). Comparing
+    the edits, not the count, is what makes a *re*-repair possible: if the text has moved since, the
+    signature differs and the question is repaired again, which is correct.
+    """
+    if not event or event.get("source") != "qbr_dispute_apply":
+        return None
+    return frozenset((str(c.get("field")), str(c.get("from")), str(c.get("to")))
+                     for c in event.get("changes") or [])
+
+
+def repair_signature(subs: list[dict]):
+    return frozenset((str(s["field"]), str(s["before"]), str(s["after"])) for s in subs)
+
+
 def main() -> int:
     args = parse_args()
     queue_dir = os.path.join(args.queue, "review-ui")
@@ -309,6 +450,15 @@ def main() -> int:
     if args.only:
         wanted_numbers = {str(item).lower().lstrip("q").lstrip("0") or "0" for item in args.only}
 
+    # The page readings, when asked for. Read from the same finding stream the reviewer's screen
+    # shows, so the repair is applied to exactly the diff a person can open and check.
+    page_findings = {}
+    if args.page_read:
+        store = os.path.join(queue_dir, ai_findings.STREAM)
+        for key, record in ai_findings.latest_by_question(store).items():
+            if record.get("population") == "dispute" and record.get("changes"):
+                page_findings[key] = record
+
     latest = latest_events(events_path)
     before = sha256_file(events_path)
     created_at = datetime.now().isoformat(timespec="seconds")
@@ -319,6 +469,10 @@ def main() -> int:
         if wanted_numbers is not None and number not in wanted_numbers:
             continue
         subs = [s for s in substitutions_for(question) if s["rule"] in wanted_kinds]
+        if args.page_read:
+            record = page_findings.get(question.get("candidate_key"))
+            if record:
+                subs = subs + page_read_substitutions(question, record.get("changes") or [])
         if not subs:
             continue
         complaints = verify(question, subs)
@@ -327,6 +481,11 @@ def main() -> int:
             continue
         previous = latest.get(question["candidate_key"]) or {}
         previous_action = previous.get("action")
+        # Already repaired, with exactly these edits. The candidate text is not rewritten (by
+        # design), so the same substitution is found again every run; without this the tool would
+        # duplicate its own past work. A different edit set - the text moved since - is not skipped.
+        if applied_signature(previous) == repair_signature(subs):
+            continue
         correction = build_correction(question, subs)
         planned.append({"candidate_key": question["candidate_key"], "subs": subs,
                         "correction": correction, "previous_action": previous_action,

@@ -47,6 +47,11 @@ LOCAL_DIR="${CATALOG}/qbr/data/review-queues/live/review-ui"
 STREAMS=(
   question_review_events.jsonl
   question_ai_findings.jsonl
+  # 錯題討論區的兩條流：基本原則與代理的反問／人的回答。跟上面兩個同理——它們只存在於
+  # 「那一刻人寫了什麼」，無法從語料重建；名字與 `scripts/serve_question_review_ui.py` 的
+  # `PRINCIPLES_STREAM`／`REPAIR_QUESTIONS_STREAM` 相同。
+  question_review_principles.jsonl
+  question_repair_questions.jsonl
 )
 
 DRY_RUN=0

@@ -29,6 +29,7 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 
 from qbr import ai_findings  # noqa: E402
+from qbr import discuss  # noqa: E402
 from qbr import groups  # noqa: E402
 from qbr import review_queue  # noqa: E402
 
@@ -124,6 +125,13 @@ def review_events_to_carry(out_dir, previous=()):
              "question_ai_review_events.jsonl", "question_ai_feedback_events.jsonl",
              "question_ai_learning_events.jsonl",
              "question_correction_feedback_events.jsonl",
+             # The 錯題討論區's two append-only streams. Same reason every other name here is
+             # carried: nothing outside them can reconstruct them, and a rebuild that silently
+             # discards the person's principles and the agent's open questions would lose the only
+             # record of why a repair was attempted. Read from `qbr.discuss` rather than respelled,
+             # because the deploy and push scripts name the same files and the failure mode of a
+             # typo is silent loss.
+             *discuss.STREAMS,
              # A model's finding about a question a person blocked is not a decision, but it is the
              # same kind of irreplaceable data: it says what was believed about one particular
              # reading, and the readings it is about are the strange one-offs nobody can classify on
@@ -306,7 +314,7 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
                                   if p.get("category")}),
              "subjects": sorted({p["subject"] for p in per_paper if p.get("subject")}),
              "years": sorted({p["year"] for p in per_paper if p.get("year")}, reverse=True),
-             "taxonomy": _taxonomy(per_paper),
+             "taxonomy": review_queue.taxonomy_of(per_paper),
              "order": [p["paper"] for p in per_paper]}
     with open(os.path.join(out_dir, "queue_index.json"), "w", encoding="utf-8") as handle:
         json.dump(index, handle, ensure_ascii=False, indent=2)
@@ -329,48 +337,6 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
         for origin, count in origins.most_common():
             print("    from %s (%d)" % (origin, count))
     return index
-
-
-def _taxonomy(per_paper):
-    """`category -> year -> subject -> [paper]`, and the counts at every level.
-
-    Built as a tree rather than as a flat list of facet values because the facets are not
-    independent: 醫事檢驗師 has papers in 115 but 藥師(一) does not have the same subjects, so a
-    flat subject list would offer choices that lead to an empty list. A tree cannot.
-    """
-    tree = {}
-    for entry in per_paper:
-        entry = dict(entry)
-        # The two spellings of one category are folded together, because they *are* one category:
-        # the catalog spells `藥師（一）` with full-width brackets in some years and `藥師(一)` in
-        # others, and both are the same examination class. Measured: without folding, the review UI
-        # offers six categories where there are four, and the two 藥師(一) entries split 63 and 12
-        # papers - so a reviewer choosing one sees a quarter of the papers that exist.
-        category = _fold_category(entry.get("category")) or "(未分類)"
-        year = str(entry.get("year") or "(未知)")
-        subject = entry.get("subject") or entry.get("paper") or "(未知)"
-        bucket = tree.setdefault(category, {"years": {}, "papers": 0, "questions": 0})
-        bucket["papers"] += 1
-        bucket["questions"] += entry["questions"]
-        year_bucket = bucket["years"].setdefault(
-            year, {"sittings": {}, "papers": 0, "questions": 0})
-        year_bucket["papers"] += 1
-        year_bucket["questions"] += entry["questions"]
-        # The sitting is its own level, between the year and the subject, because the same subject
-        # is set twice a year and the two settings are two different papers: 1151 and 1152 of
-        # 藥師(一) 藥學(二) share a subject name and share nothing else. Without this level a
-        # reviewer comparing a question against the paper it came from cannot say which sitting
-        # they mean, which is the whole point of the comparison.
-        sitting = str(entry.get("ordinal") or "")
-        sitting_bucket = year_bucket["sittings"].setdefault(
-            sitting, {"subjects": {}, "papers": 0, "questions": 0})
-        sitting_bucket["papers"] += 1
-        sitting_bucket["questions"] += entry["questions"]
-        subject_bucket = sitting_bucket["subjects"].setdefault(
-            subject, {"papers": [], "questions": 0})
-        subject_bucket["papers"].append(entry["paper"])
-        subject_bucket["questions"] += entry["questions"]
-    return tree
 
 
 def _adopt_crops(refs, run, paper, crops_root, copied, *, queue_root):
@@ -470,13 +436,10 @@ def _adopt_finding_crops(records, previous, crops_root, copied, *, queue_root):
 def _fold_category(name):
     """One category's name, with the brackets folded so two spellings are one entry.
 
-    The corpus's own spelling is preferred when it can be told which is which: `藥師(一)` is the
-    directory name and `藥師（一）` is the catalog's, and the directory is the authority on its own
-    layout. Both are folded to the half-width form, which is the form the directories use.
+    Kept as a thin alias because the `categories` facet and the taxonomy must fold the same way;
+    the rule itself lives in `review_queue` with the tree it feeds.
     """
-    if not name:
-        return name
-    return name.replace("（", "(").replace("）", ")")
+    return review_queue._fold_category(name)
 
 
 def _sha256(path):

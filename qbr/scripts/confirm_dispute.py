@@ -62,7 +62,7 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import ai_findings, extract, paths, reread  # noqa: E402
+from qbr import ai_findings, discuss, extract, paths, reread  # noqa: E402
 import ask_about_blocks  # noqa: E402
 import repair_loop  # noqa: E402
 
@@ -107,6 +107,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-confirmed", action="store_true",
                         help="skip a question whose current reading already has a confirmation, "
                              "so a 30-minute loop does not re-render what it already read")
+    parser.add_argument("--principles", metavar="PATH",
+                        help="the reviewer's 基本原則 stream (default: the queue's own "
+                             + discuss.PRINCIPLES_STREAM + "); each active principle is added to "
+                             "the transcription prompt as a constraint")
+    parser.add_argument("--escalate", action="store_true",
+                        help="when the page cannot settle a blocked question, ask the person back "
+                             "(append an `ask` to " + discuss.REPAIR_QUESTIONS_STREAM + ")")
     return parser.parse_args()
 
 
@@ -296,7 +303,23 @@ def crop_for(pdf_path, number, *, dpi, out_png=None):
     return png, len(rows), None
 
 
-def transcribe(png, *, endpoint, max_tokens, timeout):
+def transcribe_system(principles=None):
+    """The system prompt a page read is actually sent.
+
+    A separate function because two places need the *same* text: `transcribe` sends it, and
+    `_append_finding` stores it. The record's whole value is that a reader can see what the model was
+    shown; regenerating a different prompt at record time (which is what happens when the record is
+    built through `ai_findings.build_prompt` while the send used `reread.SYSTEM`) would put a prompt
+    in the record that was never sent. The principles are appended here, once, so the send and the
+    record cannot disagree about whether the reviewer's constraints were in force.
+    """
+    system = reread.SYSTEM
+    if principles:
+        system = system + ai_findings.principles_note(principles)
+    return system
+
+
+def transcribe(png, *, endpoint, max_tokens, timeout, principles=None):
     """Ask the model what the crop says. Returns `(seen_or_None, raw, error, usage, seconds)`.
 
     The engine controls come from `ask_about_blocks` rather than being written again here, because
@@ -304,11 +327,17 @@ def transcribe(png, *, endpoint, max_tokens, timeout):
     Splash, `chat_template_kwargs.enable_thinking` is accepted with HTTP 200 and takes 31.5s with
     612 characters of reasoning, while `reasoning_effort: none` takes 6.7s with none. Two copies of
     that table is two places for a "thinking off" run to keep thinking.
+
+    `principles` are the reviewer's 基本原則, appended to the system prompt verbatim. They go on the
+    **system** turn, not the user turn, because they are a standing constraint on how to read rather
+    than part of the question - the same reason the transcription instructions are there. This is the
+    integration point requirement (4) asks for: a person writes one line in the 錯題討論區, and every
+    later page read by the resident loop obeys it, with no rebuild.
     """
     import base64
 
     messages = [
-        {"role": "system", "content": reread.SYSTEM},
+        {"role": "system", "content": transcribe_system(principles)},
         {"role": "user", "content": [
             {"type": "text", "text": "請轉錄這張截圖。"},
             {"type": "image_url", "image_url": {
@@ -413,13 +442,16 @@ def queue_relative(path, queue_root):
         return path
 
 
-def confirm_one(question, *, endpoint, args, crops_root, queue_root):
+def confirm_one(question, *, endpoint, args, crops_root, queue_root, principles=None):
     key = question.get("candidate_key")
     number = question.get("question_number")
     pdf_path = paper_pdf_of(question)
     record_base = {
         "candidate_key": key, "question_number": number,
         "kinds": sorted(set(dispute_kinds(question))),
+        # Carried so `_append_finding` records the constraints that were actually sent, and so a
+        # failed read still records under which constraints it failed.
+        "principles": principles or None,
     }
     if not pdf_path:
         return {**record_base, "error": "no-paper", "seconds": 0.0}
@@ -430,7 +462,8 @@ def confirm_one(question, *, endpoint, args, crops_root, queue_root):
     if failure:
         return {**record_base, "error": failure[0], "rows": rows, "seconds": 0.0}
     seen, raw, error, usage, seconds = transcribe(
-        png, endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
+        png, endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout,
+        principles=principles)
     report, changes = changes_between(question, seen)
     finding = finding_from(changes, seen=seen, error=error)
     return {**record_base, "pdf": pdf_path, "rows": rows, "crop_png": out_png,
@@ -467,14 +500,24 @@ def main() -> int:
           % (len(questions), endpoint["name"], endpoint["url"]))
     print("寫到：%s" % out)
     print("截圖留存：%s" % crops_root)
+    # The reviewer's principles are read **once per round**, not once per question: they are a
+    # standing constraint, and re-reading the file per question would let a principle added mid-round
+    # apply to some of the batch and not others - the same measurement claiming two prompt versions.
+    principles_path = args.principles or os.path.join(queue_dir, discuss.PRINCIPLES_STREAM)
+    principles = discuss.active_principles(discuss.load_events(principles_path))
+    if principles:
+        print("基本原則 %d 條（%s）" % (len(principles), principles_path))
+    else:
+        print("基本原則：無（%s）" % principles_path)
     print()
 
     confirmed = 0
     agreed = 0
     failures = 0
+    escalated = 0
     for index, question in enumerate(questions, 1):
         result = confirm_one(question, endpoint=endpoint, args=args, crops_root=crops_root,
-                             queue_root=queue_root)
+                             queue_root=queue_root, principles=principles)
         kinds = ",".join(result["kinds"])
         number = str(result["question_number"])
         if result.get("error"):
@@ -493,12 +536,71 @@ def main() -> int:
             print("[%d/%d] q%-4s %-28s 紙本與抽取一致"
                   % (index, len(questions), number, kinds))
         _append_finding(out, question, result, endpoint, args)
+        # The page read settled the question or it did not. When it did not - the crop could not be
+        # read, or the diff is empty while the person still blocked it - the honest next move is to
+        # ask the person, not to try a second opinion from the same model. This is the answer to
+        # "what does the loop do with what it cannot resolve": it stops and says so, in the place the
+        # person is already looking.
+        if args.escalate and _needs_person(result):
+            if _escalate(queue_dir, question, result, endpoint):
+                escalated += 1
 
     print()
     print("已記錄 %d 筆：不一致 %d、一致 %d、讀不到 %d。"
           % (len(questions), confirmed, agreed, failures))
+    if args.escalate:
+        print("反問人 %d 筆（寫進 %s）。" % (escalated, discuss.REPAIR_QUESTIONS_STREAM))
     print("這些都是 advisory：沒有任何 review event、沒有任何題目被改（GOV-05）。")
     return 0
+
+
+#: Why a page read that came back "一致" can still leave the question stuck. The distinction is
+#: between a dispute the page can settle ("does the text match the picture") and one it cannot (a
+#: question a person rejected for a reason the picture does not show - an answer they disagree with,
+#: a defect in the exam itself). `confirm_dispute`'s header records why the model must not be asked
+#: the open question; this recognises the moment the loop has reached it.
+def _needs_person(result):
+    """Whether this read leaves something only a person can settle."""
+    if result.get("error"):
+        return True
+    # Empty diff on a blocked question: the page and the extraction agree, so the block cannot be
+    # about extraction. That is exactly `NOT_EXTRACTION`, and it is the human-judgment case.
+    return not result.get("changes")
+
+
+def _escalate(queue_dir, question, result, endpoint):
+    """Append one `ask` to the repair-question stream, unless this reading is already asked.
+
+    Idempotent by reading, like `confirmed_keys`: the loop runs every 30 minutes forever, and the
+    same unanswerable question must not spawn a new `ask` each round - the person would open the
+    discussion area to 200 identical questions. The `question_id` is therefore derived from the
+    candidate key and the reading, so the same reading cannot open a second question and a repaired
+    question (new reading) gets asked afresh.
+    """
+    path = os.path.join(queue_dir, discuss.REPAIR_QUESTIONS_STREAM)
+    key = question.get("candidate_key")
+    fingerprint = ai_findings.reading_fingerprint(question)
+    question_id = "rq-%s-%s" % (str(key).replace("moex:", "").replace(":", "-"), fingerprint[:8])
+    events = discuss.load_events(path)
+    if any(str(event.get("question_id")) == question_id for event in events):
+        return False
+    if result.get("error"):
+        reason = "紙本讀不到（%s）" % result["error"]
+        ask = ("這一題我拍到了紙本，但讀不出來（%s）。請確認：這題還需要修嗎？"
+               "若需要，請在討論區直接改文字；若只是紙本本身沒問題，請按重新審核。" % result["error"])
+    else:
+        reason = "紙本與抽取一致，人仍阻擋"
+        ask = ("這一題的紙本與抽取文字看過是一樣的（我已核對過截圖），"
+               "但你之前把它阻擋了。這表示問題不在抽取——請告訴我是什麼："
+               "答案有爭議、題目本身有錯、還是紙本以外的原因？你的回答會在下一輪讀到。")
+    discuss.append_event(path, {
+        "action": "ask", "question_id": question_id, "candidate_key": key,
+        "question": ask, "reason": reason,
+        "model": endpoint["name"], "endpoint": endpoint["url"],
+        "reviewer": "repair_agent",
+    })
+    print("        → 反問人：%s" % reason)
+    return True
 
 
 def _append_finding(out, question, result, endpoint, args):
@@ -506,14 +608,20 @@ def _append_finding(out, question, result, endpoint, args):
     kinds = result.get("kinds") or []
     learned = {"confirm_dispute": "；".join(kinds)} if kinds else None
     finding = result["finding"]
-    system, user = ai_findings.build_prompt(question, learned=learned, population="dispute")
+    principles = result.get("principles") or None
+    # The stored prompt is the one that was **sent** (`transcribe_system`), not one rebuilt from the
+    # finding template. Storing a prompt the model never saw is exactly the kind of record this
+    # project treats as no record at all.
+    system = transcribe_system(principles)
+    _template_system, user = ai_findings.build_prompt(question, learned=learned,
+                                                      population="dispute", principles=principles)
     record = ai_findings.make_record(
         question=question, finding=finding, model=endpoint["name"], endpoint=endpoint["url"],
         prompt_system=system, prompt_user=user, raw=result.get("raw") or "",
         usage=result.get("usage") or {}, seconds=result.get("seconds") or 0.0,
         error=None if result.get("error") is None else result["error"],
         learned=learned, population="dispute", crop=result.get("crop"),
-        changes=result.get("changes"))
+        changes=result.get("changes"), principles=principles)
     # The dispute itself, and the crop's size, are the evidence this note is about. Kept beside the
     # note rather than inside it, because a reader has to be able to see the claim and the picture.
     record["evidence"] = {**(record.get("evidence") or {}),

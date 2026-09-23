@@ -211,6 +211,59 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
     }
 
 
+def taxonomy_of(per_paper):
+    """`category -> year -> sitting -> subject -> {papers, questions}`, and the counts above it.
+
+    **One implementation, in the library, because two of them diverged.** This tree is the review
+    UI's navigation contract: `scopePapers()`/`whereOfPaper()` walk it to decide which papers a
+    scope names, and the sitting level is not decoration - the same subject is set twice a year and
+    the two settings are two different papers. A second copy lived in `refresh_queue_text.py` with
+    a *different shape* (`category -> year -> sitting -> subject -> {papers, questions}` as a bare
+    nested dict without the `years`/`sittings` wrappers and counts), and running it overwrote the
+    live queue's `queue_index.json`. Measured 2026-09-23: after `refresh_queue_text.py --queue live`
+    the question area stopped rendering at all - `scopePapers()` read `bucket.years` from a node
+    whose keys were year numbers, got `undefined`, and `Object.keys(undefined)` threw before the
+    first question was drawn. A test could not have caught it because the *build* path was correct;
+    only the second implementation was wrong. Single-sourced here so a third shape cannot appear.
+
+    The two spellings of one category are folded together, because they *are* one category: the
+    catalog spells `藥師（一）` with full-width brackets in some years and `藥師(一)` in others.
+    Measured: without folding the UI offers six categories where there are four, and the two
+    `藥師(一)` entries split 63 and 12 papers - a reviewer choosing one sees a quarter of the papers.
+    """
+    tree = {}
+    for entry in per_paper:
+        entry = dict(entry)
+        category = _fold_category(entry.get("category")) or "(未分類)"
+        year = str(entry.get("year") or "(未知)")
+        subject = entry.get("subject") or entry.get("paper") or "(未知)"
+        questions = int(entry.get("questions") or 0)
+        bucket = tree.setdefault(category, {"years": {}, "papers": 0, "questions": 0})
+        bucket["papers"] += 1
+        bucket["questions"] += questions
+        year_bucket = bucket["years"].setdefault(
+            year, {"sittings": {}, "papers": 0, "questions": 0})
+        year_bucket["papers"] += 1
+        year_bucket["questions"] += questions
+        sitting = str(entry.get("ordinal") or "")
+        sitting_bucket = year_bucket["sittings"].setdefault(
+            sitting, {"subjects": {}, "papers": 0, "questions": 0})
+        sitting_bucket["papers"] += 1
+        sitting_bucket["questions"] += questions
+        subject_bucket = sitting_bucket["subjects"].setdefault(
+            subject, {"papers": [], "questions": 0})
+        subject_bucket["papers"].append(entry.get("paper"))
+        subject_bucket["questions"] += questions
+    return tree
+
+
+def _fold_category(name):
+    """One category's name, with the brackets folded so two spellings are one entry."""
+    if not name:
+        return name
+    return str(name).replace("（", "(").replace("）", ")")
+
+
 def disputes_for_paper(rows):
     """Attach each question's disputes, over the whole paper at once.
 

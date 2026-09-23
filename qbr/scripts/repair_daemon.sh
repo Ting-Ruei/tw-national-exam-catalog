@@ -51,9 +51,15 @@ while true; do
   # `--model` 就是 lane：`LANE=splash` 走截圖轉錄那條線，不改的話這裡的變數等於裝飾。
   # 截圖預設就存進 queue 自己的 `review-ui/crops/`，會被同一個路由服務，
   # 所以「模型看過的圖，人也看得到」，不必另外指定。
+  #
+  # `--principles` 讀審題者在錯題討論區寫下的基本原則（預設就是 queue 自己那一份），
+  # 每一條都會原封不動加進轉錄提示詞——人在介面上寫一句，下一輪就照著讀，不必重建。
+  # `--escalate` 是「這一輪解決不了」的出口：紙本讀不到、或紙本與抽取一致但人仍然阻擋時，
+  # 它寫一個 `ask` 到 `question_repair_questions.jsonl`，下一輪的提示詞讀得到，
+  # 人也會在討論區看到它。**不是**再問一次同一個模型，也不是替人做決定。
   if ( cd "${QBR}" && "${PY}" scripts/confirm_dispute.py \
         --queue "${QUEUE}" --model "${LANE}" \
-        --blocked-only --skip-confirmed --limit "${WINDOW}" ) >>"${LOG}" 2>&1; then
+        --blocked-only --skip-confirmed --limit "${WINDOW}" --escalate ) >>"${LOG}" 2>&1; then
     echo "[daemon] 第 ${turn} 輪完成 $(date -u +%FT%TZ)" | tee -a "${LOG}"
   else
     echo "[daemon] 第 ${turn} 輪失敗（rc=$?），${INTERVAL}s 後重試" | tee -a "${LOG}"

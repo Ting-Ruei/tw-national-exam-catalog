@@ -188,6 +188,22 @@ LEARNED = """
 並把注意力放在**其他**異常上。若沒有其他異常，verdict 用 NOT_EXTRACTION。
 """
 
+#: 審題者寫的「基本原則」——**人給的約束**，不是程式規則。
+#:
+#: 刻意做成一段提示詞文字，而不是編譯成 `if`：專案量過，把「讀懂文字的意思」寫成腳本會走上
+#: 「規則→腳本→新問題→新規則」的跑步機。人在介面上寫下一句話、這句話原封不動地出現在模型
+#: 眼前，這條路才可檢查——因為它是一個句子，不是一個實作。
+#:
+#: 與 `LEARNED` 分開，因為兩者對模型的要求相反：`LEARNED` 說「這些形狀已處理，看別的」，
+#: 原則是「這些界線必須遵守」。把它們擠進同一段會讓一個「不要管 X」的約束讀成「去找 X」。
+#:
+#: 為空時整段不出現：一段空的【基本原則】會讀成「沒有原則」，而那是與「這次沒被給原則」
+#: 不同的主張（同 `learned_note`）。
+PRINCIPLES = """
+【基本原則】審題者寫下的約束，你必須遵守；它們優先於你的判斷：
+{principles}
+"""
+
 USER = """科目：{subject}
 試卷：{paper}
 題號：第 {number} 題
@@ -347,12 +363,19 @@ def reading_fingerprint(question) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def build_prompt(question, *, learned=None, population="blocked") -> tuple:
+def build_prompt(question, *, learned=None, population="blocked", principles=None) -> tuple:
     """The system prompt and the user turn. Returned together so a record can store both.
 
     `learned` is optional on purpose. Omitting it is not the same as passing an empty one: a pass
     given prior findings and one that was not are different passes, and the record keeps the prompt
     verbatim so the difference survives.
+
+    `principles` are the 基本原則 the reviewer wrote in the 錯題討論區. They are **constraints**, not
+    observations, which is why they are a separate block from `learned`: `learned` says "these shapes
+    are handled, look elsewhere", a principle says "this boundary must be kept". Folding them together
+    would let "ignore X" read as "go find X". Omitted and empty are different states, exactly as for
+    `learned` - an empty block would read as "there are no principles", which is a claim about a person
+    rather than about this run.
 
     `population` says how the question got here, and it is not cosmetic - see `POPULATIONS`. The
     default is the loop's case (a person blocked it), because that is what the record format was
@@ -370,10 +393,11 @@ def build_prompt(question, *, learned=None, population="blocked") -> tuple:
                        figures=figures_note(question),
                        answer=answer_of(question) or "（無）",
                        ask=framing["ask"])
-    return SYSTEM.format(codes=codes, arrival=framing["arrival"]) + learned_note(learned), user
+    return (SYSTEM.format(codes=codes, arrival=framing["arrival"])
+            + learned_note(learned) + principles_note(principles), user)
 
 
-def prompt_version(population="blocked", learned=None) -> str:
+def prompt_version(population="blocked", learned=None, principles=None) -> str:
     """A short hash of the prompt itself, so a change to it is visible in every record.
 
     The loop's whole point is that the prompt is adjusted between batches, which means two records
@@ -390,6 +414,11 @@ def prompt_version(population="blocked", learned=None) -> str:
     all but the last flag and `parse_learned` walked the string a character at a time - and under the
     template-only hash those records claimed the same version as a run given the real block.)
 
+    `principles` is hashed the same way and for the same reason, with one extra: the reviewer can
+    change the principles **between two runs of a resident loop that nobody is watching**, so two
+    records whose text is identical can have been produced under different constraints. Hashing the
+    rendered block is what makes those two records distinguishable at all.
+
     And `population`, because a pass that tells the model "a human flagged this" is not the same
     measurement as one that tells it "nobody has looked at this yet" - they even ask for different
     things. Two records that differ only in that sentence must not hash to the same version, or the
@@ -397,9 +426,31 @@ def prompt_version(population="blocked", learned=None) -> str:
     consistent measurement.
     """
     framing = POPULATIONS[population]
-    body = "\x00".join([SYSTEM, USER, LEARNED, learned_note(learned), framing["arrival"],
+    body = "\x00".join([SYSTEM, USER, LEARNED, learned_note(learned), PRINCIPLES,
+                         principles_note(principles), framing["arrival"],
                          framing["ask"], ANSWER_READING, "\x00".join(sorted(CODES))])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+
+
+def principles_note(principles) -> str:
+    """The reviewer's constraints, or nothing when there are none.
+
+    Accepts the list `discuss.active_principles` returns, a mapping, or a string, because the two
+    callers that pass it (the resident loop and the one-off corpus pass) get it from different
+    places and neither should have to reshape it. Numbered, because a constraint a person wrote is
+    something they may want to refer to ("the second one") when they answer the agent back.
+    """
+    if not principles:
+        return ""
+    if isinstance(principles, str):
+        lines = [principles]
+    elif isinstance(principles, dict):
+        lines = ["%d. %s：%s" % (index, str(item).strip(), str(note or "").strip())
+                 for index, (item, note) in enumerate(sorted(principles.items()), 1)]
+    else:
+        lines = ["%d. %s" % (index, str(item).strip())
+                 for index, item in enumerate(principles, 1)]
+    return PRINCIPLES.format(principles="\n".join(lines))
 
 
 def learned_note(learned) -> str:
@@ -420,7 +471,7 @@ def learned_note(learned) -> str:
 
 def make_record(*, question, finding, model, endpoint, prompt_system, prompt_user,
                 raw="", usage=None, seconds=0.0, error=None, created_at=None, learned=None,
-                population="blocked", crop=None, changes=None) -> dict:
+                population="blocked", crop=None, changes=None, principles=None) -> dict:
     """One finding, with everything needed to check it later.
 
     `prompt_user` is stored verbatim and not regenerated at read time: the point of the record is
@@ -443,12 +494,18 @@ def make_record(*, question, finding, model, endpoint, prompt_system, prompt_use
         # Which generation of the prompt this note belongs to. The prompt is adjusted between batches
         # - that is the loop - so without this field two notes taken before and after a change look
         # like the same measurement and cannot be compared without diffing the stored text by hand.
-        "prompt_version": prompt_version(population, learned),
+        "prompt_version": prompt_version(population, learned, principles),
         # How the question reached the model: a person blocked it, or it was next in the file. A
         # finding about a blocked question and one about a random corpus question are different
         # claims with different error rates, so which population it came from is part of the record.
         "population": population,
         "learned": learned or None,
+        # The 基本原則 in force when this note was written, kept verbatim beside the prompt for the same
+        # reason the prompt is: a constraint the reviewer edited later would otherwise be invisible in
+        # the record, and two notes taken under different constraints would look like one measurement.
+        # A note made before this field existed has `None`, which is "not recorded", not "no
+        # principles" - the same distinction `learned`/`crop` keep.
+        "principles": list(principles) if principles else None,
         "prompt_system": prompt_system,
         "prompt_user": prompt_user,
         # The exact text the model was shown. A reader who cannot see the evidence is trusting a

@@ -121,23 +121,8 @@ def rebuild_index(index: dict, rows: list) -> dict:
     index["years"] = sorted({str((row.get("metadata") or {}).get("year") or "") for row in rows},
                             reverse=True)
     index["order"] = [entry["paper"] for entry in per_paper]
-    index["taxonomy"] = _taxonomy(per_paper)
+    index["taxonomy"] = review_queue.taxonomy_of(per_paper)
     return index
-
-
-def _taxonomy(per_paper: list) -> dict:
-    """`類科 → 年 → 考次 → 科目 → {papers, questions}`，與 `build_review_queue` 同形。"""
-    tree = {}
-    for entry in per_paper:
-        category = str(entry.get("category") or "")
-        year = str(entry.get("year") or "")
-        ordinal = str(entry.get("ordinal") or "")
-        subject = str(entry.get("subject") or "")
-        node = (tree.setdefault(category, {}).setdefault(year, {})
-                .setdefault(ordinal, {}).setdefault(subject, {"papers": [], "questions": 0}))
-        node["papers"].append(entry.get("paper"))
-        node["questions"] += int(entry.get("questions") or 0)
-    return tree
 
 
 def main(argv: list | None = None) -> int:
