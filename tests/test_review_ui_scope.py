@@ -12,6 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
+
 
 def import_review_ui():
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -209,7 +212,7 @@ class ReviewUiScopeTests(unittest.TestCase):
         state = object.__new__(self.ui.ReviewState)
         heavy_cte, _ = state._sql_candidate_filter_parts({"q": "缓"})
         light_cte, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "unreviewed"})
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
 
         self.assertIn("raw_candidate_json::text", heavy_cte)
         self.assertIn("latest_question_ai AS", light_cte)

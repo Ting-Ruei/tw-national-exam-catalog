@@ -9,6 +9,9 @@ from unittest.mock import Mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 import serve_question_review_ui as review_ui  # noqa: E402
@@ -178,7 +181,7 @@ class CountOnlyRequestTests(unittest.TestCase):
         for source in ("filtered_candidate_payloads", "filtered_candidate_payloads_sql"):
             with self.subTest(source=source):
                 body = _function_body(
-                    Path(ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8"),
+                    server_source(),
                     source,
                 )
                 self.assertIn('params.get("_count")', body, f"{source} 沒有讀 _count")
