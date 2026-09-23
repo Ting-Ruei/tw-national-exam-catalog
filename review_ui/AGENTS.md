@@ -33,6 +33,75 @@ v1 仍然服務，**不是因為它還被維護**，而是因為既有書籤、�
 
 **v1 只修「讓它繼續能動」的問題，不加功能。**
 
+## 改完必須推上常駐機，否則等於沒改（2026-09-23 補）
+
+**審題介面跑在常駐機 `192.168.10.70`，不是在筆電上。** 你現在編輯的檔案在筆電的工作樹；
+使用者打開的是**常駐機的容器**。兩者之間沒有人自動搬運：
+
+```text
+筆電工作樹  ──(要你自己下指令)──>  192.168.10.70:8765
+```
+
+**所以「我改好了」與「使用者看得到」是兩件事。** 2026-09-23 就是這樣出錯的：介面與題目改了
+一整天，常駐機的檔案停在 6 小時前，使用者打開 `192.168.10.70:8765/v2` 什麼都沒看到。
+不是部署壞了——是**沒有人要求要部署**。
+
+改完 `review_ui/`、`scripts/serve_question_review_ui.py`、`qbr/src/qbr/review_ui/` 或任何伺服器
+會讀到的東西之後：
+
+```sh
+scripts/deploy_station.sh --restart     # 同步程式碼，並重建容器讓新程式真的生效
+```
+
+- `--restart` **不能省**。rsync 只換檔案；跑著的 Python 不會自己重讀已載入的模組。
+  少了它，部署「成功」而服務仍是舊行為——這是這條路徑最會騙人的失敗。
+- **不要手打 `rsync`。** 它會靜默漏掉三件事：`code/國考題資料夾` 掛載點、`record-deploy.sh`
+  要的來源 revision，以及最要緊的——審核紀錄要排除在 `--delete` 之外。
+- 改完介面**用瀏覽器打開 `http://192.168.10.70:8765/v2` 看一次**，再對照
+  `shasum -a 256 review_ui/v2.html` 與服務中的位元組。截圖與 hash 都對才算完成。
+- 反向（常駐機 → 筆電）只有審核紀錄：`scripts/pull_station_reviews.sh`。
+
+「部署成功」不是證據。`up.sh` 自己會比對服務題數與 `wc -l candidates.jsonl`；數字不符它以非零
+結束。要更強的證據就用 `~/qbr-review/DEPLOYED.json`——那裡記著站上每個檔案的 sha256。
+
+## 伺服器結構（2026-09-23 拆分）
+
+`scripts/serve_question_review_ui.py` 曾經是 **10,713 行**。它現在是 **347 行的 composition
+root**：只做 `parse_args`、`main`，以及把實作再匯出。實作在
+[`../qbr/src/qbr/review_ui/`](../qbr/src/qbr/review_ui/)：
+
+| 檔案 | 內容 |
+|---|---|
+| `constants.py` | 共用常數、分類濾鏡、SQL 片段、prompt 版本 |
+| `paths.py` | 路徑安全、content-type、專案路徑 rebind |
+| `events.py` | append-only 事件流的讀取（六條流） |
+| `ai_audit.py` | AI 稽核的判讀、範圍切分、修正建議 |
+| `queue_view.py` | 佇列／卷的投影、討論區分類 |
+| `legacy_assets.py` | v1 頁面與資產回應 |
+| `review_state.py` | `ReviewState`：審核引擎本體 |
+| `handlers.py` | `Handler` / `MobileHandler`：HTTP 進入點 |
+
+**為什麼要拆**：一個 10,713 行的檔案讓「改一條規則」變成「在 10,713 行裡找那條規則」，
+而 `ReviewState` 一個 class 就佔 7,239 行、132 個方法。拆完之後，改 AI 判讀只開
+`ai_audit.py`。
+
+**拆分的鐵則：`serve_question_review_ui` 仍是唯一的公開名字。** 約 50 個測試檔用
+`importlib.util.spec_from_file_location(...)` 直接載入這個路徑，然後呼叫
+`module.split_ai_audit_scopes(...)`。所以 composition root 會把每個模組的符號再匯出一次
+（`from qbr.review_ui.x import (...)` 那一段）。**那段不是裝飾，是契約**：把東西移出
+`qbr/review_ui/` 時，要把它加進再匯出清單，否則測試會在它沒改過的地方壞掉。
+
+**測試要斷言「實作在原始碼裡的樣子」時，讀 `tests/review_ui_source.py::server_source()`**，
+不要直接讀 `scripts/serve_question_review_ui.py`——實作已經不在那個檔案裡，直接讀會找不到
+而誤報「規則不見了」。
+
+**要 patch 模組層級的全域變數**（例如呼叫 `safe_file_path` 前改 `PROJECT_ROOT`）時，
+要 patch **擁有它的那個模組**（`serve_question_review_ui.paths.PROJECT_ROOT`）。
+patch composition root 上的同名屬性只會改到再匯出的那份副本，函式讀到的仍是自己模組的值。
+
+**拆分的正確性用「逐定義比對」證明，不是用感覺**：229 個頂層定義中，227 個的原始碼與拆分前
+**逐位元組相同**，另外 2 個（`main`、`parse_args`）留在 composition root 且同樣逐位元組相同。
+
 ## 鐵則
 
 1. **導覽與內容必須來自同一個來源。** `S.rows` 同時是被畫出來的陣列與被走過的陣列。

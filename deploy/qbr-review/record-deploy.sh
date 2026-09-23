@@ -39,6 +39,23 @@ SERVED="$(curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/queue_index" 2>/d
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("questions") or 0)' 2>/dev/null \
   || echo 0)"
 
+# 2026-09-23 之後，伺服器是 composition root，實作在 `qbr/src/qbr/review_ui/`。
+# 只記 `server_sha256` 會讓「站上跑的是哪一份程式」失去證明力：那兩個檔案已經不含大部分程式碼，
+# 它們相同**不代表**模組相同。所以把模組的 sha256 也一起記下來（單一檔案時就是那一個 hash）。
+IMPL_DIR="${HOME_DIR}/code/qbr/src/qbr/review_ui"
+IMPL_JSON="{}"
+if [[ -d "${IMPL_DIR}" ]]; then
+  IMPL_JSON="$(python3 - "$IMPL_DIR" <<'PY'
+import hashlib, json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+out = {}
+for p in sorted(d.glob("*.py")):
+    out[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+print(json.dumps(out, ensure_ascii=False, indent=2))
+PY
+)"
+fi
+
 cat > "${OUT}" <<JSON
 {
   "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -47,8 +64,9 @@ cat > "${OUT}" <<JSON
   "source_repo": "${SRC_REPO}",
   "source_head": "${SRC_HEAD}",
   "source_dirty_files": "${SRC_DIRTY}",
-  "note": "站上跑的是工作樹鏡射。source_head 由送部署的那台提供；source_dirty_files > 0 代表它含未提交的改動（實測：一筆 content_type_of 修正，讓圖能顯示）。這台上的 ~/tw-national-exam-catalog 是舊 checkout，不是本部署的來源。",
+  "note": "站上跑的是工作樹鏡射。source_head 由送部署的那台提供；source_dirty_files > 0 代表它含未提交的改動（實測：一筆 content_type_of 修正，讓圖能顯示）。這台上的 ~/tw-national-exam-catalog 是舊 checkout，不是本部署的來源。2026-09-23 之後 server_sha256 只涵蓋 composition root，實作在 qbr/src/qbr/review_ui/，見 review_ui_sha256。",
   "server_sha256": "$(sha "${SERVER}")",
+  "review_ui_sha256": ${IMPL_JSON},
   "v2_sha256": "$(sha "${V2}")",
   "legacy_sha256": "$(sha "${LEGACY}")",
   "candidates_sha256": "$(sha "${QUEUE}/candidates.jsonl")",

@@ -23,6 +23,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
 SERVER = ROOT / "scripts" / "serve_question_review_ui.py"
 
 # 一題帶著 `substituted-ideograph` 爭議的真實形狀：`⻑` 是部首補充區的碼位，不是「長」。
@@ -138,7 +141,7 @@ class RepairedTextHasNoStaleDisputeTests(unittest.TestCase):
                         "關掉重量，舊爭議就回來了：這一步就是把它清掉的原因")
 
     def test_the_recompute_uses_the_one_rule_not_a_second_copy(self):
-        source = SERVER.read_text(encoding="utf-8")
+        source = server_source()
         self.assertIn("review_queue.disputes_for_paper(", source)
         # 而且它真的在 correction 疊加的區塊裡（不在別的、跑不到的地方）。
         block = source.split('copy["disputes_recomputed"]')[0]
