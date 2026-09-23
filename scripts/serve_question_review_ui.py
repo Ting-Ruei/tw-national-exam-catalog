@@ -936,8 +936,17 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 latest.pop(key, None)
                 latest_reset[key] = event
                 continue
-            if "correction" not in event and key in latest and latest[key].get("correction"):
-                event["correction"] = latest[key]["correction"]
+            # A human decision must not drop the repaired text a previous human decision was made
+            # against. The correction can be sitting in `latest_reset`: a repair reopens the
+            # question (`latest` popped) and carries the new text; the person then reads it and
+            # decides. Measured 2026-09-23: four questions (`108030:305:33 q034/q040/q072/q073`) had
+            # a `qbr_dispute_apply` reset at 08:20:05 and a human `accept` after it (the station
+            # clock is UTC), and this branch - which looked only at `latest` - lost the correction,
+            # so the accepted question fell back to the raw `⻑` the repair had just fixed. The SQL
+            # path already read `latest or latest_reset`; this is the same rule, spelled the same.
+            previous = latest.get(key) or latest_reset.get(key)
+            if "correction" not in event and previous and previous.get("correction"):
+                event["correction"] = previous["correction"]
             counts[key] = counts.get(key, 0) + 1
             latest[key] = event
             latest_reset.pop(key, None)

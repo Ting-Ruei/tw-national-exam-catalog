@@ -143,3 +143,75 @@ class RepairedTextHasNoStaleDisputeTests(unittest.TestCase):
         # 而且它真的在 correction 疊加的區塊裡（不在別的、跑不到的地方）。
         block = source.split('copy["disputes_recomputed"]')[0]
         self.assertIn('if "options" in correction:', block)
+
+
+class HumanDecisionKeepsTheRepairedTextTests(unittest.TestCase):
+    """人在修復之後做的決定，不可以把修好的文字丟掉。
+
+    實測 2026-09-23：`108030:305:33` 的 q034/q040/q072/q073 在 `08:20:05` 有一筆
+    `qbr_dispute_apply` 的 `reset_review`（帶著 `options` 的 correction），常駐機時鐘是 UTC，
+    所以人的 `accept` 蓋在 `03:28:55`——**檔案順序上在修復之後**。
+
+    `load_review_events` 在 reset 分支把 `latest` pop 掉、只留 `latest_reset`。下一個分支
+    （人的決定）原本只從 `latest` 取 correction，於是那四題回到原抽取的 `⻑`/`延⻑`——
+    人剛接受的那一版不見了。SQL 那條路早就寫成 `latest or latest_reset`，所以這是
+    **兩份後端對同一件事給不同答案**，而不是一條規則的兩個地方。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ui = import_server()
+
+    def _log(self, tmp):
+        log = Path(tmp) / "question_review_events.jsonl"
+        events = [
+            # 修復：文字層的修正，並把題目退回未審（`latest` 被 pop）。
+            {"candidate_key": "moex:108030:305:33:1:question:q034",
+             "action": "reset_review", "source": "qbr_dispute_apply",
+             "reviewer": "repair_dispute_apply",
+             "correction": {"options": [{"key": "A", "text": "延長藥物於黏膜之作用時間"}]},
+             "changes": [{"field": "option A", "from": "⻑", "to": "長"}],
+             "created_at": "2026-09-23T08:20:05"},
+            # 人的決定，檔案順序在後（站上時鐘較慢，created_at 反而較早）。
+            {"candidate_key": "moex:108030:305:33:1:question:q034",
+             "action": "accept", "source": "linear_v2", "reviewer": "local",
+             "created_at": "2026-09-23T03:28:55"},
+        ]
+        log.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events),
+                       encoding="utf-8")
+        return log
+
+    def test_a_human_decision_inherits_the_correction_from_the_reset_not_only_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = self._log(tmp)
+            latest, _counts, latest_reset = self.ui.load_review_events(log)
+        key = "moex:108030:305:33:1:question:q034"
+        self.assertEqual((latest.get(key) or {}).get("action"), "accept")
+        self.assertTrue((latest[key].get("correction") or {}).get("options"),
+                        "人的決定不可丢掉剛修好的文字（correction 要從 latest_reset 繼承）")
+        # 而人的決定一旦寫下，`latest_reset` 就被 pop 了（決定已經不只是「待重看」），
+        # 所以 correction 只可能來自上面的繼承——不是 reset 自己還留著給它。
+        self.assertIsNone(latest_reset.get(key))
+
+    def test_the_negative_control_reading_only_latest_loses_the_correction(self):
+        # 負對照：把「只從 latest 取」寫回來（原本的 JSONL 行為），那條斷言就會紅。
+        # 這裡直接重建那份邏輯，證明失敗的形狀就是先前線上那四題的形狀。
+        with tempfile.TemporaryDirectory() as tmp:
+            log = self._log(tmp)
+            latest, _counts, _latest_reset = self.ui.load_review_events(log)
+            events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+        key = "moex:108030:305:33:1:question:q034"
+        naive = {}
+        for event in events:
+            event = dict(event)
+            k = event["candidate_key"]
+            if event.get("action") in ("unreviewed", "reset_review"):
+                naive.pop(k, None)
+                continue
+            if "correction" not in event and k in naive and naive[k].get("correction"):
+                event["correction"] = naive[k]["correction"]
+            naive[k] = event
+        self.assertFalse((naive[key].get("correction") or {}).get("options"),
+                         "只讀 latest 就會丢掉 correction——這正是被修掉的舊行為")
+        self.assertTrue((latest[key].get("correction") or {}).get("options"))
