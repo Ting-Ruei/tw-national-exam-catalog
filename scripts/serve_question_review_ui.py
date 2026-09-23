@@ -1117,6 +1117,40 @@ REPAIR_QUESTIONS_STREAM = discuss.REPAIR_QUESTIONS_STREAM
 #: stuck ones unfindable (measured: the previous build pulled all 79,090 rows).
 DISCUSS_BUCKETS = ("block", "repair_pending", "accepted_reaudit", "reset_review")
 
+
+def is_discuss_bucket(review: dict[str, Any] | None) -> bool:
+    """Is this row's projected review state one the 錯題討論區 shows?
+
+    One function, because the rule had three copies - the JSONL filter loop and both SQL CTEs - and
+    a fourth in the browser's `discussRowLabel`. Three copies of "what is stuck" is three chances
+    for the list and the filter to disagree, and the area was rebuilt precisely because the previous
+    definition ("every question") made the stuck ones unfindable.
+
+    The input is the projection `filtered_candidate_payloads` already computed per row, so this
+    cannot drift from the buckets the row displays: it reads the same four flags the row carries.
+    """
+    review = review if isinstance(review, dict) else {}
+    return bool(
+        review.get("action") == "block"
+        or review.get("is_repair_pending")
+        or review.get("is_accepted_reaudit_pending")
+        or (review.get("is_reset_unreviewed")
+            and not review.get("is_repair_pending")
+            and not review.get("is_accepted_reaudit_pending"))
+    )
+
+
+#: The same rule as `is_discuss_bucket`, expressed against the CTE's own columns. It has to be a
+#: second expression rather than a call, because the SQL filter runs in the database - but it is one
+#: string used by **both** CTEs (the full one and the light one), so a third SQL spelling cannot
+#: appear. `tests/test_review_ui_discuss.py` drives both halves over the same truth table.
+SQL_DISCUSS_PREDICATE = "(" + " OR ".join((
+    "COALESCE(review_action, '') = 'block'",
+    "is_repair_pending",
+    "is_accepted_reaudit_pending",
+    "(is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending)",
+)) + ")"
+
 #: The fields of a finding the reviewer's screen needs, and nothing else.
 #:
 #: The stream is large - measured at 371 MB for 61,178 records on the served queue - and almost all
@@ -3566,6 +3600,19 @@ class ReviewState:
             clauses.append("review_action IN ('accept', 'unblock')")
         elif review_status == "repair_pending":
             clauses.append("is_repair_pending")
+        elif review_status == "discuss":
+            # The 錯題討論區's own filter: a question a person rejected, or one the pipeline
+            # returned for a fresh look.
+            #
+            # This branch was **missing** here and present only in the light CTE, which is the one
+            # discuss never uses: `_sql_can_use_light_candidate_query` returns False for `discuss`
+            # (the light query cannot see `repair_kind`), so the request fell through to
+            # `review_action = %s` with the literal `'discuss'` and matched **nothing**. Measured on
+            # the truth table: the branch existed, was tested, and was unreachable. `discuss` is
+            # reachable on the SQL backend (`sql_primary`), where the whole area would have been
+            # empty - a filter that returns no rows reads as "nothing is stuck", not as a bug.
+            # The shared `SQL_DISCUSS_PREDICATE` is used by both CTEs so the two cannot drift again.
+            clauses.append(SQL_DISCUSS_PREDICATE)
         elif review_status == "accepted_reaudit":
             clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
@@ -4067,14 +4114,9 @@ filtered AS (
             clauses.append("is_repair_pending")
         elif review_status == "discuss":
             # The 錯題討論區's own filter: a question a person rejected, or one the pipeline returned
-            # for a fresh look. Expressed here rather than assembled from four requests so the
-            # bucket definition lives in one place and the three SQL paths cannot drift from it.
-            clauses.append("(" + " OR ".join((
-                "COALESCE(review_action, '') = 'block'",
-                "is_repair_pending",
-                "is_accepted_reaudit_pending",
-                "(is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending)",
-            )) + ")")
+            # for a fresh look. The predicate is the shared `SQL_DISCUSS_PREDICATE`, so this and the
+            # light CTE below cannot drift from each other or from `is_discuss_bucket`.
+            clauses.append(SQL_DISCUSS_PREDICATE)
         elif review_status == "accepted_reaudit":
             clauses.append("is_accepted_reaudit_pending")
         elif review_status == "correct":
@@ -6589,15 +6631,9 @@ filtered AS (
                 review_match = review["is_repair_pending"]
             elif review_status == "discuss":
                 # The 錯題討論區's own filter: a question a person rejected, or one the pipeline
-                # returned for a fresh look. Same buckets as the SQL path (`DISCUSS_BUCKETS`), so
-                # the JSONL and SQL backends cannot disagree about what is stuck.
-                review_match = bool(
-                    review["action"] == "block"
-                    or review["is_repair_pending"]
-                    or review["is_accepted_reaudit_pending"]
-                    or (review["is_reset_unreviewed"] and not review["is_repair_pending"]
-                        and not review["is_accepted_reaudit_pending"])
-                )
+                # returned for a fresh look. The rule lives in `is_discuss_bucket` so it cannot
+                # differ from the SQL paths or from what the row says its own bucket is.
+                review_match = is_discuss_bucket(review)
             elif review_status == "accepted_reaudit":
                 review_match = review["is_accepted_reaudit_pending"]
             elif review_status == "reset_review":

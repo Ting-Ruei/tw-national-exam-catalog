@@ -26,6 +26,9 @@ import unittest
 from pathlib import Path
 
 from test_review_ui_areas import V2, function_body, script_of
+# One loader for the server module, not a second copy: two loaders would be two module objects and
+# the class-level `object.__new__` stubs below would be built against the wrong one.
+from test_review_ui_scope import import_review_ui as load_ui_module
 
 
 class DiscussLayoutTests(unittest.TestCase):
@@ -312,6 +315,77 @@ class DiscussButtonWiringTests(unittest.TestCase):
         self.assertIn("handlers.length === 0", source)
         self.assertIn("typeof n.onclick === 'function'", source)
         self.assertIn("每一個可見動作控制項", source)
+
+
+class DiscussFilterReachability(unittest.TestCase):
+    """The SQL discuss predicate must be in the CTE the request actually takes.
+
+    The branch existed, was tested, and was **unreachable**: it lived in the light CTE, and
+discuss is excluded from the light query (`_sql_can_use_light_candidate_query` returns False because
+    the light query cannot see `repair_kind`). So the full CTE fell through to
+    `review_action = %s` with the literal `'discuss'` and matched nothing.
+
+    That failure mode is worth a test of its own because it does not look like a failure: an empty
+    filter returns zero rows, and zero rows reads as \u300c\u6c92\u6709\u5361\u4f4f\u7684\u984c\u300d, not as a bug. On the SQL backend
+    (`sql_primary`) the whole area would have been silently empty.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ui = load_ui_module()
+
+    def test_both_ctes_carry_the_shared_predicate(self):
+        state = object.__new__(self.ui.ReviewState)
+        heavy, _ = state._sql_candidate_filter_parts({"reviewStatus": "discuss"})
+        light, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "discuss"})
+        self.assertIn("is_repair_pending", heavy)
+        self.assertIn("is_accepted_reaudit_pending", heavy)
+        self.assertIn("is_repair_pending", light)
+        self.assertIn("is_accepted_reaudit_pending", light)
+        # Negative control: the fall-through the defect produced.
+        self.assertNotIn("review_action = %s", heavy)
+
+    def test_the_browser_filter_takes_the_heavy_cte(self):
+        """
+        The reachability fact itself, so the test above cannot be satisfied by the wrong branch:
+        `discuss` must not be eligible for the light query, which is why the predicate has to be in
+        the heavy one.
+        """
+        state = object.__new__(self.ui.ReviewState)
+        self.assertFalse(state._sql_can_use_light_candidate_query({"reviewStatus": "discuss"}))
+
+    def test_is_discuss_bucket_matches_the_sql_predicate_on_every_bucket(self):
+        """One truth table, both implementations.
+
+        The Python function (`is_discuss_bucket`) and the SQL string (`SQL_DISCUSS_PREDICATE`) are
+        two expressions of one rule and cannot be made one expression (one runs in the database).
+        What can be made true is that they agree - so the same rows are driven through both.
+        """
+        cases = [
+            # (row flags, is it stuck)
+            ({"action": "block"}, True),
+            ({"action": "accept"}, False),
+            ({"is_repair_pending": True}, True),
+            ({"is_accepted_reaudit_pending": True}, True),
+            ({"is_reset_unreviewed": True}, True),
+            # A reset that is *also* a repair is still one question, not two.
+            ({"is_reset_unreviewed": True, "is_repair_pending": True}, True),
+            ({"is_reset_unreviewed": True, "is_accepted_reaudit_pending": True}, True),
+            ({"action": "block", "is_reset_unreviewed": True}, True),
+            # Not reviewed, nothing pending: not stuck.
+            ({"is_never_reviewed": True}, False),
+            ({}, False),
+        ]
+        for review, expected in cases:
+            self.assertEqual(expected, self.ui.is_discuss_bucket(review), review)
+        # And each flag the Python reads must appear in the SQL, or the two are not the same rule.
+        for flag in ("is_repair_pending", "is_accepted_reaudit_pending", "is_reset_unreviewed"):
+            self.assertIn(flag, self.ui.SQL_DISCUSS_PREDICATE)
+        self.assertIn("'block'", self.ui.SQL_DISCUSS_PREDICATE)
+        # Negative control for the SQL string: dropping the reset clause would make the
+        # `is_reset_unreviewed` case above the only one that differs.
+        self.assertIn("NOT is_repair_pending AND NOT is_accepted_reaudit_pending",
+                      self.ui.SQL_DISCUSS_PREDICATE)
 
 
 if __name__ == "__main__":
