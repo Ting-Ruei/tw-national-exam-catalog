@@ -17,7 +17,13 @@ const htmlPath = process.argv[2] || 'review_ui/v2.html';
 const jsonlPath = process.argv[3];
 
 const html = fs.readFileSync(htmlPath, 'utf8');
-const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+// 本檔已拆成 `review_ui/v2/*.js`（一檔一區，載入序＝檔名序）。
+// 瀏覽器由 HTML 的 `<script src>` 順序串起；這裡按同一序重組後才 `eval`，
+// 因為各檔共用的 `S`/`A` 是頂层 `const`（跨腳本本體可見，但 `eval` 每段要自己收斂）。
+const parts = [...html.matchAll(/<script src="([^"]+)"><\/script>/g) ?? []].map(([, src]) =>
+  fs.readFileSync(path.join(path.dirname(path.resolve(htmlPath)), src), 'utf8'));
+if (!parts.length) throw new Error('v2.html 沒有可執行的 <script src>');
+const script = parts.join("\n");
 
 /* --- a browser small enough to hold the navigation path, and no smaller -------------------- */
 const elements = new Map();
