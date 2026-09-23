@@ -23,15 +23,35 @@
 
 ## 工作項（每項做完 → 真 Chrome 量測 → 測試 → checkpoint commit）
 
-- [ ] P0 建立驗收工具：`scripts/test_v2_ui_audit.mjs`（CDP，逐顆按鈕點、每區截圖）
-- [ ] P1 上下標：新增 `richText()`（白名單 markup → 真標籤），題幹／選項用 `innerHTML` 輸出
-      - 負對照：`<script>`／`<img onerror>` 必須被跳脫
-- [ ] P2 下拉選單：每個 level 只改自己那一格，不清上層；改選上層才把下層選「全部」
-      - 由 `resolveLevel` 的 `''`＝全部語意支撐
-- [ ] P3 討論區版面：右欄改 `minmax(360px,0.9fr)` 全高，跟題目區一致；左欄加 scope 過濾器
-- [ ] P4 討論區加入：圖片擷圖／抽換（沿用 `/api/manual-asset`）、字體調整、給 AI 的註解（comment 事件）
-- [ ] P5 全部按鈕真瀏覽器測過（含 `/legacy` 對照）
-- [ ] P6 文件：`docs/skills/review-ui-v2/SKILL.md`、`review_ui/AGENTS.md`、`docs/ROUTE_HISTORY.md`
+- [x] P0 建立驗收工具：`scripts/test_v2_ui_audit.mjs`（CDP，逐顆按鈕點）
+- [x] P1 上下標：新增 `richText()`（白名單 markup → 真標籤），題幹／選項／原題用 `innerHTML`
+      - 負對照：`<script>`／`<img onerror>` 必須被跳脫（`tests/test_review_ui_rich_text.py`）
+- [x] P2 下拉選單：每個 level 只改自己那一格；`resolveLevel` 的 `''`＝全部語意
+      - 負對照：`tests/test_review_ui_v2_scope.py`，真 Chrome 重驗通過
+- [x] P3 討論區版面：`238px | 1fr | 1fr`，與題目區同一個算式（實測 PDF 欄 330→721px）
+- [x] P4 討論區加入：③ 原題（唯讀、走 `richText`）、④ 擷圖／抽換（沿用 `/api/manual-asset`）、
+      字級控制（一個 CSS 變數）、⑥ 註解（`comment` 事件）、統計移到左欄
+- [x] P5 全部按鈕真瀏覽器測過：`test_v2_ui_audit.mjs` 四區 213 個控制項 + `test_v2_note_keeps_question.mjs`
+- [x] P5b 修掉由此暴露的真缺陷：寫註解會把題目踢出討論區（`_note_annotates_pending_reset`）
+- [x] P6 文件：`docs/skills/review-ui-v2/SKILL.md`、`review_ui/AGENTS.md`、`docs/ROUTE_HISTORY.md`
+
+### 使用者 2026-09-23 回答後的追加需求
+
+| # | 使用者的話 | 判讀 |
+|---|---|---|
+| 1 | 「字體」是前者 | 閱讀字級（已完成），不是上下標標記 |
+| 2 | **「要有篩選，比較好審核」** | **討論區要加 scope 篩選器（未做）** |
+| 3 | 「類科，維持目前四層」 | 四層是 類科／年度／考次／科目 |
+| 4 | 逐題 comment 自己讀，是原本沒有的規則才加入 | 讀完 10 筆註解 → 只有新規則才進基本原則（未做） |
+
+- [ ] P7 討論區 scope 篩選器：左欄加四層下拉，與題目區**共用** `resolveLevel`／`availableSittings`／
+      `availableSubjects`／`countQuestions` 與 `scopePickerHtml`（不重寫一份）。分類樹只含討論區的題
+      （伺服器只回卡住的題），預設全部
+      - 契約：改一層不動別層；負對照沿用 `test_review_ui_v2_scope.py` 的案例
+      - 真 Chrome：改考次後科目不變；篩選後清單只含該科
+- [ ] P8 逐題註解 → 基本原則：讀 10 筆 `comment`，比對既有原則，只把**新的**規則寫成 `add` 事件
+      - 不可把一次性的事實（「Ae-αt＋Be-βt 沒改到」）當成通則
+
 
 ## 不能違反的規則
 
