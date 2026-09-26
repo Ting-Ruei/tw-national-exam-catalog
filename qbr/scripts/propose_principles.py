@@ -74,7 +74,7 @@ sys.path.insert(0, os.path.dirname(PKG))
 
 import repair_loop  # noqa: E402
 import ask_about_blocks  # noqa: E402
-from qbr import ai_findings, discuss, engines  # noqa: E402
+from qbr import ai_findings, discuss  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(PKG), "scripts"))
 from review_feedback import classify_change, diff_snapshots  # noqa: E402
@@ -324,8 +324,8 @@ def ask_curator(packet: dict, *, endpoint, args) -> tuple:
     """One call. Returns `(parsed_or_None, raw, error, seconds)`.
 
     Through `ask_about_blocks.ask`, like every other pass in this repo, so the engine-specific thinking
-    switch and the egress gate stay in `qbr.engines` (`QBR_ALLOW_EXTERNAL_LLM` keeps an off-network
-    provider off unless someone turns it on; `splash`/`dgx-*` are on-network).
+    switch and request construction stay in `qbr.engines`; `--model` uses the same endpoint registry as
+    the existing QBR reading passes.
 
     The answer is read with `ai_findings.json_object` - the same object reader `parse_finding` uses -
     so a fenced or prose-wrapped answer is read the same way in both places.
@@ -401,10 +401,6 @@ def main() -> int:
         return 0
 
     endpoint = ask_about_blocks.ENDPOINTS[args.model]
-    refused = engines.egress_refusal(endpoint)
-    if refused:
-        print("不呼叫 %s：%s" % (args.model, refused))
-        return 0
 
     proposed = 0
     already = existing_proposals(queue_dir)

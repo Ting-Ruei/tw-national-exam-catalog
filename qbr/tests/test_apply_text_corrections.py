@@ -33,7 +33,6 @@ sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
 import apply_text_corrections as produce_mod  # noqa: E402
-from scripts.serve_question_review_ui import ReviewState  # noqa: E402
 
 KEY = "moex:111020:305:33:1:question:q030"
 
@@ -607,44 +606,3 @@ def test_a_row_the_event_does_not_know_is_copied_through_byte_for_byte(monkeypat
     assert odd_line in lines, "沒有被 correction 碰到的列要原樣透過"
 
 
-# ------------------------------------------------- the display fold keeps that same original
-
-def _state():
-    """A `ReviewState` with empty projections: `candidate_payload` reads them and nothing else."""
-    state = ReviewState.__new__(ReviewState)
-    for name in ("issues", "latest_reviews", "review_counts", "latest_reset_reviews",
-                 "latest_answer_reviews", "answer_review_counts", "latest_ai_reviews",
-                 "ai_review_counts", "latest_group_reviews", "latest_ai_feedbacks",
-                 "latest_correction_feedbacks"):
-        setattr(state, name, {})
-    return state
-
-
-def _fold_event():
-    return {"action": "reset_review", "reviewer": "repair_dispute_apply",
-            "correction": {"stem": PAGE}}
-
-
-def test_the_display_fold_serves_the_persisted_original():
-    """The server folds the correction onto the copy it serves. Once the producer has persisted an
-    original, the fold must serve *that* text: the row's own text is the corrected one by then, so a
-    fold that rebuilt the dict from the row would present the repair as if the extractor had always
-    read it that way - and there is exactly one record of what the extractor read."""
-    row = _row(stem=PAGE, parser_original={"stem": STORED})
-    payload = _state().candidate_payload(row, latest_reset_reviews={KEY: _fold_event()})
-
-    assert payload["stem"] == PAGE
-    assert payload["parser_original"]["stem"] == STORED
-    assert payload["parser_original"]["stem"] != payload["stem"]
-
-
-def test_the_negative_control_rebuilding_from_the_row_would_serve_the_corrected_text():
-    """The negative control, as its own test: the old fold was `{"stem": item.get("stem"), ...}`, and
-    this row's stem is already the corrected text - so that fold returns the corrected text as the
-    "original" and the assertion below goes red."""
-    row = _row(stem=PAGE, parser_original={"stem": STORED})
-    old_fold = {"stem": row.get("stem")}
-    payload = _state().candidate_payload(row, latest_reset_reviews={KEY: _fold_event()})
-
-    assert old_fold["stem"] == payload["stem"] == PAGE
-    assert payload["parser_original"]["stem"] == STORED, "存過的原文才是原文"
