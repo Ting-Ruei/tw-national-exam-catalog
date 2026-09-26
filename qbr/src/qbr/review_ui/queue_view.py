@@ -407,7 +407,13 @@ def review_projection(
     reset = latest_reset_review if isinstance(latest_reset_review, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     event = latest or reset or {}
-    reset_waiting = bool(reset and not latest)
+    applied = _first_event_value(reset, "applied").strip().lower()
+    repaired_after_decision = bool(
+        (latest or {}).get("pending_reset") and applied in {"field", "substitution"}
+    )
+    reset_waiting = bool(
+        (reset and not latest and applied != "withdrawn") or repaired_after_decision
+    )
     action = _first_event_value(event, "action")
     reset_action = _first_event_value(reset, "action")
     previous_action = _first_event_value(

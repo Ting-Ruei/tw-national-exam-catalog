@@ -80,8 +80,8 @@ import threading
 import time
 import urllib.request
 from .ai_audit import ai_patch_safety_reason, ai_review_reference, ai_suggested_correction, ai_visual_status, answer_review_hint, candidate_visual_profile, compact_ai_lane_results, compact_candidate_for_ai, effective_ai_audit_status, human_review_supersedes_ai, int_or_zero, issue_quality_status, normalized_correction, openai_question_ai_audit, repair_event_info, split_ai_audit_scopes
-from .constants import AI_FEEDBACK_RATINGS, AI_FEEDBACK_SCOPES, AI_RESET_REVIEW_ACTIONS, AI_REVIEW_PROMPT_VERSION, ANSWER_ISSUE_CODES, ANSWER_READY_ACTIONS, CATEGORY_GROUP_FILTERS, CATEGORY_GROUP_NORMALIZED_FILTERS, GROUP_REVIEW_ACTIONS, MANUAL_ASSET_ROOT, MOBILE_REVIEW_ACTIONS, NON_QUESTION_REVIEW_ACTIONS, NOTE_ACTIONS, QBR_AI_FINDINGS_STREAM, QUESTION_READY_ACTIONS, REPAIR_REVIEWER_PREFIXES, RESET_REVIEW_ACTIONS, SQL_ANSWER_CATEGORY_EXPR, SQL_CANDIDATE_CATEGORY_EXPR, SQL_REVIEW_ACCEPTED_REAUDIT_EXPR, SQL_REVIEW_REPAIR_PENDING_EXPR, SqlWriteError, TABLE_DEPENDENCY_SQL_RE, VISUAL_DEPENDENCY_SQL_RE, WORKFLOW_QUEUE_DEFINITIONS
-from .events import _merge_note_into_reset, _note_annotates_pending_reset, file_signature, load_ai_feedback_events, load_ai_learning_events, load_append_only_events, load_correction_feedback_events, load_correction_feedback_rows, load_group_review_events, load_keyed_events, load_latest_events, load_review_events
+from .constants import AI_FEEDBACK_RATINGS, AI_FEEDBACK_SCOPES, AI_RESET_REVIEW_ACTIONS, AI_REVIEW_PROMPT_VERSION, ANSWER_ISSUE_CODES, ANSWER_READY_ACTIONS, CATEGORY_GROUP_FILTERS, CATEGORY_GROUP_NORMALIZED_FILTERS, GROUP_REVIEW_ACTIONS, MANUAL_ASSET_ROOT, MOBILE_REVIEW_ACTIONS, NON_QUESTION_REVIEW_ACTIONS, NOTE_ACTIONS, QBR_AI_FINDINGS_STREAM, QUESTION_READY_ACTIONS, REPAIR_REVIEWER_PREFIXES, RESET_REVIEW_ACTIONS, SQL_ANSWER_CATEGORY_EXPR, SQL_CANDIDATE_CATEGORY_EXPR, SQL_REVIEW_ACCEPTED_REAUDIT_EXPR, SQL_REVIEW_REPAIR_PENDING_EXPR, SqlWriteError, STANDING_ACTIONS, TABLE_DEPENDENCY_SQL_RE, VISUAL_DEPENDENCY_SQL_RE, WORKFLOW_QUEUE_DEFINITIONS
+from .events import _is_repair_reset, _merge_note_into_preserved_review, _merge_note_into_reset, _note_annotates_pending_reset, file_signature, load_ai_feedback_events, load_ai_learning_events, load_append_only_events, load_correction_feedback_events, load_correction_feedback_rows, load_group_review_events, load_keyed_events, load_latest_events, load_review_events
 from .legacy_assets import _reaffirm_standing_action, load_issues, load_jsonl, workflow_primary_queue
 from .paths import data_url_to_bytes, display_path, safe_path_segment, sibling_pdf, strip_structured_tables
 from .queue_view import DISCUSS_BUCKETS, PRINCIPLES_STREAM, QbrAiFindingsStore, REPAIR_QUESTIONS_STREAM, SQL_DISCUSS_PREDICATE, category_filter_values, category_matches_filter, is_discuss_bucket, normalize_category_name, paper_entries_for, principles_projection, repair_questions_projection, review_projection
@@ -2152,16 +2152,33 @@ filtered AS (
                         previous = latest.get(key) or latest_reset.get(key)
                         if not event.get("correction") and previous and previous.get("correction"):
                             event["correction"] = previous["correction"]
+                        if (
+                            _is_repair_reset(event)
+                            and key in latest
+                            and latest[key].get("action") in STANDING_ACTIONS
+                        ):
+                            kept = dict(latest[key])
+                            if event.get("correction"):
+                                kept["correction"] = event["correction"]
+                            kept["pending_reset"] = {
+                                "at": event.get("created_at") or event.get("at"),
+                                "reviewer": event.get("reviewer"),
+                                "notes": event.get("pipeline_note") or event.get("notes") or "",
+                            }
+                            latest[key] = kept
+                            latest_reset[key] = event
+                            continue
                         latest.pop(key, None)
                         latest_reset[key] = event
                         continue
                     previous = latest.get(key) or latest_reset.get(key)
                     if not event.get("correction") and previous and previous.get("correction"):
                         event["correction"] = previous["correction"]
-                    # A note on a question whose latest state is a pending reset must merge into
-                    # that reset, not replace it - the SQL half of the 錯題討論區 rule.
+                    # A note after a repair does not erase either the decision or the pending marker.
                     if _note_annotates_pending_reset(event, key, latest, latest_reset):
                         latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
+                        if key in latest:
+                            latest[key] = _merge_note_into_preserved_review(latest[key], event)
                         continue
                     latest[key] = event
                     latest_reset.pop(key, None)
@@ -6226,6 +6243,10 @@ filtered_sheets AS (
             elif _note_annotates_pending_reset(event, key, self.latest_reviews, self.latest_reset_reviews):
                 # In-memory half of the same rule: a note on a stuck question keeps it stuck.
                 self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], event)
+                if key in self.latest_reviews:
+                    self.latest_reviews[key] = _merge_note_into_preserved_review(
+                        self.latest_reviews[key], event
+                    )
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)
@@ -6272,6 +6293,10 @@ filtered_sheets AS (
                 self.latest_reset_reviews[key] = event
             elif _note_annotates_pending_reset(event, key, self.latest_reviews, self.latest_reset_reviews):
                 self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], event)
+                if key in self.latest_reviews:
+                    self.latest_reviews[key] = _merge_note_into_preserved_review(
+                        self.latest_reviews[key], event
+                    )
             else:
                 self.latest_reviews[key] = event
                 self.latest_reset_reviews.pop(key, None)

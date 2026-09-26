@@ -355,6 +355,194 @@ process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
         self.assertTrue(payload["options"][0]["image"]["path"].endswith("40_manual_assets/correct.png"))
         self.assertTrue(payload["review"]["is_reset_unreviewed"])
 
+    def test_content_change_reset_preserves_decision_and_repair_bucket(self):
+        candidate = {
+            "candidate_key": "content-change-keeps-decision",
+            "question_number": "1",
+            "stem": "抽取原文",
+            "options": [{"key": "A", "text": "選項"}],
+            "metadata": {},
+        }
+        human_block = {
+            "candidate_key": candidate["candidate_key"],
+            "action": "block",
+            "reviewer": "local",
+            "notes": "原本判斷原因",
+        }
+        repair = {
+            "candidate_key": candidate["candidate_key"],
+            "action": "reset_review",
+            "reviewer": "repair_dispute_apply",
+            "repair_kind": "content_change",
+            "applied": "field",
+            "previous_action": "block",
+            "correction": {"stem": "依紙本修正"},
+        }
+
+        def payload_for(events):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidate_path = root / "candidates.jsonl"
+                review_log = root / "question_review_events.jsonl"
+                candidate_path.write_text(
+                    json.dumps(candidate, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                review_log.write_text(
+                    "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+                    encoding="utf-8",
+                )
+                state = self.ui.ReviewState(
+                    candidate_path, None, review_log, review_backend="jsonl"
+                )
+                return state.candidate_payload(candidate)
+
+        repaired = payload_for([human_block, repair])
+        self.assertEqual(repaired["stem"], "依紙本修正")
+        self.assertEqual(repaired["review"]["action"], "block")
+        self.assertEqual(repaired["review"]["notes"], "原本判斷原因")
+        self.assertTrue(repaired["review"]["is_repair_pending"])
+        self.assertEqual(repaired["review"]["queue_bucket"], "repair_pending")
+
+        annotated = payload_for([
+            human_block,
+            repair,
+            {"candidate_key": candidate["candidate_key"], "action": "comment", "notes": "補充註記"},
+        ])
+        self.assertEqual(annotated["review"]["action"], "block")
+        self.assertEqual(annotated["review"]["notes"], "補充註記")
+        self.assertTrue(annotated["review"]["is_repair_pending"])
+
+        # This same reviewer prefix without an explicit content change still means reopen.
+        reopened = dict(repair)
+        reopened.pop("repair_kind")
+        reopened_payload = payload_for([human_block, reopened])
+        self.assertEqual(reopened_payload["review"]["action"], "reset_review")
+
+    def test_sql_content_change_reset_preserves_human_decision(self):
+        import contextlib
+
+        key = "sql-content-change-keeps-decision"
+        rows = [
+            (
+                key,
+                "block",
+                None,
+                {"candidate_key": key, "action": "block", "reviewer": "local", "notes": "原本判斷原因"},
+                "原本判斷原因",
+                "local",
+                None,
+            ),
+            (
+                key,
+                "reset_review",
+                None,
+                {
+                    "candidate_key": key,
+                    "action": "reset_review",
+                    "reviewer": "repair_dispute_apply",
+                    "repair_kind": "content_change",
+                    "applied": "field",
+                    "correction": {"stem": "依紙本修正"},
+                },
+                None,
+                "repair_dispute_apply",
+                None,
+            ),
+            (
+                key,
+                "comment",
+                None,
+                {"candidate_key": key, "action": "comment", "reviewer": "local", "notes": "補充註記"},
+                "補充註記",
+                "local",
+                None,
+            ),
+        ]
+
+        class StubCursor:
+            def __init__(self, result_rows):
+                self.result_rows = result_rows
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, _query, _params):
+                pass
+
+            def fetchall(self):
+                return self.result_rows
+
+        class StubConnection:
+            def __init__(self, cursor):
+                self.cursor_value = cursor
+
+            def cursor(self):
+                return self.cursor_value
+
+        state = object.__new__(self.ui.ReviewState)
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield StubConnection(StubCursor(rows))
+
+        state._sql_connect = fake_connect
+        latest, _, resets = state._sql_question_review_maps([key])
+        projection = self.ui.review_projection(latest.get(key), resets.get(key))
+
+        self.assertEqual(latest[key]["action"], "block")
+        self.assertEqual(latest[key]["notes"], "補充註記")
+        self.assertEqual(latest[key]["correction"]["stem"], "依紙本修正")
+        self.assertTrue(projection["is_repair_pending"])
+        self.assertEqual(projection["queue_bucket"], "repair_pending")
+
+    def test_jsonl_note_after_content_repair_keeps_decision_in_memory(self):
+        key = "content-change-note-keeps-decision"
+        candidate = {
+            "candidate_key": key,
+            "question_number": "1",
+            "stem": "抽取原文",
+            "options": [{"key": "A", "text": "選項"}],
+            "metadata": {},
+        }
+        events = [
+            {"candidate_key": key, "action": "block", "reviewer": "local", "notes": "原本原因"},
+            {
+                "candidate_key": key,
+                "action": "reset_review",
+                "reviewer": "repair_dispute_apply",
+                "repair_kind": "content_change",
+                "applied": "field",
+                "correction": {"stem": "依紙本修正"},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidates.jsonl"
+            review_log = root / "question_review_events.jsonl"
+            candidate_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
+            review_log.write_text(
+                "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+                encoding="utf-8",
+            )
+            state = self.ui.ReviewState(
+                candidate_path, None, review_log, review_backend="jsonl"
+            )
+            state.append_review({
+                "candidate_key": key,
+                "action": "comment",
+                "reviewer": "local",
+                "notes": "補充註記",
+            })
+            review = state.candidate_payload(candidate)["review"]
+
+        self.assertEqual(review["action"], "block")
+        self.assertEqual(review["notes"], "補充註記")
+        self.assertTrue(review["is_repair_pending"])
+
     def test_review_queue_projection_separates_never_seen_repair_and_accepted_reaudit(self):
         never_seen = self.ui.review_projection(None, None, {})
         repair = self.ui.review_projection(

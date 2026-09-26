@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 from qbr import discuss
 import json
-from .constants import AI_FEEDBACK_SCOPES, GROUP_REVIEW_ACTIONS, MOBILE_REVIEW_ACTIONS, NOTE_ACTIONS, RESET_REVIEW_ACTIONS
+from .constants import AI_FEEDBACK_SCOPES, GROUP_REVIEW_ACTIONS, MOBILE_REVIEW_ACTIONS, NOTE_ACTIONS, REPAIR_REVIEWER_PREFIXES, RESET_REVIEW_ACTIONS, STANDING_ACTIONS
 
 def load_ai_feedback_events(
     path: Path,
@@ -159,14 +159,16 @@ def _note_annotates_pending_reset(
     latest: dict[str, Any],
     latest_reset: dict[str, Any],
 ) -> bool:
-    """True when this event is a note for a question whose latest state is a pending reset.
+    """True when this is a note for a pending reset, with or without a kept decision.
 
     This is the *one* place the condition lives, because it has to hold in every fold: the JSONL
     load and the SQL load, for questions and for answers. Six hand-written copies of one condition
     is six chances for the 錯題討論區 to keep a different set of stuck questions than `review_projection`
     describes.
     """
-    return _is_note_event(event) and key not in latest and key in latest_reset
+    return _is_note_event(event) and key in latest_reset and (
+        key not in latest or bool(latest[key].get("pending_reset"))
+    )
 
 
 def _merge_note_into_reset(reset_event: dict[str, Any], note_event: dict[str, Any]) -> dict[str, Any]:
@@ -189,6 +191,39 @@ def _merge_note_into_reset(reset_event: dict[str, Any], note_event: dict[str, An
     note = note_event.get("notes")
     if note:
         merged["notes"] = note
+    return merged
+
+
+ACCEPTED_REAUDIT_REVIEWER_PREFIXES = (
+    "codex-luna-accepted-reaudit",
+    "accepted-reaudit",
+)
+
+REOPEN_REVIEWER_PREFIXES = (
+    "qbr_dispute_apply",
+    "repair_dispute_apply",
+)
+
+
+def _is_repair_reset(event: dict[str, Any]) -> bool:
+    """A content repair preserves the prior decision; an intentional reopen does not."""
+    reviewer = str(event.get("reviewer") or "").strip().lower()
+    if any(reviewer.startswith(prefix) for prefix in ACCEPTED_REAUDIT_REVIEWER_PREFIXES):
+        return False
+    if str(event.get("repair_kind") or "").strip().lower() == "content_change":
+        return True
+    if any(reviewer.startswith(prefix) for prefix in REOPEN_REVIEWER_PREFIXES):
+        return False
+    return any(reviewer.startswith(prefix.lower()) for prefix in REPAIR_REVIEWER_PREFIXES)
+
+
+def _merge_note_into_preserved_review(
+    latest_review: dict[str, Any], note_event: dict[str, Any]
+) -> dict[str, Any]:
+    """Update the visible note without replacing its preserved decision or repair marker."""
+    merged = dict(latest_review)
+    if note_event.get("notes"):
+        merged["notes"] = note_event["notes"]
     return merged
 
 
@@ -216,17 +251,34 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 continue
             if event.get("action") in RESET_REVIEW_ACTIONS:
                 counts[key] = counts.get(key, 0) + 1
-                # Reset only reopens the human decision.  A previously saved
-                # text/image/manual-asset correction remains the effective
-                # candidate layer and must not fall back to MinerU raw.
+                # A content repair may retain the decision; a human or intentional reset still reopens.
+                # Preserve the latest correction in either path.
                 previous = latest.get(key) or latest_reset.get(key)
                 if not event.get("correction") and previous and previous.get("correction"):
                     event["correction"] = previous["correction"]
+                if (
+                    _is_repair_reset(event)
+                    and key in latest
+                    and latest[key].get("action") in STANDING_ACTIONS
+                ):
+                    kept = dict(latest[key])
+                    if event.get("correction"):
+                        kept["correction"] = event["correction"]
+                    kept["pending_reset"] = {
+                        "at": event.get("created_at") or event.get("at"),
+                        "reviewer": event.get("reviewer"),
+                        "notes": event.get("pipeline_note") or event.get("notes") or "",
+                    }
+                    latest[key] = kept
+                    latest_reset[key] = event
+                    continue
                 latest.pop(key, None)
                 latest_reset[key] = event
                 continue
             if _note_annotates_pending_reset(event, key, latest, latest_reset):
                 latest_reset[key] = _merge_note_into_reset(latest_reset[key], event)
+                if key in latest:
+                    latest[key] = _merge_note_into_preserved_review(latest[key], event)
                 counts[key] = counts.get(key, 0) + 1
                 continue
             # A human decision must not drop the repaired text a previous human decision was made

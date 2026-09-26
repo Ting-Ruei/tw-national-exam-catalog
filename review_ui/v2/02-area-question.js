@@ -106,7 +106,7 @@ function visibleRows() {
     // axis from the state chips and deliberately so: a question can be a settled `確認正常` and still
     // carry a dispute the pipeline raised, and collapsing them would hide the machine's uncertainty
     // behind the human's decision.
-    if (mode === 'disputed') return hasDispute(item);
+    if (mode === 'disputed') return stateOf(item) !== 'returned' && hasDispute(item);
     return true;
   });
 }
@@ -590,6 +590,7 @@ function closeEditor() {
 }
 
 function setEditMode(on) {
+  if (S.refreshing) return;
   if (on) {
     // The editor and the note are two different things to write about a question, and the pane can
     // only show one at a time - so opening the editor closes the note.
@@ -639,6 +640,7 @@ function noteKeydown(event) {
 }
 
 function toggleNote(force) {
+  if (S.refreshing) return;
   const item = S.rows[S.index];
   // 已經開著的時候再按一次註記（或再按 C）＝存起來。
   // 「再按一次同一個按鈕存」是使用者要求的第二種存法：滑鼠已經在按鈕上了，不該逼人回頭去按 Enter。
@@ -674,6 +676,7 @@ function toggleNote(force) {
    stays 未看 until the reviewer actually decides. The server reaffirms whatever decision is already
    on the question, so annotating after `確認正常` cannot withdraw it. */
 async function saveNote() {
+  if (S.refreshing) return;
   const item = S.rows[S.index];
   if (!item) return;
   const notes = $('reasonText').value.trim();
@@ -705,6 +708,7 @@ function markDirty() {
 
 /* ---------------------------------------------------------------- decisions */
 async function decide(action) {
+  if (S.refreshing) return;
   const item = S.rows[S.index];
   if (!item) return;
   // `需重看` and `阻擋` are recorded **without** a reason. Requiring one made the reviewer stop and
@@ -745,6 +749,7 @@ async function decide(action) {
    text, so what the reviewer typed can be diffed against what the parser produced; the
    decision itself stays `reviewed`, waiting for an explicit accept. */
 async function saveCorrection() {
+  if (S.refreshing) return;
   const item = S.rows[S.index];
   const candidate = (item || {}).candidate || {};
   if (!item) return;
