@@ -86,6 +86,27 @@ def test_an_answered_question_is_closed_and_an_unanswered_one_is_open(tmp_path):
     assert closed["answer_text"] == "是圖，不用修"
 
 
+def test_the_newest_unanswered_ask_is_the_one_the_row_shows(tmp_path):
+    """題目區那一列要說「機器讀到了但沒有自己改，原因是什麼」，而它手上只有那一題的 key。
+
+    同一個 key 可以有好幾筆反問（每一輪重讀紙本、文字改了要重新問），所以挑選規則必須是
+    「最新的那一筆還沒被回答的」——挑錯了，畫面會拿一個已經作廢的理由去解釋現在這一列。
+    """
+    path = str(tmp_path / discuss.REPAIR_QUESTIONS_STREAM)
+    discuss.append_event(path, {"action": "ask", "question_id": "rq1", "candidate_key": "k1",
+                                "reason": "舊的理由"})
+    discuss.append_event(path, {"action": "ask", "question_id": "rq2", "candidate_key": "k1",
+                                "reason": "新的理由"})
+    discuss.append_event(path, {"action": "ask", "question_id": "rq3", "candidate_key": "k2",
+                                "reason": "另一題的理由"})
+    discuss.append_event(path, {"action": "answer", "question_id": "rq3", "answer": "紙本是對的"})
+    by_key = discuss.repair_asks_by_key(discuss.load_events(path))
+    assert by_key["k1"]["reason"] == "新的理由", "同一個 key 要最新的那一筆"
+    # 負對照：已經被回答的不算。把它算進去，畫面會把一個那個人已經回過的問題再拿出來講一次。
+    assert "k2" not in by_key
+    assert set(by_key) == {"k1"}
+
+
 def test_the_next_id_counts_events_instead_of_a_counter_file(tmp_path):
     # A counter file is second state that can drift; counting the events cannot hand two adds the
     # same id, and an id is the key the fold uses. Re-issuing a *removed* id is fine, because the
@@ -196,18 +217,88 @@ def test_the_discuss_streams_have_exactly_one_reader_implementation():
     # shape differed from `build_review_queue.py`'s, it overwrote the live queue index, and the whole
     # question area stopped booting while every test stayed green - because the *build* path was
     # correct and only the second implementation was wrong. So the interpretation of these two
-    # streams must live in exactly one module, and the server must import it.
+    # streams must live in exactly one module, and the server must reach it.
+    #
+    # **Asserted on the delegation, not on the file it happens to sit in.** The projections moved out
+    # of the 10,700-line server into `qbr.review_ui.queue_view` (which re-exports them, which is how
+    # the server still names them). Checking "the server's text contains `def principles_projection`"
+    # would pin the *layout*, and would have to be edited every time code moves - while saying nothing
+    # about whether a second reader appeared. What must hold is: one module defines the rule, and that
+    # module calls `qbr.discuss`, never re-implements it.
     server = os.path.join(PKG, "..", "scripts", "serve_question_review_ui.py")
     with open(os.path.abspath(server), encoding="utf-8") as handle:
         text = handle.read()
     assert "from qbr import discuss" in text, \
         "伺服器必須用 qbr.discuss 的折疊規則，不能自己再寫一份"
-    assert 'def principles_projection' in text and 'discuss.principles_projection' in text
-    assert 'def repair_questions_projection' in text and 'discuss.repair_questions_projection' in text
-    assert 'discuss.append_event' in text, "兩個流只有一個寫者"
+    assert 'principles_projection' in text and 'repair_questions_projection' in text, \
+        "伺服器必須經由投影讀這兩個流，不能各自解析"
+    # The writer moved into `review_state.py` with the rest of the append logic; the server still
+    # names `discuss` (that is how tests reach the taxonomy). What must hold is that *some* file
+    # writes through `discuss.append_event` rather than appending to the JSONL by hand.
+    writers = []
+    for dirpath, _dirnames, filenames in os.walk(os.path.join(PKG, "src", "qbr")):
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, filename)
+            with open(path, encoding="utf-8") as handle:
+                if "discuss.append_event" in handle.read():
+                    writers.append(os.path.relpath(path, os.path.join(PKG, "src")))
+    assert writers, "兩個流只有一個寫者（discuss.append_event），但沒有任何模組用它"
     # And the stream names have one definition, so a push/deploy/carry list cannot name a file the
-    # projection does not read.
-    assert "discuss.PRINCIPLES_STREAM" in text and "discuss.REPAIR_QUESTIONS_STREAM" in text
+    # projection does not read. The names are *bound* in `queue_view` from `discuss`, which is the
+    # form that satisfies the rule: there is a definition, and it is `discuss`'s.
+    bound = []
+    for dirpath, _dirnames, filenames in os.walk(os.path.join(PKG, "src", "qbr")):
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, filename)
+            with open(path, encoding="utf-8") as handle:
+                body = handle.read()
+            if "PRINCIPLES_STREAM = discuss.PRINCIPLES_STREAM" in body:
+                bound.append(path)
+            # `discuss.py` itself is where the definition lives; anywhere else is a second spelling.
+            if os.path.basename(path) != "discuss.py":
+                assert 'PRINCIPLES_STREAM = "question_review_principles.jsonl"' not in body, \
+                    "流的名稱被重新打了一次字，就是第二個可以漂移的拼法：%s" % path
+    assert bound, "沒有任何模組把流名稱綁到 discuss 的定義上"
+
+    # The projections themselves: exactly one implementation of each rule, and it is `qbr.discuss`'s.
+    # `AST` would be overkill; a second *definition* is what the defect looked like, and a definition
+    # is what a text scan can find reliably in a module that is not the owner.
+    import ast
+
+    qbr_src = os.path.join(PKG, "src", "qbr")
+    owners = []
+    for dirpath, _dirnames, filenames in os.walk(qbr_src):
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, filename)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if node.name not in ("principles_projection", "repair_questions_projection"):
+                    continue
+                if os.path.basename(path) == "discuss.py":
+                    # The owner module is where the rule is *defined*; that is not a second copy.
+                    owners.append((os.path.relpath(path, qbr_src), node.name, True))
+                    continue
+                # A delegating wrapper is fine (it is a re-export for the server's import path); a
+                # *re-implementation* is not, and the difference is whether the body calls
+                # `discuss.<same name>`.
+                calls = {getattr(call.func, "attr", None)
+                         for call in ast.walk(node) if isinstance(call, ast.Call)}
+                owners.append((os.path.relpath(path, qbr_src), node.name, node.name in calls))
+    delegated = [name for _path, name, calls_discuss in owners if calls_discuss]
+    reimplemented = [(path, name) for path, name, calls_discuss in owners if not calls_discuss]
+    assert "principles_projection" in delegated and "repair_questions_projection" in delegated, \
+        "沒有任何地方真的用了 qbr.discuss 的折疊規則：%r" % (owners,)
+    assert not reimplemented, \
+        "同一個折疊規則有第二份實作（這正是讓題目區整個開不起來的那個缺陷）：%r" % (reimplemented,)
 
 
 def test_the_deploy_push_and_rebuild_all_name_the_discuss_streams():

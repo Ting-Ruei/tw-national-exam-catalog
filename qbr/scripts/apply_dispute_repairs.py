@@ -18,9 +18,86 @@ description; this is the change.
 What is applied, and what is not
 --------------------------------
 
-Only the two kinds whose repair is **deterministic** - the target character is in the dispute itself:
+Three paths in, in this order, and none of them asks a model what to do:
 
-    substituted-ideograph  `⻑` -> `長`                     (the dispute carries `means`)
+1. **the dispute carries the target character** - deterministic, allowed on any question:
+
+       substituted-ideograph  `⻑` -> `長`                     (the dispute carries `means`)
+
+2. **a page reading that is a pure character-level repair** at positions a detector already flagged
+   (`anchored_page_changes`); also allowed on any question;
+
+3. **a page reading that replaces the whole field** (`rule=page-read-field`, `applied="field"`).
+   This is the gate that used to be shut, and the measurement is what shut it: 2026-09-24, the mirror
+   carried **204** readings with `changes` while `--page-read` applied **0** of them, because path 2
+   demands a detector's own flagged position and a detector cannot flag a character it does not know
+   about (`⻑` `⻄` are in its table, the Kangxi radicals beside them are not).
+
+   Path 3 is fenced on the question, on the second engine, and on the measurement - and the anchor is
+   **never a detector**:
+
+   * on the **question**: a person must have rejected it - a standing `block`/`needs_review` with no
+     later `accept`/`unblock` (see `standing_rejections`). The owner's decision (2026-09-24) is what
+     the fence implements: 「判讀 → 文字 跟 文字 → 抽取檔要打通，並且改標籤送到『AI已解決』，我才能知道
+     有沒有改過」, with the person reviewing that bucket and bouncing a wrong one back with a `block`
+     plus a 註解.
+   * on the **second engine**: `orchestration.verdict` must be `TRUST` (see `_verdict_complaint`).
+     `CARE`/`DOUBT`/absent all mean a person should look, and a whole-field rewrite is the most
+     invasive thing this loop does; measured on the station 2026-09-24, of the 146 field candidates
+     the other fences let through, 81 are `TRUST`, 44 `CARE`, 17 with no second read and 4 `DOUBT` -
+     so this fence halves the whole-field path. (The same census earlier that evening, on a smaller
+     queue, read 117 = 59/37/17/4: the loop is still writing readings while we measure.)
+   * on the **measurement**: the reading must look like a reading of *this* field - alignment ratio at
+     least `PAGE_READ_ALIGN_MIN` and length within `PAGE_READ_LENGTH_FACTOR` either way. Both numbers
+     are measured, not chosen; the table and the case counts are in the constants below.
+
+   Two per-field clauses come after those, both of them "the replacement is worse than what is there":
+
+   * a field whose stored text carries HTML markup (`<sub>`/`<sup>`, the platform's own spelling of a
+     subscript) is refused - the reading renders the same maths as real subscript characters
+     (`Cₚ`, `4e⁻⁵ᵗ`), so replacing the whole field would strip the markup. That hole survived both
+     measurements (`104090 q052`: the shared suffix is a whole sentence, so the length line never
+     engaged) and a dress rehearsal caught it.
+   * a reading that brings in the **unreadable mark** (`▢`, the character `reread.SYSTEM` tells the
+     model to write when it cannot read a glyph) is refused when the stored field does not have one:
+     that writes "I don't know" over text the extraction did read. Measured on the station: 10 of the
+     370 field candidates bring it in (`115090:305:0402 q075` option C, `113020:308:11 q021` option A
+     among them), 3 of those pass the other fences, and of the examples both are `CARE` - so the
+     verdict fence stops them first and this clause is what stops a `TRUST` one.
+
+   Both clauses are refusals of the *whole-field* form only; the character-level paths stay open for
+   those fields, because they substitute measured characters and leave the tags (and the readable
+   characters) standing.
+
+   Four more clauses, added after the 2026-09-24 evening, and three of them are the machine's own
+   whole-field work being judged (see the measured numbers below):
+
+   * a reading that writes **Unicode sub/superscripts** (`GABAₐ`, `Kₘ`, `[AUC₍ᵢᵥ₎]₀∞`) where the
+     stored text has the plain characters is refused (`unicode_sub_sup_complaint`): `<sub>`/`<sup>`
+     is how the platform typesets this (6540 fields already use it, 55 carry the characters), and
+     the characters have no capital letters - so the reading changed `GABA`A`` into a lowercase `ₐ`,
+     which is not the same text. Markup *inside* the field is not what this clause measures.
+   * a reading that introduces `<sub>`/`<sup>` is **wanted**, but only when the characters inside are
+     exactly the stored characters in order (`markup_fidelity_complaints`): `KM` -> `K<sub>M</sub>`
+     is a repair, `KM` -> `K<sub>m</sub>` is a different character wearing markup.
+   * a **character pair** the whole-field readings of this run change on `SYSTEMATIC_PAIR_MIN` or more
+     distinct questions is refused (`systematic_pairs`): one misread character repeated across
+     questions is evidence about the *reading*, not four independent slips.
+   * a **question** whose newest human word is a bounce of a machine whole-field repair has that
+     repair **withdrawn** (`closed_questions`): the wrong change is put back, and the question is
+     *not* closed to the machine (2026-09-24: 「機器改錯就給我重改，為什麼還給我還原回去原本錯的地方」
+     - withdrawing restores `parser_original`, which is the flattened text the machine was fixing, so
+     a permanent refusal parks the row on the wrong text). What stops a bounce becoming a loop is the
+     signature (the same change is never written twice) and the markup gate, both of which are above.
+
+   The first three of those are per-field; the fourth is per-question, and so is **atomicity**: a
+   question's whole-field repairs pass together or none of them is written (a half-applied reading
+   would leave two spellings of the same thing in one question - the owner's "某些KM 四個選項都有，
+   結果只改某些，還改錯").
+
+   Path 3 also **subsumes** the character-level edits on the same field (a whole-field statement is the
+   same measurement at higher resolution), and it refuses to subsume the disputed positions it does not
+   actually fix - see `_flagged_conflict`.
 
 and explicitly **not** the `flat-offset` class any more, and that is a measured reversal. It was
 in this list; the measurement that took it out is in `extract._body_centre`. `cm-1` was not a defect
@@ -43,6 +120,56 @@ Explicitly **not** applied, and the reason is measured rather than stylistic:
                            these are "content is missing", not "content is wrong" - the repair is a
                            re-read of the page, which is `confirm_dispute`'s job, not a substitution.
     the model findings     `qbr_ai_finding` is advisory (AGENTS.md); a prose `fix` never edits text.
+                           Only the mechanical `changes` of a **page reading** are read here, and
+                           only inside path 3's fence. The repair is never written as the model's
+                           decision either: the event carries `reviewer=repair_dispute_apply`, a name
+                           the server's `repair_` prefix keeps out of "a person decided this".
+
+What a page reading can still not do - every clause is a measured refusal from this corpus, and path
+3 reuses them (they are enforced in `anchored_page_changes` and `page_read_shape_complaint` /
+`whole_field_refusals`):
+
+    a reading that changes the *number* of characters
+                           `115090 q053`'s reading inserted 93 characters and deleted the four
+                           options, `114020 q060`'s inserted 80. Every position after the change moved,
+                           so the diff describes a different line, not a repair.
+    a reading that only inserts or deletes
+                           `113020 q076`'s reading appended the acceptance-criteria table, `113020
+                           q050`'s a figure description, `105020 q045`'s a whole compartment diagram
+                           with invented arrow labels. Measured length ratios: 2.71, 2.02, 2.11.
+    a reading that leaves a flagged character exactly where the detector said it was wrong
+                           a partial repair would reopen the field with the defect still in it.
+                           (measured 2026-09-24: 0 of the mirror's 509 field readings did this)
+    a reading that reads a flagged position as a *different* character than the dispute's `means`
+                           two measurements disagreeing about one position. The character-level path
+                           hands the question to a person (`merge_substitutions` returns `None`); the
+                           whole-field one is refused by `_flagged_conflict`. (measured: 0 cases too)
+    a reading that would strip HTML markup the platform renders
+                           `<sub>`/`<sup>` are the platform's own spelling of a subscript
+                           (`H<sub>2</sub>PO<sub>4</sub><sup>-</sup>`); a reading renders the same
+                           maths as real subscript characters (`Cₚ`, `4e⁻⁵ᵗ`), so replacing the whole
+                           field would throw the markup away. `104090 q052`'s reading passed both
+                           measurements - its shared suffix is a whole sentence, so the length line
+                           never engaged - and a dress rehearsal showed the replacement had destroyed
+                           `<sub>`/`<sup>`; it is refused for this reason alone, and the
+                           character-level path stays open for such fields because it substitutes
+                           measured characters and leaves the tags standing. (measured 2026-09-24,
+                           station, read-only: 0 of the 225 events carrying a correction strip markup,
+                           so this guards the whole-field path only)
+    a reading that brings in the unreadable mark
+                           `▢` is what `reread.SYSTEM` tells the model to write when it cannot read a
+                           glyph, so applying it writes "I don't know" over text that was read.
+                           (measured 2026-09-24, station: 10 of the 370 whole-field candidates -
+                           `115090:305:0402 q075` option C, `113020:308:11 q021` option A among them;
+                           both of those are `CARE`, which the verdict fence stops first)
+    a reading the second engine did not call `TRUST`
+                           `orchestration.verdict` (`orchestrator.py:46-52`). `CARE` means the
+                           difference may change the answer or the reading contradicts itself,
+                           `DOUBT` means the local reading is clearly wrong or invented, and an
+                           absent verdict means no second read happened at all - all three are "a
+                           person should look", which is where those questions already are. The
+                           whole-field path is the most invasive action this loop takes, so it needs
+                           that agreement; the character-level paths do not.
 
 Why an event and not a rewrite of `candidates.jsonl`
 ----------------------------------------------------
@@ -61,6 +188,54 @@ server reads a `correction` from `latest_reset_review` as well as from `latest`,
 both serves the fixed text and lands the question in `repair_pending` (**修復後待複核**) - repaired,
 waiting for a person, which is what happened.
 
+Machine repairs that were wrong, and what tonight measured
+----------------------------------------------------------
+
+The three rules added after the 2026-09-24 evening (the systematic pair, the two content clauses and
+the bounce-back closure) are each named after a measurement, not after a worry. All of these are the
+station's own numbers, read-only (the log, the findings, `candidates.jsonl`):
+
+    18:06:35  the machine wrote **66** whole-field repairs - 66 questions, 90 `changes` - and the
+              producer folded them into `candidates.jsonl`, so `parser_original` now holds what the
+              extraction had said before each one.
+    the damage  one character pair came out wrong on **four** questions with both engines saying
+              `TRUST` (`抗癲癇` -> `抗癲癲`): `115090:305:0401 q037` (stem and option A),
+              `113090:305:11 q053`, `108100:305:11 q035` option A, `108030:305:11 q061`. **69** fields
+              of that run had Unicode sub/superscripts written into them (`GABAₐ`, `Kₘ`,
+              `[AUC₍ᵢᵥ₎]₀∞`) where the paper prints plain capitals - the owner's "字型異常".
+    the census  the CJK->CJK census over this run's readings finds **16** pairs; 15 of them stand on a
+              single question each (`中→可`, `及→口`, `之→性`, `氯→氫` ... - the artefacts of a reflowed
+              line), and `癇→癲` stands on **2** inside the census population. A third
+              (`106020:302:22 q071`) is not standing-rejected and the other two
+              (`115090:305:0401 q037`, `113090:305:11 q053`) have no changes at all in their newest
+              reading (18:37:23 and 18:39:36), so the pair line at 3 did not fire tonight - it is the
+              rule that would have caught the same misreading one question later.
+    18:43:49  a second `--apply` wrote **14** more whole-field repairs (14 questions) on questions
+              whose newest human word was a `block`. The signature check did not stop them because
+              the re-read text was not identical to the bounced text: the ping-pong the owner's
+              guardrail exists for (`110101:305:55 q061`: block -> repair -> block -> repair). That
+              is why the bounce comparison is now also a refusal (`closed_questions`), and why the
+              withdrawal covers every field the machine ever wrote on such a question.
+    the revert  the applier wrote **52** withdrawal events (75 fields over 52 rows) and the producer
+              restored them in one pass. Measured again with the ping-pong shape included, the same
+              comparison finds **64 questions / 91 fields** (`bounce-back` 63/90, `unicode-sub-sup`
+              1/1); **12** of those questions (16 fields) are new, and all 14 of the 18:43 repairs are
+              inside the set.
+    the fence   over the same run: `held back 268` readings on questions nobody rejected,
+              `REFUSED 405` entries, `to repair 0`, `atomicity 2` - the ladder a person reads before
+              trusting the number at the top of it.
+    the ask     the census above is the machine's record; it is not a place a person looks. Measured
+              2026-09-25 on the station: of the **197** blocked questions whose newest reading the
+              fences refused (`CARE` 109, markup 39, `DOUBT` 27, characters 17, no second read 5),
+              only **27** had an open question in the review UI - the other 170 were stuck, measured,
+              and silent. The refuse line now asks a person about each one (`questions_to_ask`), with
+              the two readings of up to two fields side by side, 40 a run, and never twice for the same
+              text (`ask_id`, the reader's own id shape). `--ask-limit 0` turns it off.
+    the markup  the two measurements now count the characters, not the tags: in a short field
+              (`藥理作用標的是GABAA 受體` -> `藥理作用標的是 GABA<sub>A</sub> 受體`) the tags alone made
+              the raw length factor 1.79 and the alignment 0.52 - both outside the fence, so a
+              *wanted* reading was refused. Flattened: `(1.00, 1.00)`.
+
 Governance
 ----------
 
@@ -69,525 +244,172 @@ Governance
     prefix so the projection cannot read the event as a human decision. The event log's sha256
     before the write is printed, and a backup of the log is taken before the append.
 
-    It never writes `accept`. A repair reopens a question; it does not close one.
+    It never writes `accept`. A repair reopens a question; it does not close one. A withdrawal does
+    not either: it puts the machine's own rewrite back to `parser_original` and says so (`withdrawn`),
+    so the producer labels the row 已還原（機器改錯） and the question waits for a person.
+
+    The ask is the same shape of thing: it appends to `question_repair_questions.jsonl`, the stream the
+    reader already writes to, with `reviewer="repair_dispute_apply"` (a `repair_` prefix, so the
+    projection cannot read it as a human decision), it is written only with `--apply`, and it is a
+    question rather than a verdict - it decides nothing and moves no text. The reader's own gate
+    (「人 must have blocked it」) is what picked the population, so every ask is about a question the
+    person already said was wrong.
+
+    The page-read path is the one place where a model's *reading* can move text, so it is the one
+    place with a gate of its own: a standing human rejection on the question (`standing_rejections`)
+    plus the alignment and length measurements on the field. The gate is never a detector. Everything
+    the gate refuses is printed with its reason, so a person can see which readings stayed out and
+    why - the list is the other half of the same decision.
 """
 from __future__ import annotations
 
-import argparse
-import difflib
-import hashlib
-import json
 import os
 import sys
-from datetime import datetime
-from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
-from qbr import ai_findings, extract  # noqa: E402
+from qbr import ai_findings, discuss, extract  # noqa: E402,F401
 
-#: Kinds whose target character is carried by the dispute itself.
-#: `flat-offset` is deliberately absent - it is repaired in `extract._body_centre`, at the reading.
-APPLICABLE = ("substituted-ideograph",)
-#: The actions a person's decision can stand at. Used only to *report* the previous state; the
-#: write path does not branch on it (a `reset_review` is correct for a judged and an unjudged
-#: question alike, because it never claims a verdict).
-HUMAN_ACTIONS = {"accept", "block", "needs_review", "exclude", "unblock", "reviewed", "correct"}
+# ── re-exports ────────────────────────────────────────────────────────────────────────────────
+#
+# 這支是 composition root：實作在 `qbr/src/qbr/dispute_apply/`；此處**再匯出**那些模組定義的每一個
+# 符號，因為腳本與測試都直接載入這個路徑。
+#
+# Every symbol the extracted modules define, made reachable from this module again. `test_*.py`
+# loads this file by path and calls these directly, so removing a name here breaks tests that never
+# import `qbr.dispute_apply` at all.
+#
+# The modules themselves, under their plain names, so that patching a module-level global patches the
+# module that *owns* it - the re-exported copy here is a different binding (see `review_ui/AGENTS.md`).
+from qbr.dispute_apply import asking as _asking
+from qbr.dispute_apply import cli as _cli
+from qbr.dispute_apply import page_read as _page_read
+from qbr.dispute_apply import report as _report
+from qbr.dispute_apply import text as _text
+from qbr.dispute_apply import withdrawals as _withdrawals
 
+asking = _asking
+cli = _cli
+page_read = _page_read
+report = _report
+text = _text
+withdrawals = _withdrawals
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--queue", required=True,
-                        help="queue root; candidates and the review log live under its review-ui/")
-    parser.add_argument("--events", help="review-event log; default <queue>/review-ui/"
-                                         "question_review_events.jsonl")
-    parser.add_argument("--out", help="also write the resulting log here")
-    parser.add_argument("--only", nargs="*", default=None,
-                        help="question numbers (q004 or 4); default is every applicable question")
-    parser.add_argument("--kind", nargs="*", default=None,
-                        help="restrict to these dispute kinds (default: %s)" % (APPLICABLE,))
-    parser.add_argument("--page-read", action="store_true",
-                        help="also apply the repairs confirmed by a **page reading** against the "
-                             "question's own disputes (advisory findings, population=dispute). "
-                             "The model transcribes and this script subtracts; only substitutions "
-                             "anchored on a detector's own flagged positions are applied")
-    parser.add_argument("--limit", type=int, default=0, help="repair at most this many (0 = all)")
-    parser.add_argument("--reviewer", default="repair_dispute_apply",
-                        help="who is recorded as making the repair. Must carry the server's "
-                             "`repair_` reviewer prefix (REPAIR_REVIEWER_PREFIXES) or the projection "
-                             "would count a machine repair as a human decision")
-    parser.add_argument("--apply", action="store_true",
-                        help="actually write; without it this is a dry run")
-    return parser.parse_args()
+# `cli.parse_args` builds the parser with `description=__doc__`，而 `--help` 印的就是那份說明。把實作
+# 模組的 `__doc__` 指到這支腳本的 docstring，`--help` 的輸出才與拆分前逐字相同（含 Governance 段）。
+_cli.__doc__ = __doc__
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def load_candidates(path: Path) -> list[dict]:
-    rows = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                rows.append(json.loads(line))
-    return rows
-
-
-def latest_events(path: Path) -> dict[str, dict]:
-    """The latest event per key, for the re-check that keeps a repair from undoing a decision.
-
-    Read the same way the server reads it (`latest` wins), so "what action stands" cannot be one
-    thing here and another there.
-    """
-    latest: dict[str, dict] = {}
-    if not path.exists():
-        return latest
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            key = event.get("candidate_key")
-            if key:
-                latest[key] = event
-    return latest
-
-
-def field_text(question: dict, field: str) -> str:
-    if field == "stem":
-        return str(question.get("stem") or "")
-    for option in question.get("options") or []:
-        if "option %s" % option.get("key") == field:
-            return str(option.get("text") or "")
-    return ""
-
-
-def substitutions_for(question: dict) -> list[dict]:
-    """Every deterministic substitution this question's disputes imply, in field order.
-
-    One `{field, position, before, after}` per place. `position` comes from the dispute, which
-    measures it on the stored text, so it can be sliced directly. `substituted-ideograph` is the
-    only kind here: its dispute carries `means` (the character the paper meant) beside the character
-    the text layer stored, which is what makes the repair a substitution rather than a decision.
-
-    `flat-offset` is deliberately not read, even though its dispute also carries a target - see the
-    module docstring; that class is repaired at the reading (`extract._body_centre`), so substituting
-    the characters here would fix the symptom and leave the cause in place.
-    """
-    out = []
-    for dispute in question.get("disputes") or []:
-        if not isinstance(dispute, dict):
-            continue
-        kind = dispute.get("kind")
-        if kind == "substituted-ideograph":
-            for sub in dispute.get("substitutions") or []:
-                if sub.get("position") is None or not sub.get("char") or not sub.get("means"):
-                    continue
-                out.append({"field": sub.get("field"), "position": int(sub["position"]),
-                            "before": sub["char"], "after": sub["means"], "rule": kind})
-    return out
-
-
-def flagged_positions(question: dict, field: str) -> dict:
-    """`position -> substitution` for one field, from the question's own disputes.
-
-    This is the anchor the page-read path is allowed to edit: the places a detector *already measured*
-    as carrying a character that is not what the paper prints. Everything else in the field is text
-    nobody has doubted, and a repair has no business rewriting it.
-    """
-    out = {}
-    for dispute in question.get("disputes") or []:
-        if not isinstance(dispute, dict):
-            continue
-        for sub in dispute.get("substitutions") or []:
-            if sub.get("field") == field and sub.get("position") is not None:
-                out[int(sub["position"])] = sub
-    return out
-
-
-def _without_whitespace(text: str):
-    """The text's non-whitespace characters, each with the index it came from.
-
-    Whitespace is dropped because the page read is a second *reading* of the same line: a model that
-    collapses the two spaces the extractor kept between numbered items has not changed the content,
-    and refusing the whole repair over a space would put the one character that does matter out of
-    reach. The original indices are kept so the anchor check compares positions on the stored text.
-    """
-    chars, origins = [], []
-    for index, char in enumerate(text):
-        if char.isspace():
-            continue
-        chars.append(char)
-        origins.append(index)
-    return chars, origins
-
-
-def anchored_page_changes(stored: str, page: str, flagged: set) -> list[dict] | None:
-    """The substitutions a page reading implies, or `None` if it is not a repair but a rewrite.
-
-    The rule, and every clause of it is a measured refusal from this corpus:
-
-    * **Equal length per run.** A run that changes the *number* of characters is not a substitution:
-      it moved every later position, and the diff that follows it is about a line that has become a
-      different line. Measured: `115090 q053`'s read inserted 93 characters and deleted the four
-      options, `114020 q060` inserted 80.
-    * **Replace only.** An `insert`/`delete` run is the same failure expressed as a boundary instead
-      of a length change. Measured: `113020 q076`'s read appended a table, `113020 q050` a figure
-      description, `105020 q045` a whole compartment diagram with invented arrow labels.
-    * **Every position must already be flagged, and every flagged position fixed.** Touching a
-      character no detector doubted is the model editing prose; leaving a doubted one untouched is a
-      partial repair that would reopen the question with the defect still in it. Both measured: the
-      `flattened-offset` class (`C=5e-0.4t` -> `C=5e⁻⁰·⁴ᵗ`) has **no** flagged position at all, and
-      reading it as a repair would rewrite physics formulas on a model's word alone - it is repaired
-      at the reading, not here.
-    """
-    if not stored or not page:
-        return None
-    if stored == page:
-        return None
-    stored_chars, stored_origins = _without_whitespace(stored)
-    page_chars, _ = _without_whitespace(page)
-    matcher = difflib.SequenceMatcher(None, "".join(stored_chars), "".join(page_chars),
-                                      autojunk=False)
-    touched, changes = set(), []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        if tag != "replace" or (i2 - i1) != (j2 - j1):
-            return None
-        touched |= set(range(i1, i2))
-        changes.append({"positions": (i1, i2), "from": "".join(stored_chars[i1:i2]),
-                        "to": "".join(page_chars[j1:j2])})
-    if not changes:
-        return None
-    if {stored_origins[i] for i in touched} != set(flagged):
-        return None
-    # Back to the stored field's own coordinates. `verify` and `apply_substitutions` slice the
-    # original text, not the folded one - a position in the folded text would edit the wrong
-    # character whenever the field contains a space, which the corpus's formulas and numbered
-    # option lists always do. A run whose original indices are not contiguous cannot be expressed as
-    # one `{position, before}` pair, so it is refused rather than silently split.
-    located = []
-    for change in changes:
-        i1, i2 = change["positions"]
-        originals = [stored_origins[i] for i in range(i1, i2)]
-        if originals != list(range(originals[0], originals[-1] + 1)):
-            return None
-        located.append({"position": originals[0],
-                        "before": stored[originals[0]:originals[-1] + 1],
-                        "after": change["to"]})
-    return located
-
-
-def page_read_substitutions(question: dict, changes: list[dict]) -> list[dict]:
-    """The `{field, position, before, after}` list a *confirmed page reading* justifies.
-
-    Only for fields the reading covers and only where every edit is anchored on a detector's own
-    measurement - see `anchored_page_changes`. The `before` text is taken from the stored field, not
-    from the finding, so a stale finding (the text moved since it was written) refuses in `verify`
-    instead of applying an edit to the wrong place.
-    """
-    out = []
-    for change in changes or []:
-        field = change.get("field")
-        if not field:
-            continue
-        flagged = set(flagged_positions(question, field))
-        anchored = anchored_page_changes(field_text(question, field),
-                                         str(change.get("page") or ""), flagged)
-        if not anchored:
-            return []
-        for edit in anchored:
-            out.append({"field": field, "position": edit["position"],
-                        "before": edit["before"], "after": edit["after"],
-                        "rule": "page-read"})
-    return out
-
-
-def verify(question: dict, subs: list[dict]) -> list[str]:
-    """Why a substitution cannot be applied, as a list of complaints (empty = safe).
-
-    Checks the *stored* text at the claimed position, because a dispute is a claim about the storage
-    and the claim has to still hold at write time. A stale dispute (the text changed since it was
-    measured) must refuse rather than replace the wrong character.
-    """
-    complaints = []
-    for sub in subs:
-        text = field_text(question, sub["field"])
-        at = sub["position"]
-        actual = text[at:at + len(sub["before"])]
-        if actual != sub["before"]:
-            complaints.append("%s[%d] 是 %r，不是 %r（dispute 已過期）"
-                              % (sub["field"], at, actual, sub["before"]))
-    return complaints
-
-
-def apply_substitutions(text: str, subs: list[dict]) -> str:
-    """Replace right-to-left so an earlier replacement cannot move a later position.
-
-    Order is not cosmetic: `h-1` at 88 and another run at 12 must both land at the index the dispute
-    measured, and replacing left-to-right would shift everything after the first edit.
-    """
-    value = text
-    for sub in sorted(subs, key=lambda s: -s["position"]):
-        at = sub["position"]
-        value = value[:at] + sub["after"] + value[at + len(sub["before"]):]
-    return value
-
-
-def build_correction(question: dict, subs: list[dict]) -> dict:
-    """The `correction` payload the server understands: `stem` and/or `options`, whole.
-
-    Whole fields rather than a diff, because that is the shape `normalized_correction` accepts and
-    the overlay applies - and because a partial field would leave the reader unable to tell which
-    text is the corrected one.
-    """
-    by_field: dict[str, list[dict]] = {}
-    for sub in subs:
-        by_field.setdefault(sub["field"], []).append(sub)
-    correction: dict = {}
-    if "stem" in by_field:
-        correction["stem"] = apply_substitutions(field_text(question, "stem"), by_field["stem"])
-    touched = {f for f in by_field if f != "stem"}
-    if touched:
-        options = []
-        for option in question.get("options") or []:
-            name = "option %s" % option.get("key")
-            row = {"key": option.get("key"), "text": str(option.get("text") or "")}
-            if name in touched:
-                row["text"] = apply_substitutions(row["text"], by_field[name])
-            options.append(row)
-        correction["options"] = options
-    return correction
-
-
-def build_repair_event(question_key: str, subs: list[dict], correction: dict,
-                       previous: dict | None, reviewer: str, created_at: str) -> dict:
-    """One `reset_review` event that carries the repair.
-
-    A single event of this action, and not a `correct` followed by a `reset_review`, and the reason
-    is measured rather than stylistic. `load_review_events` puts every action that is not a group or
-    reset action into `latest`, and `review_projection` calls that "reviewed". A machine `correct`
-    on a question nobody has judged therefore makes it read as **已看過** - a machine event
-    presented as a person's decision, which is the one thing AGENTS.md forbids outright ("an agent
-    must never impersonate a human reviewer").
-
-    `reset_review` is the action that does the two things the repair needs and nothing more: the
-    server reads the correction from `latest_reset_review` as well as `latest` (so the fixed text is
-    served), and the projection puts the question in `repair_pending` - **修復後待複核**, "repaired,
-    waiting for a person" - which is what actually happened. It neither claims a decision nor hides
-    the question.
-
-    `previous_action` and its notes travel with the event so the reviewer can see what they had
-    decided before the text moved underneath them; `_reaffirm_standing_action` is not involved
-    because no verdict is being written here.
-    """
-    changes = [{"field": s["field"], "from": s["before"], "to": s["after"]} for s in subs]
-    summary = "；".join("(%s→%s)" % (s["before"], s["after"]) for s in subs)[:120]
-    return {
-        "candidate_key": question_key,
-        "action": "reset_review",
-        "correction": correction,
-        "reviewer": reviewer,
-        "source": "qbr_dispute_apply",
-        "repair_kind": "content_change",
-        "notes": "依 dispute 的機械證據修復：" + summary,
-        "reset_notes": "依 dispute 的機械證據修復：" + summary,
-        "previous_action": (previous or {}).get("action"),
-        "previous_notes": (previous or {}).get("notes") or "",
-        "previous_reviewed_at": (previous or {}).get("created_at"),
-        "changes": changes,
-        "created_at": created_at,
-    }
-
-
-def applied_signature(event: dict):
-    """What a repair event already changed, as an order-independent frozenset of edits.
-
-    The queue's candidate text is **not** rewritten by design - a correction is an event that overlays
-    the field, so the original reading survives. That means `substitutions_for` still finds the same
-    `⻑ -> 長` on the next run, and without this the tool would append a second identical repair for
-    every question it had already fixed (measured: 192 such events were already in the log). Comparing
-    the edits, not the count, is what makes a *re*-repair possible: if the text has moved since, the
-    signature differs and the question is repaired again, which is correct.
-    """
-    if not event or event.get("source") != "qbr_dispute_apply":
-        return None
-    return frozenset((str(c.get("field")), str(c.get("from")), str(c.get("to")))
-                     for c in event.get("changes") or [])
-
-
-def last_repair_signature(path) -> dict:
-    """`candidate_key -> edits` of the **most recent `qbr_dispute_apply`** event for that question.
-
-    Not the latest event overall, and the difference was measured. A person can review a question
-    after the repair - the station's clock is UTC while the laptop's is UTC+8, so a human `accept`
-    stamped `03:28:55` is appended **after** a repair stamped `11:25:44` - and the projection is
-    last-line-wins, so the repair stops being the latest event. Reading the signature off the latest
-    event then returned `None`, and the next `--page-read` run would have appended a *second*
-    identical repair, re-resetting a question a person had just accepted. That is the one outcome
-    this tool must never produce: it would silently undo a human decision.
-
-    Scanning for the last repair event instead of the last event keeps the check about the tool's own
-    work, and a human decision in between no longer erases the memory of it.
-    """
-    out = {}
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            key = event.get("candidate_key")
-            if key and event.get("source") == "qbr_dispute_apply":
-                out[key] = event
-    return out
-
-
-def repair_signature(subs: list[dict]):
-    return frozenset((str(s["field"]), str(s["before"]), str(s["after"])) for s in subs)
-
-
-def main() -> int:
-    args = parse_args()
-    queue_dir = os.path.join(args.queue, "review-ui")
-    candidates_path = Path(os.path.join(queue_dir, "candidates.jsonl"))
-    events_path = Path(args.events or os.path.join(queue_dir, "question_review_events.jsonl"))
-    if not candidates_path.is_file():
-        print("找不到 candidates.jsonl：%s" % candidates_path, file=sys.stderr)
-        return 2
-    if not events_path.is_file():
-        print("找不到 review event log：%s" % events_path, file=sys.stderr)
-        return 2
-
-    wanted_kinds = set(args.kind) if args.kind else set(APPLICABLE)
-    wanted_numbers = None
-    if args.only:
-        wanted_numbers = {str(item).lower().lstrip("q").lstrip("0") or "0" for item in args.only}
-
-    # The page readings, when asked for. Read from the same finding stream the reviewer's screen
-    # shows, so the repair is applied to exactly the diff a person can open and check.
-    page_findings = {}
-    if args.page_read:
-        store = os.path.join(queue_dir, ai_findings.STREAM)
-        for key, record in ai_findings.latest_by_question(store).items():
-            if record.get("population") == "dispute" and record.get("changes"):
-                page_findings[key] = record
-
-    latest = latest_events(events_path)
-    # The tool's own past repairs, found by scanning for `qbr_dispute_apply` rather than reading the
-    # latest event. A human decision appended after a repair (their clock, or just their turn) must
-    # not erase the memory that the repair already happened - otherwise the next run duplicates it
-    # and re-resets a question a person just accepted. See `last_repair_signature`.
-    prior_repairs = last_repair_signature(events_path)
-    before = sha256_file(events_path)
-    created_at = datetime.now().isoformat(timespec="seconds")
-
-    planned, refused = [], []
-    for question in load_candidates(candidates_path):
-        number = str(question.get("question_number")).lstrip("0") or "0"
-        if wanted_numbers is not None and number not in wanted_numbers:
-            continue
-        subs = [s for s in substitutions_for(question) if s["rule"] in wanted_kinds]
-        if args.page_read:
-            record = page_findings.get(question.get("candidate_key"))
-            if record:
-                subs = subs + page_read_substitutions(question, record.get("changes") or [])
-        if not subs:
-            continue
-        complaints = verify(question, subs)
-        if complaints:
-            refused.append({"candidate_key": question["candidate_key"], "why": complaints})
-            continue
-        previous = latest.get(question["candidate_key"]) or {}
-        previous_action = previous.get("action")
-        # Already repaired, with exactly these edits. The candidate text is not rewritten (by
-        # design), so the same substitution is found again every run; without this the tool would
-        # duplicate its own past work. A different edit set - the text moved since - is not skipped.
-        if applied_signature(prior_repairs.get(question["candidate_key"])) == repair_signature(subs):
-            continue
-        correction = build_correction(question, subs)
-        planned.append({"candidate_key": question["candidate_key"], "subs": subs,
-                        "correction": correction, "previous_action": previous_action,
-                        "previous": previous})
-        if args.limit and len(planned) >= args.limit:
-            break
-
-    print("queue        : %s" % args.queue)
-    print("events file  : %s" % events_path)
-    print("sha256 before: %s" % before)
-    print("to repair    : %d" % len(planned))
-    for item in planned:
-        print("  %-44s %-14s %s" % (
-            item["candidate_key"].replace("moex:", ""),
-            item["previous_action"] or "-",
-            "；".join("%s[%d] %r→%r" % (s["field"], s["position"], s["before"], s["after"])
-                      for s in item["subs"])[:96]))
-    if refused:
-        print()
-        print("REFUSED (%d) - not touched:" % len(refused))
-        for item in refused:
-            print("  %-44s %s" % (item["candidate_key"].replace("moex:", ""),
-                                   "；".join(item["why"])[:90]))
-
-    if not args.apply:
-        print()
-        print("dry run；pass --apply to write")
-        return 0
-
-    # The re-check that makes a write safe: a person may have decided a question between the
-    # measurement above and this line, and reopening it would silently undo their work. This is the
-    # same guard `append_reset_review_events.py` uses, and it is re-read from the file rather than
-    # trusted from the earlier snapshot.
-    now_latest = latest_events(events_path)
-    confirmed = []
-    for item in planned:
-        if (now_latest.get(item["candidate_key"]) or {}).get("action") != item["previous_action"]:
-            refused.append({"candidate_key": item["candidate_key"],
-                            "why": ["寫入前重驗失敗：判定已變（%s → %s）" % (
-                                item["previous_action"],
-                                (now_latest.get(item["candidate_key"]) or {}).get("action"))]})
-            continue
-        confirmed.append(item)
-
-    events = [build_repair_event(item["candidate_key"], item["subs"], item["correction"],
-                                 item["previous"], args.reviewer, created_at)
-              for item in confirmed]
-
-    # A backup first, because this file is the reviewer's history: a wrong append must be a file to
-    # put back, not a lost decision.
-    backup = events_path.with_name(events_path.name + ".before-" + created_at.replace(":", ""))
-    backup.write_bytes(events_path.read_bytes())
-    with events_path.open("a", encoding="utf-8") as handle:
-        for event in events:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-    after = sha256_file(events_path)
-    print()
-    print("backup       : %s" % backup)
-    print("appended     : %d reset_review events (carrying the correction)" % len(events))
-    print("sha256 after : %s" % after)
-    if args.out:
-        with Path(args.out).open("w", encoding="utf-8") as handle:
-            handle.write(events_path.read_text(encoding="utf-8"))
-        print("copy written : %s" % args.out)
-    print()
-    print("全部是 append-only 事件；原始抽取文字仍在 candidates.jsonl，由伺服器的 parser_original 保存。")
-    print("結果桶位是「修復後待複核」：機器不宣告任何人的判定。")
-    return 0
+from qbr.dispute_apply.text import (  # noqa: F401,E402
+    CJK_IDEOGRAPH_BLOCKS,
+    KANGXI_BLOCK,
+    RADICAL_BLOCKS,
+    REPAIR_REVIEWER_PREFIXES,
+    SUBSCRIPT_CHARS,
+    SUPERSCRIPT_CHARS,
+    UNICODE_SUB_SUP,
+    _cjk_ideograph,
+    _compatibility_fold,
+    _normalisation_pairs,
+    _radical_glyph,
+    _sub_sup_char,
+    _unique,
+    _without_whitespace,
+    aligned_changes,
+    anchored_page_changes,
+    applied_signature,
+    apply_substitutions,
+    build_correction,
+    corrected_field,
+    field_text,
+    flagged_positions,
+    is_machine_event,
+    is_normalisation,
+    last_repair_signature,
+    latest_events,
+    load_candidates,
+    merge_substitutions,
+    queue_relative,
+    repair_signature,
+    satisfied_sub,
+    sha256_file,
+    substitutions_for,
+    verify,
+)
+from qbr.dispute_apply.page_read import (  # noqa: F401,E402
+    MARKUP,
+    PAGE_READ_ALIGN_MIN,
+    PAGE_READ_LENGTH_FACTOR,
+    SYSTEMATIC_PAIR_MIN,
+    TRUST_VERDICT,
+    UNREADABLE_MARK,
+    _first_trigger,
+    _flagged_conflict,
+    _flagged_survivors,
+    _page_read_shape,
+    _record,
+    _refuse,
+    _verdict_complaint,
+    _whole_field_decision,
+    markup_dropped_complaint,
+    markup_fidelity_complaints,
+    markup_introduced,
+    page_read_fields,
+    page_read_replacements,
+    page_read_shape_complaint,
+    page_read_substitutions,
+    reading_refused_fields,
+    second_read_verdict,
+    systematic_pairs,
+    unicode_sub_sup_complaint,
+    unicode_sub_sup_introduced,
+    whole_field_refusals,
+)
+from qbr.dispute_apply.withdrawals import (  # noqa: F401,E402
+    APPLICABLE,
+    CLEARING_ACTIONS,
+    FIELD_WITHDRAW_TRIGGERS,
+    HUMAN_ACTIONS,
+    REJECTING_ACTIONS,
+    WITHDRAWN_LABEL,
+    WITHDRAW_PRIORITY,
+    _withdrawal_is_new,
+    add_withdrawal,
+    build_repair_event,
+    build_withdrawal_event,
+    closed_questions,
+    existing_withdrawals,
+    standing_rejections,
+    withdrawal_reason,
+    withdrawal_state,
+)
+from qbr.dispute_apply.asking import (  # noqa: F401,E402
+    ASK_EXCERPT,
+    ASK_LIMIT_DEFAULT,
+    _clip,
+    _reading_refusal,
+    ask_for_refusals,
+    ask_id,
+    questions_to_ask,
+    refusal_ask,
+)
+from qbr.dispute_apply.report import (  # noqa: F401,E402
+    print_asks,
+    print_page_read_census,
+    print_plan,
+    print_refusals,
+    print_withdrawals,
+)
+from qbr.dispute_apply.cli import (  # noqa: F401,E402
+    main,
+    parse_args,
+)
+from qbr.dispute_apply.withdrawals import (  # noqa: F401,E402
+    MAX_ATTEMPTS,
+    rejection_counts,
+)
 
 
 if __name__ == "__main__":

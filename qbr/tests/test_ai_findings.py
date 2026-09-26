@@ -421,6 +421,61 @@ def test_an_out_of_vocabulary_code_keeps_the_note_but_not_the_code():
     assert ok and ok["verdict"] == "OK"
 
 
+def test_a_reply_that_degenerates_mid_field_keeps_the_fields_it_finished():
+    # The shape measured on `dgx-qwen3.8-flash` (2026-09-24): a correct object whose `fix` falls into
+    # a repetition loop and never closes. 30 of 166 replies in one batch looked like this and were
+    # discarded whole - which lost the answer the model had already written.
+    #
+    # The negative control is the old behaviour: this text returned `None`, and the assertion below
+    # (`is not None`) is what fails on it.
+    degenerate = (
+        '{"verdict":"DEFECT","what":"GLYPH_DAMAGE","where":"題幹首字",'
+        '"fix":"將「酸鹼」改為「酸鹼」（應為「酸鹼」之誤植，正確詞為「酸鹼」或「酸鹼」？查證：'
+        'Carbohydrate 中文為「醣類」或「醣類」？正確為「醣類」或「醣類」？標準為「醣類」或「醣類」？')
+    finding = ai_findings.parse_finding(degenerate)
+    assert finding is not None
+    assert finding["verdict"] == "DEFECT" and finding["what"] == "GLYPH_DAMAGE"
+    assert finding["where"] == "題幹首字"
+    # The unfinished field is dropped, not filled in from the loop text: the loop is not a `fix`.
+    assert "fix" not in finding
+    assert finding["truncated"] is True
+
+    # A clean reply is not marked: `truncated` has to mean "this one needed salvage", or it stops
+    # being information.
+    clean = ai_findings.parse_finding(
+        '{"verdict":"DEFECT","what":"GLYPH_DAMAGE","where":"w","fix":"把 A 改成 B"}')
+    assert clean is not None and "truncated" not in clean and clean["fix"] == "把 A 改成 B"
+
+    # Salvage reads the leading fields only, in schema order, and stops at the first gap that is not
+    # a comma: a fragment after junk is not the next field.
+    junk = ai_findings.parse_finding('{"verdict":"DEFECT" 我插話 "what":"GLYPH_DAMAGE"}')
+    assert junk is not None and junk["truncated"] is True and junk["what"] is None
+    # Nothing to read at all is still nothing - the one case that must stay `None`. An object that
+    # never closes **and** never says a verdict has no answer in it, so salvage refuses it too;
+    # whereas a *complete* object with no recognisable verdict is the pre-existing case where the
+    # note survives and only the label is missing.
+    assert ai_findings.parse_finding("{") is None
+    assert ai_findings.parse_finding('{"where":"只有位置，沒有判定"') is None
+    unlabelled = ai_findings.parse_finding('{"where":"只有位置，沒有判定"}')
+    assert unlabelled is not None and unlabelled["verdict"] is None
+    assert "truncated" not in unlabelled
+
+
+def test_a_truncated_finding_is_not_rule_worthy_even_when_it_says_so():
+    # `rule_worthy: true` that arrives before the collapse was raised by a reply that then lost its
+    # thread, and a rule is the part that outlives the batch. The negative control is the old
+    # predicate (`rule_worthy is True and verdict == DEFECT`), which returns True here.
+    truncated = ai_findings.parse_finding(
+        '{"verdict":"DEFECT","what":"GLYPH_DAMAGE","where":"w","rule_worthy":true,"fix":"把「酸')
+    assert truncated["truncated"] is True
+    assert ai_findings.is_rule_worthy({"finding": truncated}) is False
+    # The same finding without the collapse is still rule-worthy, so the guard is about the collapse
+    # and not about the code or the verdict.
+    intact = ai_findings.parse_finding(
+        '{"verdict":"DEFECT","what":"GLYPH_DAMAGE","where":"w","rule_worthy":true,"fix":"把「酸鹼」改為「酸鹼」"}')
+    assert ai_findings.is_rule_worthy({"finding": intact}) is True
+
+
 def test_the_reading_fingerprint_does_not_fold_the_text():
     # A finding may be about a Kangxi radical or a full-width letter; folding would erase exactly
     # the difference the finding is about.
@@ -514,6 +569,66 @@ def test_the_answer_reading_is_part_of_the_prompt_version():
     finally:
         ai_findings.ANSWER_READING = real
     assert ai_findings.prompt_version("blocked") == version
+
+
+def test_the_figure_block_is_part_of_the_prompt_version():
+    """同一件事，換到圖片那一塊：它一直沒有被雜湊，所以改了塊的文字版本不會動。
+
+    2026-09-25 這一塊多了圖自己的量測（`clipped`／`ownership: unverified`）。改動前後的記錄不可以
+    自稱同一個 prompt 世代——那正是「提示詞變了、版本沒變」這一類缺陷。
+    """
+    version = ai_findings.prompt_version("blocked")
+    real = ai_findings.FIGURE_NOTE
+    try:
+        ai_findings.FIGURE_NOTE = real.replace("圖片", "圖像")
+        assert ai_findings.prompt_version("blocked") != version
+    finally:
+        ai_findings.FIGURE_NOTE = real
+    assert ai_findings.prompt_version("blocked") == version
+
+
+# ------------------------------------------------------------------ 圖自己的量測
+#
+# 業主 2026-09-25：「有些題目原本沒圖卻截了上下題圖片；AI 截圖檢查只看當下這題、沒上下資訊，
+# 於是回報『找不到問題』。」切圖那一步已經把兩種事實寫在候選列上（`crop_run_figures`），但讀這一題
+# 的那一端從來沒讀它們。以下三條釘住「事實有沒有被說出來」，以及「沒量到時不可以自己編」。
+
+def test_a_crop_whose_ownership_was_never_measured_says_so_in_the_prompt():
+    question = {"stem": "如下圖，何者正確？", "image_refs": [
+        {"asset_role": "figure-crop", "path": "review-ui/crops/p/q011_embedded-image.png",
+         "ownership": "unverified", "page": 2, "box": [47.0, 325.1, 549.2, 586.4]}]}
+    note = ai_findings.figures_note(question)
+    assert "無法確認這張圖屬於哪一題" in note, note
+    # 量到的頁碼仍在，因為那是同一張圖的別的事實。
+    assert "figure-crop" in note
+
+
+def test_a_verified_crop_says_nothing_it_did_not_measure():
+    """負對照：量到歸屬（框落在這一題的列裡）的那一種不可以借用上面的句子，也不可以編一個比例。"""
+    verified = {"stem": "如下圖，何者正確？",
+                "image_refs": [{"asset_role": "figure-crop", "path": "x.png", "page": 2,
+                                "box": [47.0, 325.1, 549.2, 586.4]}]}
+    note = ai_findings.figures_note(verified)
+    assert "這一題的圖片：1 張（figure-crop）" in note
+    assert "無法確認這張圖屬於哪一題" not in note
+    assert "切掉" not in note
+
+
+def test_a_crop_that_was_cut_to_this_questions_rows_reports_how_much_was_cut():
+    question = {"stem": "如下圖，何者正確？", "image_refs": [
+        {"asset_role": "figure-crop", "path": "x.png", "page": 1,
+         "box": [39.1, 100.0, 304.6, 200.0], "clipped": {"above": 298.4, "below": 0.0}}]}
+    note = ai_findings.figures_note(question)
+    assert "蓋到隔壁題" in note and "298.4pt" in note, note
+
+
+def test_the_caveat_is_empty_when_there_are_no_pictures_to_be_doubtful_about():
+    """負對照的另一半：沒有圖、或圖的歸屬量到了，就不該多出一句話。"""
+    assert ai_findings.figure_caveat({"stem": "下列何者正確？"}) == ""
+    assert ai_findings.figure_caveat(
+        {"image_refs": [{"asset_role": "figure-crop", "box": [1, 2, 3, 4]}]}) == ""
+    unverified = {"image_refs": [{"asset_role": "figure-crop", "ownership": "unverified"}]}
+    assert "無法確認屬於哪一題" in ai_findings.figure_caveat(unverified)
 
 
 def test_an_or_answer_is_not_shown_as_a_multi_select_answer():
@@ -612,10 +727,15 @@ def test_only_the_latest_finding_decides_whether_a_question_is_stale(tmp_path):
     """
     path = str(tmp_path / "findings.jsonl")
     key = "moex:1:1:1:1:question:q001"
-    old = {"candidate_key": key, "prompt_version": "aaaaaaaaaaaa", "population": "blocked"}
-    new = {"candidate_key": key, "prompt_version": "cccccccccccc", "population": "blocked"}
+    # `finding` is what makes a record an *answer* (`is_answer`); a record without one answered
+    # nothing and is stale by design. Every real record carries it (`make_record` always writes it),
+    # so a fixture that omits it is not a record this code can produce.
+    old = {"candidate_key": key, "prompt_version": "aaaaaaaaaaaa", "population": "blocked",
+           "finding": {"verdict": "NONE"}}
+    new = {"candidate_key": key, "prompt_version": "cccccccccccc", "population": "blocked",
+           "finding": {"verdict": "NONE"}}
     corpus = {"candidate_key": "moex:1:1:1:1:question:q002", "prompt_version": "aaaaaaaaaaaa",
-              "population": "corpus"}
+              "population": "corpus", "finding": {"verdict": "NONE"}}
     import json as _json
     with open(path, "w", encoding="utf-8") as handle:
         for record in (old, corpus, new):
@@ -627,6 +747,61 @@ def test_only_the_latest_finding_decides_whether_a_question_is_stale(tmp_path):
     assert ai_findings.stale_questions(path, "cccccccccccc", "corpus") == {corpus["candidate_key"]}
     # A question whose only finding is old is stale.
     assert ai_findings.stale_questions(path, "dddddddddddd") == {key, corpus["candidate_key"]}
+
+
+
+def test_restale_does_not_repeat_unchanged_rejection_context(monkeypatch, tmp_path):
+    question = _question(12)
+    key = question["candidate_key"]
+    queue = _build_queue(tmp_path, [question], [
+        {"candidate_key": key, "action": "block", "reviewer": "local",
+         "source": "linear_v2", "notes": "同一則註解"},
+        {"candidate_key": key, "action": "reset_review", "reviewer": "repair_dispute_apply",
+         "source": "qbr_dispute_apply", "applied": "field",
+         "changes": [{"field": "stem", "from": "舊字", "to": "新字"}]},
+        {"candidate_key": key, "action": "block", "reviewer": "local",
+         "source": "linear_v2", "notes": "同一則註解"},
+    ])
+    calls = []
+
+    def fake_ask(messages, *, endpoint, max_tokens, timeout):
+        calls.append(messages)
+        return ({"verdict": "NOT_EXTRACTION", "what": "NONE", "where": "", "fix": "",
+                 "rule_worthy": False, "confidence": 0.5}, "{}", None, {}, 0.1)
+
+    monkeypatch.setattr(ask_about_blocks, "ask", fake_ask)
+    for flags in ([], ["--restale"]):
+        monkeypatch.setattr(sys, "argv", [
+            "ask_about_blocks.py", "--queue", queue, "--concurrency", "1", *flags,
+        ])
+        assert ask_about_blocks.main() == 0
+
+    assert len(calls) == 1, "unchanged reviewer rejection context must not make the finding stale"
+
+
+def test_a_failed_call_does_not_count_as_an_answer(tmp_path):
+    """一次暫時的失敗不可以看起來像一個結果。
+
+    實測 2026-09-24：對 DGX 的 4 次試探呼叫有 1 次 `request failed`，而它被寫成一筆帶著**現行**
+    `prompt_version` 的記錄。沒有這條規則的話，那一題就再也不是「舊版」——`--restale` 永遠不會
+    重問它、`--resume` 永遠跳過它，而且是**安靜地**。這與 `scan_for_repairs.py --limit` 是同一族
+    缺陷：把「沒做到」記成「做過了」。
+    """
+    path = str(tmp_path / "findings.jsonl")
+    key = "moex:1:1:1:1:question:q001"
+    version = "cccccccccccc"
+    answered = {"candidate_key": key, "prompt_version": "aaaaaaaaaaaa", "population": "blocked",
+                "finding": {"verdict": "NONE"}}
+    failed = {"candidate_key": key, "prompt_version": version, "population": "blocked",
+              "finding": None, "error": "request failed"}
+    import json as _json
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in (answered, failed):
+            handle.write(_json.dumps(record) + "\n")
+    assert not ai_findings.is_answer(failed)
+    assert ai_findings.is_answer(answered)
+    assert ai_findings.stale_questions(path, version, "blocked") == {key}, (
+        "最後一筆是這一版的失敗，但它什麼都沒回答——這一題仍然是舊的，要重問")
 
 
 def test_repeated_learned_flags_do_not_become_a_list_of_characters():

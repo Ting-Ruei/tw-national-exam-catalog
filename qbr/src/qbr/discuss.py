@@ -41,6 +41,15 @@ REPAIR_QUESTIONS_STREAM = "question_repair_questions.jsonl"
 #: 但名字只有一個來源）。
 STREAMS = (PRINCIPLES_STREAM, REPAIR_QUESTIONS_STREAM)
 
+#: 原則流的 schema。`add`／`remove`／`approve`／`unapprove` 都是這一種記錄——同一個流、
+#: 同一種寫法（`review_ui/review_state.py::append_principle` 寫的是同一個字串，見
+#: `tests/test_review_ui_principles.py` 把兩邊釘在一起）。
+PRINCIPLE_SCHEMA = "qbr_review_principle_v0.1"
+
+#: 人對一條原則的**決定**。它是一個事件，不是改寫 `add` 那一行：與 `remove` 同一個理由，
+#: 而且「誰在什麼時候核准的」本身就是稽核要看的東西（append-only 的流沒有第二次機會）。
+DECISION_ACTIONS = ("approve", "unapprove")
+
 
 def load_events(path):
     """一個 append-only 流的每一筆記錄，照檔案順序，壞行跳過。
@@ -82,42 +91,117 @@ def append_event(path, record):
 
 
 def principles_projection(events):
-    """當前有效的原則，由 append-only 的 add/remove 流折疊而來。
+    """當前有效的原則，由 append-only 的 add/remove/approve/unapprove 流折疊而來。
 
     每個 `principle_id` 以最後一個 `add` 為準，其後若有 `remove` 就撤掉；兩者的先後以**檔案
     順序**為準，因為事件是 append 的，檔案順序就是寫入順序。對一個從未 add 過的 id 做
     `remove`，保留在 `orphans` 而不是默默丟掉——它證明有人試著撤回一個檔案已經不持有的東西，
     這件事值得看見。
+
+    **核准（2026-09-24）**：一條原則進了提示詞，模型就照著它改題目文字，所以「哪幾條是**人**
+    點頭過的」必須是一個被記錄下來的狀態，而不是一句推測。`approve`／`unapprove` 是同一條流上
+    的事件（append-only：核准不是改寫 add 那一行），折疊成每一條的 `approved` 布林值，連同
+    `approved_by`／`approved_at`。三條規則，都是為了讓畫面與提示詞讀到同一個答案：
+
+      * **重複的決定不搬時間。** 再按一次「核准」會 append 第二筆事件（歷史不重寫），但
+        `approved_at` 留在第一次——那個欄位是「這個決定是什麼時候做下的」，不是「最後一次有人
+        按到它」。所以 `approve` 是冪等的，而檔案仍然只增不減。
+      * **重新 add 同一個 id ＝ 一句新的話**（`add` 之後是新的文字），核准的對象是那句話，
+        不是那個號碼，所以它的核准狀態回到未核准。
+      * `remove` 帶走核准狀態：一條不再生效的原則沒有「已核准」可言。
+
+    `count`／`approved_count`／`pending_count` 都在這裡算，因為介面上的「N 條」與「N 條待你
+    核准」必須是**同一次折疊**的兩個數字，不能一個來自投影、一個來自畫面上數。
     """
     order = []
     latest = {}
     orphans = []
+    decisions = {}
     for event in events:
         action = str(event.get("action") or "").strip().lower()
         principle_id = str(event.get("principle_id") or "").strip()
-        if not principle_id or action not in {"add", "remove"}:
+        if not principle_id:
+            continue
+        if action in DECISION_ACTIONS:
+            state = decisions.setdefault(
+                principle_id, {"approved": False, "approved_by": None, "approved_at": None})
+            wanted = action == "approve"
+            if wanted != state["approved"]:
+                state["approved"] = wanted
+                state["approved_by"] = str(event.get("reviewer") or "").strip() or None
+                state["approved_at"] = str(event.get("created_at") or "").strip() or None
+            continue
+        if action not in {"add", "remove"}:
             continue
         if action == "add":
             if principle_id not in latest:
                 order.append(principle_id)
             latest[principle_id] = event
+            decisions.pop(principle_id, None)
             continue
         if principle_id in latest:
             latest.pop(principle_id, None)
+            decisions.pop(principle_id, None)
             if principle_id in order:
                 order.remove(principle_id)
         else:
             orphans.append(event)
-    active = [latest[pid] for pid in order if pid in latest]
+    active = []
+    for pid in order:
+        if pid not in latest:
+            continue
+        event = latest[pid]
+        decision = decisions.get(pid) or {}
+        # 一份**複本**，不是那一筆事件本身：事件的物件由呼叫端持有（伺服器把它存在
+        # `state.principles_events`），折疊不該把顯示用的欄位寫進歷史。
+        active.append(dict(event, approved=bool(decision.get("approved")),
+                           approved_by=decision.get("approved_by"),
+                           approved_at=decision.get("approved_at")))
+    approved_count = sum(1 for row in active if row["approved"])
     return {"principles": active, "removed": orphans,
-            "count": len(active), "event_count": len(events)}
+            "count": len(active), "approved_count": approved_count,
+            "pending_count": len(active) - approved_count, "event_count": len(events)}
 
 
 def active_principles(events):
-    """只取有效原則的文字，照加入順序。這是提示詞要的東西。"""
+    """**全部**有效原則的文字，照加入順序——含還沒被人核准的。
+
+    這是給**人看的畫面**用的（一條原則被寫下來，就該看得見它在等誰點頭）。**提示詞要用
+    `approved_principles`**：未核准的原則若進了提示詞，模型就會照著一句人還沒看過的話改題目
+    文字，而畫面上那個「待你核准」的標記會變成一句謊。兩個存取器並存是刻意的——把它們併成
+    一個，就是「誰在用哪一種」再次只能靠猜。
+    """
     return [str((event.get("text") or "")).strip()
             for event in principles_projection(events)["principles"]
             if str(event.get("text") or "").strip()]
+
+
+def approved_principles(events):
+    """**已核准**原則的文字，照加入順序。這是提示詞唯一該讀的一份。
+
+    一條也沒核准過（例如這個機制剛上線、原則已經寫了但還沒有人按過）時回傳空清單，呼叫端
+    必須把「0 條」印出來而不是安靜地送出一個沒有原則的提示詞——見
+    `confirm_dispute.py` 的 `基本原則 N 條（已核准 X／待核准 Y）`。
+    """
+    return [str(row.get("text") or "").strip()
+            for row in principles_projection(events)["principles"]
+            if row.get("approved") and str(row.get("text") or "").strip()]
+
+
+def principle_decision_event(principle_id, action, reviewer="local"):
+    """一筆核准／取消核准的記錄，形狀與 `add`／`remove` 同一個 schema、同一條流。
+
+    事件由**這裡**組、由呼叫端交給 `append_event`：寫進去的欄位就是折疊讀的欄位，兩者只有
+    一份定義（`principles_projection` 讀 `principle_id`／`action`／`reviewer`／`created_at`）。
+    """
+    action = str(action or "").strip().lower()
+    if action not in DECISION_ACTIONS:
+        raise ValueError("action must be approve or unapprove")
+    principle_id = str(principle_id or "").strip()
+    if not principle_id:
+        raise ValueError("principle_id is required")
+    return {"schema": PRINCIPLE_SCHEMA, "action": action, "principle_id": principle_id,
+            "reviewer": str(reviewer or "").strip() or "local"}
 
 
 def repair_questions_projection(events):
@@ -154,6 +238,26 @@ def repair_questions_projection(events):
         rows.append(row)
     return {"questions": rows, "open_count": sum(1 for row in rows if row["open"]),
             "count": len(rows), "event_count": len(events)}
+
+
+def repair_asks_by_key(events):
+    """每一題「代理還在等答案」的那一筆反問，依 `candidate_key`。
+
+    折疊規則只有一份（上面那個投影），這裡只把它的結果依題目分組——審題介面的題目區要顯示
+    「這一題機器讀到了但沒有自己改，原因是什麼」，而它手上只有那一題的 key。
+
+    同一個 key 可以有好幾筆反問（每一輪重讀紙本、或文字改了就得重新問），介面要的是**最新
+    的那一筆還沒被回答的**：投影是「最新的問題排前面」，所以第一個命中的就是它。已經被回答
+    的不算——那是歷史，那個人已經說過話了，這一題不再是「機器停在這裡」。
+    """
+    by_key = {}
+    for row in repair_questions_projection(events)["questions"]:
+        key = row.get("candidate_key")
+        if not key or not row.get("open"):
+            continue
+        if key not in by_key:
+            by_key[key] = row
+    return by_key
 
 
 def next_id(events, prefix):
