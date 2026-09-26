@@ -130,9 +130,17 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
     merged = {
         "adapter_version": metadata.get("adapter_version"),
         "answer_authority_source": metadata.get("answer_authority_source"),
+        "answer_role_primary": metadata.get("answer_role_primary"),
         "answer_display": metadata.get("answer_display"),
+        "answer_pdf_primary_relative": metadata.get("answer_pdf_primary_relative"),
         "answer_pdf_relative": metadata.get("answer_pdf_relative"),
+        "answer_pdf_sha256": metadata.get("answer_pdf_sha256"),
+        "answer_source_documents": metadata.get("answer_source_documents"),
+        "answer_source_registry_key": metadata.get("answer_source_registry_key"),
+        "answer_source_registry_keys": metadata.get("answer_source_registry_keys"),
         "category_code": metadata.get("category_code"),
+        "corrected_answer_pdf_relative": metadata.get("corrected_answer_pdf_relative"),
+        "corrected_answer_pdf_sha256": metadata.get("corrected_answer_pdf_sha256"),
         # Carried through so the reviewer is told which questions the text layer could not spell
         # out completely, and where. The character renders on the page, so the question is
         # readable - but a reader comparing the screen against the paper deserves to know which
@@ -148,6 +156,7 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         "parser_status": _quality_status(gate, number),
         "parser_version": metadata.get("parser_version"),
         "question_pdf_relative": metadata.get("question_pdf_relative"),
+        "question_pdf_sha256": metadata.get("question_pdf_sha256"),
         "review_status": metadata.get("review_status"),
         "subject_code": metadata.get("subject_code"),
         "year": metadata.get("year"),
@@ -168,8 +177,8 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
             "is_special_correction": voided,
             "raw_answer": _answer_string(labels),
         },
-        "answer_source_registry_key": (metadata.get("external_registry_key") or "").replace(
-            ":question", ":answer") or None,
+        "answer_source_registry_key": metadata.get("answer_source_registry_key"),
+        "answer_source_registry_keys": metadata.get("answer_source_registry_keys") or [],
         "candidate_key": question["source_question_key"],
         "canonical_question_key": question["source_question_key"],
         "explanation": None,
