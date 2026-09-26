@@ -45,6 +45,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
+ROOT = os.path.dirname(PKG)
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
@@ -90,12 +92,12 @@ def review_actions(queue_dir: str) -> dict:
     免得兩處對「這題的狀態是什麼」有兩種答案。
     """
     from pathlib import Path
-    from qbr.review_ui import events as review_events
+    from scripts.serve_question_review_ui import load_review_events
 
     path = Path(queue_dir) / "review-ui" / "question_review_events.jsonl"
     if not path.exists():
         return {}
-    latest, _counts, reset = review_events.load_review_events(path)
+    latest, _counts, reset = load_review_events(path)
     actions = {key: str(event.get("action") or "") for key, event in latest.items()}
     for key, event in reset.items():
         actions.setdefault(key, str(event.get("action") or ""))
