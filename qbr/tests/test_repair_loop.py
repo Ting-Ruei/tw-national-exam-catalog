@@ -195,3 +195,165 @@ def test_a_missing_queue_exits_nonzero_instead_of_reporting_no_blocks(tmp_path):
     result = _run(["--queue", str(tmp_path / "nope")])
     assert result.returncode == 2
     assert "candidates.jsonl" in result.stderr
+
+
+# ------------------------------------- 被退過的修復：迴圈自己的記憶（owner 2026-09-25）
+
+def _repair_event(key, *, before, after, field="stem", created_at="2026-09-25T01:00:00",
+                  applied="field", notes="依 dispute 的機械證據修復：(5-HT1A→5-HT<sub>1A</sub>)"):
+    """一筆機器修復事件，形狀同 `apply_dispute_repairs.build_reset_event` 寫出來的。
+
+    `notes` 預設**有值**，因為真實的事件都有（站上 141 筆修復、137 筆帶 summary）：這是
+    「機器也會寫 `notes`」這件事在測試裡的代表。
+    """
+    return {"candidate_key": key, "action": "reset_review", "applied": applied,
+            "reviewer": "repair_dispute_apply", "source": "qbr_dispute_apply",
+            "repair_kind": "content_change", "notes": notes,
+            "changes": [{"field": field, "from": before, "to": after}],
+            "created_at": created_at}
+
+
+def _withdrawal_event(key, *, fields=("stem",), created_at="2026-09-25T01:30:00"):
+    """一筆撤回事件，形狀同 `apply_dispute_repairs.build_withdrawal_event`。
+
+    撤銷事件沒有 `source`（契約就那幾個鍵），署名仍是 `repair_dispute_apply`——所以判斷「誰寫的」
+    不能只看 `source`。
+    """
+    return {"candidate_key": key, "action": "reset_review", "applied": "withdrawn",
+            "reviewer": "repair_dispute_apply", "withdraw": list(fields),
+            "correction": None, "created_at": created_at}
+
+
+def _events_path(queue):
+    return os.path.join(repair_loop.review_ui_dir(queue), "question_review_events.jsonl")
+
+
+def test_a_block_after_a_machine_repair_is_one_refusal(tmp_path):
+    """機器改過、人打回＝一次「被退」，而且記下**被退的是哪一筆改動**。
+
+    這是收斂迴圈唯一的記憶：沒有它，下一次讀取只知道「這一題被 block」，不知道機器試過什麼。
+    """
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="5-HT1A", after="5-HT<sub>1A</sub>"),
+         _event("k1", "block", created_at="2026-09-25T02:27:00")])
+    refusals = repair_loop.rejections_by_key(_events_path(queue))
+    assert refusals["k1"]["count"] == 1
+    assert refusals["k1"]["fields"] == ["stem"]
+    assert refusals["k1"]["changes"] == [{"field": "stem", "from": "5-HT1A",
+                                          "to": "5-HT<sub>1A</sub>"}]
+
+
+def test_a_question_the_machine_never_touched_is_not_a_refusal(tmp_path):
+    """**負控制。** 沒有機器修復的 block 是**新問題**，不是「被退的修復」。
+
+    把它算進去，報告上「重複被拒」那個數字就會把沒試過的題目也算成試過了。
+    """
+    queue = _build_queue(tmp_path, [_question(1, key="k1")], [_event("k1", "block")])
+    assert repair_loop.rejections_by_key(_events_path(queue)) == {}
+
+
+def test_the_second_refusal_counts_after_the_machine_took_its_repair_back(tmp_path):
+    """**核心。** 站上真實的順序：修復 → 打回 → 撤回 → 打回（64 題就是這樣被退第二次）。
+
+    撤回（`applied: "withdrawn"`）是那一筆修復的**下場**（被打回之後還原），不是「機器沒改過」。
+    把它讀成「沒有待退的修復」，第二次打回就只算 0 次——實測：較窄的規則下 64 題全部只算 1 次、
+    沒有任何一題算 2 次；正確的規則是那 64 題算 2 次。
+    """
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="5-HT1A", after="5-HT<sub>1A</sub>"),
+         _event("k1", "block", created_at="2026-09-25T02:27:00"),
+         _withdrawal_event("k1"),
+         _event("k1", "block", created_at="2026-09-25T02:29:00")])
+    refusals = repair_loop.rejections_by_key(_events_path(queue))
+    assert refusals["k1"]["count"] == 2
+    # 而被退的是那筆已經被還原的改動——正是「不要再改一次同一個地方」要知道的那一筆。
+    assert refusals["k1"]["changes"][0]["to"] == "5-HT<sub>1A</sub>"
+
+    # 負控制：把撤回讀成「機器沒改過」的那一版，這裡會得到 1。
+    assert repair_loop.fold_review_events(_events_path(queue))["k1"]["repairs_seen"] == 1
+
+
+def test_an_accept_clears_the_refusal_count(tmp_path):
+    """人接受了就不再是「被退過」：數字要回得到 0，否則報告會一直說著過去。"""
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="A", after="B"),
+         _event("k1", "block", created_at="2026-09-25T02:27:00"),
+         _event("k1", "accept", created_at="2026-09-25T03:00:00")])
+    assert repair_loop.rejections_by_key(_events_path(queue)) == {}
+
+
+def test_the_refused_change_is_the_one_that_was_on_screen(tmp_path):
+    """兩筆修復、兩次打回：第二次留的是第二次的那一筆，不是第一次的。"""
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="一", after="二", created_at="2026-09-25T01:00:00"),
+         _event("k1", "block", created_at="2026-09-25T01:10:00"),
+         _repair_event("k1", before="二", after="三", created_at="2026-09-25T01:20:00"),
+         _event("k1", "block", created_at="2026-09-25T01:30:00")])
+    refusals = repair_loop.rejections_by_key(_events_path(queue))
+    assert refusals["k1"]["count"] == 2
+    assert [change["to"] for change in refusals["k1"]["changes"]] == ["三"]
+
+
+def test_a_machine_repair_summary_is_not_a_reviewer_note(tmp_path):
+    """**負控制。** 機器的修復事件也帶 `notes`，而這個頻道整條路都在說「審題者寫下的原話」。
+
+    站上實測（2026-09-25）：464 題有還站著的註解，其中 **311 題**的那一句是機器寫的
+    （「依 dispute 的機械證據修復：…」）。把過濾拿掉，`notes_by_key` 就會把機器的話交給
+    `NOTES`／`BLOCKED_WITH_NOTE`，提示詞於是拿機器的摘要冒充人的方向。
+    """
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="一", after="二"),
+         _event("k1", "block", created_at="2026-09-25T02:27:00")])
+    assert repair_loop.notes_by_key(_events_path(queue)) == {}, \
+        "機器寫的修復摘要被當成審題者的註解了"
+    # 而人寫的那一句仍然照樣傳得出去（否則上面那一行只是「什麼都不回」）。
+    (tmp_path / "b").mkdir(parents=True, exist_ok=True)
+    queue2 = _build_queue(
+        tmp_path / "b", [_question(1, key="k1")],
+        [_repair_event("k1", before="一", after="二"),
+         _event("k1", "comment", "檢查上下標", created_at="2026-09-25T02:20:00"),
+         _event("k1", "block", created_at="2026-09-25T02:27:00")])
+    assert [row["notes"] for row in repair_loop.notes_by_key(_events_path(queue2))["k1"]] == \
+        ["檢查上下標"]
+
+
+def test_human_answers_are_scoped_to_their_candidate_and_exclude_machine_replies(tmp_path):
+    path = tmp_path / "question_repair_questions.jsonl"
+    events = [
+        {"action": "ask", "question_id": "human", "candidate_key": "k1",
+         "question": "Which figure belongs here?", "reviewer": "repair_agent"},
+        {"action": "answer", "question_id": "human", "candidate_key": "k1",
+         "answer": "The q2 figure is shown.", "reviewer": "local"},
+        {"action": "ask", "question_id": "machine", "candidate_key": "k2",
+         "question": "Is this change acceptable?", "reviewer": "repair_agent"},
+        {"action": "answer", "question_id": "machine", "candidate_key": "k2",
+         "answer": "Applied from prior experience.", "reviewer": "repair_experience_apply"},
+    ]
+    path.write_text("".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+                    encoding="utf-8")
+
+    assert repair_loop.human_answers_by_key(str(path)) == {
+        "k1": {"questions": [
+            {"candidate_key": "k1", "question": "Which figure belongs here?",
+             "answer_text": "The q2 figure is shown."}
+        ]}
+    }
+
+
+def test_the_report_names_the_questions_that_were_refused_twice(tmp_path):
+    """人要看得見那個數字：報告要說出「打回 2 次」與被退的欄位，不能只是一個黑箱。"""
+    queue = _build_queue(
+        tmp_path, [_question(1, key="k1")],
+        [_repair_event("k1", before="一", after="二", created_at="2026-09-25T01:00:00"),
+         _event("k1", "block", created_at="2026-09-25T01:10:00"),
+         _repair_event("k1", before="二", after="三", created_at="2026-09-25T01:20:00"),
+         _event("k1", "block", created_at="2026-09-25T01:30:00")])
+    result = _run(["--queue", queue, "--show", "3"])
+    assert result.returncode == 0, result.stderr
+    assert "被人打回 2 次以上的：1 題" in result.stdout
+    assert "打回 2 次" in result.stdout and "stem" in result.stdout

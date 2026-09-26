@@ -80,6 +80,7 @@ sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
 from qbr import ai_findings  # noqa: E402
+from qbr import discuss  # noqa: E402
 from qbr import engines  # noqa: E402
 from qbr import vision  # noqa: E402
 import repair_loop  # noqa: E402
@@ -134,6 +135,13 @@ def parse_args() -> argparse.Namespace:
                              "fix the answers that were asked the old question have to be asked "
                              "again, and only those")
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--principles", metavar="PATH",
+                        help="the reviewer's 基本原則 stream (default: the queue's own "
+                             + discuss.PRINCIPLES_STREAM + "); each active principle is added to the "
+                             "prompt as a constraint. Same flag and same default as "
+                             "`confirm_dispute.py`, because both passes ask the model about a page "
+                             "and a constraint that bound one of them but not the other would make "
+                             "two measurements out of one reviewer's notes.")
     return parser.parse_args()
 
 
@@ -156,6 +164,66 @@ def ask(messages, *, endpoint, max_tokens, timeout):
     content = engines.content_of(raw_response)
     return (ai_findings.parse_finding(content), content, None, engines.usage_of(raw_response),
             seconds)
+
+
+# 審題者對某一題的**圖**留的話，只有這五種意思。標籤是封閉集合，所以這一支的答案可以被拒絕
+# （不在集合裡就是抱怨，不是一個比較寬鬆的答案）。
+FIGURE_DIRECTIVE_LABELS = ("no-figure", "extra-crop", "wrong-region", "keep", "unclear")
+
+FIGURE_DIRECTIVE_SYSTEM = """你是審題者留言的轉錄員。題庫的主人對**某一題的圖**留了一句話，你要把它轉成一個標籤。
+
+只回一個 JSON，不要解釋、不要加字：
+{"directive": "<標籤>", "quote": "<他那句話裡讓你下這個標籤的原文片段，照抄>"}
+
+標籤只能是這五個之一：
+- no-figure：他說這一題（的題目／題幹／本體）本來就沒有圖、不該有圖、多放了一張圖、硬要截圖。
+- extra-crop：他說多截了圖、額外多截、截到別題的圖（但沒有說這一題本來沒有圖）。
+- wrong-region：他說這一題有圖，只是截的範圍錯了（切掉了、跨頁只截一半、截錯位置、截得不完整）。
+- keep：他在要求保留這張圖，或這句話與圖無關（例如只講文字、只講選項）。
+- unclear：看不出來。**不要猜**，不確定就用這個。
+
+注意：選項 C 的圖沒截完整、而題目本體沒有圖，是 no-figure（他要的是這一題不要放圖）。
+"""
+
+FIGURE_DIRECTIVE_USER = """這一題目前在平台上的文字（供你判斷他講的是哪一張圖）：\n%s\n\n他對這一題的圖留的話：\n%s\n"""
+
+
+def read_figure_directive(note, *, question="", model=None, max_tokens=400, timeout=300):
+    """這一題的圖，他的話是什麼意思。回 `(標籤, 原話片段, 抱怨)`。
+
+    為什麼要讓引擎讀這句話：站上實測（2026-09-25），業主明確說「沒有圖／多截」的 11 題裡，
+    用紙本量得到的訊號只解釋得了 **5 題**（這一題自己的區域裡連一個圖物件都量不到）。剩下 6 題的
+    區域**確實量到 2-4 個圖物件**（選項的圖、隔壁題的圖），量測於是留著一張，而他看到的就是
+    「他不改」。紙本量不出「這張圖該不該交給審題者」——那是他的意思，所以這裡是一個提示詞，不是一條
+    新的量測規則（charter：腳本只保留紙張的性質）。
+
+    走 `qbr.engines` 的同一個 lane（`LANE`／`QBR_NOTE_DIRECTIVE_MODEL`，預設與常駐迴圈一致），因為
+    「怎麼讀他的話」只能有一份：這一支與 `ask_about_blocks` 的判讀同一個門，兩份就是兩個答案。
+    """
+    lane = (model or os.environ.get("QBR_NOTE_DIRECTIVE_MODEL") or os.environ.get("LANE")
+            or "mtplx-35b")
+    endpoint = ENDPOINTS.get(lane)
+    if endpoint is None:
+        return "", "", "unknown-local-lane: " + str(lane)
+    refusal = engines.egress_refusal(endpoint)
+    if refusal:
+        return "", "", refusal
+    messages = [
+        {"role": "system", "content": FIGURE_DIRECTIVE_SYSTEM},
+        {"role": "user", "content": FIGURE_DIRECTIVE_USER % (
+            (question or "").strip()[:1500] or "（沒有提供）", (note or "").strip()[:500])}]
+    raw, _seconds = engines.ask(messages, endpoint=endpoint, max_tokens=max_tokens,
+                               timeout=timeout)
+    if raw is None:
+        return "", "", "request-failed"
+    parsed, complaint = vision._json_of(engines.content_of(raw), expect=("directive",))
+    if parsed is None:
+        return "", "", complaint or "unparsed"
+    label = str(parsed.get("directive") or "").strip()
+    quote = str(parsed.get("quote") or "").strip()
+    if label not in FIGURE_DIRECTIVE_LABELS:
+        return "", quote, "unknown-directive: " + (label[:40] or "empty")
+    return label, quote, ""
 
 
 def targets(queue_dir: str, only, limit, everything=False, done=(), questions=None):
@@ -188,7 +256,11 @@ def targets(queue_dir: str, only, limit, everything=False, done=(), questions=No
                    for q in rows]
     else:
         blocked, rows = repair_loop.collect_blocks(queue_dir)
-        _explained, unexplained = repair_loop.explain(blocked, rows)
+        # 被退過的次數與那筆被退的改動（同一份事件流、同一個折疊）。沒有它，被問到的題目帶著
+        # 「不知道上次的改動被退過」出發，只能再發明一次同一個改動（`ask_one` 把它交給提示詞）。
+        rejections = repair_loop.rejections_by_key(
+            os.path.join(queue_dir, "question_review_events.jsonl"))
+        _explained, unexplained = repair_loop.explain(blocked, rows, rejections)
         entries = [{**entry, "population": "blocked", "question": rows.get(entry["candidate_key"])}
                    for entry in unexplained]
     if only:
@@ -362,7 +434,20 @@ def ask_one(entry, *, endpoint, out, args):
     # collected rather than from a flag re-read here - those two could disagree, and the whole
     # point of the fix is that the question "did a person block this" is answered by the data.
     population = entry.get("population") or "blocked"
-    system, user = ai_findings.build_prompt(question, learned=args.learned, population=population)
+    # The reviewer's 註解 on this question, when they wrote one (`repair_loop.explain` already read it
+    # out of the same fold that decided this question was a block). It goes into the prompt because it
+    # is the one thing that says *where* the person thinks the problem is: without it the model is
+    # handed "a human flagged this, he did not say where" and told to re-derive the problem, which is
+    # the open question this project has measured as unreliable - see `ai_findings.POPULATIONS`.
+    notes = entry.get("notes") or None
+    # **這一題被機器改過又被退過幾次、上一次被退的是哪一筆改動**（`repair_loop.explain` 從同一份
+    # 折疊讀出來的）。與註解同一個理由：不知道上一次的改動被退過，模型只會再造一次同一個改動；
+    # 這是這個迴圈唯一能收斂的地方，而不是一直重問同一題。
+    rejected = entry.get("rejected") or None
+    system, user = ai_findings.build_prompt(question, learned=args.learned,
+                                            population=population,
+                                            principles=args.principles_for_prompt,
+                                            notes=notes, rejected=rejected)
     parsed, raw, complaint, usage, seconds = ask(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         endpoint=endpoint, max_tokens=args.max_tokens, timeout=args.timeout)
@@ -370,7 +455,8 @@ def ask_one(entry, *, endpoint, out, args):
     record = ai_findings.make_record(
         question=question, finding=parsed, model=endpoint["name"], endpoint=endpoint["url"],
         prompt_system=system, prompt_user=user, raw="" if parsed else raw, usage=usage,
-        seconds=round(seconds, 1), error=error, learned=args.learned, population=population)
+        seconds=round(seconds, 1), error=error, learned=args.learned, population=population,
+        principles=args.principles_for_prompt, notes=notes, rejected=rejected)
     ai_findings.append(out, record)
     return {"key": entry["candidate_key"], "finding": parsed, "error": error,
             "seconds": seconds, "raw": raw}
@@ -390,7 +476,36 @@ def main() -> int:
         print("找不到 candidates.jsonl：%s" % queue_dir, file=sys.stderr)
         return 2
 
-    done = set(ai_findings.latest_by_question(out)) if args.resume else ()
+    # The reviewer's 基本原則, read **once per run**: they are a standing constraint, and re-reading
+    # the file per question would let a principle added mid-run apply to some of the batch and not
+    # others - the same measurement claiming two prompt versions. This is the same resolution and
+    # the same default `confirm_dispute.py` uses, so the two passes cannot disagree about what the
+    # reviewer's notes are.
+    principles_path = args.principles or os.path.join(queue_dir, discuss.PRINCIPLES_STREAM)
+    # **只有人核准過的原則會進提示詞**（2026-09-24）。核准是原則區上的一顆按鈕，寫進同一條
+    # append-only 流；`discuss.active_principles` 是畫面上要畫的（含待核准，人才知道有東西等他
+    # 點頭），提示詞讀的是 `ai_findings.principles_for_prompt`——否則一句還沒有人看過的話就會去
+    # 改題目文字。兩個數字都印出來：「有 N 條原則」與「模型看到 N 條」現在是兩個量。
+    principle_events = discuss.load_events(principles_path)
+    projection = discuss.principles_projection(principle_events)
+    args.principles_for_prompt = ai_findings.principles_for_prompt(principle_events)
+    if args.principles_for_prompt:
+        print("基本原則 %d 條（已核准 %d／待核准 %d）（%s）"
+              % (len(args.principles_for_prompt), projection["approved_count"],
+                 projection["pending_count"], principles_path))
+    else:
+        print("基本原則：無已核准的（待核准 %d 條；%s）"
+              % (projection["pending_count"], principles_path))
+
+    # `--resume`'s skip set is "questions that have an **answer**", not "questions that have a
+    # record": a failed call leaves a record with `finding: None`, and counting it would skip the
+    # question forever (`ai_findings.is_answer`). Read only when one of the two flags needs it —
+    # `latest_by_question` walks the whole stream, which is 500 MB on the station.
+    done = ()
+    if args.resume or args.restale:
+        latest = ai_findings.latest_by_question(out)
+        answered = {key for key, record in latest.items() if ai_findings.is_answer(record)}
+        done = answered
     if args.restale:
         # Re-ask the questions whose current finding belongs to an older prompt generation. The
         # skip set has to become "everything except those", because `--resume` skips every question
@@ -398,12 +513,25 @@ def main() -> int:
         population = "corpus" if args.all else "blocked"
         # The version has to be computed with the *same* learned block this run will use - the
         # learned text is part of the prompt, so a run with a different block is a different
-        # measurement and every record from the other one is legitimately stale.
-        stale = ai_findings.stale_questions(
-            out, ai_findings.prompt_version(population, args.learned), population)
-        done = set(ai_findings.latest_by_question(out)) - stale
-        print("提示詞版本 %s：%d 題的現行 finding 是舊版，要重問。"
-              % (ai_findings.prompt_version(population, args.learned), len(stale)))
+        # measurement and every record from the other one is legitimately stale. The principles go
+        # in for the same reason and one more: the reviewer can write a new one between two runs,
+        # and a note written before it is an answer to a question that is no longer being asked.
+        #
+        # The expected version must use exactly the inputs `targets`/`ask_one` use: the standing note
+        # from `read_latest_actions` (not note history, whose candidate-key labels change the rendered
+        # block) and the current rejected-repair row. The prompt hash includes that rendered text.
+        review_log = os.path.join(queue_dir, "question_review_events.jsonl")
+        latest_actions = repair_loop.read_latest_actions(review_log)
+        rejections_by_key = repair_loop.rejections_by_key(review_log)
+        versions = {key: ai_findings.prompt_version(population, args.learned,
+                                                    args.principles_for_prompt,
+                                                    notes=(latest_actions.get(key) or {}).get("notes"),
+                                                    rejected=rejections_by_key.get(key))
+                    for key in latest}
+        stale = ai_findings.stale_questions(out, versions, population)
+        done = answered - stale
+        print("提示詞版本 %d 種（逐題，含註解與被退修復）：%d 題的現行 finding 是舊版，要重問。"
+              % (len(set(versions.values())), len(stale)))
     questions = None
     if args.all:
         # Read once and hold, rather than have every worker re-read 196 MB.
