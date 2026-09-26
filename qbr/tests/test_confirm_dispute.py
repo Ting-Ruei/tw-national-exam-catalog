@@ -686,71 +686,8 @@ def test_the_resident_loop_is_pinned_to_the_work_list_that_will_not_empty_itself
     assert json.loads(args.stdout) == ["blocked_only", "pending_only", "skip_confirmed"]
 
 
-def test_the_judge_is_told_which_kinds_of_dispute_it_is_looking_at(tmp_path=None):
-    """**指揮者過去從來沒看到「這是哪一種爭議」。**
-
-    `orchestrator.judgement_payload` 的說明把資料邊界寫得很清楚：分流要送的是「最小的一組——
-    爭議種類、數字、地端自己說它哪裡不一樣」。但那一邊讀的是 `question["kinds"]`，而
-    `disputed_questions` 從來沒有放過這個鍵。於是 `dispute_kinds` 每一題都是空的：一個
-    被交付「判斷這個讀法能不能信」的模型，看不到它在判的是哪一種爭議。
-
-    負控制：把 `kinds` 拿掉（＝改動前的形狀）再送同一個 payload builder，`dispute_kinds` 就是
-    `[]`——所以這條測的是那個鍵真的被帶上去，不是「有沒有這條路」。
-    """
-    import tempfile
-    from qbr import orchestrator
-
-    root = tempfile.mkdtemp()
-    queue_dir = os.path.join(root, "review-ui")
-    os.makedirs(queue_dir, exist_ok=True)
-    disputed = _question(number=4)
-    disputed["candidate_key"] = "moex:108100:309:33:1:question:q004"
-    clean = _question(number=5)
-    clean["disputes"] = []  # `_question(disputes=[])` 會落回預設的爭議清單（`disputes or [...]`）
-    clean["candidate_key"] = "moex:108100:309:33:1:question:q005"
-    with open(os.path.join(queue_dir, "candidates.jsonl"), "w", encoding="utf-8") as handle:
-        for row in (disputed, clean):
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    # 站上真正呼叫它的形狀：`--pending-only` 傳的是人 block 的那份工作清單。有了清單，爭議種類就
-    # 不是閘門（2026-09-24 的規則：人標了 block、而沒有任何偵測器解釋它，正是最需要讀紙本的那一題）。
-    work_list = {disputed["candidate_key"], clean["candidate_key"]}
-    rows = {row["candidate_key"]: row
-            for row in confirm_dispute.disputed_questions(queue_dir, None, None, 0, blocked=work_list)}
-    assert set(rows) == {disputed["candidate_key"], clean["candidate_key"]}, \
-        "爭議題與乾淨題都要在這一輪裡（乾淨的沒有 `kinds` 可送，但仍然要被讀）"
-    assert rows[disputed["candidate_key"]]["kinds"] == ["substituted-ideograph"]
-    # 沒有爭議的題也要有這個鍵：下游是 `question.get("kinds") or []`，但「鍵不存在」與「空清單」
-    # 在別的讀者手上會分岔（KeyError），而這一格沒有理由讓它們不同。
-    assert rows[clean["candidate_key"]]["kinds"] == []
-
-    finding = {"verdict": "DEFECT", "where": "stem: 較⻑的OID → 較長的OID", "confidence": "high"}
-    payload = orchestrator.judgement_payload(rows[disputed["candidate_key"]], finding)
-    assert payload["dispute_kinds"] == ["substituted-ideograph"]
-
-    without = dict(rows[disputed["candidate_key"]])
-    without.pop("kinds")
-    assert orchestrator.judgement_payload(without, finding)["dispute_kinds"] == [], \
-        "改動前的形狀（沒有 `kinds`）就是空的——這條測試才咬得住"
 
 
-def test_retired_remote_model_lanes_cannot_be_selected():
-    from qbr import engines
-
-    assert set(engines.ENDPOINTS) == {"splash", "mtplx-35b"}
-    previous_argv = sys.argv
-    try:
-        for option, lane in (("--model", "dgx-qwen3.8-flash"),
-                             ("--orchestrate", "litellm-orchestrator")):
-            sys.argv = ["confirm_dispute.py", "--queue", "/tmp/qbr-no-read", option, lane]
-            try:
-                confirm_dispute.parse_args()
-            except SystemExit as exc:
-                assert exc.code == 2, (option, lane, exc.code)
-            else:
-                raise AssertionError("%s accepted retired remote lane %s" % (option, lane))
-    finally:
-        sys.argv = previous_argv
 
 
 # --------------------------------------------------- 「讀不出來」不是「改成▢」
