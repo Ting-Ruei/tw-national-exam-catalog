@@ -8,7 +8,7 @@ The contract this file pins (owner 2026-09-24：「新整理出來的總規則�
      相對於 `confirm_dispute` 的全部意義（後者的工作清單來自人的 `block` 與爭議種類）。
   2. 別的考別不會被選到。
   3. 制度群組 key 與它包含的考別名稱選出**同一組**題目——拼字來源只有一個
-     （`review_ui.constants.category_matches_filter`），包含 `藥師（一）` 這種全角括號的寫法。
+     （`scripts.serve_question_review_ui.category_matches_filter`），包含 `藥師（一）` 這種全角括號的寫法。
   4. `--dry-run`（也就是預設）什麼都不寫：沒有 findings、沒有截圖、**沒有送模型**。
   5. `--skip-confirmed` 跳過同一個讀法，而讀法一變那一題自己回來（負控制：不是靠人記得清旗標）。
      一次**讀不到**不算讀過——暫時的端點故障不該讓題目永遠從清單上消失。
@@ -28,6 +28,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
+sys.path.insert(0, os.path.dirname(PKG))
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
@@ -35,7 +36,7 @@ import ask_about_blocks  # noqa: E402
 import confirm_dispute  # noqa: E402
 import scan_category_principles as scan  # noqa: E402
 from qbr import ai_findings, discuss  # noqa: E402
-from qbr.review_ui.constants import CATEGORY_GROUP_FILTERS, PHARMACIST_TRACK_FILTER  # noqa: E402
+from scripts.serve_question_review_ui import CATEGORY_GROUP_FILTERS, PHARMACIST_TRACK_FILTER  # noqa: E402
 
 #: The group key and the names it contains, from the app's own table — never spelled again here.
 PHARM = CATEGORY_GROUP_FILTERS[PHARMACIST_TRACK_FILTER]

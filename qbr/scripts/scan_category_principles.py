@@ -64,11 +64,13 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
+ROOT = os.path.dirname(PKG)
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, HERE)
 
 from qbr import ai_findings, discuss  # noqa: E402
-from qbr.review_ui.constants import CATEGORY_GROUP_FILTERS, category_matches_filter  # noqa: E402
+from scripts.serve_question_review_ui import CATEGORY_GROUP_FILTERS, category_matches_filter  # noqa: E402
 import ask_about_blocks  # noqa: E402
 import confirm_dispute  # noqa: E402
 import repair_loop  # noqa: E402
@@ -147,11 +149,11 @@ def selected_questions(queue_dir, categories, limit=0, *, already=None):
     a question carrying no dispute and no human decision is exactly the question nobody has looked at,
     and the newly curated 基本原則 are general - their scope is the 考別, not a list of flags. So the
     two gates of `confirm_dispute.disputed_questions` (a standing `block`, a confirmable dispute kind)
-    are deliberately absent here, and the category comparison goes through
-    `review_ui.constants.category_matches_filter` rather than a local spelling of the same idea: the
-    group key `__pharmacist_track__` and the names it contains must select the same set as the app's
-    own filter, including the full-width bracket spelling some rows carry (`藥師（一）`), which is
-    folded by `normalize_category_name` and by nothing else.
+    are deliberately absent here. Category selection goes through the server composition root's public
+    re-export of the canonical `category_matches_filter`, rather than a local spelling of the same idea:
+    `__pharmacist_track__` and the names it contains must select the same set as the app's own filter,
+    including the full-width bracket spelling some rows carry (`藥師（一）`), which is folded by the UI
+    matcher and by nothing else.
 
     `already` is `{candidate_key: reading_sha256}` — the readings this batch has already been asked
     about. A key is skipped only while its **current** reading still hashes to the recorded one, so a
