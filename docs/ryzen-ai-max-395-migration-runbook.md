@@ -7,6 +7,7 @@
 > canonical regeneration queue 為 0，final manifest SHA-256 是
 > `e261084b60fc94f7672fa85552ee397dacd9bf5bc9b28c8004a24326f1fb0e57`。完整 live evidence
 > 見 `docs/ai395-production-cutover-2026-08-09.md`；下列盤點與步驟保留作歷史基線與回退手冊。
+> `scripts/migration_preflight.py` 的 CLI 已退役；下方命令範例只保留作歷史記錄，不可執行。
 
 ## 目的與現行邊界
 

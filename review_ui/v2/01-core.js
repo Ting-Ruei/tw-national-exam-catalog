@@ -21,6 +21,8 @@ const S = {
   // year on the next redraw.
   scope: { category: null, year: null, sitting: null, subject: null },
   scopeTotal: 0,
+  refreshing: false,
+  scopeRequest: 0,
   tree: null,
 };
 const $ = (id) => document.getElementById(id);
@@ -148,11 +150,13 @@ function toItem(candidate) {
 function rowReviewAction(candidate) {
   const review = candidate && candidate.review;
   if (!review || typeof review !== 'object') return '';
-  // A reset is a recorded decision that says "look again", and it outranks an older action: the
-  // events are append-only, so after a repair the old `accept` is still on the row and the newest
-  // statement about the question is the reset.
   if (review.is_reset_unreviewed) return 'reset_review';
-  return String(review.action || '');
+  const action = String(review.action || '');
+  if (action === 'accept' || action === 'needs_review' || action === 'block') return action;
+  const withdrawn = String(review.applied_kind || review.applied || '').toLowerCase() === 'withdrawn';
+  if (!withdrawn && review.correction && typeof review.correction === 'object') return 'correct';
+  if (withdrawn && action === 'reset_review') return '';
+  return action;
 }
 
 /* The paper's identity: the official PDF's file name without its extension. */
@@ -212,9 +216,15 @@ function treeFrom(items) {
    time will not come back to it. It also makes a scope reproducible, which is what an audit of a
    decision needs. */
 function scopeFromHash() {
-  const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  const hash = String(location.hash || '');
+  const queryAt = hash.indexOf('?');
+  const raw = decodeURIComponent((queryAt < 0 ? hash : hash.slice(0, queryAt)).replace(/^#/, ''));
   if (!raw) return null;
-  const [category, year, sitting, ...rest] = raw.split('/');
+  const parts = raw.split('/');
+  if (typeof PREFIX_AREA !== 'undefined' && Object.prototype.hasOwnProperty.call(PREFIX_AREA, parts[0])) {
+    parts.shift();
+  }
+  const [category, year, sitting, ...rest] = parts;
   if (!category) return null;
   // A trailing `q41` names a question, so a link can point at one question of one paper. It is
   // the unit an argument about a question is conducted in.
@@ -228,8 +238,15 @@ function scopeFromHash() {
 function scopeToHash() {
   const { category, year, sitting, subject } = S.scope;
   const number = S.rows[S.index] ? `q${S.rows[S.index].question_number}` : '';
+  const current = String(location.hash || '');
+  const queryAt = current.indexOf('?');
+  const path = queryAt < 0 ? current : current.slice(0, queryAt);
+  const query = queryAt < 0 ? '' : current.slice(queryAt);
+  const head = decodeURIComponent(path.replace(/^#/, '')).split('/')[0];
+  const prefix = typeof PREFIX_AREA !== 'undefined'
+    && Object.prototype.hasOwnProperty.call(PREFIX_AREA, head) ? `${head}/` : '';
   const parts = [category, year, sitting, subject].map((v) => encodeURIComponent(v || ''));
-  history.replaceState(null, '', `#${parts.join('/')}${number ? '/' + number : ''}`);
+  history.replaceState(null, '', `#${prefix}${parts.join('/')}${number ? '/' + number : ''}${query}`);
 }
 
 function buildScope(tree) {
@@ -467,6 +484,13 @@ function scopePapers() {
   return papers.length ? papers : null;
 }
 
+function setQuestionActionsDisabled(disabled) {
+  for (const id of ['actAccept', 'actHold', 'actBlock', 'actFix', 'actSave', 'actNote']) {
+    const node = $(id);
+    if (node) node.disabled = disabled;
+  }
+}
+
 /* Load the questions of the current scope from the server, one scope at a time.
 
    The whole queue is 32,350 questions and the endpoint refuses to return more than a thousand of
@@ -480,12 +504,20 @@ function scopePapers() {
    scope it is showing. The response also carries `filtered_count`, which is the number the scope
    really holds - not the number that happened to fit. */
 async function applyScope() {
+  const requestId = ++S.scopeRequest;
+  S.refreshing = true;
   S.index = 0;
   S.editing = false;
   scopeToHash();
+  S.view = [];
+  S.rows = [];
+  S.scopeTotal = 0;
+  setQuestionActionsDisabled(true);
+  $('textSide').innerHTML = '<div class="empty">載入中…</div>';
   renderCrumbs();
   const papers = scopePapers();
   if (!papers || !papers.length) {
+    S.refreshing = false;
     S.view = [];
     // `S.rows` is cleared with it. It is a separate array now, so emptying only `S.view` would leave
     // the previous scope's rows drawn and walkable - the list would show one paper while the crumbs
@@ -536,6 +568,7 @@ async function applyScope() {
       if (!response.ok) throw new Error(`HTTP ${response.status}（${where.year} 年第${where.ordinal}次）`);
       return response.json();
     }));
+    if (requestId !== S.scopeRequest) return;
     const rows = [];
     for (const data of responses) {
       if (!data.candidates) throw new Error(data.error || '伺服器沒有回傳 candidates');
@@ -578,9 +611,12 @@ async function applyScope() {
     }
     S.scopeTotal = S.view.length;
   } catch (error) {
+    if (requestId !== S.scopeRequest) return;
     S.view = [];
     $('textSide').innerHTML = `<div class="empty">無法讀取這個範圍：${esc(error.message || error)}</div>`;
   }
+  if (requestId !== S.scopeRequest) return;
+  S.refreshing = false;
   renderCrumbs();
   // `S.rows` is built here, once per scope, and every later filter change rebuilds it from `S.view`
   // with `rebuildRows()`. Building it before the first `go()` matters: `go()` indexes `S.rows`, so a
@@ -588,6 +624,7 @@ async function applyScope() {
   if (!rebuildRows(null)) {
     renderList();
     $('textSide').innerHTML = '<div class="empty">這個範圍沒有題目</div>';
+    setQuestionActionsDisabled(true);
     return;
   }
   renderList();
@@ -600,6 +637,7 @@ async function applyScope() {
   S.openQuestion = '';
   const firstOpen = S.rows.findIndex((item) => !verdictOf(item.candidate_key));
   await go(named >= 0 ? named : (firstOpen >= 0 ? firstOpen : 0));
+  setQuestionActionsDisabled(false);
 }
 
 function renderCrumbs() {

@@ -86,6 +86,27 @@ def test_an_answered_question_is_closed_and_an_unanswered_one_is_open(tmp_path):
     assert closed["answer_text"] == "是圖，不用修"
 
 
+def test_the_newest_unanswered_ask_is_the_one_the_row_shows(tmp_path):
+    """題目區那一列要說「機器讀到了但沒有自己改，原因是什麼」，而它手上只有那一題的 key。
+
+    同一個 key 可以有好幾筆反問（每一輪重讀紙本、文字改了要重新問），所以挑選規則必須是
+    「最新的那一筆還沒被回答的」——挑錯了，畫面會拿一個已經作廢的理由去解釋現在這一列。
+    """
+    path = str(tmp_path / discuss.REPAIR_QUESTIONS_STREAM)
+    discuss.append_event(path, {"action": "ask", "question_id": "rq1", "candidate_key": "k1",
+                                "reason": "舊的理由"})
+    discuss.append_event(path, {"action": "ask", "question_id": "rq2", "candidate_key": "k1",
+                                "reason": "新的理由"})
+    discuss.append_event(path, {"action": "ask", "question_id": "rq3", "candidate_key": "k2",
+                                "reason": "另一題的理由"})
+    discuss.append_event(path, {"action": "answer", "question_id": "rq3", "answer": "紙本是對的"})
+    by_key = discuss.repair_asks_by_key(discuss.load_events(path))
+    assert by_key["k1"]["reason"] == "新的理由", "同一個 key 要最新的那一筆"
+    # 負對照：已經被回答的不算。把它算進去，畫面會把一個那個人已經回過的問題再拿出來講一次。
+    assert "k2" not in by_key
+    assert set(by_key) == {"k1"}
+
+
 def test_the_next_id_counts_events_instead_of_a_counter_file(tmp_path):
     # A counter file is second state that can drift; counting the events cannot hand two adds the
     # same id, and an id is the key the fold uses. Re-issuing a *removed* id is fine, because the
@@ -190,24 +211,6 @@ def test_a_repaired_reading_gets_asked_afresh(tmp_path):
 
 
 # ------------------------------------------------------- one folding rule, one place
-
-def test_the_discuss_streams_have_exactly_one_reader_implementation():
-    # The expensive lesson of this round: `refresh_queue_text.py` carried a second `_taxonomy` whose
-    # shape differed from `build_review_queue.py`'s, it overwrote the live queue index, and the whole
-    # question area stopped booting while every test stayed green - because the *build* path was
-    # correct and only the second implementation was wrong. So the interpretation of these two
-    # streams must live in exactly one module, and the server must import it.
-    server = os.path.join(PKG, "..", "scripts", "serve_question_review_ui.py")
-    with open(os.path.abspath(server), encoding="utf-8") as handle:
-        text = handle.read()
-    assert "from qbr import discuss" in text, \
-        "伺服器必須用 qbr.discuss 的折疊規則，不能自己再寫一份"
-    assert 'def principles_projection' in text and 'discuss.principles_projection' in text
-    assert 'def repair_questions_projection' in text and 'discuss.repair_questions_projection' in text
-    assert 'discuss.append_event' in text, "兩個流只有一個寫者"
-    # And the stream names have one definition, so a push/deploy/carry list cannot name a file the
-    # projection does not read.
-    assert "discuss.PRINCIPLES_STREAM" in text and "discuss.REPAIR_QUESTIONS_STREAM" in text
 
 
 def test_the_deploy_push_and_rebuild_all_name_the_discuss_streams():

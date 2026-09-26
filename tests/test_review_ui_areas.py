@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 BROWSER_TEST = ROOT / "scripts" / "test_v2_areas_browser.mjs"
 
@@ -169,7 +173,7 @@ class AreasTests(unittest.TestCase):
         這裡不取 `do_POST` 的函式本體：Python 的 dict/集合字面值也是大括號，用括號深度切一個
         Python 函式不可靠。改讀**端點字串出現的那一段**，它就在處理器裡。
         """
-        server = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        server = server_source()
         # 處理分支，不是那個允許路徑的集合字面值（那個只是列出名字）。
         marker = server.find('if parsed.path == "/api/answer-review-batch":')
         self.assertGreater(marker, -1, "伺服器裡沒有 answer-review-batch 處理分支")

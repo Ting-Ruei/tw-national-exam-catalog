@@ -14,6 +14,7 @@ const D = {
   rows: [],            // candidate_key，依伺服器回的序（卡住的題）
   byKey: new Map(),
   index: 0,
+  selectedKey: '',
   //: 這一區自己的範圍篩選（類科／年度／考次／科目）。四個層級，與題目區同一組語意：
   //: `''`＝全部（刻意的），`null`＝還沒選。**預設四層都是全部**，因為卡住的題散在整個題庫，
   //: 預設一個具體範圍會把其他範圍的卡住題藏起來，而這一區存在的理由就是要把卡住的題找出來。
@@ -51,6 +52,38 @@ const D = {
   cropPlacement: 'stem',
   cropOption: '',
 };
+const DISCUSS_SELECTION_STORAGE_KEY = 'v2.discuss.selectedKey';
+
+function discussSelectionFromUrl() {
+  const hash = String(location.hash || '');
+  const queryAt = hash.indexOf('?');
+  if (queryAt < 0) return '';
+  return new URLSearchParams(hash.slice(queryAt + 1)).get('discuss') || '';
+}
+
+function discussSelectionFromStorage() {
+  try { return String(window.localStorage.getItem(DISCUSS_SELECTION_STORAGE_KEY) || ''); }
+  catch (error) { return ''; }
+}
+
+function rememberDiscussSelection(key) {
+  D.selectedKey = String(key || '');
+  try {
+    if (D.selectedKey) window.localStorage.setItem(DISCUSS_SELECTION_STORAGE_KEY, D.selectedKey);
+    else if (typeof window.localStorage.removeItem === 'function') {
+      window.localStorage.removeItem(DISCUSS_SELECTION_STORAGE_KEY);
+    }
+  } catch (error) { /* 私密模式沒有 localStorage */ }
+  const current = String(location.hash || '#');
+  const queryAt = current.indexOf('?');
+  const path = (queryAt < 0 ? current : current.slice(0, queryAt)) || '#';
+  const params = new URLSearchParams(queryAt < 0 ? '' : current.slice(queryAt + 1));
+  if (D.selectedKey) params.set('discuss', D.selectedKey);
+  else params.delete('discuss');
+  const query = params.toString();
+  const next = `${path}${query ? `?${query}` : ''}`;
+  if (next !== current) history.replaceState(null, '', next);
+}
 
 // The reading size survives a reload. It is a preference about the reviewer's eyes, not about a
 // question, so it belongs beside them rather than in the queue. Restored once, at load time, and
@@ -86,6 +119,8 @@ async function renderDiscuss(force) {
     return;
   }
   D.index = Math.min(Math.max(0, D.index), total - 1);
+  const selectedKey = D.rows[D.index];
+  if (selectedKey && selectedKey !== D.selectedKey) rememberDiscussSelection(selectedKey);
   const scopeKey = `${D.scope.category}\u0000${D.scope.year}\u0000${D.scope.sitting}\u0000${D.scope.subject}`;
   const returned = D.rows.length;
   const filtered = D.filteredCount === null ? returned : D.filteredCount;
@@ -126,6 +161,11 @@ async function loadDiscuss() {
   if (D.scope.year) params.year = D.scope.year;
   if (D.scope.sitting) params.ordinal = D.scope.sitting;
   if (D.scope.subject) params.subject = D.scope.subject;
+  const selectedKey = discussSelectionFromUrl() || discussSelectionFromStorage() || D.selectedKey;
+  if (selectedKey) {
+    rememberDiscussSelection(selectedKey);
+    params.focusKey = selectedKey;
+  }
   const payload = await fetchAreaJson('/api/discuss', params);
   if (!payload) {
     $('discussList').innerHTML = `<div class="empty">讀不到討論區（${esc(A.error['/api/discuss'] || '')}）</div>`;
@@ -139,6 +179,9 @@ async function loadDiscuss() {
       D.rows.push(candidate.candidate_key);
     }
   }
+  const selectedIndex = D.selectedKey ? D.rows.indexOf(D.selectedKey) : -1;
+  if (selectedIndex >= 0) D.index = selectedIndex;
+  else if (D.selectedKey) rememberDiscussSelection('');
   // The tree and its count come back on **every** response and are always the unfiltered stuck
   // population (see `discuss_taxonomy`). Assigning them here rather than only on the first load is
   // what keeps the pickers complete: the same tree arrives whatever filter is in force, so choosing
@@ -589,6 +632,7 @@ function bindDiscussScope() {
    `D.index` 歸零：新的範圍是不同的問題集，指著舊集合的第 37 題沒有意義。
    樹（`D.tree`）**不動**，它每一輪都一樣，所以選單不會因為篩選而塌陷。 */
 async function discussReload() {
+  rememberDiscussSelection('');
   D.index = 0;
   D.loaded = false;
   await renderDiscuss();

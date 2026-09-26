@@ -8,7 +8,8 @@ description: Run the new-pipeline question Review UI as a container on the LAN �
 `tw-national-exam-catalog/deploy/qbr-review/`. It serves the **qbr (new) pipeline's** queue over
 HTTP so a reviewer can open it from a browser on another device.
 
-**What this is not:** the old `deploy/ai395/compose.production.yaml` (SQL backend, ports 8765/8766).
+**What this is not:** any historical SQL-backed deployment copy. The qbr review service is
+JSONL-based and its current contract is defined here and in `review_ui/AGENTS.md`.
 Those are a **different review store**. Reviewing the new pipeline and mixing the old one in is the
 error this deployment exists to avoid (`qbr/reports/two_review_stores.md`).
 
@@ -205,7 +206,7 @@ scripts/push_reviews_to_station.sh --dry-run  # say how many events would be app
 **It only ever appends the events the station does not already have.** Someone may have kept
 reviewing on the station (a lab computer does exactly this) while the laptop held a copy, and
 transferring the file over would delete their work silently. The server's own write is `open("a")`
-(`serve_question_review_ui.py:3993`) and it reloads when the file signature changes (`:2560`), so
+(`qbr/review_ui/review_state.py`, the append-only writers) and it reloads when the file signature changes (`qbr/review_ui/events.py::file_signature`), so
 appending to a running server is what it already supports — no restart, no second writer.
 
 It refuses to act when the station is unreachable, and when the station's record has *fewer* lines
@@ -297,6 +298,19 @@ deployed `scripts/serve_question_review_ui.py` carries an **uncommitted** `conte
 another work-stream) that is what makes images display at the right MIME type. So "what is running"
 cannot be answered by `git log` alone.
 
+**Since 2026-09-23 the server is a composition root.** `scripts/serve_question_review_ui.py` is ~347
+lines (`parse_args` + `main` + re-exports); the implementation is in `qbr/src/qbr/review_ui/*.py`.
+The deploy mirrors the whole tree, so the package goes along — but two consequences matter here:
+
+- **A change to a review-UI module needs `--restart` exactly like a change to the server file.** The
+  running container has the old module loaded in memory; `rsync` alone changes the bytes on disk and
+  nothing else.
+- **`record-deploy.sh` hashes only `scripts/serve_question_review_ui.py` and `review_ui/v2.html`.**
+  After the split those two files no longer contain most of the code, so a matching `server_sha256`
+  does **not** prove the station is running your modules. Compare the module hashes too, or use
+  `--restart` (which rebuilds and re-verifies the served question count) rather than trusting the
+  provenance file alone.
+
 `deploy/qbr-review/record-deploy.sh` writes `~/qbr-review/DEPLOYED.json`: source repo + HEAD +
 dirty-file count, sha256 of the server, `v2.html`, `candidates.jsonl` and the review log, plus the
 live question count. `deploy_station.sh` calls it and passes the **true** source revision over; run
@@ -317,3 +331,13 @@ deploy/qbr-review/up.sh
 
 `up.sh --rebuild` carries review records automatically (`--carry-from` points at the **queue root**),
 and refuses to start if it would carry 0 records while records exist nearby.
+
+<!-- project-map:belongs-to -->
+## 這一層在哪（回上層的路）
+
+> **這是本子專屬技能**：只服務這個子專案。其他子專案要用同一件事時，先確認是不是該變成全域共通技能。
+
+- 本層入口：[`../../../AGENTS.md`](../../../AGENTS.md)
+- 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
+- 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
+<!-- /project-map:belongs-to -->

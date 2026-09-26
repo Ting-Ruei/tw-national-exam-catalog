@@ -28,6 +28,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 SERVER = ROOT / "scripts" / "serve_question_review_ui.py"
 
@@ -152,12 +155,12 @@ class FindingVisibleTests(unittest.TestCase):
     def test_the_finding_is_a_separate_field_from_the_sql_era_ai_review(self):
         # 這是這一條最重要的不變量：finding 沒有 status、沒有 recommended_action，它不是一次
         # 審核。把它併進 `ai_review` 就會讓一則筆記被讀成一次有狀態的審核。
-        source = SERVER.read_text(encoding="utf-8")
+        source = server_source()
         self.assertIn('copy["qbr_ai_finding"] = ', source)
         self.assertIn('copy["ai_review"] = {', source)
 
     def test_the_negative_control_folding_the_finding_into_ai_review_is_not_what_happens(self):
-        source = SERVER.read_text(encoding="utf-8")
+        source = server_source()
         # 負對照：把 finding 塞進 ai_review 的寫法長這樣，而它不在檔案裡。
         folded = 'copy["ai_review"]["qbr_finding"]'
         self.assertNotIn(folded, source)
@@ -393,7 +396,7 @@ class TailLoadedFindingStoreTests(unittest.TestCase):
     def test_the_server_keeps_the_findings_fresh_through_the_store_not_a_full_reload(self):
         # 這條釘的是**接線**，不是函式本身：`ReviewState` 必須用 store，否則上面所有的好處都
         # 不會發生，而程式看起來完全正常。
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
         self.assertIn("self.qbr_ai_findings_store = QbrAiFindingsStore(", source)
         self.assertIn("self.qbr_ai_findings_store.refresh()", source)
         # 而且 `refresh_event_logs` 裡不能再有 findings 的整檔重載（舊的那條分支）。
@@ -402,7 +405,7 @@ class TailLoadedFindingStoreTests(unittest.TestCase):
         self.assertIn("qbr_ai_findings_store.refresh()", body)
 
     def test_the_negative_control_a_full_reload_in_refresh_would_be_caught(self):
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
         injected = source.replace(
             "if self.qbr_ai_findings_store.refresh():\n            self.latest_qbr_ai_findings = self.qbr_ai_findings_store.latest",
             "self.latest_qbr_ai_findings = load_qbr_ai_findings(self.qbr_ai_findings_log)",

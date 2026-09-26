@@ -22,6 +22,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 
 
@@ -123,7 +126,7 @@ class NoteActionTests(unittest.TestCase):
     def test_no_path_still_treats_only_correct_as_needing_reaffirming(self):
         # A note must be reaffirmed on every path, so the old `correct`-only checks must not survive
         # anywhere - a note reaffirmed on one path and not another is two behaviours for one rule.
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
         self.assertNotIn('if event.get("action") == "correct":\n            previous =', source)
         self.assertNotIn('if event.get("action") == "correct":\n                previous =', source)
         self.assertIn('if event.get("action") in (NOTE_ACTIONS | {"correct"}):', source)
@@ -301,7 +304,7 @@ class NoteKeepsTheQuestionInTheStuckQueueTests(unittest.TestCase):
     def test_the_condition_lives_in_one_place(self):
         # Six copies of "is this a note on a pending reset" is six chances for the discuss list and
         # the projection to disagree. It must be one function, used by every fold.
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
         self.assertEqual(1, source.count("def _note_annotates_pending_reset("))
         self.assertGreaterEqual(source.count("_note_annotates_pending_reset("), 5,
                                 "每個折疊點都要用同一個判斷")

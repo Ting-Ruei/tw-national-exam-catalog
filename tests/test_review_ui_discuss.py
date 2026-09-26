@@ -70,7 +70,10 @@ def run_node(expression: str) -> object:
       globalThis.fetch = async () => ({ ok:false, status:0, json: async () => ({}) });
       globalThis.setTimeout = () => 0; globalThis.clearTimeout = () => {};
     """
-    script = stub + "\n" + "\n".join(sources) + f"\nconsole.log(JSON.stringify({expression}));"
+    script = stub + "\n" + "\n".join(sources) + (
+        f"\n(async () => {{ console.log(JSON.stringify(await ({expression}))); }})()"
+        ".catch((error) => { console.error(error); process.exitCode = 1; });"
+    )
     result = subprocess.run([node, "-"], input=script, capture_output=True, text=True)
     if result.returncode != 0:
         raise AssertionError(f"node 執行失敗：{result.stderr[-2000:]}")
