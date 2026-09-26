@@ -35,6 +35,7 @@ PKG = HERE.parent
 sys.path.insert(0, str(PKG / "src"))
 sys.path.insert(0, str(PKG / "scripts"))
 sys.path.insert(0, str(PKG.parent / "scripts"))
+sys.path.insert(0, str(PKG.parent))
 
 import apply_experience_repairs as experience_mod  # noqa: E402
 from qbr.dispute_apply.withdrawals import MAX_ATTEMPTS  # noqa: E402
@@ -312,7 +313,7 @@ def test_the_landing_step_recognises_this_producers_withdrawal(tmp_path):
     text = (PKG / "scripts" / "apply_text_corrections.py").read_text(encoding="utf-8")
     assert "REPAIR_REVIEWER_PREFIXES" in text
     assert 'reviewer") or "").strip() == REPAIR_REVIEWER' not in text, "只認一個 id 的舊規則還在"
-    from qbr.review_ui.constants import REPAIR_REVIEWER_PREFIXES
+    from scripts.serve_question_review_ui import REPAIR_REVIEWER_PREFIXES
     assert "repair_" in REPAIR_REVIEWER_PREFIXES
 
 

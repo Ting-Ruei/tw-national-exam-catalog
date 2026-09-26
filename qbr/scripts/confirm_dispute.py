@@ -126,10 +126,6 @@ def parse_args() -> argparse.Namespace:
                              "them done. Pending keys that are not the human's blocks are drained in "
                              "the same pass - they were queued by an older gate, and a later `block` "
                              "brings a question back on its own.")
-    parser.add_argument("--orchestrate", metavar="ENGINE", default=None,
-                        choices=sorted(ask_about_blocks.ENDPOINTS),
-                        help="optionally ask a second, explicitly selected local engine to check "
-                             "the page reading; advisory only, never an accept/block decision")
     return parser.parse_args()
 
 
@@ -346,15 +342,8 @@ def disputed_questions(queue_dir, only, kinds, limit, *, blocked=None, already=N
             if completed is not None:
                 completed.add(key)
             continue
-        # **The judgement payload reads `question["kinds"]`, and this is where it is set.**
-        #
-        # Measured 2026-09-25 while moving the driver onto the on-prem engine: the judged question was
-        # the raw candidate row, which carries `disputes` but no `kinds` key, so
-        # `orchestrator.judgement_payload`'s `dispute_kinds` was **empty on every call this loop has
-        # ever made** - and its own docstring says the dispute kinds are part of the smallest set the
-        # judge needs. The kinds are computed here anyway (`dispute_kinds`, above, is the same call the
-        # finding records), so the question carries them from here on rather than the judge being told
-        # there were none.
+        # Carry the normalized dispute kinds beside the selected question so downstream readers use
+        # the same `dispute_kinds` interpretation instead of deriving another spelling from `disputes`.
         rows.append(dict(question, kinds=sorted(set(dispute_kinds(question)))))
     if limit:
         rows = rows[:limit]
@@ -1011,8 +1000,6 @@ def main() -> int:
     reference_looked = 0
     reference_used = 0
     escalated = 0
-    degraded = 0
-    triaged = {}
     for index, question in enumerate(questions, 1):
         # 這一題自己的註解。一輪一份對照表（上面讀的），每題只拿自己的那一份：模型手上是這一題的
         # 截圖，別題的註解只會讓它去找不存在的東西。
@@ -1057,34 +1044,6 @@ def main() -> int:
                      if result.get("read_with_neighbours")
                      else "沒有多解釋，維持原判讀"))
 
-        # The orchestrator judges the reading we just made. It runs **before** `_append_finding`
-        # because the finding is what gets written, and a judgement appended afterwards would be a
-        # second record for one question - the exact shape this project keeps removing.
-        #
-        # It only runs when the local read produced something to judge: a `讀不到` has no reading,
-        # and asking a second model to adjudicate a failure is not a judgement, it is a retry.
-        if args.orchestrate and not result.get("error"):
-            from qbr import orchestrator
-
-            orchestration, note = orchestrator.review_with_orchestrator(
-                question, result.get("finding"), endpoint=ask_about_blocks.ENDPOINTS[args.orchestrate],
-                audit_log=os.path.join(queue_dir, "external_llm_calls.jsonl"),
-                # 指揮者拿到的是**同一輪已經摺好的**那一份（原則／人的註解／被退過的改動）與**結論
-                # 來自的那一張圖**：不在 orchestrator 裡重算，也不讓它看一張沒被採用的截圖。
-                crop_path=result.get("deciding_crop_png"), principles=principles, notes=note,
-                rejected=refused_here, figures=result.get("figure_facts"))
-            result["orchestration"] = orchestration
-            if orchestration.get("degraded"):
-                degraded += 1
-                print("        指揮者沒有判斷（%s）——這題的紀錄會標示未分流" % note)
-            else:
-                triaged[orchestration["verdict"]] = triaged.get(orchestration["verdict"], 0) + 1
-                print("        指揮者：%s（%s）%s"
-                      % (orchestration["verdict"], orchestration["why"][:60],
-                         "→ 自己再看一眼" if orchestration.get("self_look") else "→ 放行"))
-                if orchestration.get("second_look", {}).get("disagrees_with_local"):
-                    print("        ⚠ 指揮者與地端不一致：%s"
-                          % (orchestration["second_look"].get("why") or "")[:80])
 
         _append_finding(out, question, result, endpoint, args)
         # **A question leaves pending only when it is actually done.**
@@ -1115,13 +1074,6 @@ def main() -> int:
     if reference_looked:
         print("參考讀取（上下題）：切了 %d 題，其中 %d 題取代了第一次判讀。"
               % (reference_looked, reference_used))
-    if args.orchestrate:
-        parts = "、".join("%s %d" % (name, triaged[name]) for name in ("TRUST", "CARE", "DOUBT")
-                          if triaged.get(name))
-        print("指揮者（%s）：%s%s"
-              % (args.orchestrate, parts or "沒有判斷",
-                 "；未分流 %d" % degraded if degraded else ""))
-        print("第二判讀請求完成；分流結果保留在每題 finding 中。")
     if args.escalate:
         print("反問人 %d 筆（寫進 %s）。" % (escalated, discuss.REPAIR_QUESTIONS_STREAM))
     print("以上是**讀**的結果，advisory：讀不改題目文字，也不寫人為判決"
@@ -1243,16 +1195,6 @@ def _append_finding(out, question, result, endpoint, args):
                           "neighbour_crop": result.get("neighbour_crop"),
                           "neighbour_bytes": _file_size(result.get("neighbour_crop_png")),
                           "crop_bytes": _file_size(result.get("crop_png"))}
-    # The orchestrator's judgement, when there is one. It is stored beside the local finding rather
-    # than folded into it: the two disagreeing is the information a reviewer needs, and collapsing
-    # them would destroy which model said what (charter §3 — provenance).
-    #
-    # A degraded judgement (`degraded: True`) is stored too. "The orchestrator was unreachable" is a
-    # fact about this record, and a record that cannot say whether it was triaged is a record whose
-    # trustworthiness nobody can audit.
-    orchestration = result.get("orchestration")
-    if orchestration:
-        record["orchestration"] = orchestration
     ai_findings.append(out, record)
 
 

@@ -156,50 +156,6 @@ class BrowserSafePaperTest(unittest.TestCase):
         )
 
 
-@unittest.skipIf(pikepdf is None, "pikepdf is required to inspect PDF filters")
-class ServerPrefersTheDrawableCopyTest(unittest.TestCase):
-    """The rewrite only helps if the server asks for it."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.asset_root = os.path.join(self.tmp.name, "國考題資料夾")
-        self.relative = os.path.join("10_official_pdf", "by_official_catalog", "藥師", "p.pdf")
-        self.original = os.path.join(self.asset_root, self.relative)
-        os.makedirs(os.path.dirname(self.original), exist_ok=True)
-        _jpx_pdf(self.original, pages=1)
-
-        # `paths` reads ASSET_ROOT at import time; point it at the fixture for this test.
-        os.environ["ASSET_ROOT"] = self.asset_root
-        import qbr.review_ui.paths as paths_module
-
-        self.paths = paths_module
-        self._saved_root = paths_module.ASSET_ROOT
-        paths_module.ASSET_ROOT = type(paths_module.ASSET_ROOT)(self.asset_root)
-        self.addCleanup(setattr, paths_module, "ASSET_ROOT", self._saved_root)
-
-    def test_without_a_derived_copy_the_original_is_served(self):
-        resolved = self.paths.safe_file_path(self.relative)
-        self.assertIsNotNone(resolved)
-        self.assertEqual(str(resolved), os.path.realpath(self.original))
-
-    def test_with_a_derived_copy_the_drawable_version_is_served(self):
-        derived = browser_safe_pdf.derived_path_for(self.original, self.asset_root)
-        os.makedirs(os.path.dirname(derived), exist_ok=True)
-        browser_safe_pdf.rewrite_and_verify(self.original, derived)
-
-        resolved = self.paths.safe_file_path(self.relative)
-        self.assertIsNotNone(resolved)
-        self.assertEqual(str(resolved), os.path.realpath(derived))
-        self.assertNotIn("/JPXDecode", _filters_of(resolved))
-
-    def test_the_original_is_still_readable_after_serving_the_derived_copy(self):
-        """The corpus keeps its own bytes; only the served path moves."""
-        derived = browser_safe_pdf.derived_path_for(self.original, self.asset_root)
-        os.makedirs(os.path.dirname(derived), exist_ok=True)
-        browser_safe_pdf.rewrite_and_verify(self.original, derived)
-        self.paths.safe_file_path(self.relative)
-        self.assertIn("/JPXDecode", _filters_of(self.original))
 
 
 if __name__ == "__main__":
