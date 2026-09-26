@@ -28,7 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 
+from qbr import ai_findings  # noqa: E402
+from qbr import discuss  # noqa: E402
 from qbr import groups  # noqa: E402
+from qbr import review_queue  # noqa: E402
 
 
 def run_dirs(work_roots):
@@ -121,7 +124,21 @@ def review_events_to_carry(out_dir, previous=()):
     names = ("question_review_events.jsonl", "answer_review_events.jsonl",
              "question_ai_review_events.jsonl", "question_ai_feedback_events.jsonl",
              "question_ai_learning_events.jsonl",
-             "question_correction_feedback_events.jsonl")
+             "question_correction_feedback_events.jsonl",
+             # The 錯題討論區's two append-only streams. Same reason every other name here is
+             # carried: nothing outside them can reconstruct them, and a rebuild that silently
+             # discards the person's principles and the agent's open questions would lose the only
+             # record of why a repair was attempted. Read from `qbr.discuss` rather than respelled,
+             # because the deploy and push scripts name the same files and the failure mode of a
+             # typo is silent loss.
+             *discuss.STREAMS,
+             # A model's finding about a question a person blocked is not a decision, but it is the
+             # same kind of irreplaceable data: it says what was believed about one particular
+             # reading, and the readings it is about are the strange one-offs nobody can classify on
+             # sight. It is carried by the same mechanism as the decision logs because the failure
+             # mode is the same - a rebuild that silently discards it - and the `ai_findings.STREAM`
+             # name is imported rather than retyped so the two cannot drift.
+             ai_findings.STREAM)
     records = []
     seen = set()
     for source in previous:
@@ -140,20 +157,11 @@ def review_events_to_carry(out_dir, previous=()):
                         continue
                     # Identity is the record's **content**, not where it was found.
                     #
-                    # `_carried_from` is provenance added by this very function, so including it in
-                    # the key made every carried record a new record on the next rebuild, and the
-                    # queue accumulated duplicates without bound. Measured: a first rebuild carried
-                    # 392 records, and rebuilding again from that queue carried 629 - the same 181
-                    # questions, with every record present twice. Two rebuilds later it would have
-                    # been three times, and the reviewer's history would read as if they had judged
-                    # each question repeatedly.
-                    #
-                    # Deduplicating on the whole record rather than on `candidate_key` is deliberate:
-                    # one question legitimately carries several events (`correct` then `accept`), so
-                    # keying by question would silently drop the reviewer's later decisions - the
-                    # opposite error, and a quieter one.
-                    record.pop("_carried_from", None)
-                    key = (name, json.dumps(record, sort_keys=True, ensure_ascii=False))
+                    # The rule lives in `review_queue.record_identity` so that it is the same rule
+                    # the push helper uses; see that function for the two measured mistakes
+                    # (including `_carried_from`, which made every carried record a new record, and
+                    # keying too narrowly, which dropped a reviewer's later decisions).
+                    key = (name, review_queue.record_identity(record))
                     if key in seen:
                         continue
                     seen.add(key)
@@ -178,6 +186,12 @@ def _keys_of(candidates_path):
 
 
 def merge(work_roots, out_dir, *, include_papers=None, previous=()):
+    # Made absolute **before anything reads it**, so `_adopt_crops` can compute a queue-relative
+    # path with `os.path.relpath` regardless of how `--out` was spelled. Without this, a relative
+    # `--out` would leave the stored crop reference pointing outside the queue. `abspath` (not
+    # `realpath`) on purpose: `/tmp` is a symlink to `/private/tmp` on this machine, and resolving
+    # it would make the stored path and the served root disagree by a prefix.
+    out_dir = os.path.abspath(out_dir)
     runs = run_dirs(work_roots)
     if include_papers:
         wanted = set(include_papers)
@@ -191,6 +205,10 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     # files for 30,440 questions and makes the queue self-contained: copy it anywhere, serve it
     # there, and the pictures come with it.
     crops_root = os.path.join(out_dir, "review-ui", "crops")
+    # The root the stored crop references are relative to. Taken once, here, from the argument as
+    # given, because the stored path must not depend on the caller's working directory - see
+    # `_adopt_crops`.
+    queue_root = out_dir
     candidates, issues = [], []
     per_paper = []
     seen_keys = {}
@@ -208,7 +226,7 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
         for row in rows:
             if row.get("image_refs"):
                 row["image_refs"] = _adopt_crops(row["image_refs"], run, paper, crops_root,
-                                                 copied)
+                                                 copied, queue_root=queue_root)
             # The review log keys on `candidate_key`, which is the source question keyed by the
             # registry key - unique across the corpus. A collision means two runs packaged the
             # same paper twice, which is a finding rather than something to paper over.
@@ -245,9 +263,21 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     carried = collections.Counter()
     orphaned = collections.Counter()
     records = review_events_to_carry(out_dir, previous)
+    # The evidence, not just the claim. A finding says "紙本這頁印的是 長", and the crop is that
+    # page; carrying the record without the picture leaves a note that still reads like a note with
+    # a basis, pointing at a 404. See `_adopt_finding_crops` for the measured loss.
+    _adopt_finding_crops(records, previous, crops_root, copied, queue_root=queue_root)
     live = {row.get("candidate_key") for row in candidates}
     streams = {}
+    # Where the carried records came from, counted by the queue directory itself. Printed below
+    # because auto-discovery scans *every* sibling of `--out`, and the failure mode is silent:
+    # build into `/tmp` and a leftover browser-test queue (`/tmp/ann_test`) is carried in as if it
+    # were a person's decisions. Measured 2026-09-22: 3 records from `115090:311:0704` got into a
+    # rebuild that way. Naming the sources turns an invisible over-scan into something the operator
+    # can see while it is still cheap to notice. Same reason the record keeps `_carried_from`.
+    origins = collections.Counter()
     for name, record in records:
+        origins[record.get("_carried_from") or "?"] += 1
         streams.setdefault(name, []).append(record)
         if record.get("candidate_key") in live:
             carried[name] += 1
@@ -284,7 +314,7 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
                                   if p.get("category")}),
              "subjects": sorted({p["subject"] for p in per_paper if p.get("subject")}),
              "years": sorted({p["year"] for p in per_paper if p.get("year")}, reverse=True),
-             "taxonomy": _taxonomy(per_paper),
+             "taxonomy": review_queue.taxonomy_of(per_paper),
              "order": [p["paper"] for p in per_paper]}
     with open(os.path.join(out_dir, "queue_index.json"), "w", encoding="utf-8") as handle:
         json.dump(index, handle, ensure_ascii=False, indent=2)
@@ -292,61 +322,45 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     print("%d papers, %d questions, %d issue rows" % (len(runs), len(candidates), len(issues)))
     if copied:
         print("  crops: %d copied, %d missing" % (copied["copied"], copied["missing"]))
+    if copied["finding_crop_copied"] or copied["finding_crop_missing"]:
+        # Naming this separately matters because it is the difference between a queue that holds a
+        # finding's evidence and one that holds only its claim.
+        print("  finding crops: %d copied, %d missing (already present: %d)"
+              % (copied["finding_crop_copied"], copied["finding_crop_missing"],
+                 copied["finding_crop_present"]))
     if carried or orphaned:
         print("  review records: %d carried, %d orphaned"
               % (sum(carried.values()), sum(orphaned.values())))
+        # Naming the source queues is what makes an over-broad scan visible. Auto-discovery carries
+        # every sibling of `--out`; a test queue left beside a real one is then indistinguishable
+        # from a person's work once it is inside the queue. It never is once it is listed here.
+        for origin, count in origins.most_common():
+            print("    from %s (%d)" % (origin, count))
     return index
 
 
-def _taxonomy(per_paper):
-    """`category -> year -> subject -> [paper]`, and the counts at every level.
-
-    Built as a tree rather than as a flat list of facet values because the facets are not
-    independent: 醫事檢驗師 has papers in 115 but 藥師(一) does not have the same subjects, so a
-    flat subject list would offer choices that lead to an empty list. A tree cannot.
-    """
-    tree = {}
-    for entry in per_paper:
-        entry = dict(entry)
-        # The two spellings of one category are folded together, because they *are* one category:
-        # the catalog spells `藥師（一）` with full-width brackets in some years and `藥師(一)` in
-        # others, and both are the same examination class. Measured: without folding, the review UI
-        # offers six categories where there are four, and the two 藥師(一) entries split 63 and 12
-        # papers - so a reviewer choosing one sees a quarter of the papers that exist.
-        category = _fold_category(entry.get("category")) or "(未分類)"
-        year = str(entry.get("year") or "(未知)")
-        subject = entry.get("subject") or entry.get("paper") or "(未知)"
-        bucket = tree.setdefault(category, {"years": {}, "papers": 0, "questions": 0})
-        bucket["papers"] += 1
-        bucket["questions"] += entry["questions"]
-        year_bucket = bucket["years"].setdefault(
-            year, {"sittings": {}, "papers": 0, "questions": 0})
-        year_bucket["papers"] += 1
-        year_bucket["questions"] += entry["questions"]
-        # The sitting is its own level, between the year and the subject, because the same subject
-        # is set twice a year and the two settings are two different papers: 1151 and 1152 of
-        # 藥師(一) 藥學(二) share a subject name and share nothing else. Without this level a
-        # reviewer comparing a question against the paper it came from cannot say which sitting
-        # they mean, which is the whole point of the comparison.
-        sitting = str(entry.get("ordinal") or "")
-        sitting_bucket = year_bucket["sittings"].setdefault(
-            sitting, {"subjects": {}, "papers": 0, "questions": 0})
-        sitting_bucket["papers"] += 1
-        sitting_bucket["questions"] += entry["questions"]
-        subject_bucket = sitting_bucket["subjects"].setdefault(
-            subject, {"papers": [], "questions": 0})
-        subject_bucket["papers"].append(entry["paper"])
-        subject_bucket["questions"] += entry["questions"]
-    return tree
-
-
-def _adopt_crops(refs, run, paper, crops_root, copied):
+def _adopt_crops(refs, run, paper, crops_root, copied, *, queue_root):
     """Copy a run's crops into the merged queue and rewrite the references to point there.
 
     The path a candidate carries is absolute and points into the package run it was built from.
     Left alone it would make the merged queue depend on 243 directories that a later cleanup may
     remove, and the Review UI - which serves files only under registered roots - would answer 404
     for every crop. The relative reference is what the queue keeps; the copy is what makes it true.
+
+    **Relative to the queue, not to the caller's working directory.** This is the one thing the
+    version above got wrong, and it was invisible for as long as no merged queue had any pictures:
+    `path` was left as the value of `os.path.join(out_dir, ...)`, so what the row stored depended on
+    how the operator spelled `--out`. Run `build_review_queue.py --out data/review-queues/x` from
+    `qbr/` and the row says `data/review-queues/x/review-ui/crops/...`; run it with an absolute
+    `--out` and the row says `/abs/...`. Serving that queue from a container (where `/queue` is the
+    queue and the CWD is `/workspace`) then answered **404 for every figure**, which is exactly the
+    failure this function exists to prevent. Measured: 3,483 questions with 4,549 crops, all 404 at
+    `/file`, until the path was made queue-relative.
+
+    So the stored value is always `review-ui/crops/<paper>/<name>`, which is the one spelling that
+    resolves against whichever root the queue is mounted at - `/queue` in the container, the queue
+    directory anywhere else. A copy of the queue is still self-contained; the reference no longer
+    encodes where it was built.
     """
     adopted = []
     for ref in refs:
@@ -366,20 +380,66 @@ def _adopt_crops(refs, run, paper, crops_root, copied):
         if not os.path.isfile(target):
             shutil.copyfile(source, target)
             copied["copied"] += 1
-        adopted.append({**ref, "path": target, "exists": True})
+        relative = os.path.relpath(target, queue_root)
+        adopted.append({**ref, "path": relative, "exists": True})
+    return adopted
+
+
+def _adopt_finding_crops(records, previous, crops_root, copied, *, queue_root):
+    """Copy the crops that carried findings point at, so their evidence survives the rebuild.
+
+    A finding is a statement about a page ("紙本這裡是 長"), and the crop is the page it was read
+    from. `review_events_to_carry` carries the *record* - so after a rebuild the queue holds the
+    claim - but nothing carried the *picture*. A rebuild therefore kept every finding and silently
+    destroyed what it was about: measured 2026-09-23, after the extractor-fix rebuild the live
+    queue held 21 dispute crops, the old queue held 23, and two findings pointed at files that no
+    longer existed. Serving that queue answers 404 where the evidence should be, and the failure is
+    worse than a missing image - the note still reads like a note with a basis.
+
+    The rule is the same as `_adopt_crops`: the reference is made queue-relative and the file is
+    copied inside, so the queue is self-contained. Only crops that are actually referenced are
+    copied, and only from the queues the records were carried from (`previous`).
+    """
+    sources = [os.path.abspath(item) for item in previous]
+    adopted = 0
+    for _name, record in records:
+        crop = record.get("crop")
+        if not crop:
+            continue
+        # The carried reference is already queue-relative (`review-ui/crops/<paper>/<name>`), which
+        # is the spelling that resolves against any root - so it is kept as-is and only the bytes
+        # are brought along. Absolute references from an older queue are normalised the same way.
+        if os.path.isabs(crop):
+            crop = os.path.relpath(crop, queue_root)
+            record["crop"] = crop
+        target = os.path.join(queue_root, crop)
+        if os.path.isfile(target):
+            adopted += 1
+            copied["finding_crop_present"] += 1
+            continue
+        for source in sources:
+            candidate = os.path.join(source, crop)
+            if os.path.isfile(candidate):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(candidate, target)
+                adopted += 1
+                copied["finding_crop_copied"] += 1
+                break
+        else:
+            # A finding whose crop cannot be found anywhere is still carried - dropping the record
+            # would lose the statement to save the picture - but it is counted, because "the claim
+            # survived and its evidence did not" is something the operator has to be able to see.
+            copied["finding_crop_missing"] += 1
     return adopted
 
 
 def _fold_category(name):
     """One category's name, with the brackets folded so two spellings are one entry.
 
-    The corpus's own spelling is preferred when it can be told which is which: `藥師(一)` is the
-    directory name and `藥師（一）` is the catalog's, and the directory is the authority on its own
-    layout. Both are folded to the half-width form, which is the form the directories use.
+    Kept as a thin alias because the `categories` facet and the taxonomy must fold the same way;
+    the rule itself lives in `review_queue` with the tree it feeds.
     """
-    if not name:
-        return name
-    return name.replace("（", "(").replace("）", ")")
+    return review_queue._fold_category(name)
 
 
 def _sha256(path):
@@ -445,13 +505,10 @@ def review_logs_elsewhere(out_dir, roots=None):
                             record = json.loads(line)
                         except ValueError:
                             continue
-                        # `_carried_from` is added when a record is carried, so it is not part of
-                        # the record's identity. Comparing with it left every carried record looking
-                        # like a *different* record, and the guard then refused a rebuild that was
-                        # in fact carrying everything - measured: sf8's 52 records all appeared
-                        # "missing" from sf9 although sf9 held them all plus 92 more.
-                        record.pop("_carried_from", None)
-                        keys.add((stream, json.dumps(record, sort_keys=True, ensure_ascii=False)))
+                        # The rule lives in `review_queue.record_identity`; see it for the two
+                        # measured mistakes this prevents (a carried record looking new, and a key
+                        # narrower than the record dropping later decisions).
+                        keys.add((stream, review_queue.record_identity(record)))
             if keys:
                 found.append((run, keys))
     return found

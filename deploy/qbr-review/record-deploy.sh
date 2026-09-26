@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# 記下「常駐機上跑的到底是哪一份程式」。
+#
+# 為什麼需要它：部署是把**工作樹**鏡射過去，而工作樹不一定等於任何一個 commit
+# （實測：站上跑的 `scripts/serve_question_review_ui.py` 含一筆未提交的 `content_type_of` 修正，
+# 那是另一個工作流的成果，而它讓圖片能正確顯示）。所以「站上跑的是什麼」不能只靠 git 回答。
+#
+#     deploy/qbr-review/record-deploy.sh            # 在常駐機上跑，寫出 DEPLOYED.json
+#
+# 它記三件事：
+#   1. 部署時間、來源機器、來源 repo 的 HEAD 與 dirty 狀態；
+#   2. 服務本身（server + v2.html + legacy.html + queue）的 sha256——這樣「介面變了」可以歸因；
+#   3. 佇列與審核紀錄的筆數——「畫得出來」要用數字講，不是用感覺。
+set -euo pipefail
+
+HOME_DIR="${QBR_HOME:-/Users/tim/qbr-review}"
+PORT="${REVIEW_UI_PORT:-8765}"
+OUT="${HOME_DIR}/DEPLOYED.json"
+
+sha() { [[ -f "$1" ]] && shasum -a 256 "$1" | awk '{print $1}' || echo null; }
+
+QUEUE="${HOME_DIR}/queue/review-ui"
+SERVER="${HOME_DIR}/code/scripts/serve_question_review_ui.py"
+V2="${HOME_DIR}/code/review_ui/v2.html"
+LEGACY="${HOME_DIR}/code/review_ui/v1-reference/legacy.html"
+
+# 來源 repo 的狀態。
+#
+# **重要：來源是「送出部署的那台機器」，不是這台。** 這台上確實有一份舊的
+# `~/tw-national-exam-catalog`（HEAD 3925d978，116 個未提交檔），但它**跟本部署無關**——
+# 那是舊的 checkout。第一版就是讀到它，把來源記成錯的 commit，所以改成由送部署的那台
+# 把 revision 帶進來（見 scripts/deploy_station.sh，它會匯出 QBR_SRC_HEAD / QBR_SRC_REPO）。
+SRC_REPO="${QBR_SRC_REPO:-unknown}"
+SRC_HEAD="${QBR_SRC_HEAD:-unknown}"
+SRC_DIRTY="${QBR_SRC_DIRTY:-unknown}"
+
+# 服務當下的數字（真的打 API，不是讀檔猜）。
+SERVED="$(curl -fsS --max-time 8 "http://127.0.0.1:${PORT}/api/queue_index" 2>/dev/null \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("questions") or 0)' 2>/dev/null \
+  || echo 0)"
+
+# 2026-09-23 之後，伺服器是 composition root，實作在 `qbr/src/qbr/review_ui/`。
+# 只記 `server_sha256` 會讓「站上跑的是哪一份程式」失去證明力：那兩個檔案已經不含大部分程式碼，
+# 它們相同**不代表**模組相同。所以把模組的 sha256 也一起記下來（單一檔案時就是那一個 hash）。
+IMPL_DIR="${HOME_DIR}/code/qbr/src/qbr/review_ui"
+IMPL_JSON="{}"
+if [[ -d "${IMPL_DIR}" ]]; then
+  IMPL_JSON="$(python3 - "$IMPL_DIR" <<'PY'
+import hashlib, json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+out = {}
+for p in sorted(d.glob("*.py")):
+    out[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+print(json.dumps(out, ensure_ascii=False, indent=2))
+PY
+)"
+fi
+
+cat > "${OUT}" <<JSON
+{
+  "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "host": "$(hostname)",
+  "port": ${PORT},
+  "source_repo": "${SRC_REPO}",
+  "source_head": "${SRC_HEAD}",
+  "source_dirty_files": "${SRC_DIRTY}",
+  "note": "站上跑的是工作樹鏡射。source_head 由送部署的那台提供；source_dirty_files > 0 代表它含未提交的改動（實測：一筆 content_type_of 修正，讓圖能顯示）。這台上的 ~/tw-national-exam-catalog 是舊 checkout，不是本部署的來源。2026-09-23 之後 server_sha256 只涵蓋 composition root，實作在 qbr/src/qbr/review_ui/，見 review_ui_sha256。",
+  "server_sha256": "$(sha "${SERVER}")",
+  "review_ui_sha256": ${IMPL_JSON},
+  "v2_sha256": "$(sha "${V2}")",
+  "legacy_sha256": "$(sha "${LEGACY}")",
+  "candidates_sha256": "$(sha "${QUEUE}/candidates.jsonl")",
+  "review_log_sha256": "$(sha "${QUEUE}/question_review_events.jsonl")",
+  "review_events": $(wc -l < "${QUEUE}/question_review_events.jsonl" | tr -d ' '),
+  "served_questions": ${SERVED}
+}
+JSON
+
+echo "已寫出 ${OUT}"
+python3 -m json.tool "${OUT}"

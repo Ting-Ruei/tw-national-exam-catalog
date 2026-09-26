@@ -61,6 +61,34 @@ _OFFSET_SUB_MIN_DCY = 1.9       # measured: +2.0 for `₂`,`₃`; smaller text w
 _OFFSET_SUP_MAX_DCY_SMALL = -1.0
 _OFFSET_SUB_MIN_DCY_SMALL = 0.8
 
+#: How close two spans' sizes must be to count as the same type size, for `_body_centre`.
+#: A paper sets its body in one size and rounds the reported number to two decimals, so copies of
+#: the body agree to well under a tenth of a point; a raised run is a whole step smaller (10.83 vs
+#: 9.03) and is excluded. Half a point is comfortably between the two and is not a value any page
+#: is balanced on.
+_BODY_SIZE_TOLERANCE = 0.5
+
+_OFFSET_WHITESPACE = frozenset(" \t\u00a0")
+
+#: Characters that sit **inside a formula the paper prints as an offset**, but for which Unicode has
+#: no raised or lowered form. These are the reason a whole run comes out flat.
+#:
+#: This is the measured cause of the class a reviewer kept blocking and the model kept naming
+#: `SUPERSCRIPT_FLATTENED`. On `1051_藥師(一)_藥劑學(包括生物藥劑學)` the geometry says six runs are
+#: superscripts and the table refuses all six; the only characters blocking them are `.` (seven
+#: occurrences) and `/` (one). The papers print `C=80e-0.35t` with `-0.35t` raised, and there is no
+#: superscript period in Unicode, so `_mappable_offset` returns False, `_offset_kind` returns None,
+#: and the reader is shown `e-0.35t` - a formula that has lost its layer. Same for a subscript
+#: fraction `1/2`.
+#:
+#: What is **not** here matters as much: `dextrose`, `P`, `D`, `M`, `β` are also geometrically
+#: lowered and also refused, and they are *not* this class - they are small print at a slightly low
+#: baseline (table entries, single-letter abbreviations), and calling them subscripts would be
+#: inventing an offset. The distinction is not the letter vs the punctuation: it is that the
+#: punctuation sits **inside a run that is otherwise a formula** (it contains a digit), while those
+#: words are not formulas at all. Hence the second condition in `refused_offsets` below.
+_OFFSET_BLOCKING_PUNCTUATION = frozenset(".,/·×÷")
+
 _SUP_MAP = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
             "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
             "+": "\u207a", "-": "\u207b", "\u2212": "\u207b", "=": "\u207c",
@@ -70,39 +98,247 @@ _SUB_MAP = {"0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u
             "+": "\u208a", "-": "\u208b", "\u2212": "\u208b", "=": "\u208c",
             "(": "\u208d", ")": "\u208e"}
 
+#: Superscript Latin letters. The papers raise whole variable names, not only digits:
+#: `Cp=Ｂe⁻ᵏᵗ−Ａe⁻ᵏᵃᵗ` (pharmacokinetics, every year) and `0.23t` in an exponent. Without these the
+#: run contains a letter, fails the all-characters-mappable rule below, and the formula is printed
+#: flat - which is what a reviewer reported, repeatedly, across subjects.
+#:
+#: What is *not* here is as deliberate as what is. A letter is listed only when Unicode has a real
+#: superscript form for it; nothing is approximated by markup, a caret or a raised digit. That keeps
+#: the existing contract intact by construction rather than by a special case: `41.` still cannot
+#: convert (`.` has no form), and `HbA1c` still cannot (there is no subscript `c`), so neither of the
+#: two regressions this table's strictness was introduced to prevent can come back through it.
+_SUP_LETTERS = {
+    "a": "\u1d43", "b": "\u1d47", "c": "\u1d9c", "d": "\u1d48", "e": "\u1d49",
+    "f": "\u1da0", "g": "\u1d4d", "h": "\u02b0", "i": "\u2071", "j": "\u02b2",
+    "k": "\u1d4f", "l": "\u02e1", "m": "\u1d50", "n": "\u207f", "o": "\u1d52",
+    "p": "\u1d56", "r": "\u02b3", "s": "\u02e2", "t": "\u1d57", "u": "\u1d58",
+    "v": "\u1d5b", "w": "\u02b7", "x": "\u02e3", "y": "\u02b8", "z": "\u1dbb",
+}
+#: Subscript Latin letters, same rule. `null` in `Rh_null` is one of these - the paper sets it 5.15pt
+#: below the baseline of `Rh` and it is legible as a subscript in the rendered page, so `Rhₙᵤₗₗ` is
+#: the reading and `Rhnull` was the defect. The absent `c` is what keeps `HbA1c` as printed.
+_SUB_LETTERS = {
+    "a": "\u2090", "e": "\u2091", "h": "\u2095", "i": "\u1d62", "j": "\u2c7c",
+    "k": "\u2096", "l": "\u2097", "m": "\u2098", "n": "\u2099", "o": "\u2092",
+    "p": "\u209a", "r": "\u1d63", "s": "\u209b", "t": "\u209c", "u": "\u1d64",
+    "v": "\u1d65", "x": "\u2093",
+}
+_SUP_MAP = dict(_SUP_MAP, **_SUP_LETTERS)
+_SUB_MAP = dict(_SUB_MAP, **_SUB_LETTERS)
+
+#: The two ways this corpus spells an offset, and the only two the helpers below accept.
+#: The reverse tables are derived, first spelling wins (`-` was in the literal before `≈`, and
+#: both are spelled with U+207B by the forward table - a reverse dict that overwrote would put
+#: the same codepoint under two keys and make the fold order-dependent).
+def _reverse_offset_table(table):
+    """`{offset_char: plain_char}` from a forward table, first spelling kept.
+
+    The forward tables map two ASCII spellings onto one codepoint (`-` and `−` both
+    → U+207B), so the reverse direction is not a bijection. `setdefault` keeps the first
+    (the ASCII punctuation the flattened runs actually use) instead of letting the last win.
+    """
+    out = {}
+    for plain, offset in table.items():
+        out.setdefault(offset, plain)
+    return out
+
+_TO_PLAIN_SUP = _reverse_offset_table(_SUP_MAP)
+_TO_PLAIN_SUB = _reverse_offset_table(_SUB_MAP)
+#: One pair per run, non-greedy: `…<sup>-1</sup>…` is a single fold even when two pairs touch.
+_OFFSET_TAG_RE = re.compile(r"<(sup|sub)>(.*?)</\1>", re.DOTALL)
+_TAG_PAIR_RE = re.compile(r"</?(?:sup|sub)>")
+
+
+
+def html_sup_sub(text):
+    """`cm⁻¹` → `cm<sup>-1</sup>`; `H₂O` → `H<sub>2</sub>O`. Idempotent.
+
+    The paper's own offset characters (U+2070.., U+2080.., and ¹²³) are the extraction's
+    source of truth; the markup form is what the reader gets, because a browser's
+    `sup`/`sub` renders at about 0.83em with a baseline shift - the same shape Word
+    produces, and the reason the raised/lowered runs stay legible next to body text.
+    A run of consecutive offset characters becomes one tag pair; a lone offset character is
+    one pair too, which is what keeps `D₂` from being spelled `D<sub>2</sub><sub>…`.
+    """
+    if not text:
+        return text
+    out = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in _TO_PLAIN_SUP:
+            run = [_TO_PLAIN_SUP[char]]
+            index += 1
+            while index < len(text) and text[index] in _TO_PLAIN_SUP:
+                run.append(_TO_PLAIN_SUP[text[index]])
+                index += 1
+            out.append("<sup>%s</sup>" % "".join(run))
+            continue
+        if char in _TO_PLAIN_SUB:
+            run = [_TO_PLAIN_SUB[char]]
+            index += 1
+            while index < len(text) and text[index] in _TO_PLAIN_SUB:
+                run.append(_TO_PLAIN_SUB[text[index]])
+                index += 1
+            out.append("<sub>%s</sub>" % "".join(run))
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def plain_sup_sub(text):
+    """The one form the measurements are written against: `cm<sup>-1</sup>` → `cm-1`.
+
+    Both spellings collapse to it, which is what makes the pair usable as a single
+    measurement input: the tag form comes out of `html_sup_sub`, the compressed form is what
+    `extract` stored all along, and a run with no offset at all is passed through untouched.
+    A lone tag pair keeps its inner text; the tags themselves carry no information.
+    """
+    if not text:
+        return text
+    body = _TAG_PAIR_RE.sub("", _OFFSET_TAG_RE.sub(lambda m: m.group(2), text))
+    return "".join(_TO_PLAIN_SUP.get(c, _TO_PLAIN_SUB.get(c, c)) for c in body)
+
 
 def _span_centre(span):
     box = span.get("bbox") or (0, 0, 0, 0)
     return (float(box[1]) + float(box[3])) / 2.0
 
 
-def _offset_kind(span, *, body_centre, body_size):
-    """`"sup"`, `"sub"`, or None for a span that sits on the baseline.
+def _body_centre(body, *, fallback=0.0):
+    """Where the line's baseline sits, measured from the spans set in the **dominant** size.
 
-    A run is an offset only when it is smaller than the line's body, shifted well clear of the
-    baseline, **and made only of characters that have an offset form**. All three are required,
-    and the third is what keeps ordinary small text out: this corpus sets `A.`/`B.` option
-    markers and whole English phrases in a smaller face, and they sit at ratios the size floor
-    admits. Measured over the four categories - 145,639 spans smaller than their line's body -
-    the runs at |shift| >= 2.5 that are entirely offset characters are the chemical formulas
-    (`₃` in `CH₃`, `₂` in `H₂O`, `₄` in `NH₄Cl`, `ₚ` in `Kₚ`, `⁻` in `10⁻⁵`), and 1,617 of the
-    1,664 that are not are option markers and prose. Requiring the mapping also means a run this
-    rule cannot express is left exactly as the paper printed it, rather than half-converted.
+    Whitespace-only spans are left out, and that is a statement about paper rather than a
+    threshold. A space has no ink, so it has no baseline to speak of; a run of spaces at the body
+    size can sit anywhere on the sheet and still be the body size. This corpus prints exactly
+    that: `1041_醫事檢驗師_臨床血液學與血庫學` puts a two-and-a-half-point space span at
+    `x=420.4` and `y=35.69` while the question it belongs to is set at `y≈48`. Averaging it in
+    with the real text lifts the measured centre by about a point - and one point is the whole
+    margin between reading `Leᵃ` and dropping it, because the offset thresholds are ~1.9pt. The
+    measured effect: `anti-Le` `a` moves from dcy -0.99 (missed) to -2.42 (read as the
+    superscript the paper prints), and across the medical-technologist papers this reads 34 more
+    runs without changing which sizes are called the body.
+
+    **The dominant size, and not every span the body floor admits, and that is the correction to
+    a defect this function had been carrying.** The caller's `body` is filtered at
+    `_BODY_SIZE_RATIO` (0.75) so that a *run* well below the body is still available to be
+    compared against it - but an offset run is only a little smaller than its host, and 0.83 >
+    0.75, so those runs were being averaged into the baseline they are supposed to be measured
+    from. Measured on `1141_醫事放射師_醫學物理學與輻射安全` Q14, whose page prints `Ci-1` with the
+    `-1` at 9.03pt raised to 446.04 against 10.83pt prose at 449.93: the contaminated baseline
+    sat at 447.65, so the raised run measured **-1.61** and fell under the -1.9 threshold while
+    the page plainly raised it. Restricting the baseline to the dominant size put it back at
+    448.86 and the run measures **-2.82**, which is what the page shows. On that paper the
+    readable offset characters go 30 -> 47; over 30 sampled papers, 161 -> 176, and no run is
+    newly refused. The class this hid (`flat-offset`, `cm-1` left flat) was reported as an
+    extraction defect needing a repair rule - it was this average.
+
+    Two readings of the same line would otherwise disagree about the same glyph - the cells view
+    puts the stray space in a cell of its own, the line view keeps it in the body - so this is also
+    what keeps `extract_cells_a` and `extract_lines_a` saying the same thing.
+    """
+    inked = [span for span in body if (span.get("text") or "").strip()]
+    measured = inked or body
+    if not measured:
+        return fallback
+    dominant = _body_size(measured)
+    same_size = [span for span in measured
+                 if abs(float(span.get("size") or 0.0) - dominant) < _BODY_SIZE_TOLERANCE]
+    if same_size:
+        measured = same_size
+    return sum(_span_centre(span) for span in measured) / len(measured)
+
+
+def _body_size(spans):
+    """The line's body type size, chosen by how much ink each size carries.
+
+    The body of a line is the size that most of it is set in, and the honest measure of "most of
+    it" is **width of ink**, not the largest size present and not a count of characters.
+
+    Taking the largest was wrong, and it is why a reviewer saw flat formulas rather than raised
+    ones. A paper prints its question number and its option markers **larger than its body text**
+    (`55.` and `C.` at 12.96pt against 11.04pt of prose), so "largest" picks the marker, every
+    span of real text looks smaller than the body, and the line is read as though its entire text
+    were an offset. Measured on `1081_藥師(一)_藥劑學與生物藥劑學` Q55: with the largest size as the
+    body, the prose fragment `digoxin 100 mg` sits at dcy -1.98 and crosses the -1.9 threshold -
+    a whole phrase read as a superscript. Nothing caught it only because the phrase contains
+    letters, which the offset table then refused; the moment that table grew letters, the paper's
+    prose started turning into superscripts (`tissue`, `volume`, `plateau`, 3,259 runs in a
+    partial sweep). The apparent choice between reading the formulas and keeping the prose was an
+    artifact of the wrong body.
+
+    Counting characters is wrong too, in a way that is easy to miss. In `C₇H₁₅SO₃⁻` the
+    multi-digit subscripts (`7`, `15`, `3`) accumulate more characters than the four body glyphs
+    they hang from, so the body would come out as the subscript size and the formula would invert.
+    Width does not have that failure: the subscripts are set small *and* are only three glyphs, so
+    `10.83` carries 28.9pt of ink against their 21.1pt.
+
+    Both engines answer it. poppler reports no type size at all (its `size` is always 0.0), but its
+    word boxes carry the same evidence in their width and height, which is why the rule is stated
+    over the box rather than over the font.
+
+    When every span shares one size - the common case - this returns it, so nothing changes for
+    lines that have no offsets at all.
+    """
+    ink = {}
+    for span in spans:
+        box = span.get("bbox") or (0, 0, 0, 0)
+        size = round(float(span.get("size") or 0.0), 2)
+        ink[size] = ink.get(size, 0.0) + abs(float(box[2]) - float(box[0]))
+    if not ink:
+        return 0.0
+    return max(ink.items(), key=lambda pair: pair[1])[0]
+
+
+def _mappable_offset(text, kind):
+    """Whether this run is one the offset table for *this kind* can express, in full.
+
+    The table is the one the run will actually be transliterated with, and that is the whole
+    point. Checking "one of the two tables" instead lets `1c` through - `1` is in the subscript
+    table and `c` is in the *superscript* one - and `1c` is exactly the run the `HbA₁c` contract
+    forbids converting, because there is no subscript `c`. A character that the run's own table
+    cannot express means the run would come out half-converted, which is the failure this rule
+    exists to prevent.
+
+    Whitespace is admitted, and it is not a concession. A raised run can hold a space where the
+    paper spaced a two-character exponent - `Ａe⁻ᵏᵃᵗ` is stored as the single span `-ka t` - and
+    refusing the run for that space prints the formula flat. A space has no offset form and needs
+    none: it travels *with* the run it sits inside, and the offset is recorded in the glyphs.
+
+    At least one character must be one the table does change, or nothing is being said: a lone
+    space would otherwise become a "superscript" of itself.
+
+    Measured over pharmacist and medical-technologist papers, admitting whitespace adds exactly one
+    run - `-ka t` - and refuses `41.`, `1c` and `HbA` exactly as before.
+    """
+    table = _SUP_MAP if kind == "sup" else _SUB_MAP
+    mappable = False
+    for char in text:
+        if char in table:
+            mappable = True
+        elif char not in _OFFSET_WHITESPACE:
+            return False
+    return mappable
+
+
+def _offset_direction(span, *, body_centre, body_size):
+    """`"sup"`, `"sub"`, or None from geometry alone - before asking whether it can be spelled.
+
+    Split out of `_offset_kind` because two different questions had been fused into one answer.
+    "Where does this run sit" is a fact about the page; "can Unicode spell that" is a fact about the
+    offset table. Fusing them threw the first away whenever the second said no, and the first is
+    exactly the evidence a flattened formula needs - measured on the pharmacist paper, six runs are
+    geometrically offsets and the table can spell none of them. Returning the direction even when
+    the table refuses is what lets `refused_offsets` report the run instead of silently printing it
+    flat. The three size/shift tests are the ones documented in the old docstring, unchanged.
     """
     size = float(span.get("size") or 0.0)
     text = (span.get("text") or "").strip()
     if not body_size or not size or size >= body_size * _OFFSET_MAX_SIZE_RATIO:
         return None
-    # Every character has to have an offset form. `any` was tried first and it corrupts text: a
-    # span mixing mappable and unmappable characters gets *half* converted, and measured over the
-    # corpus that turned the digits of ordinary numbers into superscripts - `41.` became `⁴¹.`,
-    # `1c` became `₁c`, `-0.2t` became `⁻⁰.²t`, 240 spans in all. Requiring all of them means a run
-    # this rule cannot express is left exactly as the paper printed it. The cost is measurable and
-    # was measured: 4,546 runs convert and 4,550 do not, and the ones that do not are the corpus's
-    # option markers (`A.`/`B.`/`C.`/`D.`, which must not convert), `®`, and the chemical symbols
-    # that have no subscript form at all (`max`, `p`, `M`, `Cr`). Leaving those alone is honest;
-    # half-converting them is not.
-    if not text or not all(char in _SUP_MAP or char in _SUB_MAP for char in text):
+    if not text:
         return None
     delta = _span_centre(span) - body_centre
     # Two subscript styles, and the papers use both. The tight one is 5.5pt against 11pt
@@ -118,6 +354,132 @@ def _offset_kind(span, *, body_centre, body_size):
     if delta >= (_OFFSET_SUB_MIN_DCY_SMALL if small else _OFFSET_SUB_MIN_DCY):
         return "sub"
     return None
+
+
+def _offset_kind(span, *, body_centre, body_size):
+    """`"sup"`, `"sub"`, or None for a span that sits on the baseline.
+
+    A run is an offset only when it is smaller than the line's body, shifted well clear of the
+    baseline, **and made only of characters that have an offset form**. All three are required,
+    and the third is what keeps ordinary small text out: this corpus sets `A.`/`B.` option
+    markers and whole English phrases in a smaller face, and they sit at ratios the size floor
+    admits. Measured over the four categories - 145,639 spans smaller than their line's body -
+    the runs at |shift| >= 2.5 that are entirely offset characters are the chemical formulas
+    (`₃` in `CH₃`, `₂` in `H₂O`, `₄` in `NH₄Cl`, `ₚ` in `Kₚ`, `⁻` in `10⁻⁵`), and 1,617 of the
+    1,664 that are not are option markers and prose. Requiring the mapping also means a run this
+    rule cannot express is left exactly as the paper printed it, rather than half-converted.
+
+    When the mapping refuses, the run's *direction* is still known - `refused_offsets` reads it
+    through `_offset_direction` and reports the run, so the information is not lost even though this
+    function's answer is None.
+    """
+    text = (span.get("text") or "").strip()
+    kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
+    if kind is None:
+        return None
+    # The run is an offset geometrically; now ask whether it can be *said* as one. Refusing here
+    # leaves the run exactly as the paper printed it rather than half-converted, which is the rule
+    # `41.` and `HbA1c` depend on.
+    return kind if _mappable_offset(text, kind) else None
+
+
+def _flattened_offset(spans, index, *, body_centre, body_size):
+    """This span is a formula the page raised and the offset table cannot spell, or None.
+
+    One predicate, and it is only used by `refused_offsets` today. The split is deliberate: the
+    question "is this run a flattened formula?" must have exactly one answer, because the review
+    queue reports the run and any future repair **spells** the run, and two answers would drift -
+    the queue would report a defect that had already been repaired (the stale-dispute failure
+    measured on 204 questions). The predicate lives here so a second caller must reuse it rather
+    than re-derive "looks like a formula" from scratch.
+
+    The run is a flattened offset only when it **looks like a formula** - it contains a digit, every
+    character the table refuses is one a formula contains, and it hangs off a host to its left. A
+    run blocked by an ordinary letter (`dextrose`, `P`, `D`, `M`, `β`) is small print at a low
+    baseline, not a flattened offset; a line-initial `41.` is a question numeral, not a superscript.
+    Both negative controls live on this function now instead of being duplicated.
+
+    **Still flat in the reading.** `read_spans` does not yet spell these runs, because it feeds the
+    structure parser and the model's skeleton check, and markup there is a second measurement nobody
+    has taken. Measured 2026-09-23: 185 questions / 334 runs corpus-wide, 35 of them blocked - the
+    largest mechanically-attackable class left, and the next lever.
+    """
+    span = spans[index]
+    text = (span.get("text") or "").strip()
+    kind = _offset_direction(span, body_centre=body_centre, body_size=body_size)
+    if kind is None or not text:
+        return None
+    if _mappable_offset(text, kind):
+        return None
+    table = _SUP_MAP if kind == "sup" else _SUB_MAP
+    blockers = [char for char in text
+                if char not in table and char not in _OFFSET_WHITESPACE]
+    if not blockers:
+        return None
+    # The run has to be a formula for this to be a flattened offset rather than small print.
+    if not any(char.isdigit() for char in text):
+        return None
+    if not all(char in _OFFSET_BLOCKING_PUNCTUATION for char in blockers):
+        return None
+    # And it has to **hang off something**. This condition was added after the first version of
+    # this rule over-fired by 67x: measured over 36 papers it returned 1,806 questions instead
+    # of 27, because a question's own number sits in a smaller face and is shifted, and `4.`
+    # blocked by `.` passed every test above. Every one of those was *line-initial* - measured
+    # on `1062_物理治療師_心肺疾病與小兒物理治療學`: 39 of 39 line-initial, 0 attached - while
+    # every genuine flattened formula hangs off a host with a span to its left (`-1.5t` after
+    # `= 70e`; `1/2` after `t`). A margin number is a label for the line it begins; a superscript
+    # is part of an expression, and an expression has something on its left. That is geometry,
+    # not meaning, so it belongs here.
+    if index == 0:
+        return None
+    return {"text": text, "kind": kind, "blockers": blockers,
+            "bbox": list(span.get("bbox") or (0, 0, 0, 0)),
+            "size": float(span.get("size") or 0.0),
+            "host": (spans[index - 1].get("text") or "")[-12:],
+            "why": "offset-table-cannot-express"}
+
+
+def refused_offsets(spans):
+    """Runs the page's geometry calls offsets and the offset table cannot say, with their address.
+
+    Returns a list of `{"text", "kind", "blockers", "bbox", "size", "why"}`, one per run.
+
+    This is evidence a later stage can act on, and it has to be gathered **here**, where the page
+    still exists. Once the text has been read, `e-0.35t` (a formula that lost its layer) and
+    `e-0.35t` (a formula the paper printed flat) are the same string - no text-only rule can tell
+    them apart, which is why `disputes.py` cannot detect this class and why this function exists.
+    It is the same shape as `lost_glyphs`: a defect whose evidence is on the paper, reported at the
+    position it occurs, with the character never guessed at.
+
+    The predicate that decides "is this a flattened formula" is `_flattened_offset`, shared so the
+    report and any later spelling of the run cannot disagree. Measured on the pharmacist paper
+    above: six runs kept (`-1.5t`, `-1.386t`, `-0.0866t`, `-0.1t`, `-0.46t`, `1/2`), five refused
+    (`dextrose`, `P`, `D`, `M`, `β`).
+    """
+    if not spans:
+        return []
+    body_size = float(_body_size(spans) or 0.0)
+    body = [span for span in spans
+            if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
+    if not body:
+        return []
+    body_centre = _body_centre(body)
+    found = []
+    for index in range(len(spans)):
+        item = _flattened_offset(spans, index, body_centre=body_centre, body_size=body_size)
+        if item:
+            found.append(item)
+    return found
+
+
+def refused_offsets_of_page(spans):
+    """`refused_offsets` grouped per visual line, so a caller can say which line it was on."""
+    out = []
+    for line in group_visual_lines(spans):
+        for item in refused_offsets(line):
+            box = item["bbox"]
+            out.append(dict(item, y0=min(float(box[1]), float(box[3]))))
+    return out
 
 
 # A horizontal gap wider than this fraction of the type size separates two items; a gap
@@ -136,6 +498,14 @@ _ZERO_WIDTH = 0.5
 # of 0-4 points, and 928 column separations at ten points or more, over two years of two
 # categories. Half a body height sits between the two groups rather than inside either.
 _COLUMN_GAP_RATIO = 0.5
+
+# Two spans are the same draw when their boxes agree to within this many points. Measured on the
+# duplicate draws: the fake-bold overlays sit 0.24pt apart horizontally and the doubled question
+# numerals sit 0.00pt apart, while genuine neighbours - the next numeral, the next option - are
+# never closer than the width of a character. A tolerance of one point therefore separates a
+# redraw from a neighbour with two orders of magnitude of room on the redraw side and no way to
+# reach a real neighbour on the other.
+_REDRAW_TOLERANCE = 1.0
 
 # A raised run may stand a little clear of its host and still be a superscript. Measured: the
 # joins at a gap of 1-4 points are these, and the ones at ten points and above are columns, so
@@ -180,11 +550,11 @@ def group_cells(spans):
     spans = [span for span in spans if span.get("text")]
     if not spans:
         return []
-    biggest = max(spans, key=lambda span: float(span.get("size") or 0.0))
-    body_size = float(biggest.get("size") or 0.0)
+    biggest = _body_size(spans)
+    body_size = float(biggest or 0.0)
     body = [span for span in spans
             if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
-    body_centre = (sum(_span_centre(span) for span in body) / len(body)) if body else 0.0
+    body_centre = _body_centre(body) if body else 0.0
     cells, current = [], [spans[0]]
     for previous, span in zip(spans, spans[1:]):
         # A small glyph is joined to what precedes it when it is *raised or lowered against it*,
@@ -231,24 +601,147 @@ def read_spans(spans):
     visual line, and gluing them back together would turn four separate options - `田野研究`
     `大眾和專業評論` … - into one unreadable word. The same test keeps a superscript against
     its host, because the gap inside `[Na⁺]` is zero.
+
+    A span that **overlaps** its predecessor is trimmed first, by `_covered_prefix_length`: the
+    overlapping characters are already in the text, and appending them again invents a character
+    the paper does not carry. This is the second time this function has had to be told that two
+    boxes can share a position - the first was `_gap_joins`, which stops a column gap from being
+    read as no gap; this one stops a shared character from being read as two. Both are properties
+    of the boxes, and neither is a property of the words.
     """
     spans = [span for span in spans if span.get("text")]
     if not spans:
         return ""
-    biggest = max(spans, key=lambda span: float(span.get("size") or 0.0))
-    body_size = float(biggest.get("size") or 0.0)
+    biggest = _body_size(spans)
+    body_size = float(biggest or 0.0)
     body = [span for span in spans if float(span.get("size") or 0.0) >= body_size * _BODY_SIZE_RATIO]
     if not body:
         return "".join(span.get("text", "") for span in spans)
-    body_centre = sum(_span_centre(span) for span in body) / len(body)
+    body_centre = _body_centre(body)
     pieces = []
-    for index, span in enumerate(spans):
-        if index and not _gap_joins(spans[index - 1], span):
-            pieces.append(" ")
-        kind = _offset_kind(span, body_centre=body_centre, body_size=body_size)
+    previous = None
+    for span in spans:
         text = span.get("text", "")
+        if previous is not None:
+            if _is_a_redraw(previous, span, text):
+                continue
+            trimmed = _covered_prefix_length(previous, span, text)
+            if trimmed:
+                text = text[trimmed:]
+                if not text:
+                    continue
+            elif not _gap_joins(previous, span):
+                pieces.append(" ")
+        kind = _offset_kind(span, body_centre=body_centre, body_size=body_size)
         pieces.append(_transliterate(text, kind) if kind else text)
+        previous = span
     return "".join(pieces)
+
+
+def _is_a_redraw(previous, span, text, *, tolerance=_REDRAW_TOLERANCE):
+    """True when `span` sits inside `previous` and carries text that is already there.
+
+    A **geometry** rule with one text test on top, and the text test is what makes it safe: a
+    span is dropped only when its characters are provably present in the line already, so
+    dropping it cannot lose anything.
+
+    These papers draw some runs more than once - a faked bold sets the same string two to four
+    times at slightly different offsets - and they draw some question numbers twice at the very
+    same spot. Read end to end, each extra draw becomes an extra character. Measured on
+    `1031_醫師(二)_醫學(四)`, whose question numbers are bare two-column numerals:
+
+    * question 3 arrives as span `3` at x=[52.68, 58.17] followed by span `3` at
+      x=[52.68, 58.17] - the same box twice, read as `33`;
+    * question 34 arrives as `34` at x=[47.16, 58.17] followed by `4` at x=[52.68, 58.17] -
+      the second inside the first, read as `344`.
+
+    Both were fatal, because a question number that is not the successor of the one before it
+    is rejected by the numbering rule and the rest of the paper is dropped. Before this rule
+    that paper read as **2 questions out of 80**; with it, 33 do - and the remainder are a later,
+    separate defect, not this one.
+
+    The test is `inside` rather than `coincident` so that both shapes are caught, and the text
+    half is what keeps a real repetition: a paper that genuinely prints `3 3` puts the two
+    glyphs at different x positions, so the second is not inside the first, and a word that
+    genuinely repeats - `常常`, `慢慢` - likewise has its second copy starting where the first
+    ends, not inside it. Only a draw lying within the draw before it, carrying characters that
+    are already in the line, is dropped.
+    """
+    if not text:
+        return False
+    left = previous.get("bbox") or (0, 0, 0, 0)
+    right = span.get("bbox") or (0, 0, 0, 0)
+    if float(right[0]) < float(left[0]) - tolerance:
+        return False
+    if float(right[2]) > float(left[2]) + tolerance:
+        return False
+    return text.strip() in previous.get("text", "")
+
+
+def _covered_prefix_length(previous, span, text):
+    """How many characters of `span` are already in the text, having been read from `previous`.
+
+    A **geometry** rule, in the same class as `_gap_joins`: it asks where two boxes sit, never
+    what they say. It exists because this reader lays every span end to end, and on these papers
+    a long run is often emitted as several spans that share their boundary character - the printer
+    draws the same glyph twice, once at the end of one span and once at the start of the next, so
+    the shared character was being read twice and `血液中` came out as `血液液中`, `下列` as
+    `下列列`.
+
+    Both shapes are visible on `1131_醫事檢驗師_臨床血液學與血庫學` (113 年第 2 次):
+
+    * A **seam**: span `…尤其是貧血。血液` at x=[215.40, 435.35] then span `液中沒有發現對抗紅血球`
+      at x=[424.32, 545.27]. The `液` of the first sits at [424.32, 435.35], the `液` of the second
+      at [424.32, 434.40]. One character, two boxes - and appending them made `血液液`.
+    * An **overlay**: the header `科目名稱：臨床血液學與血庫` is drawn four times by the fake-bold
+      printer, at x0 33.96 / 33.96 / 34.20 / 34.20 and y alternating by 0.24pt. Every span of an
+      overlay starts left of the one before it, because it is the same run redrawn, not a
+      continuation.
+
+    Only the seam is trimmed, because only the seam has the property that says so: the following
+    span starts **right** of the previous one and overlaps its tail. An overlay's spans march left
+    as often as right, so the `right[0] <= left[0]` guard rejects them, and the fake-bold text
+    survives intact. Without that guard the header read `科目名稱科目名稱科目名稱科目名稱：臨床血液學與血庫庫學`
+    - deleting real characters is worse than the duplication being removed.
+
+    The count is a rounding of geometry, not a fitted threshold: characters are laid out at a
+    uniform pitch inside a span, so the covered width over the per-character width is how many
+    characters are covered, and coverage of less than half a character is left alone - which is
+    what keeps a subscript merely overhanging its host from losing its first character. Coverage
+    of the *whole* span is left alone too: that is a redraw, not a seam.
+
+    Evidence that this is our defect and not the paper's: PyMuPDF's own `get_text("text")` returns
+    `血液中` once, and engine B (poppler, which does its own overlap handling) reads the paper with
+    zero doubled characters. Two independent readings agreed; only this function disagreed.
+
+    This was not cosmetic. The affected papers had their **question numbers** doubled as well -
+    `72` read as `722` - and a number that is not the successor of the one before it is rejected
+    by the numbering rule, so the run stops there and the rest of the paper is dropped. That is
+    the whole of the `count-mismatch` refusal on the six `醫師(二)` papers, which is why they
+    looked like six unrelated broken papers rather than one broken reader.
+    """
+    if not text:
+        return 0
+    left = previous.get("bbox") or (0, 0, 0, 0)
+    right = span.get("bbox") or (0, 0, 0, 0)
+    covered = float(left[2]) - float(right[0])
+    if covered <= 0.0:
+        return 0
+    if float(right[0]) <= float(left[0]):
+        # The following span does not start to the right of the previous one, so it is not a
+        # continuation of it - it is the same run drawn again. Leave it whole.
+        return 0
+    width = float(right[2]) - float(right[0])
+    if width <= 0.0:
+        return 0
+    per_character = width / len(text)
+    if per_character <= 0.5:
+        return 0
+    count = int(round(covered / per_character))
+    if count >= len(text):
+        # The whole span already sits inside the previous one: a redraw, not a seam.
+        return 0
+    return count
 
 
 def _spans_of_page(page):
@@ -360,6 +853,13 @@ def extract_lines_a(path):
                     "size": float(body.get("size", 0.0) or 0.0),
                     "block": -1,
                     "line": line_index,
+                    # Gathered while the spans still exist. `read_spans` folds a raised run back
+                    # into its host line so the formula reads as one line - which is right, and is
+                    # also what destroys the evidence that the run *was* raised. A run the offset
+                    # table cannot spell is therefore recorded here, at the one moment its geometry
+                    # is visible; after this the reader's string and a genuinely flat formula are
+                    # indistinguishable.
+                    "flattened_offsets": refused_offsets(spans),
                 }
             )
     document.close()

@@ -181,6 +181,118 @@ def test_a_superscript_stays_with_its_host_cell():
     assert extract.read_spans(cells[0]).startswith("PO")
 
 
+def test_an_offset_run_the_table_cannot_spell_is_reported_instead_of_lost():
+    """Geometry says superscript; Unicode has no superscript period; the run must not vanish.
+
+    This is the measured cause of the flattened formulas a reviewer kept blocking. `read_spans`
+    folds a raised run back into its host line - correct, since the formula must read as one line -
+    and that fold is exactly what destroys the evidence. So the run is recorded while the spans
+    still exist.
+    """
+    from qbr import extract
+    spans = [
+        {"text": "C=80e", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "-0.35t", "size": 7.0, "bbox": (40, 1, 60, 8)},
+    ]
+    found = extract.refused_offsets(spans)
+    assert [item["text"] for item in found] == ["-0.35t"]
+    assert found[0]["kind"] == "sup" and found[0]["blockers"] == ["."]
+    # And the reading really did drop the offset: that is why the evidence has to be kept.
+    assert "⁻" not in extract.read_spans(spans)
+
+
+def test_small_print_at_a_low_baseline_is_not_a_flattened_offset():
+    """The negative control: `dextrose`, `P`, `D`, `M`, `β` must not be reported.
+
+    These are geometrically lowered - sitting in a small face a little below the baseline - and the
+    offset table also refuses them. But they are table entries and single-letter abbreviations, not
+    formulas, and calling them subscripts would be inventing an offset. Measured on the same paper
+    as the true class: six genuine flattened formulas, five of these.
+    """
+    from qbr import extract
+    spans = [
+        {"text": "glucose", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "dextrose", "size": 7.0, "bbox": (40, 8, 70, 15)},
+        {"text": "P", "size": 7.0, "bbox": (70, 8, 75, 15)},
+        {"text": "M", "size": 7.0, "bbox": (75, 8, 80, 15)},
+    ]
+    assert extract.refused_offsets(spans) == []
+
+
+def test_the_flattened_formula_predicate_has_exactly_one_implementation():
+    """「這個 run 是不是壓平的公式」只能有一個答案。
+
+    這個判準被拆出来（`_flattened_offset`）而不是寫在 `refused_offsets` 裡面，因為第二個用它
+    的地方一定會出現：佇列現在**報告**這個 run，而修法是在**閱讀層拼出 markup**（紙張把
+    `-0.17t` 抬高，只是 Unicode 沒有上標句點；markup 有）。兩份「看起來像公式」的判準會
+    漂移，然後就會出現同一種缺陷的兩種說法——量到的實例就是 204 題顯示了一個已經被修掉的爭議。
+
+    負對照：把判定搬回 `refused_offsets` 自己寫（只把 `_flattened_offset` 當空殼），這條測試
+    就要紅。这里直接比較兩者對同一組 span 的答案。
+    """
+    from qbr import extract
+    spans = [
+        {"text": "C=80e", "size": 11.0, "bbox": (0, 0, 40, 11)},
+        {"text": "-0.35t", "size": 7.0, "bbox": (40, 1, 60, 8)},
+    ]
+    body_size = extract._body_size(spans)
+    body = [s for s in spans if s["size"] >= body_size * extract._BODY_SIZE_RATIO]
+    centre = extract._body_centre(body)
+    direct = extract._flattened_offset(spans, 1, body_centre=centre, body_size=body_size)
+    reported = extract.refused_offsets(spans)
+    assert direct is not None and len(reported) == 1
+    assert direct == reported[0]
+    # 負對照：不是公式就不可以通過（小字、低基線的表格詞）。
+    words = [{"text": "glucose", "size": 11.0, "bbox": (0, 0, 40, 11)},
+             {"text": "dextrose", "size": 7.0, "bbox": (40, 8, 70, 15)}]
+    centre = extract._body_centre([words[0]])
+    assert extract._flattened_offset(words, 1, body_centre=centre,
+                                     body_size=11.0) is None
+    assert extract.refused_offsets(words) == []
+
+
+def test_the_baseline_is_measured_from_the_dominant_size_not_the_offset_runs():
+    """The negative control for a defect that hid a whole class: the average moved the baseline.
+
+    `_body_centre` is handed every span at or above 0.75x the body size, so that a run well below
+    the body is still there to be measured against. An offset run is only a *little* smaller than
+    its host - 9.03pt against 10.83pt is 0.83, above the 0.75 floor - so the offsets were being
+    averaged into the baseline they are supposed to be measured from. The old behaviour is the
+    assertion below: with the offset spans included the centre sits at 447.65, a genuinely raised
+    run measures only -1.61 against the -1.9 threshold, and the paper reads flat.
+
+    This is the shape the queue reported as `flat-offset` (`cm-1` left flat) and it was an
+    extraction defect that no repair rule could have fixed, because the text on the page was right
+    and the reading was wrong. Measured on `1141_醫事放射師_醫學物理學與輻射安全` Q14: readable offset
+    characters go 30 -> 47 with the baseline taken from the dominant size, and over 30 sampled
+    papers 161 -> 176, with no run newly refused.
+    """
+    from qbr import extract
+    # The real geometry of Q14 option A, all seven spans as PyMuPDF reports them: the `A.` marker
+    # at 12.81pt (y-centre 445.65), the prose `0.5 R m` / ` Ci` / ` h` at 10.83pt (y-centre
+    # 449.93), and the raised `2` / `-1 ` / `-1` at 9.03pt (y-centre 446.04) - a raise of 3.89
+    # points, plainly a superscript.
+    spans = [
+        {"text": "A.", "size": 12.81, "bbox": (0, 439.2, 12, 452.0)},
+        {"text": "0.5 R m", "size": 10.83, "bbox": (12, 444.5, 52, 455.4)},
+        {"text": "2", "size": 9.03, "bbox": (52, 441.5, 57, 450.6)},
+        {"text": " Ci", "size": 10.83, "bbox": (57, 444.5, 72, 455.4)},
+        {"text": "-1 ", "size": 9.03, "bbox": (72, 441.5, 82, 450.6)},
+        {"text": "h", "size": 10.83, "bbox": (82, 444.5, 88, 455.4)},
+        {"text": "-1", "size": 9.03, "bbox": (88, 441.5, 98, 450.6)},
+    ]
+    # The negative control: the *old* behaviour was a plain mean over every span at or above the
+    # floor, which averaged the raised runs into the baseline and moved it to 447.66, so the same
+    # run measured only -1.61 and stayed flat. Recomputed here rather than called, because the
+    # function has since been fixed - a negative control that called it would pass either way.
+    old_body = [span for span in spans if span["size"] >= 10.83 * 0.75]
+    old_centre = sum(extract._span_centre(span) for span in old_body) / len(old_body)
+    old_shift = extract._span_centre(spans[4]) - old_centre
+    assert old_shift > -1.9, "the old average must be the failing case"
+    # And the reading the page justifies: `Ci-1 h-1` is the superscript the paper printed.
+    assert extract.read_spans(spans) == "A.0.5 R m\u00b2 Ci\u207b\u00b9 h\u207b\u00b9"
+
+
 # --- the paper states its own structure -----------------------------------------------------
 # The skeleton reads only what the paper prints. These tests fix the two ways it was wrong before
 # the corpus was measured, because both were silent: the first made an entire year unreadable and
@@ -245,6 +357,50 @@ def test_a_year_heading_is_not_a_question_number():
     skeleton = reflow.skeleton(table)
     assert skeleton["complete"]
     assert skeleton["chrome"] == [1]
+
+
+def test_a_question_stem_that_opens_with_a_number_and_the_word_nian_is_not_a_heading():
+    """`56 年老女性…` is question 56; `56年第一次…` would be a heading.
+
+    The old rule was `^NNN年` and nothing more, so every question stem that opens with a number
+    and 年 was thrown away as chrome and the paper lost the rest of its questions. Measured over
+    all 3,516 shipped papers: 19 papers were cut short this way, `1092_法醫師_一般醫學` to 43 of
+    100, `1062_諮商心理師…` to 31 of 40, `1002_醫師(二)_醫學(五)` to 56 of 80.
+
+    What separates them is what follows the 年. A heading continues with the exam's own title
+    (`第`, `專`); a stem continues with its subject. These four cases are the whole rule.
+    """
+    from qbr import repair
+    assert repair.is_year_line("115年第一次專門職業及技術人員高等考試")
+    assert repair.is_year_line("115 年第一次專門職業及技術人員高等考試")
+    assert repair.is_year_line("105年專門職業及技術人員高等考試")
+    assert not repair.is_year_line("56  年老女性發生肱骨頸部骨折時的敘述，何者正確？")
+    assert not repair.is_year_line("7 年齡介於65～79 歲健康男性的血清尿酸")
+    assert not repair.is_year_line("12  年金給付水準通常以「替代率」來計算")
+    assert not repair.is_year_line("50年代脊髓灰白質炎流行中達到高峰")
+
+
+def test_a_stem_that_opens_with_a_number_and_nian_keeps_its_paper():
+    """Negative control: the paper is read whole, not cut at the first such stem.
+
+    A reading that merely stopped calling the line chrome would still be wrong if the numbering
+    scan then took `56` for a question number before question 55 - so the whole path is exercised:
+    the line is neither chrome nor an anchor, and it is carried into the question being read.
+    """
+    from qbr import repair
+    text = "\n".join([
+        "114年第一次專門職業及技術人員高等考試醫師考試",
+        "1  第1題的題幹，下列何者正確？",
+        "A.甲", "B.乙", "C.丙", "D.丁",
+        "2  年老女性發生肱骨頸部骨折時的敘述，何者正確？",
+        "A.戊", "B.己", "C.庚", "D.辛",
+        "3  第3題的題幹，下列何者正確？",
+        "A.壬", "B.癸", "C.子", "D.丑",
+    ])
+    records, _residual, _diagnostics = repair.segment_best(text)
+    numbers = [record["number"] for record in records]
+    assert numbers == [1, 2, 3], numbers
+    assert "年老女性" in records[1]["stem"]
 
 
 def test_a_wrapped_formula_is_not_the_next_question_number():

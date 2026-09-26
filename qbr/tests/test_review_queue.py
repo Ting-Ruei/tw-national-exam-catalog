@@ -133,6 +133,55 @@ def test_no_absolute_path_reaches_the_queue():
                 assert not str(value).startswith("/"), (key, value)
 
 
+def test_a_merged_crop_reference_does_not_depend_on_the_calling_directory(tmp_path):
+    """A merged queue's crop path must resolve against the queue, not against the CWD it was built in.
+
+    Measured, and the reason this test exists: 3,483 questions holding 4,549 crops were written with
+    a `path` of `data/review-queues/<q>/review-ui/crops/...` - the value of `--out` exactly as the
+    operator spelled it. Served from a container, where the queue is mounted at `/queue` and the CWD
+    is `/workspace`, `/file` answered **404 for every figure**, so the reviewer saw no picture at all.
+    The bug was invisible while no merged queue had pictures, which is how it survived.
+
+    This is a **negative control**: it fails on the version that stored `--out` as given
+    (`git stash` of `qbr/scripts/build_review_queue.py`), and the assertion is on the stored string
+    rather than on a copied file's existence, so it cannot pass for the wrong reason.
+    """
+    builder = _builder()
+    run = tmp_path / "run"
+    review_ui = run / "review-ui"
+    crops = review_ui / "crops"
+    crops.mkdir(parents=True)
+    (crops / "figure.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    row = {"candidate_key": "k1", "question_number": 1,
+           "image_refs": [{"path": str(crops / "figure.png"), "raw_ref": "figure.png",
+                           "asset_role": "figure-crop"}]}
+    with open(review_ui / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    # The caller is one directory up, and `--out` is given **relative** - both halves of the trap.
+    import subprocess
+    queue = tmp_path / "queue"
+    subprocess.run([sys.executable,
+                    os.path.join(PKG, "scripts", "build_review_queue.py"),
+                    "--work", str(tmp_path), "--out", "queue"],
+                   cwd=str(tmp_path), check=True, capture_output=True)
+
+    with open(queue / "review-ui" / "candidates.jsonl", encoding="utf-8") as handle:
+        written = json.loads(handle.readline())
+    stored = written["image_refs"][0]["path"]
+    assert stored == "review-ui/crops/run/figure.png", stored
+    assert not os.path.isabs(stored)
+    # And the claim that makes the reference true: the file really is inside the queue, so a copy
+    # of the queue still serves it.
+    assert (queue / stored).is_file()
+    # Negative control on the fix itself: the queue is relocatable, which is the whole point.
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    import shutil as _shutil
+    _shutil.copytree(queue / "review-ui", moved / "review-ui")
+    assert (moved / stored).is_file()
+
+
 # ------------------------------------------------------- the reviewer's records survive a rebuild
 # These import the builder by path rather than by `import`, because the module is a script that
 # parses argv in `main()` and has no package home. The point of the tests is narrow and worth
@@ -244,3 +293,138 @@ def test_an_orphaned_record_is_kept_and_counted_never_dropped(tmp_path):
     carried = [r for _name, r in records if r["candidate_key"] == "k1"]
     orphaned = [r for _name, r in records if r["candidate_key"] == "gone"]
     assert len(carried) == 1 and len(orphaned) == 1
+
+
+def test_the_carry_names_its_source_queues(tmp_path):
+    """重建要說出紀錄是從哪個佇列帶來的。
+
+    自動發現會掃 `--out` 的每一個兄弟，所以把輸出放在 `/tmp` 這種滿是測試殘留的地方，
+    一個瀏覽器測試佇列（如 `/tmp/ann_test`）會被當成真人的決定帶進新佇列——這是實際發生過的，
+    3 筆 `115090:311:0704` 的假事件混進了重建。進到佇列之後就分不出來了。
+
+    負控制：把 `_carried_from` 拿掉，`origins` 就只剩 `"?"`，這個測試就會失效——
+    也就是說它真的在驗「來源被列出來」這件事，不是在驗行數。
+    """
+    builder = _builder()
+    real = tmp_path / "qbr-live-v6"
+    _write_log(real, "question_review_events.jsonl", [_event("k1")])
+    records = builder.review_events_to_carry(str(tmp_path / "qbr-live-v7"), [str(real)])
+    assert len(records) == 1
+    _name, record = records[0]
+    assert record.get("_carried_from") == str(real), \
+        "來源必須跟著紀錄走，否則沒人能說出它從哪來"
+
+
+def test_a_carried_finding_brings_the_crop_it_is_about(tmp_path):
+    """A carried finding must bring the page it is about, not just the claim.
+
+    Measured 2026-09-23: the extractor-fix rebuild carried every finding (85,291 of them) but copied
+    no finding crops, so the live queue held 21 dispute crops while the old queue held 23 - and two
+    findings pointed at files that no longer existed. A finding says "紙本這裡印的是 長" and the crop
+    is the 長; keeping the sentence and destroying the evidence leaves a note that still reads like a
+    note with a basis, answering 404 where the page should be. The rebuild was the thing that did
+    it, silently, which is why the assertion is on the file inside the *new* queue.
+
+    Negative control: remove the `_adopt_finding_crops` call and the copied file is absent; this
+    test is written against that behaviour (it does not touch `image_refs`, so it cannot pass by
+    the figure-crop path already under test).
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    crop = "review-ui/crops/paper-x/q004-dispute.png"
+    full = source / crop
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    # A question the finding is about, so the record is carried (not orphaned) and the queue is a
+    # real one rather than an empty run set.
+    work = tmp_path / "work"
+    run = work / "paper-x"
+    (run / "review-ui").mkdir(parents=True)
+    with open(run / "review-ui" / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": "k1", "question_number": 4}) + "\n")
+    _write_log(source, "question_ai_findings.jsonl", [
+        {"candidate_key": "k1", "crop": crop, "population": "dispute",
+         "reading_sha256": "abc", "finding": {"verdict": "DEFECT"}}])
+
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+
+    written = out / "review-ui" / "question_ai_findings.jsonl"
+    stored = json.loads(written.read_text(encoding="utf-8").splitlines()[0])
+    assert stored["crop"] == crop, "reference stays queue-relative"
+    assert (out / crop).is_file(), \
+        "finding 的截圖必須跟著紀錄一起被帶進新佇列，否則證據在重建時被靜默刪掉"
+
+
+def test_a_finding_whose_crop_cannot_be_found_is_still_kept_and_counted(tmp_path):
+    """A missing crop is counted, not silently ignored, and never drops the finding.
+
+    Dropping the record to save the picture loses a statement about a page irrecoverably. Keeping
+    the record without saying the evidence is gone would report completion over a hole - so the
+    count is part of the contract, and this is the negative control for a version that only copies.
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    work = tmp_path / "work"
+    run = work / "paper-x"
+    (run / "review-ui").mkdir(parents=True)
+    with open(run / "review-ui" / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": "k1", "question_number": 4}) + "\n")
+    _write_log(source, "question_ai_findings.jsonl", [
+        {"candidate_key": "k1", "crop": "review-ui/crops/gone/q004-dispute.png",
+         "population": "dispute", "reading_sha256": "abc",
+         "finding": {"verdict": "DEFECT"}}])
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+    written = (out / "review-ui" / "question_ai_findings.jsonl").read_text(encoding="utf-8")
+    assert written.strip(), "截圖找不到也不能把 finding 丟掉"
+    assert not (out / "review-ui/crops/gone/q004-dispute.png").exists()
+
+
+# ---------------------------------------------------------------- the navigation tree
+
+def test_the_taxonomy_is_the_shape_the_review_ui_walks():
+    # This is a regression test for a defect that shipped and was invisible to every test: a *second*
+    # implementation of this tree lived in `refresh_queue_text.py`, with the year and sitting levels
+    # collapsed (`category -> year -> sitting -> subject` without the `years`/`sittings` wrappers),
+    # and running it overwrote the live queue's `queue_index.json`. `scopePapers()` then read
+    # `bucket.years`, got `undefined` from a node keyed by year numbers, and
+    # `Object.keys(undefined)` threw before the first question was drawn - the whole question area
+    # failed to boot. A test could not have caught it, because the *build* path was correct and only
+    # the second copy was wrong. So the shape asserted here is the UI's contract, and there is now
+    # exactly one implementation to keep in it.
+    per_paper = [
+        {"paper": "1152_藥師(一)_p", "questions": 80, "category": "藥師(一)", "year": 115,
+         "ordinal": 2, "subject": "藥學(二)"},
+        {"paper": "1151_藥師（一）_p", "questions": 78, "category": "藥師（一）", "year": 115,
+         "ordinal": 1, "subject": "藥學(二)"},
+    ]
+    tree = review_queue.taxonomy_of(per_paper)
+    # The two spellings of one category fold to one entry: measured, unfolded they split 63 and 12
+    # papers and a reviewer choosing one sees a quarter of the papers.
+    assert set(tree) == {"藥師(一)"}
+    bucket = tree["藥師(一)"]
+    assert bucket["papers"] == 2 and bucket["questions"] == 158
+    assert "years" in bucket, "UI 走 bucket.years；少了這一層就是整區開不起來"
+    year = bucket["years"]["115"]
+    assert "sittings" in year
+    assert year["papers"] == 2 and year["questions"] == 158
+    # The sitting is its own level because the same subject is set twice a year and the two settings
+    # share a subject name and nothing else.
+    assert set(year["sittings"]) == {"1", "2"}
+    sitting_two = year["sittings"]["2"]["subjects"]["藥學(二)"]
+    assert sitting_two["papers"] == ["1152_藥師(一)_p"]
+    assert sitting_two["questions"] == 80
+
+
+def test_both_queue_writers_use_the_one_taxonomy_implementation():
+    # The negative control for the defect above. If either script grows its own tree again, this
+    # fails - and a shell-side check cannot: the divergence was a different *shape*, not a missing
+    # call, so the test has to assert that neither file defines one.
+    root = os.path.abspath(os.path.join(PKG, ".."))
+    for name in ("build_review_queue.py", "refresh_queue_text.py"):
+        path = os.path.join(PKG, "scripts", name)
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        assert "def _taxonomy" not in text, "%s 自己又寫了一份樹" % name
+        assert "review_queue.taxonomy_of" in text, "%s 要用共用實作" % name

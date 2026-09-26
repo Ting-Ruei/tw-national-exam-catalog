@@ -3,9 +3,9 @@
 `configs/text_normalization_rules.json` 是可以逐步補齊的「發現清單／輸入區」。
 每一筆規則都必須是從官方 PDF 核對過的精確詞組，不能只因為看起來像簡體字就全域替換。
 
-人工發現建議先填入 [OCR 修正待確認清單](/Users/tim/tw-national-exam-catalog/docs/ocr-correction-inbox.md)，確認後再轉入 JSON active 規則。
+人工發現建議先填入 [OCR 修正待確認清單](ocr-correction-inbox.md)，確認後再轉入 JSON active 規則。
 
-Parser 與醫事檢驗師的既有規則總覽見 [parser-rule-inventory.md](/Users/tim/tw-national-exam-catalog/docs/parser-rule-inventory.md)。
+Parser 與醫事檢驗師的既有規則總覽見 [parser-rule-inventory.md](parser-rule-inventory.md)。
 
 ## 確定規則與 AI 建議的差異
 

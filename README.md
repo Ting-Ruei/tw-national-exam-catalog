@@ -150,7 +150,7 @@ PDF 下載、MinerU 輸出、人工檢查佇列、入庫前候選資料等大型
 
 這個資料夾刻意不納入 git。它可以放在專案旁邊方便工作，但不會被發布到 repository 歷史裡。
 
-`30_normalized_items/` 是 parser candidate、人工審核事件、AI advisory、manual assets 與入庫前暫存資料的衍生資料區。它可能因 `_repair_backups/` 的完整快照快速膨脹；清理前請先看 [docs/30-normalized-items-storage-policy.md](/Users/tim/tw-national-exam-catalog/docs/30-normalized-items-storage-policy.md)，不要直接刪除 active candidate、review events 或 manual assets。
+`30_normalized_items/` 是 parser candidate、人工審核事件、AI advisory、manual assets 與入庫前暫存資料的衍生資料區。它可能因 `_repair_backups/` 的完整快照快速膨脹；清理前請先看 [docs/30-normalized-items-storage-policy.md](docs/30-normalized-items-storage-policy.md)，不要直接刪除 active candidate、review events 或 manual assets。
 
 ## Registry Key
 
@@ -425,15 +425,15 @@ SQL 模式直接讀取 staging tables，不會在每次請求重讀大型 candid
 
 `題組審核` 模式是獨立的結構檢查層。它會把已有 `group_ref` 的題目與疑似題組依考別、科目、年份、考次彙整；人工確認後會寫入題組事件，並同步 `exam.question_groups` 與各題的 group sequence。題組標籤不取代題目與答案 gate。
 
-Review UI 的 AI 區塊只顯示已批次產生的 advisory，不再提供單題即時 `AI 格式稽核` 或 `撤回 AI 稽核` 按鈕，避免人工審核時誤觸耗費模型流量。AI advisory 只做輔助判斷：檢查疑似 OCR 字形錯誤、簡繁混用、科學符號/上下標、選項數量、圖表線索與 parser 結構疑點。批次結果可先用 JSONL 交換，再匯入 SQL `question_ai_review_events`；它不會自動改變人工審核狀態。若 AI 原始結果是 `pass`，但同時帶有 findings、recommended action、advisory labels 或可套用的 OCR/簡繁校正建議，Review UI 會顯示成 `AI needs_review`，避免「有建議卻看起來通過」。AI 建議校正可以在畫面中套用，但套用後只會保留為 `needs_review` 或原本的 `block` / `exclude`，並停留在同一題讓人工立即核對；必須再由人工按 `通過` 才能進下一關。ChatGPT / Codex 協作通道與 LLM 稽核規劃見 [docs/chatgpt-codex-llm-review-channel.md](/Users/tim/tw-national-exam-catalog/docs/chatgpt-codex-llm-review-channel.md)。
+Review UI 的 AI 區塊只顯示已批次產生的 advisory，不再提供單題即時 `AI 格式稽核` 或 `撤回 AI 稽核` 按鈕，避免人工審核時誤觸耗費模型流量。AI advisory 只做輔助判斷：檢查疑似 OCR 字形錯誤、簡繁混用、科學符號/上下標、選項數量、圖表線索與 parser 結構疑點。批次結果可先用 JSONL 交換，再匯入 SQL `question_ai_review_events`；它不會自動改變人工審核狀態。若 AI 原始結果是 `pass`，但同時帶有 findings、recommended action、advisory labels 或可套用的 OCR/簡繁校正建議，Review UI 會顯示成 `AI needs_review`，避免「有建議卻看起來通過」。AI 建議校正可以在畫面中套用，但套用後只會保留為 `needs_review` 或原本的 `block` / `exclude`，並停留在同一題讓人工立即核對；必須再由人工按 `通過` 才能進下一關。ChatGPT / Codex 協作通道與 LLM 稽核規劃見 [docs/chatgpt-codex-llm-review-channel.md](docs/chatgpt-codex-llm-review-channel.md)。
 
-圖片審核刻意維持簡單：畫面只分 `待處理`、`有圖`、`錯圖待改`、`沒有圖`。AI 或 Python / SQL 寬篩只負責把可能有圖表問題的題目送進圖片頁，或在 `question_ai_review_events` 留下背景 advisory；它不會出現在主要篩選狀態，也不能直接寫入人工圖片審核結果。人工按鈕只會寫入三種 `visual_review`：`visual_asset_ok`、`visual_asset_problem`、`no_visual_required`。完整流程見 [docs/visual-ai-audit-workflow.md](/Users/tim/tw-national-exam-catalog/docs/visual-ai-audit-workflow.md)。
+圖片審核刻意維持簡單：畫面只分 `待處理`、`有圖`、`錯圖待改`、`沒有圖`。AI 或 Python / SQL 寬篩只負責把可能有圖表問題的題目送進圖片頁，或在 `question_ai_review_events` 留下背景 advisory；它不會出現在主要篩選狀態，也不能直接寫入人工圖片審核結果。人工按鈕只會寫入三種 `visual_review`：`visual_asset_ok`、`visual_asset_problem`、`no_visual_required`。完整流程見 [docs/visual-ai-audit-workflow.md](docs/visual-ai-audit-workflow.md)。
 
-若要指派 Codex 或其他模型掃描特定考別、科目、年份或考次，請使用 repo 內的 AI 稽核 skill：[docs/skills/national-exam-ai-audit/SKILL.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/SKILL.md)。規則採「通用核心 + 科目覆寫」：所有科目先套用 [core-rules.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/core-rules.md)，再依科目讀取 [subject-overrides.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/subject-overrides.md)。AI 輸出格式見 [output-schema.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/output-schema.md)。
+若要指派 Codex 或其他模型掃描特定考別、科目、年份或考次，請使用 repo 內的 AI 稽核 skill：[docs/skills/national-exam-ai-audit/SKILL.md](docs/skills/national-exam-ai-audit/SKILL.md)。規則採「通用核心 + 科目覆寫」：所有科目先套用 [core-rules.md](docs/skills/national-exam-ai-audit/references/core-rules.md)，再依科目讀取 [subject-overrides.md](docs/skills/national-exam-ai-audit/references/subject-overrides.md)。AI 輸出格式見 [output-schema.md](docs/skills/national-exam-ai-audit/references/output-schema.md)。
 
-若要穩定用 `5.4` / `5.4-mini` 逐科審核，優先使用「按科目分包」流程，避免 Review UI 的本機 heuristic 或 OpenAI API fallback 污染模型品質判斷。完整流程見 [docs/ai-audit-subject-workflow.md](/Users/tim/tw-national-exam-catalog/docs/ai-audit-subject-workflow.md)。目前可用以下指令產生每個考別＋科目的 task JSONL：
+若要穩定用 `5.4` / `5.4-mini` 逐科審核，優先使用「按科目分包」流程，避免 Review UI 的本機 heuristic 或 OpenAI API fallback 污染模型品質判斷。完整流程見 [docs/ai-audit-subject-workflow.md](docs/ai-audit-subject-workflow.md)。目前可用以下指令產生每個考別＋科目的 task JSONL：
 
-新的 SQL-first 真人視角預審流程整理在 [national-exam-ai-audit skill](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/SKILL.md)。它涵蓋 Review UI 操作、PostgreSQL 最新狀態、PDF/MinerU 來源優先序、問題分關、GLM-5.2 工作包、結果驗證與 advisory-only 匯入；舊 JSONL 不再作為主要審核狀態。
+新的 SQL-first 真人視角預審流程整理在 [national-exam-ai-audit skill](docs/skills/national-exam-ai-audit/SKILL.md)。它涵蓋 Review UI 操作、PostgreSQL 最新狀態、PDF/MinerU 來源優先序、問題分關、GLM-5.2 工作包、結果驗證與 advisory-only 匯入；舊 JSONL 不再作為主要審核狀態。
 
 ```bash
 python3 scripts/export_subject_codex_audit_batches.py \
@@ -468,7 +468,7 @@ AI 結果可以帶 `suggested_correction` / `suggested_changes`。Review UI 會�
 bash scripts/start_devspace_chatgpt_mcp_screen.sh
 ```
 
-本機 MCP endpoint 是 `http://127.0.0.1:7676/mcp`；ChatGPT 實際使用時需要一個公開 HTTPS tunnel 指到 `http://127.0.0.1:7676`。完整設定與安全注意事項見 [docs/devspace-chatgpt-mcp.md](/Users/tim/tw-national-exam-catalog/docs/devspace-chatgpt-mcp.md)。
+本機 MCP endpoint 是 `http://127.0.0.1:7676/mcp`；ChatGPT 實際使用時需要一個公開 HTTPS tunnel 指到 `http://127.0.0.1:7676`。完整設定與安全注意事項見 [docs/devspace-chatgpt-mcp.md](docs/devspace-chatgpt-mcp.md)。
 
 `答案核對` 模式以整份答案表為單位，不以單題為單位。左側列表顯示這批答案使用 `ANS` 或 `MOD`，中間一次列出同一考次每個題號與 parser 抓到的答案，右側 PDF 固定顯示答案 PDF / 答案 MinerU layout，方便直接和官方答案表比對。只有前一關題目審核已 `accept` 或 `unblock` 的題目能進入答案核對；若題目未審核通過，即使答案頁被操作，也不能被答案通過事件推進正式入庫。
 

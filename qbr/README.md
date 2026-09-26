@@ -1,11 +1,14 @@
-# question_bank_rebuild — sandbox for the 全國exam question-bank rebuild
+# qbr — 官方 PDF → 可驗題目 package
 
-Sandbox for `tw-national-exam-catalog` work under `pi_test/`, per the instruction that all tests
-live here and needed resources are **copied** in rather than referenced for writing.
+現行工作入口是 [`AGENTS.md`](AGENTS.md) 與
+[`build-exam-question-bank`](../docs/skills/build-exam-question-bank/SKILL.md)；
+跨專案邊界依傘層 charter。`qbr/` 已從沙盒併入主線，不再以 `pi_test/` 的操作前提執行。
+設計與量測沿革見 [`PROPOSED_WORKFLOW.md`](PROPOSED_WORKFLOW.md) 和
+[`ENGINE_STRATEGY.md`](ENGINE_STRATEGY.md)：後者依修錯順序追加，較後章節會推翻較早假設，
+不是現行規範。
 
-Read `PROPOSED_WORKFLOW.md` first: it is the deliverable (three-way comparison of the legacy
-MinerU-centric path, the 先前改進方案 in `docs/`, the MOEX protocol v1, and the measured proposal),
-with the numbers behind each claim.
+> **以下保留移入主線前的沙盒快照。** 目錄、命令、數字與「session 結束時」狀態只供
+> 歷史對照；請勿以此段的舊環境／資料庫步驟取代現行 skill 和 `AGENTS.md`。
 
 ## Layout
 
@@ -70,8 +73,8 @@ brew install poppler                                     # engine β: pdftotext/
 ./.venv/bin/python scripts/three_way.py --mode gold                        # the adjudication sheet
 ./.venv/bin/python scripts/three_way.py --mode blind                      # needs QBR_AUDIT_* below
 
-export QBR_AUDIT_ENDPOINT=http://192.168.10.90:8888/v1/chat/completions
-export QBR_AUDIT_MODEL=<a model name>           # the blind leg has never been run: no endpoint set
+export QBR_AUDIT_ENDPOINT=http://127.0.0.1:<task-port>/v1/chat/completions
+export QBR_AUDIT_MODEL=<a locally approved model> # set only for a new, explicitly approved run
 ```
 
 `--ids-from` is what makes the two columns of §三 of `reports/DEFECTS-AND-FIXES.md` comparable:
@@ -100,9 +103,8 @@ corpus — is what changes.
 4. **Two engines, both compared.** A paper is not publishable unless the independent engines
    agree on the declared canonical form; disagreement is quarantined, not averaged.
 5. **Thresholds come from a gold set**, never from the data they are meant to police.
-6. `Ryzen AI MAX 395+` / AI395 services (Review UI, PostgreSQL, the 395 OCR fleet) are treated
-   as absent. The only reachable inference endpoint for later, *region-level* use is
-   `http://192.168.10.90:8888` (DGX Spark), and it is not used by this pilot.
+6. External inference services are treated as absent. This pilot makes no network
+   inference calls; any future region-level model task requires a new approved contract.
 
 ## Known state at the end of this session
 

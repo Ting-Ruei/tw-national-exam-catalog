@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only source/target readiness checks for the Ryzen host migration.
+"""Legacy readiness-check helpers for the retired Ryzen host migration.
 
-The report never prints secret values.  It is intentionally independent of
-project Python dependencies so it can run immediately after cloning the repo.
+The command-line entrypoint is disabled; these helpers remain for historical
+reference only.
 """
 
 from __future__ import annotations
@@ -473,41 +473,11 @@ def print_report(report: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    args = parse_args()
-    if args.env_file:
-        load_env_file(args.env_file.expanduser())
-    roots = parse_root_specs(args.mode, args.asset_root)
-    min_free_gib = args.min_free_gib if args.min_free_gib is not None else (250.0 if args.mode == "target" else 25.0)
-    report: dict[str, Any] = {
-        "schema_version": "tw_exam_migration_preflight_v1",
-        "generated_at": datetime.now().astimezone().isoformat(),
-        "mode": args.mode,
-        "project_root": str(PROJECT_ROOT),
-        "checks": [],
-    }
-    inspect_platform(report, args.mode)
-    inspect_git(report)
-    inspect_commands(report, args.mode)
-    inspect_environment(report, args.mode)
-    inspect_data_roots(
-        report,
-        roots,
-        mode=args.mode,
-        deep=args.deep,
-        min_free_gib=min_free_gib,
+    print(
+        "migration_preflight.py is retired; the Ryzen migration path is no longer supported.",
+        file=sys.stderr,
     )
-    inspect_machine_references(report)
-    summarize(report)
-    print_report(report)
-
-    if args.json_output:
-        args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        print(f"JSON report: {args.json_output}")
-    return 0 if report["ready"] else 2
+    return 2
 
 
 if __name__ == "__main__":

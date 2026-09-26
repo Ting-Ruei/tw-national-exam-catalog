@@ -11,7 +11,7 @@ ways that matter to every later stage:
     generation 2   103-115   the number is followed by a period; option labels are the
                              letters themselves; a paper is 413-430 extracted lines
 
-Measured on the 192 醫事檢驗師 question papers (see `docs/ENGINE_STRATEGY.md` §10). The
+Measured on the 192 醫事檢驗師 question papers (see `qbr/ENGINE_STRATEGY.md` §10). The
 change is not gradual. Year 102 carries twelve papers and they are *both* kinds, six of
 each, which is what makes it a transition rather than a boundary: a rule written for one
 generation is wrong for half of that year.

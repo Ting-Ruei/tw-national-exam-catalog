@@ -22,8 +22,13 @@
 
 | 你要做什麼 | 讀這份 |
 |---|---|
+| **審完一批題，要跑 AI 審核迴圈、建新規則、重掃** | [skill](skills/run-question-review-loop/SKILL.md) |
 | 建立考題（官方 PDF → 封裝） | [`../qbr/AGENTS.md`](../qbr/AGENTS.md) ＋ [skill](skills/build-exam-question-bank/SKILL.md) |
+| **管線現在到哪了**（穩定／待優化／待決策） | [skill](skills/qbr-pipeline-status/SKILL.md) |
+| 修抽取／切題的缺陷（讀錯題數、文字重複、選項被截斷） | [skill](skills/repair-qbr-extraction/SKILL.md) |
 | 審題介面 | [`../review_ui/AGENTS.md`](../review_ui/AGENTS.md) ＋ [skill](skills/review-ui-v2/SKILL.md) |
+| 修審題介面的缺陷、新增面板／控制項 | [skill](skills/repair-review-ui-v2/SKILL.md) |
+| **把審題介面開成常駐服務**（Docker、LAN、開機自動起） | [skill](skills/deploy-qbr-review/SKILL.md) |
 | 舊介面為什麼被換掉 | [`ROUTE_HISTORY.md`](ROUTE_HISTORY.md) |
 | 管線最佳化的兩個方向 | [`PIPELINE_OPTIMIZATION_DIRECTIONS.md`](PIPELINE_OPTIMIZATION_DIRECTIONS.md) |
 | 使用本機模型 | [skill](skills/operate-local-open-models/SKILL.md) |
@@ -53,6 +58,9 @@
 **不要照這些做事。** 它們描述 MinerU + 全文件 VLM 那一代管線。
 保留的理由：`qbr/PROPOSED_WORKFLOW.md` §1／§4 用它們當**對照組**，
 刪掉就消滅了「為什麼要換」的量測。**這些是證據，不是規範。**
+
+`qbr` 自身的逐輪量測史見 [`../qbr/ENGINE_STRATEGY.md`](../qbr/ENGINE_STRATEGY.md)；
+其中早期提案可能被後續實測推翻，**不是**現行操作入口。
 
 - [`sustainable-question-bank-workflow-todo.md`](sustainable-question-bank-workflow-todo.md) — 舊目標流程圖
 - [`parser-rule-inventory.md`](parser-rule-inventory.md) — 舊「規則三層」

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    讓新版題庫審題介面（qbr-review-ui）保持在線。
+
+    為什麼需要它：Docker Desktop 的 AutoStart 與 compose 的 restart=unless-stopped 覆蓋了
+    「重開機後自己回來」，但覆蓋不到「容器被停掉」與「Docker 起來時容器還沒被建立」。
+    這支 job 每 5 分鐘量一次 API，不通才動作；服務正常時它不寫任何東西。
+
+    RunAtLoad=true，所以登入後會立刻檢查一次，不必等第一個 5 分鐘。
+
+    安裝（在常駐機上，用 deploy/qbr-review/install-watchdog.sh）：
+      install-watchdog.sh 會把 plist 複製到 ~/Library/LaunchAgents/、把 ensure-up.sh 放到
+      ~/qbr-review/bin/，再 launchctl bootstrap 起來。換一台機器部署時改 HOME_DIR 那幾行即可。
+  -->
+  <key>Label</key>
+  <string>com.timsvms.qbr-review-ensure</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/tim/qbr-review/bin/ensure-up.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/tim/qbr-review/logs/ensure-up.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tim/qbr-review/logs/ensure-up.launchd.error.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/tim/qbr-review</string>
+</dict>
+</plist>
