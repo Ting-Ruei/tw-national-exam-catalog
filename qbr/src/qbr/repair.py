@@ -365,12 +365,19 @@ def option_alphabet(text):
     marker was read as a lost glyph, only two runs were seen where the rule wants four, and the
     options of question 34 of `1012_醫事檢驗師_生物化學與臨床生化學` stayed in the stem.
 
-    **A paper may use more than one such family, and returning only the longest one loses the
-    others.** Measured on `1001_醫事檢驗師_臨床血清免疫學與臨床病毒學`: the main labels are
-    `\ue18c`-`\ue18f`, 78 times each, and there is a *second* family `\ue000`-`\ue003` used by the
-    multi-answer questions (Q49 prints `\ue000` twice, `\ue001` twice, `\ue002` twice). Returning
-    only `\ue18c`-`\ue18f` meant Q49's and Q71's marks were not recognised as option labels at all,
-    their options stayed in the stem, and the gate reported them as questions with no options.
+    **A paper may use more than one such family, and the option labels are the most-used one.**
+    Measured on `1001_醫事檢驗師_臨床生理學與病理學`: the labels are `\ue18c`-`\ue18f`, 79 times
+    each, and there is a *second* family `\ue000`-`\ue003` used by one question's sub-items
+    (Q65 prints `\ue000細菌 \ue001白血球 \ue002紅血球 \ue003葡萄糖` and then its options as
+    `\ue18c僅\ue000\ue001`). Both families are runs of four. The option labels are printed once per
+    question while the sub-items appear only where a question asks over them, so the family with
+    the larger total is the alphabet. Measured over 334 papers printing two or more families: the
+    most-used family never yields fewer options than the union, and on 26 papers the union yields
+    **none** - because sorting the union puts `\ue000` before `\ue18c`, so the real option marks
+    come out labelled `E`/`F` and the skeleton, which looks for the label `A`, finds no options.
+
+    A paper may also need *both* families to be tried as labels; that caller is
+    `option_alphabet_families`, which this does not replace.
 
     The two codepoints that appear once or twice without an equal-count run - `\ue129`-`\ue12b` -
     are still excluded, by the equal-count requirement rather than by being listed. A paper that
@@ -387,27 +394,11 @@ def option_alphabet(text):
     the option count states the same fact about the print form and does not depend on how many
     questions happen to use the family.
     """
-    counts = collections.Counter()
-    for char in text or "":
-        if is_bullet_char(char):
-            counts[ord(char)] += 1
-    families = []
-    run = []
-    for code in sorted(counts):
-        run = run + [code] if run and code == run[-1] + 1 else [code]
-        if len(run) < 2:
-            continue
-        values = {counts[each] for each in run}
-        equal = len(values) == 1 and values.pop() >= 2
-        # One glyph per option label, so a run as long as the option count is the alphabet.
-        sized = len(run) == _OPTION_COUNT_BY_CORPUS
-        if not (equal or sized):
-            continue
-        families.append(list(run))
-    # Every qualifying family is an option alphabet, not only the longest: a paper may print one
-    # family for its single-answer questions and another for its multi-answer ones, and both are
-    # labels rather than characters the font failed to map.
-    return {code for family in families for code in family}
+    families = option_alphabet_families(text)
+    # One alphabet, and it is the most-used family: a paper prints four option labels per question
+    # while its sub-items appear only where a question asks over them, so the option family wins
+    # the count whenever a paper prints two. See the docstring's measurement.
+    return set(families[0]) if families else set()
 
 
 def option_alphabet_families(text):

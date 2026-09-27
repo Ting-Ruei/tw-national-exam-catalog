@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from qbr import vision, reflow  # noqa: E402
+from qbr import canon, vision, reflow  # noqa: E402
+from qbr import repair  # noqa: E402
 
 
 TABLE = [
@@ -903,3 +904,65 @@ def test_the_height_floor_sits_in_the_gap_the_corpus_measured():
     just_over = [{"page": 1, "x0": 40, "y0": 40, "x1": 140, "y1": 64.1}]
     assert vision.figure_questions([_skeleton_item(1)], rows, just_under) == []
     assert len(vision.figure_questions([_skeleton_item(1)], rows, just_over)) == 1
+
+
+# --- one alphabet, and it is the paper's most-used family -------------------------------------
+# A paper can print two private-use families and only one of them labels the options. The union of
+# both is what `cells_with_pages` used to take, and it is wrong on exactly the papers where it
+# matters: the sub-item family sorts first, so the option marks come out `opt:E`/`opt:F` and the
+# skeleton - which looks for the label `A` - finds no options in the whole paper.
+
+def _printed_rows(paper):
+    """The paper's cells as `cells_with_pages` sees them, one cell per printed line."""
+    return [{"text": text, "size": 12.0, "page": 1, "x0": 39.0,
+             "y0": index * 20.0, "y1": index * 20.0 + 14.0}
+            for index, text in enumerate(paper, start=1)]
+
+
+def _a_paper_with_two_families(questions=5):
+    """`questions` questions, each with four options from the option family, and one question that
+    also prints four sub-items from the second family.
+
+    The shape matters: a paper prints four option labels **per question** while its sub-items
+    appear only where a question asks over them, which is why the option family is the one with the
+    larger total. Measured on `1001_醫事檢驗師_臨床生理學與病理學`: the option labels occur 79 times
+    each and the sub-item marks 7-9 times.
+    """
+    paper = []
+    for number in range(1, questions + 1):
+        paper += [f"{number}. 下列何者正確？", "\ue18c甲", "\ue18d乙", "\ue18e丙", "\ue18f丁"]
+    paper += ["下列那些正確？\ue000砂粒病毒 \ue001漢他病毒 "
+              "\ue002西尼羅病毒 \ue003拉薩病毒",
+              "\ue18c\ue000\ue001", "\ue18d\ue000\ue002",
+              "\ue18e\ue001\ue002", "\ue18f\ue000\ue001\ue002"]
+    return paper
+
+
+def test_a_paper_with_two_private_use_families_labels_its_options():
+    """The option family is the most-used one, and that is what the alphabet must be.
+
+    Sorting the union puts `\ue000` first and the option marks then come out `opt:E`/`opt:F`, so no
+    question of the paper parses its options at all.
+    """
+    alphabet = reflow.cells_with_pages(_printed_rows(_a_paper_with_two_families()))[2]
+    assert tuple(alphabet) == (0xE18C, 0xE18D, 0xE18E, 0xE18F)
+    # Negative control: the union is the eight codepoints, and the real option mark would then be
+    # labelled `E` - which is the whole defect. Named here so a change back to the union fails this
+    # test for the right reason rather than by accident.
+    union = tuple(sorted({0xE000, 0xE001, 0xE002, 0xE003,
+                          0xE18C, 0xE18D, 0xE18E, 0xE18F}))
+    assert tuple(alphabet) != union
+    assert canon.LABELS[union.index(0xE18C)] == "E"
+
+
+def test_the_second_family_is_still_kept_for_the_question_that_is_printed_with_it():
+    """`option_alphabet_families` keeps every family, so a question stated with the second one is
+    still divisible - the fix moves the *label assignment*, not the family list.
+
+    Measured on `1001_醫事檢驗師_臨床血清免疫學與臨床病毒學` Q49/Q71: their options are expressions
+    over the sub-item marks (`\ue18c\ue000\ue001`) while the marks that label the options are still
+    `\ue18c`-`\ue18f`.
+    """
+    families = repair.option_alphabet_families("".join(_a_paper_with_two_families()))
+    assert list(families[0]) == [0xE18C, 0xE18D, 0xE18E, 0xE18F]
+    assert {0xE000, 0xE001, 0xE002, 0xE003} <= {code for family in families for code in family}
