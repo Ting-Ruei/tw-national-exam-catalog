@@ -40,7 +40,11 @@ for path in (os.path.join(QBR, "src"), os.path.join(QBR, "scripts")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-QUEUE = os.path.join(QBR, "data", "review-queues", "live", "review-ui")
+# `image_refs[].path` is relative to the **live queue root** — `review-ui/crops/...` — which is the
+# parent of the directory holding `candidates.jsonl`, not that directory itself. Measured: joining
+# against `QUEUE` gives `.../review-ui/review-ui/crops/...` and matches nothing.
+QUEUE_ROOT = os.path.join(QBR, "data", "review-queues", "live")
+QUEUE = os.path.join(QUEUE_ROOT, "review-ui")
 CANDIDATES = os.path.join(QUEUE, "candidates.jsonl")
 STORE = os.path.join(SANDBOX, "agent", "store", "agent_feedback.jsonl")
 # `REPAIR_AGENT_STORE` redirects the whole sandbox store, for tests. Nothing else should set it.
@@ -156,6 +160,27 @@ def prior_judgements(key: str) -> list:
     return out
 
 
+def figure_asset_path(ref: dict) -> str | None:
+    """Where this question's own crop file actually is, or `None` if it is not on disk.
+
+    `image_refs[].path` is **relative to the queue root**, not to the repository and not to
+    `國考題資料夾/` (which is what `qbr.review_ui.paths.safe_file_path` resolves against — measured:
+    it returns `國考題資料夾/review-ui/crops/...`, which does not exist). Handing the relative
+    string to a reader is not enough either: on 2026-09-28 the agent was given the path, could not
+    open it as written, and spent two `bash` calls running `find /` to locate its own crop. The run
+    still finished correctly, which is exactly why this is worth fixing: the failure was invisible
+    in the answer and visible only in the tool trace.
+
+    `exists` in the reference is a claim recorded when the queue was built; this checks the file
+    now, because the crop directory can be re-synced between build and read.
+    """
+    relative = ref.get("path")
+    if not relative:
+        return None
+    candidate = relative if os.path.isabs(relative) else os.path.join(QUEUE_ROOT, relative)
+    return candidate if os.path.exists(candidate) else None
+
+
 def question_view(question: dict) -> dict:
     """The complete question, not the fields that happen to have been touched.
 
@@ -202,7 +227,14 @@ def question_view(question: dict) -> dict:
                 "clipped": ref.get("clipped"),
                 "ownership_note": ref.get("ownership_note"),
                 "exists": ref.get("exists"),
-                "path": ref.get("path"),
+                # The resolved path, so a reader opens the file instead of searching for it.
+                # `path` keeps the key the pipeline already uses; `relative_path` is what the
+                # queue recorded, kept because it is stable across machines and the absolute one
+                # is not. The absolute form must come **after** no other `path` assignment, or a
+                # later duplicate silently wins (that happened: the fix looked applied and the
+                # agent still could not open the file).
+                "relative_path": ref.get("path"),
+                "path": figure_asset_path(ref),
             }
             for ref in refs
         ],

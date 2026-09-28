@@ -19,7 +19,7 @@
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { systemPrompt, remember, STORE_DIR, LOG_PATH } from "./lib/identity.mjs";
-import { toolsFor } from "./lib/tools.mjs";
+import { toolsFor, PATHS } from "./lib/tools.mjs";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -153,7 +153,15 @@ async function main() {
   const prompt = systemPrompt();
 
   const resourceLoader = new DefaultResourceLoader({
-    cwd: HERE,
+    // The repository root, not `agent/`. `read`, `grep` and `find` resolve their paths against
+    // this cwd, and every path this agent is handed is repository-root-relative
+    // (`qbr/data/review-queues/...`). Running from `agent/` made those reads fail — measured
+    // 2026-09-28: four `read` calls on the option crops returned errors, the model concluded the
+    // files were missing, and it ran four `find` and five `bash` calls (including `find /`) to
+    // locate pictures that were exactly where the tool had told it they were. The run still
+    // answered correctly, which is why the wrong cwd survived: the damage showed up only as a
+    // long tool trace, never as a wrong conclusion.
+    cwd: PATHS.CATALOG,
     // `agentDir` is required by the loader (passing undefined crashes inside its own path
     // resolution). `getAgentDir()` is Pi's own answer, so the agent reads the same auth/models
     // store the CLI does instead of a second convention invented here.
@@ -172,7 +180,7 @@ async function main() {
   const builtin = ["read", "grep", "find", "ls", "bash"];
 
   const { session } = await createAgentSession({
-    cwd: HERE,
+    cwd: PATHS.CATALOG,
     modelRuntime,
     model,
     thinkingLevel: process.env.REPAIR_AGENT_THINKING || "medium",

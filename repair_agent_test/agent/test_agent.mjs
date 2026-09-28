@@ -111,6 +111,81 @@ test("the boxes a real question produces actually widen a real crop region", asy
   assert.equal(data.with["9"][2], 158.4, "the boxes must reach where the structures end");
 });
 
+test("a figure's path is where the file actually is", async () => {
+  // On 2026-09-28 the agent was handed `image_refs[].path` as recorded — relative to the live queue
+  // root — could not open it, and spent two `bash` calls running `find /` to locate its own crop.
+  // The run still reached the right answer, so the failure was invisible in the output and visible
+  // only in the tool trace. That is the worst kind: a correct conclusion reached by searching.
+  //
+  // Measured: joining against the directory holding `candidates.jsonl` gives
+  // `.../review-ui/review-ui/crops/...` and matches nothing; the base is that directory's parent.
+  const { execFileSync } = await import("node:child_process");
+  const script = [
+    "import json, os, sys",
+    "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])",
+    "import importlib.util as u",
+    "spec = u.spec_from_file_location('bridge', sys.argv[3])",
+    "bridge = u.module_from_spec(spec); spec.loader.exec_module(bridge)",
+    "keys = []",
+    "seen = 0",
+    "with open(bridge.CANDIDATES, encoding='utf-8') as fh:",
+    "    for line in fh:",
+    "        rec = json.loads(line)",
+    "        seen += 1",
+    "        if rec.get('image_refs'):",
+    "            keys.append(rec['candidate_key'])",
+    "            if len(keys) >= 5: break",
+    "view = bridge.question_view(bridge.load_question(keys[0]))",
+    "out = {'n': seen, 'figs': len(view['figures']),",
+    "       'resolved': [bool(f['path']) and os.path.exists(f['path']) for f in view['figures']],",
+    "       'rel': [f['relative_path'] for f in view['figures']]}",
+    "print(json.dumps(out))",
+  ].join("\n");
+  const raw = execFileSync(PATHS.PYTHON, ["-c", script, `${PATHS.CATALOG}/qbr/src`,
+    `${PATHS.CATALOG}/qbr/scripts`, PATHS.BRIDGE], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const data = JSON.parse(raw);
+
+  assert.ok(data.figs > 0, "the sample question must have figures, or this proves nothing");
+  assert.ok(data.resolved.every(Boolean),
+    `every figure path must open; got ${JSON.stringify(data.resolved)}`);
+  // Negative control: the recorded relative paths are NOT usable as written. If they were, the
+  // resolution step would be unnecessary and the old code would have worked.
+  assert.ok(data.rel.some((p) => !p.startsWith("/")),
+    "the queue records relative paths, so resolution is what makes them open");
+});
+
+test("the agent works from the repository root, so the paths it is given resolve", () => {
+  // `read`/`grep`/`find` resolve against the session cwd, and every path this agent handles is
+  // repository-root-relative (`qbr/data/review-queues/...`). Running from `agent/` made those
+  // reads fail: measured 2026-09-28, four reads on the option crops errored, the model decided the
+  // files were missing, and it ran four `find` and five `bash` calls to find pictures that were
+  // exactly where it had been told. The answer was still right, so only the trace showed it.
+  const source = readFileSync(new URL("./agent.mjs", import.meta.url), "utf8");
+  assert.match(source, /cwd: PATHS\.CATALOG/, "both the loader and the session work from the root");
+  // Negative control: the old value. If this comes back, the failure is a long tool trace with a
+  // correct answer at the end — invisible unless someone reads the trace.
+  assert.equal(/cwd: HERE/.test(source), false,
+    "the agent directory is not the data root; paths would break again");
+});
+
+test("a correct official answer is not overridden by the model's own reasoning", () => {
+  // 1152_藥師(一)_藥學(一) q42, 2026-09-28. Same question, same model, four runs, three answers:
+  // up, then (after the crops were fixed and all four structures became visible) DOWN, arguing
+  // Eteplirsen's backbone is 2'-O-methyl phosphorothioate so the answer should be D. Eteplirsen is
+  // a PMO -- morpholino rings and phosphorodiamidate linkages, which is option B, the official
+  // answer. The next run said up again. The fix was not to hide the pictures: it was to say what
+  // `rating` is allowed to mean, and to put this failure in front of the model as its own history.
+  const prompt = identity.systemPrompt();
+  assert.match(prompt, /rating.*只回答一件事/s, "the rating's meaning must be stated, not implied");
+  assert.match(prompt, /官方答案不是你推翻的對象/, "the official answer is not the agent's to overrule");
+  // The failure itself, because an abstract prohibition already existed and did not hold.
+  assert.match(prompt, /一個真實的翻車/, "the model is shown what it actually got wrong");
+  assert.match(prompt, /Eteplirsen/, "named, so it is a memory and not a platitude");
+
+  // Negative control: the abstract rule alone. It was in the prompt for the whole failure.
+  assert.match(prompt, /只看格式，不看語意/, "the old rule is still there, which is the point");
+});
+
 test("the learning loop is closed: a lesson written by one run is in the next run's prompt", () => {
   rmSync(join(SCRATCH, "lessons.jsonl"), { force: true });
 
