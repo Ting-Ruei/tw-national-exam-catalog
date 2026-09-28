@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
 from qbr import package  # noqa: E402
+import golden_path  # noqa: E402  (its stages are the units under test, not a subprocess)
 
 RUNS = [path for path in ("/tmp/qbr-golden-001", "/tmp/qbr-golden-002")
         if os.path.isfile(os.path.join(path, "run_manifest.json"))]
@@ -302,3 +303,55 @@ def test_a_sheet_that_declares_nothing_falls_back_to_its_table(tmp_path, monkeyp
     # 兩界不一致（不是從 1 開始）＝不表態。
     assert _count_with_a_text(monkeypatch, "題號 21 22 23\n答案 D A C") == 0
     assert _count_with_a_text(monkeypatch, "") == 0
+
+
+# --------------------------------------------------------------- the exported page (A1, 2026-09-27)
+
+def _records(monkeypatch, items):
+    """`stage_records` over synthetic items, with the answer reading stubbed out.
+
+    The unit under test is the **export**, not the reading: `stage_records` is given items that
+    already carry a page (which is what `three_way._attach_bands` gives them), and every sheet read
+    is replaced so the test does not need a PDF. If the page is dropped between here and the record,
+    that is the defect this catches.
+    """
+    monkeypatch.setattr(golden_path, "_answer_sheet_text", lambda path, role="answer": "")
+    meta = {"year": 115, "exam_number": 1, "subject_name": "生物化學與臨床生化學",
+            "category_name": "醫事檢驗師", "answer_pdf": None, "corrected_pdf": None,
+            "answer_pdf_sha256": None, "corrected_pdf_sha256": None}
+    rows, _sources = golden_path.stage_records(
+        {"items": items}, {}, {}, {"answer": {"path": "x"}}, meta,
+        "moex:115090:308:0504:1:question", "machine-verified")
+    return rows
+
+
+def test_each_exported_question_carries_the_page_its_number_is_printed_on(monkeypatch):
+    items = [{"number": 1, "stem": "一", "options": {"A": "甲"}, "page": 1, "box": [1, 1, 1, 2]},
+             {"number": 2, "stem": "二", "options": {"A": "乙"}, "page": 1, "box": [1, 2, 1, 3]},
+             {"number": 3, "stem": "三", "options": {"A": "丙"}, "page": 4, "box": [1, 3, 1, 4]}]
+    rows = _records(monkeypatch, items)
+    assert [row["metadata"]["question_page"] for row in rows] == [1, 1, 4]
+
+
+def test_the_negative_control_a_record_without_a_parsed_page_exports_none_not_a_guess(monkeypatch):
+    # Negative control: the export must carry the page the reading found, and must not invent one
+    # when the reading found none. A default of 1 here would make every question of a paper whose
+    # numbering failed look like it began on the first page - the same "no place" defect, but silent.
+    items = [{"number": 1, "stem": "一", "options": {"A": "甲"}}]      # no "page" key at all
+    rows = _records(monkeypatch, items)
+    assert rows[0]["metadata"]["question_page"] is None
+    # And the control on the control: with the page present it is the page, so the assertion above
+    # is not passing merely because the key is always None.
+    assert _records(monkeypatch, [{"number": 1, "stem": "一", "options": {"A": "甲"}, "page": 7}])[0][
+        "metadata"]["question_page"] == 7
+
+
+@requires_run
+def test_every_delivered_question_has_a_page():
+    # The end-to-end version: whatever the golden path actually wrote must name a page for every
+    # question, because the whole point of A1 is that "how many questions are on page N" stops being
+    # an upper bound over the paper.
+    for run in RUNS:
+        pages = [question["metadata"].get("question_page") for question in _questions(run)]
+        assert pages, "no questions in the run"
+        assert all(isinstance(page, int) and page >= 1 for page in pages), pages
