@@ -60,9 +60,19 @@ MARGIN = 6.0            # points of margin around a crop, so a character is not 
 # separate them because a subscript is small in both directions while a rule is long and flat.
 MIN_FIGURE_HEIGHT = 24.0
 
-BASE_URL = os.environ.get("QBR_MODEL_BASE_URL", "http://127.0.0.1:18120")
-API_KEY = os.environ.get("QBR_MODEL_API_KEY", "mtplx")
-MODEL = os.environ.get("QBR_MODEL_NAME", "ornith-1.5-mtplx-35b")
+# The address, model and key come from the **one engine table** (`qbr.engines`) rather than a second
+# literal, so pointing a run at another host cannot leave this module talking to the old one. The
+# legacy `QBR_MODEL_*` names still win, so every existing run command keeps working; `QBR_VISION_*`
+# is the same thing spelled for this module.
+from . import engines as _engines  # noqa: E402  (module-level, one import, no cycle)
+
+_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]
+BASE_URL = (os.environ.get("QBR_VISION_BASE_URL") or os.environ.get("QBR_MODEL_BASE_URL")
+            or _DEFAULT["url"])
+API_KEY = (os.environ.get("QBR_VISION_API_KEY") or os.environ.get("QBR_MODEL_API_KEY")
+           or _DEFAULT.get("key", ""))
+MODEL = (os.environ.get("QBR_VISION_MODEL") or os.environ.get("QBR_MODEL_NAME")
+         or _DEFAULT["name"])
 
 # HOW TO TURN REASONING OFF IS NOT THE SAME QUESTION ON EVERY ENGINE, AND THE WRONG SPELLING IS
 # SILENT. Measured on three servers with the same model family:

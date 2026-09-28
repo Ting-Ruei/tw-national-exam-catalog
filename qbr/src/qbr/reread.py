@@ -53,21 +53,35 @@ from . import engines, vision
 #:
 #: `QBR_REREAD_*` overrides the *engine* (name and URL), not just the URL, so a caller can point
 #: this at MTPLX without the request keeping a Splash-shaped switch.
-ENGINE = os.environ.get("QBR_REREAD_ENGINE", "splash")
-BASE_URL = os.environ.get("QBR_REREAD_BASE_URL", engines.ENDPOINTS[ENGINE]["url"])
-MODEL = os.environ.get("QBR_REREAD_MODEL", engines.ENDPOINTS[ENGINE]["name"])
-API_KEY = os.environ.get("QBR_REREAD_API_KEY", engines.ENDPOINTS[ENGINE].get("key", ""))
+DEFAULT_ENGINE = os.environ.get("QBR_REREAD_ENGINE", "splash")
+
+
+def engine_name() -> str:
+    """The engine name to transcribe with, read **now** rather than at import.
+
+    Reading it here means a long-running process (or a test that sets `QBR_REREAD_ENGINE` between
+    calls) is not pinned to whatever the variable held when the module was first imported - the
+    frozen-at-import shape is exactly why repointing this module required a restart.
+    """
+    return os.environ.get("QBR_REREAD_ENGINE", DEFAULT_ENGINE)
 
 
 def endpoint():
     """The engine to transcribe with, as the one table spells it.
 
-    Built from the table rather than kept as a module constant so that the thinking switch travels
-    with the engine. `QBR_REREAD_BASE_URL`/`_MODEL` still override the address, but the switch comes
-    from the named engine - a caller pointing this at Splash gets Splash's switch, not MTPLX's.
+    Built from `engines.endpoints()` - the live table - so that the thinking switch travels with the
+    engine and a change of address (or engine) takes effect without a restart.
+    `QBR_REREAD_BASE_URL`/`_MODEL`/`_API_KEY` still override the address, but the switch comes from
+    the named engine - a caller pointing this at Splash gets Splash's switch, not MTPLX's.
     """
-    engine = dict(engines.ENDPOINTS[ENGINE])
-    engine["url"], engine["name"], engine["key"] = BASE_URL, MODEL, API_KEY
+    table = engines.endpoints()
+    name = engine_name()
+    if name not in table:
+        raise KeyError("unknown QBR_REREAD_ENGINE %r; known: %s" % (name, ", ".join(sorted(table))))
+    engine = dict(table[name])
+    engine["url"] = os.environ.get("QBR_REREAD_BASE_URL") or engine["url"]
+    engine["name"] = os.environ.get("QBR_REREAD_MODEL") or engine["name"]
+    engine["key"] = os.environ.get("QBR_REREAD_API_KEY") or engine.get("key", "")
     return engine
 
 #: The one instruction that matters is "do not correct what you see". A model that silently fixes a
