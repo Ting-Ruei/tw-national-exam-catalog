@@ -151,6 +151,7 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
     seen: set[str] = set()
     duplicate_keys: list[str] = []
     invalid_required: list[dict[str, Any]] = []
+    agent_verified: list[str] = []
     duplicate_options: list[dict[str, Any]] = []
     unsupported_types: list[dict[str, Any]] = []
     missing_visual: list[str] = []
@@ -172,8 +173,18 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
             for field in ("source_question_key", "source_registry_key", "stem", "options", "answer", "question_type", "metadata")
             if not question.get(field)
         ]
-        if metadata.get("review_status") != "accepted":
-            required_missing.append("metadata.review_status=accepted")
+        if metadata.get("review_status") == "accepted":
+            pass
+        elif metadata.get("review_status") == "agent_verified":
+            # A reviewing agent checked this record on the paper and found it clean. It is
+            # deliverable, but it is **weaker than `accepted`**: the two are reported separately
+            # (see `validate_review_status_split`) rather than collapsed, because a package whose
+            # manifest cannot say which records met a person is a package that has quietly raised
+            # its own assurance level. The status itself is never rewritten to `accepted` — that
+            # is a human decision and the governance floor forbids an agent from writing it.
+            agent_verified.append(key)
+        else:
+            required_missing.append("metadata.review_status in (agent_verified, accepted)")
         if not metadata.get("source_content_hash"):
             required_missing.append("metadata.source_content_hash")
         if not metadata.get("canonical_subject_name"):
@@ -204,6 +215,15 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
 
     if duplicate_keys:
         issues.append(build_issue("error", "package_duplicate_source_question_key", "source_question_key must be unique.", len(duplicate_keys), limited(args, duplicate_keys)))
+    if agent_verified:
+        # A warning, not an error: the records are deliverable, but the package must say out loud
+        # that they met an agent rather than a person. Reported as its own code so a reader can
+        # count it, and so "how much of this package is human-reviewed" is answerable from a
+        # package without re-reading every record.
+        issues.append(build_issue(
+            "warning", "package_agent_verified_not_human_accepted",
+            "Records carry review_status=agent_verified: reviewed by an agent, not accepted by a human.",
+            len(agent_verified), limited(args, agent_verified)))
     if invalid_required:
         issues.append(build_issue("error", "package_question_required_fields_invalid", "Question records are missing required import fields.", len(invalid_required), limited(args, invalid_required)))
     if duplicate_options:
@@ -356,6 +376,15 @@ def main() -> None:
         "asset_manifest_rows": len(assets),
         "package_version": manifest.get("package_version") if isinstance(manifest, dict) else None,
     }
+    # The review split is a summary number, not a footnote: a package's headline claim is how far
+    # its contents have been verified, and "all accepted" and "all agent_verified" must never
+    # render as the same line.
+    review_split: Counter[str] = Counter()
+    for question in questions:
+        metadata = question.get("metadata") if isinstance(question.get("metadata"), dict) else {}
+        review_split[str(metadata.get("review_status") or "(none)")] += 1
+    if review_split:
+        summary["review_status"] = dict(sorted(review_split.items()))
     report = {
         "status": "fail" if error_count else "pass",
         "package_dir": str(package_dir),
