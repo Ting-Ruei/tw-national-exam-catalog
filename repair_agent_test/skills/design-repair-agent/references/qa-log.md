@@ -3047,3 +3047,50 @@ pipeline 選項 A/B/C/D 文字 = ""（正確，因為它們是結構式）
    要把它**標出來給人**，不是讓模型自己判。
 3. **`rating` 與 `reason` 的語意必須分開**：`rating` 只講「格式對不對」，
    任何「內容對不對」的懷疑只能進 `reason`。**只要這兩者還混在一起，agent 就會拿語意去投票。**
+
+---
+
+## Q34（2026-09-28）「答案正確但軌跡很亂」——兩個靜默的接線錯誤
+
+Q33 的修正做完後重跑，**答案對了**，但工具軌跡是：`get_question` → 4 個 `read` **全失敗**
+→ 4 個 `find` → 5 個 `bash`（其中一個 `find /`）→ `record_judgement`。
+
+**答案正確，所以這件事本來不會被發現。** 兩個獨立的接線錯誤，都會讓「東西明明在，
+卻要去找」——而**找的過程會產生正確答案**，所以錯誤不會出現在結論裡。
+
+### 1. cwd 與資料路徑不同源
+
+- `agent.mjs` 原本用 `cwd: HERE`。`HERE` ＝ `agent/`。
+- 但 `get_question` 回傳的路徑全部是**相對於 repository root**（`qbr/data/review-queues/…`）。
+- `read`／`grep`／`find` 是**相對 session cwd** 解析的 → **4 個 read 全部 ENOENT**。
+- 模型的推論（原文）：「這些是 temp PR 目錄的舊裁片。我需要找到**目前工作樹**的裁片。」
+  → 於是 `find`、`bash`、`find /`。
+
+**修法**：`cwd: PATHS.CATALOG`（repository root）。修完軌跡是
+`get_question` → 4 個 `read`（全 True）→ `record_judgement`，**零 bash**。
+
+### 2. `image_refs[].path` 的基準不是 `candidates.jsonl` 的目錄
+
+- 佇列記的是 `review-ui/crops/…`。
+- `QUEUE` ＝ `qbr/data/review-queues/live/**review-ui**`。
+- 把兩者接起來 → `.../review-ui/review-ui/crops/...` → **match 不到**。
+- 真正的基準是它的**上一層**：`qbr/data/review-queues/live/`（`QUEUE_ROOT`）。
+
+**修法**：新增 `QUEUE_ROOT` 與 `figure_asset_path(ref)`；`question_view` 同時回
+`path`（解析後絕對路徑）與 `relative_path`（佇列原值，跨機器穩定）。
+
+**順手抓到的第二個坑**：`question_view` 的 dict 裡原本已有一個 `"path": ref.get("path")`，
+我的新行放在它**前面** → **後面的覆蓋前面的**，修正看起來有套用、實際上沒有。
+**判準**：在 dict literal 裡「追加一個同名鍵」是靜默失敗；要改的是**原本那一行**。
+
+### 3. 負對照
+
+- 把 `QUEUE_ROOT` 退回 `QUEUE` → `a figure's path is where the file actually is` **FAIL**。
+- 把 `cwd` 退回 `HERE` → `the agent works from the repository root` **FAIL**（原始碼比對）。
+
+### 4. 教訓（與 Q31／Q33 同一條線）
+
+> **「結論正確」不是「流程正確」的證據。** 三次都是同一個形狀：
+> 錯誤只出現在**中間步驟**（少一塊的裁片、繞路的 `find /`、被覆蓋的 dict 鍵），
+> 而**最終答案照樣產出**。審一個 agent 不能只看它答了什麼，要看**它怎麼答的**。
+> `store/agent.log.jsonl` 的工具軌跡就是為此存在的——**健康的軌跡沒有 `bash`。**
