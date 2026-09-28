@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>判讀介面 — 一次一題</title>
+<!--
+  一次一題、整題完整、右邊配 PDF、判讀寫進檔案。
+
+  這一頁的資料全部來自 `fetch`（沒有 fetch 的頁面就是靜態紀錄，設計者第八輪要的不是那個）。
+  判讀 POST 到 /api/judgement，落到 `store/agent_feedback.jsonl`——**與 agent 同一條學習流**，
+  所以設計者下的指導，下一輪 agent 就讀得到。
+
+  版面沿用 v2 的概念（左內容／右 PDF，`review_ui/v2.html:530` `.compare` grid 1fr 1fr）。
+  這裡不引入框架：v2 也沒有，而多一個建置步驟就多一個會和原始碼不一致的產物。
+-->
+<style>
+  :root {
+    --ink: #1b1f24; --muted: #6b7280; --line: #d8dde5; --bg: #f6f8fa;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #b42318; --accent: #0969da;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.65 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+         color: var(--ink); background: var(--bg); }
+  header { padding: 10px 16px; background: #fff; border-bottom: 1px solid var(--line);
+           display: flex; gap: 12px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  input, button, select { font: inherit; padding: 6px 9px; border: 1px solid var(--line);
+                          border-radius: 6px; background: #fff; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; margin-left: auto; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .pane { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+             color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .stem { white-space: pre-wrap; margin: 0 0 12px; padding: 10px; background: var(--bg);
+          border-radius: 6px; border: 1px solid var(--line); }
+  .options { list-style: none; padding: 0; margin: 0 0 12px; }
+  .options li { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+                margin-bottom: 6px; display: flex; gap: 10px; }
+  .options li.answer { border-color: var(--ok); background: #f0fff4; }
+  .options li .k { font-weight: 700; min-width: 1.4em; }
+  .options li .empty { color: var(--bad); font-style: italic; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 99px;
+         border: 1px solid var(--line); background: var(--bg); color: var(--muted); margin-right: 5px; }
+  .tag.bad { color: var(--bad); border-color: #f3c2bd; background: #fff5f4; }
+  .tag.ok { color: var(--ok); border-color: #b7e0c1; background: #f2fdf5; }
+  section { margin-top: 14px; }
+  section > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+  .said { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
+  .said .who { font-size: 12px; color: var(--muted); }
+  .said.designer { border-left-color: var(--accent); }
+  .said.agent { border-left-color: var(--ok); }
+  #pdf-frame { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: 6px; }
+  #crop-img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+  #write { margin: 0 12px 24px; background: #fff; border: 1px solid var(--line);
+           border-radius: 8px; padding: 14px; }
+  #write textarea { width: 100%; min-height: 90px; font: inherit; padding: 9px;
+                    border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+  #write .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .empty-note { color: var(--muted); font-style: italic; }
+  .warn { background: #fff8e6; border: 1px solid #f0d999; padding: 9px 11px;
+          border-radius: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>判讀介面</h1>
+  <input id="key" size="46" placeholder="candidate_key（或用右邊搜尋）">
+  <input id="search" size="22" placeholder="搜尋科目／題號／題幹文字">
+  <button id="find">搜尋</button>
+  <button id="load" class="primary">讀這一題</button>
+  <span id="status">尚未載入</span>
+</header>
+
+<main>
+  <div class="pane">
+    <h2>題目（整題完整）</h2>
+    <div id="qmeta" class="meta"></div>
+    <div id="qbody"><p class="empty-note">先在上方輸入 candidate_key 或搜尋後按「讀這一題」。</p></div>
+  </div>
+
+  <div class="pane">
+    <h2>紙本（右側，與左側解耦）</h2>
+    <div id="pdfmeta" class="meta"></div>
+    <iframe id="pdf-frame" title="官方題目卷"></iframe>
+    <div id="crop-wrap"></div>
+  </div>
+</main>
+
+<div id="write">
+  <h2 style="margin-top:0">我的判讀（寫進檔案，成為 agent 的學習語料）</h2>
+  <textarea id="reason" placeholder="具體寫哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
+  <div class="row">
+    <label>結論
+      <select id="rating">
+        <option value="up">沒問題（up）</option>
+        <option value="down">有問題（down）</option>
+      </select>
+    </label>
+    <button id="save" class="primary">存檔</button>
+    <span id="save-status" class="meta"></span>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function setStatus(text) { $("status").textContent = text; }
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json().catch(() => ({ error: "回應不是 JSON" }));
+  if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+  return payload;
+}
+
+// -- the question -------------------------------------------------------------------------
+function renderTags(question) {
+  const tags = [];
+  if (question.quality_status) {
+    tags.push(`<span class="tag ${question.quality_status === "pass" ? "ok" : "bad"}">機器：${esc(question.quality_status)}</span>`);
+  }
+  if (question.group_ref) tags.push(`<span class="tag">題組 ${esc(question.group_ref)}</span>`);
+  const figures = question.figures || [];
+  if (figures.length) tags.push(`<span class="tag">圖 ${figures.length}</span>`);
+  else tags.push(`<span class="tag">無圖</span>`);
+  if (question.human_events?.length) tags.push(`<span class="tag">人動過 ${question.human_events.length} 次</span>`);
+  return tags.join("");
+}
+
+function renderOptions(question) {
+  const options = question.options || [];
+  if (!options.length) {
+    return `<p class="warn">這一題的選項是空的。可能是選項本身是圖片（化學結構式等），
+      也可能是抽取缺陷——請看右邊紙本確認是哪一種。</p>`;
+  }
+  const answer = new Set((question.answer || []).map((a) => String(a).toUpperCase()));
+  return `<ul class="options">${options.map((option) => {
+    const key = String(option.key ?? option.label ?? "").toUpperCase();
+    const text = String(option.text ?? "").trim();
+    return `<li class="${answer.has(key) ? "answer" : ""}">
+      <span class="k">${esc(key)}.</span>
+      <span>${text ? esc(text) : '<span class="empty">（紙本上是圖，沒有文字）</span>'}</span>
+    </li>`;
+  }).join("")}</ul>`;
+}
+
+function renderSaid(rows) {
+  if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
+  return rows.map((row) => {
+    const who = row.source === "designer" ? "設計者" : (row.engine || row.source || "agent");
+    const cls = row.source === "designer" ? "designer" : "agent";
+    const rating = row.rating === "down" ? '<span class="tag bad">down</span>'
+                 : row.rating === "up" ? '<span class="tag ok">up</span>' : "";
+    return `<div class="said ${cls}">
+      <div class="who">${esc(who)} · ${esc(row.at || "")} ${rating}</div>
+      <div>${esc(row.reason || "")}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderQuestion(question) {
+  current = question;
+  setStatus(`已載入 q${question.question_number}（${question.subject || question.category || ""}）`);
+  $("key").value = question.candidate_key;
+  $("qmeta").innerHTML = renderTags(question);
+  $("qbody").innerHTML = `
+    <div class="stem">${esc(question.stem || "（題幹是空的）")}</div>
+    ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem">${esc(question.shared_stem)}</div></details>` : ""}
+    ${renderOptions(question)}
+    <div class="meta">答案：<b>${esc((question.answer || []).join("、") || "（無）")}</b>
+      ｜題號頁：${esc(question.page ?? "未匯出（A1 之後才有）")}</div>
+    <details open><summary>機器說法（圖的歸屬與範圍）</summary>
+      ${(question.figures || []).length
+        ? `<ul>${question.figures.map((f) => `<li>${esc(f.label || "?")} · 第 ${esc(f.page ?? "?")} 頁
+             · ${f.clipped ? '<span class="tag bad">有裁切</span>' : '<span class="tag ok">未裁切</span>'}
+             ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
+        : '<p class="empty-note">沒有圖。</p>'}
+    </details>
+    <details open><summary>這個題目已有的判讀</summary>${renderSaid(question.judgements)}</details>
+    ${(question.lessons || []).length ? `<details><summary>這一題記下的教訓</summary>
+      <ul>${question.lessons.map((l) => `<li>${esc(l.text)}（已見 ${l.count || 1} 次）</li>`).join("")}</ul>
+    </details>` : ""}
+  `;
+
+  // The PDF panel is deliberately independent of the question panel: changing one must not
+  // move the other (the charter's rule, and a real v2 defect where a filter moved the walk).
+  const pdf = question.pdf_relative || question.pdf_absolute || "";
+  $("pdfmeta").innerHTML = pdf
+    ? `第 <b>${esc(question.page ?? "?")}</b> 頁 ｜ ${esc(pdf.split("/").pop())}`
+    : '<span class="empty-note">這一題沒有對應的題目卷。</span>';
+  $("pdf-frame").src = pdf
+    ? `/file?path=${encodeURIComponent(question.pdf_absolute || pdf)}#page=${question.page || 1}`
+    : "about:blank";
+  $("crop-wrap").innerHTML = question.crop_png
+    ? `<div class="meta">這是 agent 送給地端模型看的裁片（含它自己的圖框）：</div>
+       <img id="crop-img" src="/crop?path=${encodeURIComponent(question.crop_png)}" alt="這一題的裁片">`
+    : "";
+}
+
+// -- actions ------------------------------------------------------------------------------
+async function loadQuestion() {
+  const key = $("key").value.trim();
+  if (!key) return;
+  setStatus("載入中…");
+  try {
+    renderQuestion(await api("/api/question?key=" + encodeURIComponent(key)));
+  } catch (error) {
+    setStatus("載入失敗");
+    $("qbody").innerHTML = `<p class="warn">${esc(error.message)}</p>`;
+  }
+}
+
+async function search() {
+  const term = $("search").value.trim();
+  if (!term) return;
+  setStatus("搜尋中…");
+  const looksNumeric = /^\d+$/.test(term);
+  const query = looksNumeric
+    ? "number=" + encodeURIComponent(term) + "&limit=20"
+    : "contains=" + encodeURIComponent(term) + "&limit=20";
+  try {
+    const data = await api("/api/search?" + query);
+    const rows = data.questions || [];
+    setStatus(rows.length + " 筆");
+    $("qbody").innerHTML = rows.length
+      ? `<p class="meta">點一題載入：</p><ul class="options">${rows.map((q) => `
+          <li><span class="k">${esc(q.question_number)}</span>
+            <a href="#" data-key="${esc(q.candidate_key)}">${esc(q.category || "")} ${esc(q.subject || "")}
+            ${q.figures ? `<span class="tag">圖 ${q.figures}</span>` : ""}</a></li>`).join("")}</ul>`
+      : '<p class="empty-note">沒有符合的題目。</p>';
+  } catch (error) {
+    setStatus("搜尋失敗");
+    $("qbody").innerHTML = `<p class="warn">${esc(error.message)}</p>`;
+  }
+}
+
+async function save() {
+  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
+  const reason = $("reason").value.trim();
+  if (!reason) { $("save-status").textContent = "請先寫下判讀依據。"; return; }
+  $("save").disabled = true;
+  try {
+    const result = await api("/api/judgement", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: current.candidate_key,
+        question_number: current.question_number,
+        rating: $("rating").value,
+        reason,
+      }),
+    });
+    $("save-status").textContent = "已寫入 " + result.store;
+    $("reason").value = "";
+    // Re-read so the new judgement is shown from the file, not from what we hoped we wrote.
+    renderQuestion(await api("/api/question?key=" + encodeURIComponent(current.candidate_key)));
+  } catch (error) {
+    $("save-status").textContent = "寫入失敗：" + error.message;
+  } finally {
+    $("save").disabled = false;
+  }
+}
+
+$("load").addEventListener("click", loadQuestion);
+$("find").addEventListener("click", search);
+$("save").addEventListener("click", save);
+$("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loadQuestion(); });
+$("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[data-key]");
+  if (!link) return;
+  event.preventDefault();
+  $("key").value = link.dataset.key;
+  loadQuestion();
+});
+// A key in the URL loads on open, so a question can be sent to someone as a link.
+const initial = new URLSearchParams(location.search).get("key");
+if (initial) { $("key").value = initial; loadQuestion(); }
+</script>
+</body>
+</html>

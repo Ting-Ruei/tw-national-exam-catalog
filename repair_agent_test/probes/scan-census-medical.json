@@ -1,0 +1,14 @@
+{
+  "sampled": 4940,
+  "errors": 0,
+  "threshold": 0.5,
+  "scans": [
+    {
+      "path": "國考題資料夾/10_official_pdf/by_official_catalog/護理師/108/第1次/1081_護理師_精神科與社區衛生護理學.pdf",
+      "cover": 0.9997,
+      "pages": 8,
+      "creator": "Canon iR-ADV C3330  PDF",
+      "fonts": 0
+    }
+  ]
+}

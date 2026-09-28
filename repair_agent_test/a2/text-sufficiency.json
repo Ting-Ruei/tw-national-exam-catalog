@@ -1,0 +1,103 @@
+{
+  "examples": {
+    "gained_chars": [
+      {
+        "field": "option A",
+        "human": "C<sup>∞</sup><sub>max</sub> 增高、C<sup>∞</sup><sub>min</sub> 增高",
+        "key": "moex:100030:103:0204:1:question:q057",
+        "shipped": "C∞<sub>ax</sub>增高、C∞<sub>in</sub>增高"
+      },
+      {
+        "field": "option B",
+        "human": "C<sup>∞</sup><sub>max</sub> 降低、C<sup>∞</sup><sub>min</sub> 降低",
+        "key": "moex:100030:103:0204:1:question:q057",
+        "shipped": "C∞<sub>ax</sub>降低、C∞<sub>in</sub>降低"
+      },
+      {
+        "field": "option C",
+        "human": "C<sup>∞</sup><sub>max</sub> 增高、C<sup>∞</sup><sub>min</sub> 降低",
+        "key": "moex:100030:103:0204:1:question:q057",
+        "shipped": "C∞<sub>ax</sub>增高、C∞<sub>in</sub>降低"
+      },
+      {
+        "field": "option D",
+        "human": "C<sup>∞</sup><sub>max</sub> 降低、C<sup>∞</sup><sub>min</sub> 增高",
+        "key": "moex:100030:103:0204:1:question:q057",
+        "shipped": "C∞<sub>ax</sub>降低、C∞<sub>in</sub>增高"
+      }
+    ],
+    "lost_chars": [
+      {
+        "field": "stem",
+        "human": "某藥品之體內動態遵循線性一室模式，當分布體積變成原來的一半，且清除率不變時，若給藥劑量變成原來的一半，請問下列那一圖正確地描述改變前（實線）與改變後（虛線）血中濃度（C）與時間（T）關係之變化？",
+        "key": "moex:100030:103:0204:1:question:q055",
+        "shipped": "某藥品之體內動態遵循線性一室模式，當分布體積變成原來的一半，且清除率不變時，若給藥劑量變成原來的一半，請問下列那一圖正確地描述改變前（實線）與改變後（虛線）血中濃度（C）與時間（T）關係之變化？      C  C      C  "
+      },
+      {
+        "field": "stem",
+        "human": "已知digoxin的藥動參數如下表，在常態分佈（normal distribution）的前提假設下，請選出正確的敘述：\n①50%的受試者，清除率恰在130 mL/min ②68%的受試者，清除率在63至197 mL/min間 ③95%的受",
+        "key": "moex:101100:310:44:1:question:q065",
+        "shipped": "已知digoxin的藥動參數如下表，在常態分佈（normal distribution）的前提假設下，請選出正確的敘述：藥品  Clearance (mL/min) Volume of Distribution (L) Digoxin   "
+      },
+      {
+        "field": "option C",
+        "human": "C－H stretching",
+        "key": "moex:103020:310:22:1:question:q028",
+        "shipped": "1705 cm<sup>-1</sup>；D: 1655 cm<sup>-1</sup>；則A吸收帶係下列何基團之吸收？ C–H stretching"
+      },
+      {
+        "field": "stem",
+        "human": "某醫院以含可待因（Codeine）成分醫師、藥師指示藥品供應予病人，並登錄於病歷，則依規定該醫院所聘藥師是否應將領受人資料另列簿冊？",
+        "key": "moex:103090:310:66:1:question:q041",
+        "shipped": "某醫院以含可待因（Codeine）成分屬醫師、藥師指示藥品供應予病人，並登錄於病歷，則依規定該醫院所聘藥師是否應將領受人資料另列簿冊？"
+      }
+    ],
+    "swapped": [
+      {
+        "field": "stem",
+        "human": "用電泳法後以螢光來分析乳酸脫氫酶（LD）之同功酶時，採用的受質（substrate）為：",
+        "key": "moex:100140:104:0304:1:question:q054",
+        "shipped": "用電泳法後以螢光來分析乳酸脫氫（LD）之同功時，採用的受質（substrate）為："
+      },
+      {
+        "field": "stem",
+        "human": "下列何種酶於適當之反應條件下可將 creatinine 轉變成 creatine？",
+        "key": "moex:100140:104:0304:1:question:q059",
+        "shipped": "下列何種於適當之反應條件下可將creatinine 轉變成creatine？"
+      },
+      {
+        "field": "stem",
+        "human": "已知藥品A之藥動參數如下，且本藥品符合線性藥動動力學：\n\n請選出正確的藥動參數預測？\n①Cl<sub>r</sub>=0.3 L/hr ②Cl<sub>h</sub>=2.7 L/hr ③肝抽取率為（ER<sub>h</sub>）=30% ",
+        "key": "moex:101100:310:44:1:question:q076",
+        "shipped": "已知藥品A之藥動參數如下，且本藥品符合線性藥物動力學：藥品尿液排除率（%）血漿蛋白結合率（%）清除率（L/hr）擬似分布體積（L）肝血流（L/hr） A              10                   50       "
+      },
+      {
+        "field": "option A",
+        "human": "O－H bending",
+        "key": "moex:103020:310:22:1:question:q028",
+        "shipped": "O–H bending"
+      }
+    ]
+  },
+  "kinds": {
+    "foldable": 6,
+    "gained_chars": 14,
+    "lost_chars": 7,
+    "markup_only": 31,
+    "swapped": 32
+  },
+  "needs_source": 53,
+  "needs_source_rate": 0.5889,
+  "per_field": {
+    "option A": 9,
+    "option B": 19,
+    "option C": 14,
+    "option D": 14,
+    "stem": 34
+  },
+  "reading": "needs_source_rate is the share of the reviewer's edits that cannot be reached from the text the model is given. It is a property of the corpus and the pipeline, not of a model: a text-only comparison is capped by (1 - this rate) and no prompt can raise that cap.",
+  "rows": 47,
+  "rows_fully_reachable_rate": 0.4255,
+  "rows_with_no_source_free_edit": 27,
+  "touched_fields": 90
+}

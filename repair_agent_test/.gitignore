@@ -1,0 +1,14 @@
+# 沙盒的產物：測量結果與教訓留著，可重生的中間檔不留。
+#
+# `a2/page-cache/` 是考卷頁面的點陣圖，跑一次 probe 就會重建（10MB、41 張）。它是
+# **量測的中間物**，不是結論；留著只會讓下一次 diff 充滿二進位。
+a2/page-cache/
+
+# `probes/bin/macOS_vision_ocr` 是 `build_macos_vision_ocr.sh` 編出來的執行檔（獨立引擎的
+# 掃描件 GT 來源）。編出來的不進 git：留著它，diff 會多一個沒人能讀的二進位，而 build script
+# 已經在版控裡，重建一次就有。
+probes/bin/
+
+# Python 快取。
+__pycache__/
+*.pyc

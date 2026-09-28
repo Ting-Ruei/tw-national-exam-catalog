@@ -1,0 +1,17 @@
+# The agent's runtime, not its source.
+#
+# `node_modules` is 430MB and is rebuilt from `package.json` by `npm install`. Committing it would
+# put a third copy of Pi's SDK in git and make every diff unreadable. `package.json` pins the exact
+# versions (0.87.1 plus typebox 1.3.27), so the installed tree is reproducible without it.
+node_modules/
+
+# What the agent learns while it runs. This is *data about one machine's runs*, not the code that
+# produces it: judgements, lessons, crops and trace logs all accumulate and are regenerated.
+# `store/agent_feedback.jsonl` is the learning corpus, so it is deliberately not tracked — when it
+# becomes a shared artifact it needs a decision about where the authority lives (laptop vs station),
+# which a `.gitignore` line must not pre-empt.
+store/
+
+# Python bytecode and the UI's import cache.
+__pycache__/
+*.pyc

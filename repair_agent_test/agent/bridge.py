@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""Pi agent 的判讀器橋接：把「一題」完整取出來，交給地端模型看紙本。
+
+**這個檔是 Pi 的工具，不是 agent 本身。** agent 的本體是
+`repair_agent_test/agent/agent.mjs`（Pi SDK）；本檔只提供 Pi 用 `bash` 呼叫的四個動作。
+（詳見 `skills/design-repair-agent/references/pi-agent-design.md` §1。）
+
+為什麼要有這一支：Pi 的 `read` 工具只能讀文字檔，**看不到 PDF、也不會裁圖**。
+判讀一題需要三件事——題目本身的完整內容、這一題自己的紙本裁切、把裁切送給地端模型——
+三件都在既有的 Python 裡，只是散在不同檔。本檔把它們收成一個有 JSON 輸出的入口，
+讓 Pi 不必自己拼路徑、不必自己猜端點。
+
+    question  --key KEY              一題的完整內容（題幹／ABCD／答案／圖／人做過什麼）
+    crop      --key KEY [--out PNG]  這一題自己的紙本裁切（含它自己的圖框）
+    read      --key KEY [--engine E] [--out PNG] [--no-image]  看紙本並回傳逐字判讀
+    feedback  --key KEY --rating up|down --reason TEXT          把判讀寫進學習語料
+
+**沙盒紀律**：`feedback` 寫的是 `agent/store/agent_feedback.jsonl`（本層自己的檔），
+**永不碰 `question_review_events.jsonl`**，也不冒充人類審核者。schema 刻意與
+`review_state.append_ai_feedback` 相同，所以將來要「取代」成正式流時是換一行，不是改格式。
+
+**量測紀律**：`crop` 一定把這一題自己的 `image_refs` box 一起交給 `crop_for`。
+不交的話模型會看到一條細縫，然後很誠實地說「選項是空的」——那個「讀不出來」是裁切的錯，
+不是模型的錯（`confirm_dispute.crop_for` 的 docstring 記了同一個缺陷，2026-09-25，`1152_藥師(一)` q42）。
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SANDBOX = os.path.dirname(HERE)
+CATALOG = os.path.dirname(SANDBOX)
+QBR = os.path.join(CATALOG, "qbr")
+
+for path in (os.path.join(QBR, "src"), os.path.join(QBR, "scripts")):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+QUEUE = os.path.join(QBR, "data", "review-queues", "live", "review-ui")
+CANDIDATES = os.path.join(QUEUE, "candidates.jsonl")
+STORE = os.path.join(SANDBOX, "agent", "store", "agent_feedback.jsonl")
+# `REPAIR_AGENT_STORE` redirects the whole sandbox store, for tests. Nothing else should set it.
+STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.dirname(STORE)
+DEFAULT_ENGINE = "occamy-6bit"
+
+
+class QuestionNotFound(LookupError):
+    """The requested candidate key is not in the queue.
+
+    A real exception rather than `SystemExit`, because the same functions are called by the CLI
+    **and** by the UI server. `SystemExit` in a server request thread kills the thread and the
+    browser sees a dropped connection instead of "no question with key X" — the failure mode where
+    a wrong key looks like a broken server.
+    """
+
+
+def _die(message: str, code: int = 1):
+    json.dump({"error": message}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    raise SystemExit(code)
+
+
+def load_question(key: str) -> dict:
+    """One candidate by key. Streams the JSONL: 199 MB does not belong in memory."""
+    if not os.path.exists(CANDIDATES):
+        raise QuestionNotFound(
+            "candidates.jsonl not found at %s; run scripts/sync_from_station.sh first" % CANDIDATES)
+    with open(CANDIDATES, encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line:
+                continue
+            row = json.loads(line)
+            if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
+                return row
+    raise QuestionNotFound("no question with key %r" % key)
+
+
+def questions_of_paper(question: dict, limit: int = 0) -> list:
+    """Every question in the same paper, in order. Used by the agent to see neighbours.
+
+    Keyed on the paper rather than the question because a defect is often only visible
+    next door: a stem that continues onto the next page, or a figure that was assigned
+    to the neighbouring question. Measuring one question in isolation cannot see either.
+    """
+    metadata = question.get("metadata") or {}
+    paper = metadata.get("question_pdf_relative")
+    if not paper:
+        return []
+    found = []
+    with open(CANDIDATES, encoding="utf-8") as handle:
+        for line in handle:
+            if paper not in line:
+                continue
+            row = json.loads(line)
+            if (row.get("metadata") or {}).get("question_pdf_relative") == paper:
+                found.append(row)
+    found.sort(key=lambda r: (r.get("question_number") or 0, r.get("question_number_occurrence") or 0))
+    return found[:limit] if limit else found
+
+
+def human_events(key: str) -> list:
+    """This question's human review events, if the queue has them.
+
+    Read-only and never written back. Kept in the view because the agent is asked to
+    explain a *disagreement*: a question the person blocked, corrected, or commented on
+    is where the agent's judgement is worth the most, and the person's own sentence is
+    the only channel that says where they thought the problem was.
+    """
+    path = os.path.join(QUEUE, "question_review_events.jsonl")
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
+                out.append(row)
+    return out
+
+
+def prior_judgements(key: str) -> list:
+    """Judgements already made on this question, by the designer or by an earlier agent run.
+
+    **This is the channel the designer's guidance travels on.** The UI writes to
+    `agent_feedback.jsonl`, and without reading it back here the design (第八輪) would be broken in
+    the one place that matters: the designer types why a question is wrong, the record lands in a
+    file, and the next agent run — the whole point of the loop — never sees the sentence.
+
+    Read from the sandbox store, not from the human review stream. Those are different authorities:
+    `question_review_events.jsonl` is a reviewer's decision and is read-only to this agent;
+    `agent_feedback.jsonl` is guidance about the model's output. Mixing them would make "who
+    decided this question is acceptable" unanswerable.
+    """
+    if not os.path.exists(STORE):
+        return []
+    out = []
+    with open(STORE, encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") == key:
+                out.append(row)
+    return out
+
+
+def question_view(question: dict) -> dict:
+    """The complete question, not the fields that happen to have been touched.
+
+    The design (designer, 2026-09-27) is explicit that each question must be read in full
+    —「每一題都要讀取完整，不能只讀這個不讀那個」— because a view that only expands the
+    changed fields cannot show a defect in an untouched field.
+    """
+    metadata = question.get("metadata") or {}
+    refs = question.get("image_refs") or []
+    return {
+        "candidate_key": question.get("candidate_key"),
+        "question_number": question.get("question_number"),
+        "question_type": question.get("question_type"),
+        "group_ref": question.get("group_ref"),
+        "group_size": question.get("group_size"),
+        "quality_status": question.get("quality_status"),
+        "subject": metadata.get("normalized_subject_name") or metadata.get("official_subject_name"),
+        "category": metadata.get("official_category_name"),
+        "year": metadata.get("year"),
+        "exam_ordinal": metadata.get("exam_ordinal"),
+        "question_pdf_relative": metadata.get("question_pdf_relative"),
+        "answer_pdf_relative": metadata.get("answer_pdf_relative"),
+        "stem": question.get("stem"),
+        "shared_stem": question.get("shared_stem"),
+        "stem_markup": question.get("stem_markup"),
+        "stem_image": question.get("stem_image"),
+        "subitem_legend": question.get("subitem_legend"),
+        "options": question.get("options") or [],
+        "answer": question.get("answer"),
+        "answer_payload": question.get("answer_payload"),
+        "losses": {
+            "lost_glyphs": question.get("lost_glyphs"),
+            "lost_glyph_note": question.get("lost_glyph_note"),
+            "issue_count": question.get("issue_count"),
+            "dispute_severity": question.get("dispute_severity"),
+        },
+        "figures": [
+            {
+                "label": ref.get("label"),
+                "description": ref.get("description"),
+                "page": ref.get("page"),
+                "pages": ref.get("pages"),
+                "box": ref.get("box"),
+                "clipped": ref.get("clipped"),
+                "ownership_note": ref.get("ownership_note"),
+                "exists": ref.get("exists"),
+                "path": ref.get("path"),
+            }
+            for ref in refs
+        ],
+        "human_events": human_events(question.get("candidate_key") or ""),
+        # The designer's own sentences, newest last, straight off the stream the UI writes.
+        # The agent is told to read these before judging: they are the one signal that says
+        # what a person already found wrong, which is exactly what the model is being asked
+        # to reproduce.
+        "prior_judgements": prior_judgements(question.get("candidate_key") or ""),
+    }
+
+
+def pdf_path_of(question: dict) -> str:
+    metadata = question.get("metadata") or {}
+    relative = metadata.get("question_pdf_relative")
+    if not relative:
+        _die("question has no question_pdf_relative; cannot crop a page without a PDF")
+    # `question_pdf_relative` is relative to the repository root, not to qbr/.
+    path = relative if os.path.isabs(relative) else os.path.join(CATALOG, relative)
+    if not os.path.exists(path):
+        _die("question PDF not found: %s" % path)
+    return path
+
+
+def figure_boxes(question: dict) -> list:
+    """This question's own picture boxes, in the shape `reread.page_extents` reads.
+
+    **Each entry is a dict with `box` and `page`, not a bare tuple.** `page_extents` looks for
+    `entry.get("box")`, and a tuple has no `.get` — so a list of tuples is skipped by the
+    `if not isinstance(entry, dict): continue` guard, silently. Measured on
+    `1152_藥師(一)_藥學(一)` q42 (2026-09-28): passing tuples kept the page-9 region at x1 50.3 (the
+    `B.`/`C.`/`D.` marker column) instead of 158.4 (where the option structures end), which is
+    exactly the 11-point sliver the 2026-09-25 defect was about. The pictures were in the data the
+    whole time; the shape was wrong, and a wrong shape here costs nothing visible: no exception,
+    just a crop missing its figures.
+
+    The page matters as much as the box: a question whose options are structures on the *following*
+    page only gets that page into the crop through these boxes, because the band's rows for it are
+    the marker labels alone.
+    """
+    boxes = []
+    for ref in question.get("image_refs") or []:
+        box = ref.get("box")
+        page = ref.get("page")
+        if not box or len(box) != 4 or not page:
+            continue
+        boxes.append({"box": [float(value) for value in box], "page": int(page)})
+    return boxes
+
+
+def do_crop(args) -> dict:
+    import confirm_dispute
+
+    question = load_question(args.key)
+    png, rows, error = confirm_dispute.crop_for(
+        pdf_path_of(question),
+        question.get("question_number"),
+        dpi=args.dpi,
+        out_png=args.out,
+        boxes=figure_boxes(question),
+    )
+    if png is None:
+        return {"error": error, "rows": rows, "candidate_key": args.key}
+    return {
+        "candidate_key": args.key,
+        "question_number": question.get("question_number"),
+        "rows": rows,
+        "bytes": len(png),
+        "png": args.out,
+        "boxes_supplied": len(figure_boxes(question)),
+    }
+
+
+def do_read(args) -> dict:
+    import confirm_dispute
+    from qbr import engines
+
+    question = load_question(args.key)
+    pdf = pdf_path_of(question)
+    number = question.get("question_number")
+
+    out_png = args.out or os.path.join(
+        STORE_DIR, "crops",
+        "%s_q%03d.png" % (os.path.basename(pdf).replace(".pdf", ""), number or 0),
+    )
+    png, rows, error = confirm_dispute.crop_for(
+        pdf, number, dpi=args.dpi, out_png=out_png, boxes=figure_boxes(question)
+    )
+    if png is None:
+        return {"error": "crop failed: %s" % (error,), "rows": rows, "candidate_key": args.key}
+
+    # `engines.named` returns the whole endpoint record, not a URL. Passing just the URL
+    # is what `engines.ask` crashes on (`endpoint.get` on a str) — the record is what carries
+    # the egress flag, the thinking switch and the model name that `body_for` needs.
+    endpoint = engines.named(args.engine)
+    # `--no-image` is the negative control: same prompt, no picture. A2.1 measured
+    # 47.8% -> 18.9% on ornith with exactly this switch, which is what proves the score
+    # comes from the picture and not from the prompt.
+    if args.no_image:
+        seen, raw, complaint, usage, seconds = (None, "", "image withheld (negative control)", {}, 0.0)
+    else:
+        seen, raw, complaint, usage, seconds = confirm_dispute.transcribe(
+            png,
+            endpoint=endpoint,
+            max_tokens=args.max_tokens,
+            timeout=args.timeout,
+            number=number,
+        )
+
+    # `compare` compares two `{key: text}` maps, and `options_of` is the tested normaliser for the
+    # two shapes the pipeline produces (a dict of records, or a list of them). Building the map by
+    # hand here would be a second, untested reading of "what this question's options are".
+    from qbr import reread
+    stored = {
+        "stem": question.get("stem") or "",
+        "options": reread.options_of(question),
+    }
+    diff = None
+    if seen:
+        diff = reread.compare(stored, seen)
+
+    return {
+        "candidate_key": args.key,
+        "question_number": number,
+        "subject": (question.get("metadata") or {}).get("normalized_subject_name"),
+        "engine": args.engine,
+        "endpoint": endpoint["url"],
+        "png": out_png,
+        "png_bytes": len(png),
+        "rows": rows,
+        "seconds": seconds,
+        "usage": usage,
+        "image_attached": not args.no_image,
+        "stored": {"stem": stored["stem"], "options": stored["options"]},
+        "seen": seen,
+        "raw": raw[:4000],
+        "complaint": complaint,
+        "diff": diff,
+    }
+
+
+def do_feedback(args) -> dict:
+    """Append the agent's or the person's judgement to the sandbox learning stream.
+
+    Append-only by construction (`open(..., "a")`), so a second run cannot overwrite a
+    first. The record copies `review_state.append_ai_feedback`'s field names on purpose:
+    promoting this into the production stream later is then a change of path, not of shape
+    — and a shape that has already been written is a shape that has already been tested.
+    """
+    question = load_question(args.key)
+    record = {
+        "action": "ai_feedback",
+        "schema": "repair_agent_test/agent_feedback v1",
+        "candidate_key": question.get("candidate_key"),
+        "question_number": question.get("question_number"),
+        "subject": (question.get("metadata") or {}).get("normalized_subject_name"),
+        "rating": args.rating,
+        "audit_scope": args.audit_scope,
+        "reason": (args.reason or "")[:2000],
+        "engine": args.engine,
+        "source": args.source,
+    }
+    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    with open(STORE, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # `subject` is echoed back so the Node layer can file a lesson under it. The designer's
+    # expectation is that each subject has its own habitual errors, so a lesson that cannot say
+    # which subject it came from is a lesson the next subject has to learn again.
+    return {"appended": record, "store": STORE, "subject": record["subject"]}
+
+
+def do_question(args) -> dict:
+    question = load_question(args.key)
+    view = question_view(question)
+    if args.with_paper:
+        view["paper_questions"] = [
+            {"candidate_key": row.get("candidate_key"),
+             "question_number": row.get("question_number"),
+             "stem": (row.get("stem") or "")[:120],
+             "figures": len(row.get("image_refs") or [])}
+            for row in questions_of_paper(question)
+        ]
+    return view
+
+
+def do_find(args) -> dict:
+    """Find questions by subject / number / text, so no key is ever invented.
+
+    The `subject` match is a substring against the **category**, because that is the word a
+    person uses (「醫事檢驗師」) and the normalized subject name is a long parenthesised
+    string that nobody types. `contains` is a substring of the stem, kept deliberately dumb:
+    a smarter search would be a second opinion about what the question is, and the agent is
+    supposed to form that opinion from the question itself.
+    """
+    if not os.path.exists(CANDIDATES):
+        _die("candidates.jsonl not found at %s; run scripts/sync_from_station.sh first" % CANDIDATES)
+
+    hits = []
+    seen_contains = args.contains or ""
+    with open(CANDIDATES, encoding="utf-8") as handle:
+        for line in handle:
+            if seen_contains and seen_contains not in line:
+                continue
+            row = json.loads(line)
+            metadata = row.get("metadata") or {}
+            if args.subject:
+                haystack = " ".join(str(metadata.get(field) or "") for field in (
+                    "official_category_name", "normalized_subject_name", "official_subject_name"))
+                if args.subject not in haystack:
+                    continue
+            if args.number is not None and row.get("question_number") != args.number:
+                continue
+            if seen_contains and seen_contains not in (row.get("stem") or ""):
+                continue
+            # `--with-figures` exists because the whole purpose of this agent is the pictures:
+            # a question with no figure has no crop worth showing a vision model, and filtering
+            # here is cheaper than loading 199 MB of questions the agent is not going to ask about.
+            if args.with_figures and not (row.get("image_refs") or []):
+                continue
+            hits.append({
+                "candidate_key": row.get("candidate_key"),
+                "question_number": row.get("question_number"),
+                "category": metadata.get("official_category_name"),
+                "subject": metadata.get("normalized_subject_name"),
+                "year": metadata.get("year"),
+                "exam_ordinal": metadata.get("exam_ordinal"),
+                "figures": len(row.get("image_refs") or []),
+                "figure_clipped": [
+                    {"label": ref.get("label"), "page": ref.get("page"),
+                     "clipped": ref.get("clipped"), "ownership_note": ref.get("ownership_note")}
+                    for ref in (row.get("image_refs") or [])
+                ],
+                "stem": (row.get("stem") or "")[:80],
+            })
+            if len(hits) >= args.limit:
+                break
+    return {"count": len(hits), "questions": hits}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def common(p):
+        p.add_argument("--key", required=True, help="candidate_key of the question")
+        p.add_argument("--json", action="store_true", help="print JSON (always on; kept for symmetry)")
+
+    p_question = sub.add_parser("question", help="the complete question")
+    common(p_question)
+    p_question.add_argument("--with-paper", action="store_true", help="also list the rest of the paper")
+    p_question.set_defaults(func=do_question)
+
+    p_find = sub.add_parser("find", help="find questions by subject / number / text")
+    p_find.add_argument("--subject", default="", help="substring of the category or subject name")
+    p_find.add_argument("--number", type=int, default=None, help="question number")
+    p_find.add_argument("--contains", default="", help="substring of the stem")
+    p_find.add_argument("--with-figures", action="store_true", help="only questions that have a figure")
+    p_find.add_argument("--limit", type=int, default=20)
+    p_find.set_defaults(func=do_find)
+
+    p_crop = sub.add_parser("crop", help="crop this question's band off the page")
+    common(p_crop)
+    p_crop.add_argument("--out")
+    p_crop.add_argument("--dpi", type=int, default=150)
+    p_crop.set_defaults(func=do_crop)
+
+    p_read = sub.add_parser("read", help="show the model the page and collect its reading")
+    common(p_read)
+    p_read.add_argument("--engine", default=DEFAULT_ENGINE)
+    p_read.add_argument("--out")
+    p_read.add_argument("--dpi", type=int, default=150)
+    p_read.add_argument("--max-tokens", type=int, default=2000)
+    p_read.add_argument("--timeout", type=int, default=300)
+    p_read.add_argument("--no-image", action="store_true", help="negative control: same prompt, no picture")
+    p_read.set_defaults(func=do_read)
+
+    p_feedback = sub.add_parser("feedback", help="append a judgement to the learning store")
+    common(p_feedback)
+    p_feedback.add_argument("--rating", required=True, choices=("up", "down"))
+    p_feedback.add_argument("--reason", default="")
+    p_feedback.add_argument("--audit-scope", default="question",
+                            choices=("question", "group", "visual", "answer"))
+    p_feedback.add_argument("--engine", default="")
+    p_feedback.add_argument("--source", default="agent", choices=("agent", "human"))
+    p_feedback.set_defaults(func=do_feedback)
+
+    args = parser.parse_args()
+    try:
+        result = args.func(args)
+    except QuestionNotFound as error:
+        # The CLI's contract is a JSON envelope on stdout plus a non-zero exit — the same shape
+        # `_die` produces. Catching here (not inside `load_question`) is what lets the UI reuse
+        # `load_question` without `SystemExit` taking down a request thread.
+        _die(str(error))
+    if result:
+        json.dump(result, sys.stdout, ensure_ascii=False, indent=1)
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
