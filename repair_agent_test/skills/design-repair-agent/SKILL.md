@@ -657,13 +657,14 @@ occamy-6bit／47 題／90 欄位：
 
 | # | 指示 | 助理原本的狀態 | 現行 |
 |---|---|---|---|
-| **1** | **Agent 底層用 Pi**，不是那份 Python | 助理錯誤地想去救 `qbr/scripts/repair_agent.py` | ❌ **錯的已被推翻**：那份**零 caller ＋ 一跑就 crash**（`args.principles_for_prompt`）。施工圖見 [`references/pi-agent-design.md`](references/pi-agent-design.md) |
-| **2** | **放寬 G4** | 只診斷，未改 | **要做**：`validate_question_bank_package.py:319` 那一行（`review_status != "accepted"`）＋ 新狀態 `agent_verified` |
-| **3** | **互動 UI**（不是靜態頁） | 只做了**靜態頁**（`grep fetch`=0，判讀只存 localStorage） | **要做**：見 §9.5.1 的規格 |
-| **4** | **教我用**（啟動／管理／使用） | 無 | **要做** |
-| **5** | **模型：視覺是前提** | 助理把「哪套 MoE 好」當成二選一 | **更正**：三個候選**都有 vision tower**；批次稽核**沒送圖**才是bug。→ 主力＋第二意見（§9.5.7） |
+| **1** | **Agent 底層用 Pi**，不是那份 Python | 助理錯誤地想去救 `qbr/scripts/repair_agent.py` | ✅ **已完成**。舊的是**零 caller ＋ 一跑就 crash**。新的是 Pi SDK 0.87.1（版號鎖進 `package.json`），建在 `repair_agent_test/agent/`；分支 `agent/repair-agent-pi-sdk-20260928` 已 push（3 commits）。施工圖 [`references/pi-agent-design.md`](references/pi-agent-design.md) |
+| **2** | **放寬 G4** | 只診斷，未改 | ✅ **已完成**：`agent_verified` 上線（`package.py`）、validator 接受它但**獨立 warning**、`golden_path.classify_validator_issues` 可測。分支 `agent/agent-verified-gate-20260928`（`8bedd52`）。**9 個新測試，負對照證明會失敗** |
+| **3** | **互動 UI**（不是靜態頁） | 只做了**靜態頁**（`grep fetch`=0） | ✅ **已完成**：`agent/ui/server.py` ＋ `index.html`，**全走 `fetch`**。實測：一次一題、整題完整、右側 PDF、`/crop`、判讀寫檔、404 契約。**`question_page` 全庫 79,090 題一筆都沒有**（A1 未合併）→ PDF 開第 1 頁 |
+| **4** | **教我用**（啟動／管理／使用） | 無 | ✅ **已完成**：[`agent/README.md`](../../../agent/README.md)（啟動、查題、寫判讀、讀教訓、**誠實限制清單**）。**檔內每個指令都實跑驗証過** |
+| **5** | **模型：視覺是前提** | 助理把「哪套 MoE 好」當成二選一 | **更正**：三個候選**都有 vision tower**；批次稽核**沒送圖**才是 bug。→ 主力＋第二意見（§9.5.7） |
 | **6** | **分群：加第三種不同種類的線索** | 提案 | **D1 授權自行決定** → 做（3 筆漏掉的全是假斜體，證明線索必須不同種類） |
-| **7** | **判讀寫檔（B 案）** | 只存瀏覽器 | **複用 `ai_feedback`**（writer 已存在但**從未寫過一筆**） |
+| **7** | **判讀寫檔（B 案）** | 只存瀏覽器 | ✅ **已接上**：`bridge.do_feedback` 寫 `store/agent_feedback.jsonl`（欄位照 `review_state.append_ai_feedback`）。**設計者的話與 agent 的判讀走同一條流**（`source` 欄分「誰說的」）。**agent 讀得回來**（`prior_judgements`） |
+| **8 🆕** | **「我只看新形態搞不定的」** | — | **已量化**（Q33）：選項是圖、文字 diff 為空、答案是專業知識 → **同一模型兩次跑給相反結論**。這一類**必須人看**，agent 要**標出來**而不是自己判 |
 
 **「回答 3 之後要做的」→ 現在全部變成「要做」**：
 1. **互動 UI**：每題獨立、**整題完整讀取**、右邊 PDF。
