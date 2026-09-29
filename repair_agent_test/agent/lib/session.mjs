@@ -19,10 +19,16 @@ const run = promisify(execFile);
 
 /**
  * The brain. A separate decision from the eyes: `read_page` is always a local vision engine, while
- * this is whichever model does the planning. Default is the local 35B MoE so the agent is
- * self-contained; `REPAIR_AGENT_MODEL` switches it.
+ * this is whichever model does the planning. It is the **same engine** as the eyes since the
+ * designer's ruling of 2026-09-29（「1 換 occamy（腦與眼同一顆）」）, because 6-bit occamy read the
+ * paper better than 4-bit ornith on the measured sample (field-exact 53.3% vs 47.8%, ceiling 78.4%
+ * vs 64.9% — `a2.1-vision-ceiling.md`).
+ *
+ * The provider name is `BRAIN_ENGINE` from `identity.mjs` and the model id is the one `engines.py`
+ * records for that engine; `test_agent.mjs` compares the two, so this line cannot drift into
+ * naming a model the pipeline does not serve. `REPAIR_AGENT_MODEL` switches it wholesale.
  */
-export const BRAIN = process.env.REPAIR_AGENT_MODEL || "ornith-mtplx/ornith-1.5-mtplx-35b";
+export const BRAIN = process.env.REPAIR_AGENT_MODEL || "occamy-6bit/occamy-1.0-6bit-xl-mlx";
 
 const PYTHON_CMD = process.env.QBR_PYTHON || `${PATHS.CATALOG}/qbr/.venv/bin/python`;
 
@@ -40,7 +46,11 @@ from qbr import engines
 out = {}
 for name, record in engines.endpoints().items():
     out[name] = {"url": record["url"], "model": record["name"], "key": record.get("key", ""),
-                 "reasoning": bool(record.get("reasoning") or record.get("thinking"))}
+                 "reasoning": bool(record.get("reasoning") or record.get("thinking")),
+                 # The deployment's own limits, when engines.py knows them: asking for more than a
+                 # server accepts is a 400 with no body (measured on occamy, see engines.py).
+                 "context_window": record.get("context_window"),
+                 "max_output_tokens": record.get("max_output_tokens")}
 print(json.dumps(out))
 `;
   const { stdout } = await run(PYTHON_CMD, ["-c", script], { timeout: 60_000 });
@@ -48,19 +58,34 @@ print(json.dumps(out))
 }
 
 function providerConfig(name, record) {
+  // The compat block describes the **model**, not the provider: Pi reads it as `model.compat`
+  // (`getCompat(model)` in the SDK), and a provider-level copy is not merged into the model record.
+  // Measured 2026-09-29: declared only on the provider, `supportsDeveloperRole: false` had no
+  // effect and every run still sent `role: "developer"` → 500 from the local vision server.
+  const compat = {
+    supportsStore: false,
+    maxTokensField: "max_tokens",
+    // **Pi defaults to the OpenAI `developer` role for the system prompt when the model is
+    // declared as reasoning, and the local vision server rejects it.** Measured 2026-09-29: with
+    // occamy as the brain, every agent run died with `500 status code (no body)`; the server log
+    // was `Unexpected message role` from the Jinja chat template
+    // (`transformers/utils/chat_template_utils.py:479`). A hand-sent request reproduces it:
+    // `role: "developer"` → 500 from the occamy engine, 200 from the MTPLX one (MTPLX accepts it,
+    // mlx_vlm does not); the ports are in `engines.py` and are deliberately not repeated here.
+    // The role is a per-server fact, not a preference, so it is pinned here rather than left to
+    // Pi's default: `instructionRole = reasoning && supportsDeveloperRole ? "developer" : "system"`.
+    supportsDeveloperRole: false,
+    // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
+    // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
+    ...(record.reasoning ? {} : { thinkingFormat: "qwen-chat-template" }),
+  };
   return {
     name,
     baseUrl: record.url.replace(/\/$/, "") + "/v1",
     api: "openai-completions",
     apiKey: record.key || "local-no-auth",
     authHeader: Boolean(record.key),
-    compat: {
-      supportsStore: false,
-      maxTokensField: "max_tokens",
-      // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
-      // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
-      ...(record.reasoning ? {} : { thinkingFormat: "qwen-chat-template" }),
-    },
+    compat,
     models: [
       {
         id: record.model,
@@ -68,8 +93,12 @@ function providerConfig(name, record) {
         reasoning: record.reasoning,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 32768,
+        // From `engines.py` when the deployment declares them; otherwise the previous constants.
+        // Asking a server for more than it can hold is a 400 with no body, so the numbers travel
+        // with the engine instead of being assumed here.
+        contextWindow: record.context_window || 262144,
+        maxTokens: record.max_output_tokens || 32768,
+        compat,
       },
     ],
   };

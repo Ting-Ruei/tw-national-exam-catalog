@@ -47,6 +47,7 @@ if os.path.join(HERE, "lib") not in sys.path:
     sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import platform_view  # noqa: E402
+import queue_index  # noqa: E402
 
 # `image_refs[].path` is relative to the **live queue root** — `review-ui/crops/...` — which is the
 # parent of the directory holding `candidates.jsonl`, not that directory itself. Measured: joining
@@ -58,6 +59,44 @@ STORE = os.path.join(SANDBOX, "agent", "store", "agent_feedback.jsonl")
 # `REPAIR_AGENT_STORE` redirects the whole sandbox store, for tests. Nothing else should set it.
 STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.dirname(STORE)
 DEFAULT_ENGINE = "occamy-6bit"
+
+# --- the byte-offset index ---------------------------------------------------------------
+#
+# Measured before it was written (2026-09-29, this laptop's queue): `/api/question` 0.86 s and
+# `/api/browse` 3.38 s. `lib/queue_index.py` records where the time went — decoding 708 MB of
+# findings into `str` once per request, and one 15 KB file open per candidate row in the browse
+# list. The index answers both from offsets instead.
+#
+# It is an accelerator, never an authority: any key it does not hold falls back to the streaming
+# read below, so a partial tail line or a reshaped record costs time and cannot change an answer.
+# `REPAIR_AGENT_NO_INDEX=1` turns it off, and `test_agent.mjs` compares the two paths on the real
+# files rather than trusting that claim.
+USE_INDEX = os.environ.get("REPAIR_AGENT_NO_INDEX") not in ("1", "true")
+_INDEXED: dict[tuple, queue_index.Index] = {}
+
+
+def indexed(path: str, field: str = "candidate_key",
+            limit: int | None = queue_index.PREFIX_BYTES) -> queue_index.Index | None:
+    """The index for `path`, held in memory and rebuilt when the file moves under it.
+
+    The in-memory memo is the point, not a nicety: re-reading the cache file would parse a 7 MB
+    JSON document on every request, which measured at 0.06 s — more than the lookup it saves. The
+    guard is checked on every call (`stat`, microseconds), so a rewritten queue is noticed rather
+    than served from a stale copy.
+    """
+    if not USE_INDEX or not os.path.exists(path):
+        return None
+    memo = (path, field, limit)
+    index = _INDEXED.get(memo)
+    try:
+        if index is not None and index.guard == queue_index.guard_of(path):
+            return index
+        index = queue_index.load_or_build(path, STORE_DIR, field, limit)
+    except OSError:
+        return None  # an unwritable cache directory is not a reason to answer slowly *or* wrongly
+    _INDEXED[memo] = index
+    return index
+
 
 # The three dispositions the designer can write, and the agent can write.
 #
@@ -94,10 +133,22 @@ def _die(message: str, code: int = 1):
 
 
 def load_question(key: str) -> dict:
-    """One candidate by key. Streams the JSONL: 199 MB does not belong in memory."""
+    """One candidate by key. Streams the JSONL: 199 MB does not belong in memory.
+
+    The streaming read stays, and it is the fallback for every key the byte-offset index does not
+    hold — including a `canonical_question_key` (the index is built on `candidate_key`), a line
+    whose key sits past the indexed prefix, and a key written into the file since the index was
+    cached. Falling back is how "the index is not the authority" is true in code rather than in a
+    comment.
+    """
     if not os.path.exists(CANDIDATES):
         raise QuestionNotFound(
             "candidates.jsonl not found at %s; run scripts/sync_from_station.sh first" % CANDIDATES)
+    index = indexed(CANDIDATES)
+    if index is not None:
+        for row in index.rows(key):
+            if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
+                return row
     with open(CANDIDATES, encoding="utf-8") as handle:
         for line in handle:
             if key not in line:
@@ -120,6 +171,17 @@ def questions_of_paper(question: dict, limit: int = 0) -> list:
     if not paper:
         return []
     found = []
+    index = indexed(CANDIDATES, "question_pdf_relative", limit=None)
+    if index is not None and index.unkeyed == 0:
+        # `unkeyed == 0` is required, not cosmetic: the paper index is the one that can *drop a
+        # question* rather than merely be slow, and a line it could not read is a question the paper
+        # view would not show. If even one line is unreadable the whole index is abandoned for this
+        # call and the streaming read below is used instead.
+        found = [row for row in index.rows(paper)
+                 if (row.get("metadata") or {}).get("question_pdf_relative") == paper]
+        found.sort(key=lambda r: (r.get("question_number") or 0,
+                                  r.get("question_number_occurrence") or 0))
+        return found[:limit] if limit else found
     with open(CANDIDATES, encoding="utf-8") as handle:
         for line in handle:
             if paper not in line:
@@ -156,6 +218,31 @@ def human_events(key: str) -> list:
     return out
 
 
+def human_event_keys() -> set:
+    """Every key that carries a human review event — one read for a whole paper.
+
+    `human_events(key)` is the right call for one question (14 MB, 20 ms). The paper view asked it
+    for every question in the paper and paid the file read again each time, measured 2026-09-29 at
+    1.86 s for `/api/queue`. The membership test is built from **both** key fields, exactly as
+    `human_events` matches them, so "touched" means the same thing either way.
+    """
+    path = os.path.join(QUEUE, "question_review_events.jsonl")
+    if not os.path.exists(path):
+        return set()
+    keys = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key"):
+                keys.add(row["candidate_key"])
+            if row.get("canonical_question_key"):
+                keys.add(row["canonical_question_key"])
+    return keys
+
+
 # The pipeline's own AI-findings stream — 707 MB, 108,181 lines, written by the repair loop.
 #
 # This is the file that actually holds **what the model was asked and what it produced**: each record
@@ -181,6 +268,16 @@ def ai_findings(key: str, limit: int = 20) -> list:
     if not key or not os.path.exists(AI_FINDINGS):
         return []
     out = []
+    index = indexed(AI_FINDINGS)
+    if index is not None:
+        for row in index.rows(key):
+            if row.get("candidate_key") != key:
+                continue
+            out.append(row)
+            if len(out) >= limit:
+                break
+        if out or index.has(key):
+            return out
     with open(AI_FINDINGS, encoding="utf-8") as handle:
         for line in handle:
             if key not in line:
@@ -756,6 +853,10 @@ def do_browse(args) -> dict:
         _die("candidates.jsonl not found at %s; run scripts/sync_from_station.sh first" % CANDIDATES)
 
     judgments = {}
+    # The designer's own guidance, read **once**. Measured 2026-09-29: calling `prior_judgements()`
+    # inside the row loop below opened this file once per candidate — 79,090 opens, 3.38 s, for a
+    # 15 KB file. Same rows, read once, in the same file order.
+    priors = {}
     if os.path.exists(STORE):
         with open(STORE, encoding="utf-8") as handle:
             for line in handle:
@@ -766,6 +867,7 @@ def do_browse(args) -> dict:
                 key = row.get("candidate_key")
                 if key:
                     judgments[key] = row.get("rating")
+                    priors.setdefault(key, []).append(row)
 
     # The designer's own sentences, keyed for the list. His friction, verbatim: 「我原本在 v2
     # 審核過的大量題目也沒有紀錄，我想要針對 block 的題目跟你進行對話暫時也做不到」. A list that
@@ -815,7 +917,7 @@ def do_browse(args) -> dict:
                 # The person's own words. Shown in the list so he can pick by what he wrote, and
                 # so the agent is looking at the same sentence the reviewer saw.
                 "notes": (dispute_notes.get(key) or {}).get("notes", ""),
-                "prior_judgements": prior_judgements(key) if key else [],
+                "prior_judgements": priors.get(key) or [],
             }
             by_category.setdefault(category, []).append(entry)
 

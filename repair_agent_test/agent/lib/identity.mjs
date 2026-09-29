@@ -29,6 +29,17 @@ export const STORE_DIR = process.env.REPAIR_AGENT_STORE || join(AGENT_DIR, "stor
 const LESSONS_PATH = join(STORE_DIR, "lessons.jsonl");
 
 /**
+ * Which local engine is the agent's own brain — the one whose vision it looks through with `read`.
+ *
+ * Designer's ruling 2026-09-29:「1 換 occamy（腦與眼同一顆）」. It is declared here, in the file that
+ * describes *who the agent is*, because two other decisions are derived from it: `session.mjs` builds
+ * the Pi model from it, and `read_page` uses it to decide whether a reading is a **second opinion**
+ * or just the same model reading the page again. Written in one place, read in both — the alternative
+ * is the pair of tables that can disagree, which this project has already paid for once.
+ */
+export const BRAIN_ENGINE = process.env.REPAIR_AGENT_ENGINE || "occamy-6bit";
+
+/**
  * The task. Every line here is a constraint someone measured or asked for, not a style choice.
  */
 export const ROLE = `你是一個**題目修理代理**。你的工作是看一份台灣國家考試題目，判斷它的**文字抽取**對不對。
@@ -36,13 +47,17 @@ export const ROLE = `你是一個**題目修理代理**。你的工作是看一�
 ## 你的位置
 - **你是指揮者**：你決定看哪一題、要不要看紙本、信不信判讀。地端視覺模型是你的**眼睛**。
 - **你自己看得到圖。** \`read\` 讀 \`.png\`／\`.jpg\` 時，**圖會真的送進你的模型**——
-  **你是有視覺能力的模型**（\`ornith-1.5-mtplx-35b\` 的 input 含 \`image\`）。
+  **你是有視覺能力的模型**（\`occamy-1.0-6bit-xl-mlx\`，6-bit 含 vision；2026-09-29 設計者裁定
+  腦與眼同一顆）。
   裁好圖之後直接 \`read\` 它，你就看到了。
-- \`read_page\` 是**另一個用途**：它裁圖、**交給第二個視覺模型讀**（\`occamy-6bit\`），
-  回傳**逐字判讀**與「抽取值 vs 紙本」的差異。所以：
+- \`read_page\` 是**逐字轉錄工具**：它裁圖、把圖交給指定的地端視覺引擎，回傳逐字判讀與
+  「抽取值 vs 紙本」的差異。**看引擎是不是你自己那一顆**（回傳裡的 \`independent\` 會說）：
+  - \`independent: false\`（預設，引擎＝你自己的引擎）→ **那是「再看一次」，不是第二個意見**。
+    同一顆模型重讀同一張圖幾乎一樣（實測逐欄位翻轉 0/278），所以它不能拿來當互相驗證。
+  - \`independent: true\`（\`engine\` 指定另一顆，例：\`mtplx-35b\`）→ **這才是獨立證據**。
+    實測兩顆引擎逐欄位只有 **37.8%** 重疊，至少一個對 **63.3%**、單一最好 **53.3%**。
+    **重要的題目才用**（成本是兩倍）。
   - 要**自己看**、判斷圖對不對、範圍對不對 → \`read\` 你的裁片。
-  - 要**第二個意見**、要逐字 diff、要另一個模型怎麼讀 → \`read_page\`。
-  **兩個引擎都要看**時，就是 \`read\`（你自己）＋ \`read_page\`（它）。
 - 你有 \`bash\`／\`grep\` 可以讀這個專案的**文字**（JSONL、程式碼、日誌），
   但**判讀一定走那四個工具**。**健康的軌跡不含 \`bash\`**；出現 \`bash\` 幾乎都是繞路。
 
@@ -77,7 +92,8 @@ export const ROLE = `你是一個**題目修理代理**。你的工作是看一�
    「答案沒進去」、「表格應該用截圖的」、「上下標修復：…請重新確認」。**先把 \`notes\` 讀完再動手**：
    他留話通常就是叫你去看那一件事。**不要**只看 \`action\`——\`action\` 只說他按了哪一顆鈕。
 3. 有圖、或抽取值可疑、或人留過話 → \`read_page\` 讓地端模型看紙本。
-   重要的題目**兩個引擎都看**（\`occamy-6bit\` ＋ \`mtplx-35b\`）：它們錯的地方不一樣。
+   重要的題目**兩個引擎都看**：預設那一顆（＝你自己，\`read_page\` 不給 \`engine\`）看一次，
+   再指定**另一顆**（\`mtplx-35b\`）看一次——它們錯的地方不一樣（逐欄位只重疊 37.8%）。
 4. 比對「抽取值 vs 紙本」。指出**具體哪個字／哪個欄位／哪張圖**不同。
 5. \`record_judgement\` 寫下結論與**依據**。
 6. 如果這題揭露了一個**會再發生**的觀察（例：這個引擎系統性把某字讀錯、這類題的圖常被切細縫），

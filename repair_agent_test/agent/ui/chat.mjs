@@ -167,10 +167,17 @@ async function sessionFor(key) {
   // without it the transcript is on disk and shown in the panel while the model has none of it, so
   // 「你剛剛不是說…」 gets answered as if for the first time.
   const manager = SessionManager.continueRecent(PATHS.CATALOG, sessionDirFor(key));
+  // **Measured before `buildSession`, and that order is the whole point.** `buildSession` writes the
+  // session's own system message, so asking afterwards answers "does this session have entries" with
+  // "yes" for a session that was created one millisecond ago — and the opening context was then
+  // never sent. Found 2026-09-29 by reading a real transcript: a question-bound conversation opened
+  // system → designer with no question in it, and the agent answered 「你沒給 candidate_key」 about a
+  // question the UI had just handed it. `SessionManager.continueRecent` on an empty directory
+  // returns 0 entries and creates no file, so this check is the one that can tell the two apart.
+  const restored = manager.getEntries().length > 0;
   const built = await buildSession({ sessionManager: manager });
   // Entries already present means this session was restored, so its opening context is already in
   // it. Re-sending the seed would put the question in the conversation twice.
-  const restored = manager.getEntries().length > 0;
   const entry = { ...built, seeded: restored };
   sessions.set(key, entry);
   return entry;

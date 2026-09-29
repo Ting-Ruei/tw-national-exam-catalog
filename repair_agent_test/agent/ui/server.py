@@ -523,13 +523,14 @@ class Handler(BaseHTTPRequestHandler):
         question = bridge.load_question(key)
         limit = int((query.get("limit") or ["0"])[0] or 0)
         rows = []
+        touched = bridge.human_event_keys()
         for peer in bridge.questions_of_paper(question, limit=limit):
             rows.append({
                 "candidate_key": peer.get("candidate_key"),
                 "question_number": peer.get("question_number"),
                 "quality_status": peer.get("quality_status"),
                 "figures": len(peer.get("image_refs") or []),
-                "human_touched": bool(bridge.human_events(peer.get("candidate_key") or "")),
+                "human_touched": (peer.get("candidate_key") or "") in touched,
             })
         self._json({"paper": question.get("candidate_key"), "questions": rows})
 

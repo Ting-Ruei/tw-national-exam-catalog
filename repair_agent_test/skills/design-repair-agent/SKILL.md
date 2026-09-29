@@ -814,9 +814,74 @@ occamy-6bit／47 題／90 欄位：
 **紀律**：**先量**（`/api/question` 與一次對話的實際秒數），**再改**；**每個優化都要有負對照**
 （證明優化前後讀到**同一份資料**，不是少讀）。
 
+#### 9.9 執行結果（2026-09-29 實作輪；每一項都附量到的數字）
+
+**#1 換 occamy — 已完成，含兩個只有實跑才會看到的坑。**
+
+- `agent/lib/session.mjs::BRAIN` → `occamy-6bit/occamy-1.0-6bit-xl-mlx`；`identity.mjs` 新增
+  `BRAIN_ENGINE`（同一顆），`ROLE` 文字改寫。`test_agent.mjs` 比對 `BRAIN` 與 `engines.py`
+  的 `name`，兩個常數不可能各說各話。
+- **坑 A：`role: "developer"`。** Pi 對 reasoning 模型把系統提示詞用 developer 送；mlx_vlm 的
+  Jinja 模板只認 system/user/assistant/tool → 每一輪 `500 status code (no body)`，引擎端
+  `Unexpected message role`（`transformers/utils/chat_template_utils.py:479`）。手測：
+  developer → 18130 **500**、18120 **200**（MTPLX 收，所以舊的腦把坑蓋住）。
+  **修法要掛在 `model.compat`**：provider 層的 compat 不會被 merge 進 model 記錄
+  （`getCompat(model)` 讀 `model.compat`），第一次只改 provider 層時行為完全不變。
+- **坑 B：`max_tokens` 是共用的 32768。** occamy 以 `MAX_KV_SIZE=$CTX_MLX`（預設 65536，
+  `~/models/occamy/bin/occamy:91`）起，`39496 prompt + 32768` 超過 → `400 {"detail":
+  "Request needs 72264 context tokens … but MAX_KV_SIZE is 65536."}`，客戶端只看到沒有 body 的
+  400。`engines.py` 的 occamy 記錄補上 `context_window: 65536`／`max_output_tokens: 16384`，
+  `session.mjs` 直接讀，不再有第二個常數。
+
+**#1 的殘留（`read_page` 第二意見）— 已定義。** 由「**實際回答的引擎**是否等於 brain」決定，
+回傳明寫 `independent` 與 `independence_note`：同顆＝再看一次（不是第二意見），
+指定 `mtplx-35b` 才是異質證據（逐欄位只重疊 37.8%）。`test_agent.mjs` 真的呼叫工具驗這條。
+
+**對話框 seed 缺陷（實缺陷，順手修）。** `sessionFor()` 在 `buildSession()` **之後**才判
+`restored = manager.getEntries().length > 0`，而 `buildSession` 自己會寫一條 session 訊息
+⇒ **每一條新綁題對話都被當成續談**，題目 seed 從未送出（實測 session 檔是 `system → user`，
+模型回「你沒給 candidate_key」）。已把判斷搬到前面，並新增測試驅動真的 `ui/chat.mjs`
+數 seed 出現次數（重啟後仍為 1）。
+
+**6b 沙盒效能 — 已量、已改、有負對照。** 新增 `lib/queue_index.py`（byte-offset JSONL 索引，
+cache 在 `store/index/`，失效條件 `(size, mtime_ns, ino)`，未命中一律回退串流）：
+
+| 端點 | 改前 | 改後 |
+|---|---|---|
+| `/api/question` | 0.86 s | **0.024 s** |
+| `/api/queue` | 1.86 s | **0.065 s** |
+| `/api/browse`（map） | 3.38 s | **0.94 s** |
+| `/api/browse?category=藥師&limit=50` | 3.43 s | **0.54 s** |
+
+等價性：`before/after` 的 browse map、藥師 50 列、question payload 逐欄比對全同；
+`questions_of_paper` 索引 vs `REPAIR_AGENT_NO_INDEX=1` 串流 `same rows deep: True`。
+剩下的 0.94 s 是 `do_browse` 仍要 `json.loads` 79,090 列，**刻意不動**。
+
+**#4 藥師(一) 99 題清單 — 已算出，稽核未跑。** 筆電 queue 上 334 題 disputed／99 題有 notes，
+清單 `/tmp/agent_perf/pharmacist1_notes_keys.txt`（每行一 key）。
+
+**#5 五支 PR — 仍然開不了（無 token），而且 base 要用對。** `gh auth status` → token invalid、
+keychain 與 env 都沒有。**比較基準是 `agent/review-ui-server-split-20260923`（PR #5 的來源分支），
+不是 `main`**：5 支都含它為祖先、彼此不互相包含，相對 `main` 各是 96–104 commits／150–244 檔，
+相對 split 分支只有 7 個（`repair-agent-pi-sdk` 是 15 個）。
+`https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-server-split-20260923...<branch>`
+
+**站上 findings 的 200 行差異＝不要推。** 筆電多出的 200 行全是
+`model: incoai/Qwen3.8-27B-Splash`、`endpoint http://127.0.0.1:8088`（該端點 down）的
+`error: "request failed"`、`verdict: null`，5 題 × 40 次。推上去只會污染站上 findings。
+
 #### 9.9 之後仍**待裁決**
 
-1. **換同顆後 `read_page` 的「第二意見」怎麼重新定義？**（#1 的殘留）
+1. ~~換同顆後 `read_page` 的「第二意見」怎麼重新定義？~~ → 已定義（見上），如不同意再改。
 2. **v2 要不要顯示 `prompt_system`／`prompt_user`？**（沙盒已補，站上 v2 未補）
-3. **沙盒延遲要降到多少才算「可以繼續測試」？**
-4. **五支 PR 未開**（`gh` token 無效 → GitHub 網頁）：`agent/fix-option-alphabet-union-20260927`、`agent/engine-endpoints-runtime-20260927`、`agent/export-question-page-20260927`、`agent/agent-verified-gate-20260928`、`agent/repair-agent-pi-sdk-20260928`
+3. ~~沙盒延遲要降到多少才算「可以繼續測試」？~~ → 已降到 0.024–0.94 s；剩下 0.94 s 那一項
+   要不要再動，等你一句話（動了就會多出第二份計數實作）。
+4. **五支 PR 未開**（無可用 token → GitHub 網頁）；**base 用 `agent/review-ui-server-split-20260923`**。
+5. 🆕 **`engines.py` 沒有「預設腦」這種東西**：`#1` 說要改「`qbr/src/qbr/engines.py` 預設」，
+   但該檔只有引擎表。實際的預設在 `qbr/src/qbr/vision.py:80` 與 `qbr/src/qbr/reflow.py:62` 的
+   `_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]`（另有
+   `qbr/scripts/scan_category_principles.py:124 default="mtplx-35b"`、
+   `qbr/scripts/ask_about_blocks.py:204`）。**這是主線行為變更（會改變抽取用哪顆引擎），
+   要你點頭才動。**
+6. 🆕 **occamy 的 KV 要不要開大？** 現在 65536（agent 的提示詞就吃掉 ~39.5k）；
+   `CTX_MLX=131072 occamy restart` 可調，代價是記憶體。客戶端已按 65536 保守設定。

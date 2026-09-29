@@ -1269,3 +1269,250 @@ test("the designer's v2 decisions and his own words are shown on the question", 
   const withNote = view.human_events.find((row) => (row.notes || "").trim());
   assert.ok(withNote, "and at least one carries the designer's sentence");
 });
+
+/**
+ * A question-bound conversation really receives the question — proved from the transcript, not the source.
+ *
+ * Why this test exists (2026-09-29): `sessionFor()` decided "this session was restored" **after**
+ * calling `buildSession()`, and `buildSession()` writes the session's system message, so the answer
+ * was always "yes". The seed was therefore never sent to any conversation, new or old. The source
+ * checks above passed the whole time — they looked for `getEntries().length > 0` and `seeded:
+ * restored`, which were both present and both useless in that order.
+ *
+ * What it looked like from the designer's side (verbatim answer from a real turn, question key
+ * supplied by the UI): 「你只說「這一題」，卻沒給 candidate_key，我無法判斷是哪一道」. Reading the
+ * session file showed `system → user` with no question in between.
+ *
+ * So this drives the real child process and reads what Pi actually recorded. Negative control: on
+ * the old order the seed is absent, and the assertion fails. Second half: a restart must **continue**
+ * the conversation without seeding it a second time, which is the case that protects the
+ * `restored` half of the same expression.
+ */
+test("a fresh bound conversation is seeded with the question, and a restart is not seeded twice", async () => {
+  const { spawn } = await import("node:child_process");
+  const { readdirSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const store = mkdtempSync(join(tmpdir(), "chat-seed-"));
+  // `fileURLToPath`, not `.pathname`: this repository lives under a path with a space in it, and
+  // `.pathname` hands back `AI%20workspace` — the child then fails to resolve its own entry point
+  // and the test waits for a turn that can never arrive. Measured 2026-09-29: that cost the suite
+  // 180 s of dead waiting, which is the failure the exit check below now makes loud instead of slow.
+  const chat = fileURLToPath(new URL("./ui/chat.mjs", import.meta.url));
+  const key = "moex:115090:311:0704:1:question:q001";
+  const marker = "設計者正在跟你一起看這一題";
+
+  const seedsInStore = () => {
+    const dir = join(store, "chat-sessions");
+    if (!existsSync(dir)) return 0;
+    let n = 0;
+    for (const sub of readdirSync(dir)) {
+      for (const file of readdirSync(join(dir, sub))) {
+        n += readFileSync(join(dir, sub, file), "utf8").split(marker).length - 1;
+      }
+    }
+    return n;
+  };
+
+  // The turn is done when the harness's own transcript holds the designer's sentence: that line is
+  // written before the model is asked, so waiting on it does not wait for a full answer.
+  const turnsInStore = () => {
+    const file = join(store, "chat.jsonl");
+    if (!existsSync(file)) return 0;
+    return readFileSync(file, "utf8").split("\n")
+      .filter((line) => line.includes('"role":"designer"') || line.includes('"role": "designer"')).length;
+  };
+
+  const askOnce = async (id, wantTurns) => {
+    const child = spawn("node", [chat],
+      { cwd: PATHS.CATALOG, env: { ...process.env, REPAIR_AGENT_STORE: store },
+        stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.stdin.write(JSON.stringify({ id, op: "ask", key, text: "用一句話說明這一題在做什麼。" }) + "\n");
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline && turnsInStore() < wantTurns) {
+      if (child.exitCode !== null) break;  // a dead child cannot record a turn; say so at once
+      await new Promise((done) => setTimeout(done, 500));
+    }
+    child.kill("SIGKILL");
+    return { stderr, turns: turnsInStore() };
+  };
+
+  try {
+    const first = await askOnce("seed-1", 1);
+    assert.ok(first.turns >= 1, `the turn must be recorded (stderr: ${first.stderr.slice(0, 300)})`);
+    assert.equal(seedsInStore(), 1,
+      `the question must reach the model's context on a fresh session (stderr: ${first.stderr.slice(0, 300)})`);
+
+    // A second process on the same store must **continue** that session. If it re-seeded, the
+    // question would be in the conversation twice and the model would read the question as new.
+    const second = await askOnce("seed-2", 2);
+    assert.ok(second.turns >= 2, `the second turn must be recorded (stderr: ${second.stderr.slice(0, 300)})`);
+    assert.equal(seedsInStore(), 1,
+      "a restart continues the same session instead of seeding the question a second time");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The brain is one engine, named once, and it is a model the pipeline actually serves.
+ *
+ * Designer's ruling 2026-09-29:「1 換 occamy（腦與眼同一顆）」. Two things follow, and each has a
+ * failure that would be silent:
+ *
+ *   1. `BRAIN` must name a provider **that `engines.py` serves**, with the model id that engine
+ *      records. A typo'd or stale id does not fail loudly at import time; it fails inside a run as
+ *      "找不到模型", and every number produced before then belongs to no model at all.
+ *   2. `BRAIN_ENGINE` (identity) and `BRAIN` (session) must agree, because `read_page` uses the
+ *      first to decide whether a reading is a second opinion while the session uses the second to
+ *      pick the model. Two constants for one fact is the pair-of-tables defect this repo keeps
+ *      tripping over.
+ */
+test("the brain names an engine the pipeline serves, and both constants agree", async () => {
+  const { BRAIN } = await import("./lib/session.mjs");
+  const { BRAIN_ENGINE } = await import("./lib/identity.mjs");
+  const [provider, id] = BRAIN.split("/");
+  assert.equal(provider, BRAIN_ENGINE,
+    "the brain's provider is BRAIN_ENGINE — one engine, declared once");
+
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { stdout } = await run(PATHS.PYTHON, ["-c", `
+import json, sys
+sys.path.insert(0, r"${PATHS.CATALOG}/qbr/src")
+from qbr import engines
+print(json.dumps({name: record["name"] for name, record in engines.endpoints().items()}))
+`], { timeout: 60_000 });
+  const endpoints = JSON.parse(stdout);
+  assert.ok(endpoints[provider], `engines.py must serve ${provider}; it serves: ${Object.keys(endpoints)}`);
+  assert.equal(id, endpoints[provider],
+    `the model id must be the one engines.py records for ${provider} (${endpoints[provider]})`);
+
+  // Negative control: the previous default. Nothing may still name the old engine as the brain.
+  assert.notEqual(BRAIN, "mtplx-35b/ornith-1.5-mtplx-35b",
+    "the 4-bit engine is no longer the brain (ruling of 2026-09-29)");
+});
+
+/**
+ * One engine is not a second opinion, and the tool says which one it is.
+ *
+ * The ruling made the brain and the default reader the same model, so the sentence this project
+ * used to print — 「兩個引擎都看」— became false for the default call. The label is derived from the
+ * engine the reading actually came from, which is why the same-engine case cannot be hardcoded:
+ * a hardcoded `independent: true` would make every re-read look like independent agreement.
+ *
+ * Negative control: ask the real tool for a reading from the *other* engine and require it to be
+ * marked independent. If the label were hardcoded false, or taken from the requested engine rather
+ * than the one that answered, this fails.
+ */
+test("a reading is only called independent when the engine differs from the brain", async () => {
+  const source = readFileSync(new URL("./lib/tools.mjs", import.meta.url), "utf8");
+  assert.match(source, /result\.independent = used !== BRAIN_ENGINE/,
+    "independence is computed against the brain's own engine");
+  assert.match(source, /const used = result\.engine \|\| engine/,
+    "and from the engine that answered, not from the one that was requested");
+  // The default must be passed through explicitly: leaving it to the bridge's own default is what
+  // lets the two defaults drift apart.
+  assert.match(source, /const engine = params\.engine \|\| BRAIN_ENGINE/,
+    "an unset engine means the brain's engine, named here");
+
+  const { toolsFor } = await import("./lib/tools.mjs");
+  const { Type } = await import("typebox");
+  const tool = toolsFor(Type).find((entry) => entry.name === "read_page");
+  assert.ok(tool, "read_page must exist");
+  const result = await tool.execute("t1", { key: "moex:115090:311:0704:1:question:q001", engine: "mtplx-35b" });
+  const payload = result?.details ?? result;
+  assert.ok(!payload.error, `the reading must succeed: ${JSON.stringify(payload).slice(0, 200)}`);
+  assert.equal(payload.independent, true,
+    "a reading from the other engine is independent evidence");
+  assert.equal(payload.engine, "mtplx-35b", "and it says which engine produced it");
+});
+
+/**
+ * The brain has to **answer**, not just be configured.
+ *
+ * Two 500/400s were found by running the agent, not by any test here (2026-09-29):
+ *
+ *   1. Pi sends the system prompt as `role: "developer"` when it takes the model for a reasoning
+ *      one, and mlx_vlm's Jinja chat template refuses any role outside system/user/assistant/tool —
+ *      `500 status code (no body)`, and on the server `Unexpected message role`. MTPLX answers the
+ *      same request with 200, so the old brain hid the defect. Declared as
+ *      `compat.supportsDeveloperRole: false`, which Pi reads from **`model.compat`** — a
+ *      provider-level copy is not merged, which is why the first attempt at this fix did nothing.
+ *   2. `max_tokens` was the same 32768 for every engine, but this deployment runs with
+ *      `MAX_KV_SIZE=65536`, so `prompt + max_tokens` overflowed and the server answered
+ *      `400 {"detail":"Request needs 72264 context tokens (39496 prompt + 32768 max generation),
+ *      but MAX_KV_SIZE is 65536."}` — again a body-less error at the client. The cap now travels
+ *      with the engine (`engines.py`).
+ *
+ * This test therefore does the thing that was missing: it builds the real session (real prompt,
+ * real tools) and makes it answer, and it holds the two facts that made it fail as negative
+ * controls against the servers themselves.
+ */
+test("the configured brain answers, and the roles/limits it fails on are still refused", async (t) => {
+  const { buildSession, BRAIN } = await import("./lib/session.mjs");
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const [provider] = BRAIN.split("/");
+  const { stdout } = await run(PATHS.PYTHON, ["-c", `
+import json, sys
+sys.path.insert(0, r"${PATHS.CATALOG}/qbr/src")
+from qbr import engines
+record = engines.endpoints()[${JSON.stringify(provider)}]
+print(json.dumps(record))
+`], { timeout: 60_000 });
+  const engine = JSON.parse(stdout);
+
+  const { session, model } = await buildSession({
+    sessionManager: SessionManager.inMemory(PATHS.CATALOG),
+    thinking: "low",
+  });
+  assert.equal(model.compat?.supportsDeveloperRole, false,
+    "Pi must send the system prompt as `system`; the local vision server rejects `developer`");
+  assert.equal(model.maxTokens, engine.max_output_tokens,
+    "the generation cap must come from the engine's own record, not from a constant here");
+
+  // Negative control 1: the server really does refuse the role Pi would otherwise send. If this
+  // ever starts passing, the flag above is no longer load-bearing and should be removed with the
+  // evidence, not kept as folklore.
+  const developer = await fetch(`${engine.url}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: engine.name, messages: [{ role: "developer", content: "hi" }], max_tokens: 8 }),
+  });
+  assert.notEqual(developer.status, 200,
+    "the engine must still reject `developer`; otherwise compat.supportsDeveloperRole is unnecessary");
+
+  // Negative control 2: the deployment refuses a request whose prompt + max_tokens exceeds its
+  // KV budget, which is why the cap is per engine. A single word is enough to overflow when the
+  // requested generation is the whole context.
+  const overflow = await fetch(`${engine.url}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: engine.name, messages: [{ role: "user", content: "hi" }],
+                           max_tokens: engine.context_window }),
+  });
+  assert.notEqual(overflow.status, 200,
+    "asking for the whole context as output must still be refused; the cap exists for this");
+
+  const answers = [];
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      const content = event.message.content;
+      answers.push(typeof content === "string" ? content
+        : (Array.isArray(content) ? content.filter((p) => p?.type === "text").map((p) => p.text).join("") : ""));
+    }
+    if (event.type === "error") t.diagnostic(`error event: ${JSON.stringify(event).slice(0, 200)}`);
+  });
+  try {
+    await session.prompt("不用動任何工具，只回答兩個字：收到");
+  } finally {
+    unsubscribe();
+  }
+  assert.ok(answers.join("").trim().length > 0,
+    `the brain must answer; it produced ${answers.length} assistant messages (${BRAIN})`);
+});

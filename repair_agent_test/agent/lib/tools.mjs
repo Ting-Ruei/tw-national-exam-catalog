@@ -11,7 +11,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { remember, lessonsFromDiff } from "./identity.mjs";
+import { remember, lessonsFromDiff, BRAIN_ENGINE } from "./identity.mjs";
 
 const run = promisify(execFile);
 
@@ -181,15 +181,19 @@ export function toolsFor(Type) {
       name: "read_page",
       label: "讓地端模型看紙本",
       description:
-        "裁這一題的紙本，**把圖送給地端視覺模型**，回傳它逐字讀到的內容，" +
-        "並列出「抽取值 vs 紙本」的差異（diff）。這是判讀的核心動作：模型看得到圖片。" +
-        "engine 預設 occamy-6bit（6-bit，保真）；mtplx-35b 是第二意見，兩者錯的地方不同。" +
+        "裁這一題的紙本，**把圖送給地端視覺引擎**，回傳它逐字讀到的內容，" +
+        "並列出「抽取值 vs 紙本」的差異（diff）。" +
+        "**不給 engine ＝ 用你自己那一顆（" + BRAIN_ENGINE + "），回傳的 independent 會是 false：" +
+        "那是「再看一次」，不是第二個意見**——同一顆模型重讀同一張圖幾乎一樣（實測逐欄位翻轉 0/278）。" +
+        "要**獨立證據**就指定另一顆（mtplx-35b）：兩顆逐欄位只重疊 37.8%，至少一個對 63.3%、" +
+        "單一最好 53.3%，所以重要的題目才值得付兩倍成本。" +
         keyRequiredMessage,
       parameters: Type.Object({
         key: Type.String({ description: keyRequiredMessage }),
         engine: Type.Optional(
           Type.String({
-            description: "occamy-6bit（預設）／mtplx-35b（第二意見）",
+            description: "不給＝你自己那一顆（" + BRAIN_ENGINE + "，independent:false）；"
+              + "mtplx-35b＝獨立第二意見（independent:true）",
             enum: ["occamy-6bit", "mtplx-35b", "dgx-flash"],
           }),
         ),
@@ -201,10 +205,22 @@ export function toolsFor(Type) {
         ),
       }),
       execute: async (_id, params) => {
-        const argv = ["read", "--key", params.key];
-        if (params.engine) argv.push("--engine", params.engine);
+        const engine = params.engine || BRAIN_ENGINE;
+        const argv = ["read", "--key", params.key, "--engine", engine];
         if (params.no_image) argv.push("--no-image");
         const result = await callBridge(argv);
+        // **Whether a reading is independent is a fact about the model, not about the call.** After
+        // the 2026-09-29 ruling the brain and the default reader are the same engine, so "two
+        // engines agreed" would be a false claim for the default call. The label is computed from
+        // the engine the bridge actually used (`result.engine`, falling back to what was asked for)
+        // against the brain, so a future engine change cannot leave it saying the old thing.
+        if (!result.error) {
+          const used = result.engine || engine;
+          result.independent = used !== BRAIN_ENGINE;
+          result.independence_note = result.independent
+            ? "獨立第二意見：與你自己的引擎不同（" + used + " vs " + BRAIN_ENGINE + "）"
+            : "同一顆引擎（" + used + "）＝再看一次，不是第二個意見；要獨立證據請指定另一顆";
+        }
         // **The measured lesson is filed without asking the model.** Every character the vision
         // engine misread becomes a lesson for the next run, because this is the one place where
         // "the model looked at the paper" is a fact rather than a claim. The old agent's
@@ -213,7 +229,8 @@ export function toolsFor(Type) {
         if (!result.error && !params.no_image && result.diff) {
           result.lessons_recorded = lessonsFromDiff({
             subject: result.subject || "",
-            engine: params.engine || "occamy-6bit",
+            engine,
+
             key: params.key,
             diff: result.diff,
           }).map((row) => row.text);

@@ -84,11 +84,29 @@ node agent.mjs --interactive
 node agent.mjs --probe
 ```
 
-**換大腦**（預設 `ornith-mtplx` 35B；`--probe` 會印出來）：
+**換大腦**（預設由 `lib/identity.mjs::BRAIN_ENGINE` 決定，2026-09-29 起是 `occamy-6bit`；
+`--probe` 會把 provider／model／兩個引擎常數印出來）：
 
 ```sh
-REPAIR_AGENT_MODEL="occamy-6bit/occamy-1.0-6bit-XL-mlx" node agent.mjs "…"
+REPAIR_AGENT_MODEL="mtplx-35b/ornith-1.5-mtplx-35b" node agent.mjs "…"
 ```
+
+**不要在這裡抄模型 id。** 模型 id 只有一個來源：`qbr/src/qbr/engines.py` 對那個引擎記的
+`name`；`test_agent.mjs` 會比對 `BRAIN` 與該表，所以兩者不可能說不同的話。
+（README 以前把預設寫成 `occamy-6bit/occamy-1.0-6bit-XL-mlx`，**大小寫與表不符**
+——`occamy-1.0-6bit-xl-mlx`。抄一個 id 到第二個地方就是第二個會過期的地方。）
+
+**引擎的兩個上限跟著引擎走，不是寫在這裡的常數**：`contextWindow`／`maxTokens` 取自
+`engines.py` 的 `context_window`／`max_output_tokens`。原因是一個實測的 400：
+
+```
+{"detail":"Request needs 72264 context tokens (39496 prompt + 32768 max generation),
+ but MAX_KV_SIZE is 65536."}
+```
+
+occamy 這台是以 `MAX_KV_SIZE=$CTX_MLX`（預設 65536，`~/models/occamy/bin/occamy:91`）起的，
+所以「prompt ＋ 要求的輸出」超過 65536 就直接拒絕，而客戶端只看到 `400 status code (no body)`。
+要開大是 operator 的決定：`CTX_MLX=131072 occamy restart`。
 
 **`--probe` 的兩行數字要看**：
 
@@ -136,8 +154,12 @@ system prompt  : 7758 chars built → 25800 chars in session (the agent's own)
 > 因為 `A`/`B` 是打字時會用到的字母，而這一頁的判讀框經常是聚焦的。
 判完一題**列表會自己更新**（不是只更新中間那一題），不然明天會再判同一題一次。
 
-> 讀取成本：一次掃全庫 79,090 題只花 **0.3 秒**，所以列表不需要索引或快取——
-> 快取反而是第二份會過期的語料。
+> 讀取成本：**索引化之前**一次掃全庫 79,090 題要 **0.86 秒／題**、`/api/queue` **1.86 秒**；
+> `lib/queue_index.py`（byte-offset 索引，`store/index/`）之後是 **0.024 秒**／**0.065 秒**
+> （`/api/browse` 3.38 → 0.94 秒）。索引只是加速器：沒命中的 key 一律回退串流，
+> 所以它壞掉是變慢，不是答錯。剩下的 0.94 秒是 `do_browse` 仍要 `json.loads` 全庫——
+> 刻意沒動，因為那只會多出第二份計數實作。
+> 唯一需要「不快取」的理由是第二份會過期的語料；索引的失效條件只有 `(size, mtime_ns, ino)`。
 
 ### 看什麼（中間）
 
@@ -269,6 +291,9 @@ system prompt  : 7758 chars built → 25800 chars in session (the agent's own)
 | **對話被 stdin 的 `end` 殺掉** | 餵檔案／關頁籤時，進行中的回合直接消失 | ✅ 修了。用**同步**的 `inflight` 計數，不是等 session 建好才設的 `current` |
 | **「原始記錄」說有做、其實沒接** 🔴 | 上輪兩處 edit **原子失敗**，`renderAiRead` 有定義、**從未被呼叫**；舊測試只找字串所以通過，畫面什麼都沒畫 | ✅ 修了。真的接進 `renderQuestion`，並新增管線判讀（`question_ai_findings.jsonl` 的 `prompt_system`／`prompt_user`／`raw`）。**新測試執行函式並看輸出**，另一支驅動真 bridge |
 | **agent 看不到全局** | 問「題庫整體怎樣」→「我需要更多資訊…還沒有指定哪一道題」 | ✅ 修了。`see_corpus`／`find_disputed`。**這個答案本身是對的**——缺的是端，不是腦 |
+| **綁題對話從來沒送過題目** 🔴 | 你點開一題問它，它的第一句是「請給我題號」；session 檔是 `system → user`，題目不在裡面 | ✅ 修了。`sessionFor()` 在 `buildSession()` **之後**才判 `restored`，而 `buildSession` 自己會寫一條 session 訊息 ⇒ 每一條新對話都被當成「續談」而跳過 seed。改成先讀 `manager.getEntries().length` |
+| **換 occamy 之後每一輪都 500** 🔴 | 畫面只有 `[error] 500 status code (no body)`，引擎端 `Unexpected message role` | ✅ 修了。Pi 對「reasoning 模型」會把系統提示詞用 `role: "developer"` 送，mlx_vlm 的 Jinja 模板只認 system/user/assistant/tool；MTPLX 收 developer 所以舊的腦把這個坑蓋掉了。宣告在 **`model.compat`**（provider 層的 compat 不會被 merge，所以第一次修沒有效果）|
+| **接著每一輪都 400** | 同上，`400 status code (no body)` | ✅ 修了。`max_tokens` 是每個引擎共用的常數 32768，但 occamy 是 `MAX_KV_SIZE=65536`；`39496 prompt + 32768` 超過就拒收。現在上限跟著 `engines.py` 走 |
 
 **健康的軌跡**：`read`（看裁片）與／或 `read_page`（第二意見）→ `record_judgement`，
 **`bash` 0 次**。實測 q042 對話：給了圖的絕對路徑後 **4 個 `read`、0 個 `bash`**；
