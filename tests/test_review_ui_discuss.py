@@ -23,11 +23,10 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import unittest
 from pathlib import Path
 
+import review_ui_source
 from test_review_ui_areas import V2, function_body, script_of
 # One loader for the server module, not a second copy: two loaders would be two module objects and
 # the class-level `object.__new__` stubs below would be built against the wrong one.
@@ -44,10 +43,11 @@ def run_node(expression: str) -> object:
     contract it pins. A helper that lives in `04-area-discuss.js` (`mergedBucket`) needs the other
     files too, and "the real files, in the order `v2.html` loads them" is the only version of this
     that cannot drift - so the file list is read from `v2.html` rather than written out again.
+
+    The script is handed to node **through a temp file** (`review_ui_source.run_node_script`), not
+    `node -e`: this runner is the one that carries the tree JSON, and Linux refuses a single argv
+    string longer than 128 KiB - which made the biggest test in this file fail on CI only.
     """
-    node = shutil.which("node")
-    if not node:
-        raise unittest.SkipTest("node 不在這台機器上")
     html = V2.read_text(encoding="utf-8")
     sources = [
         (V2.parent / src).read_text(encoding="utf-8")
@@ -70,11 +70,7 @@ def run_node(expression: str) -> object:
       globalThis.fetch = async () => ({ ok:false, status:0, json: async () => ({}) });
       globalThis.setTimeout = () => 0; globalThis.clearTimeout = () => {};
     """
-    script = stub + "\n" + "\n".join(sources) + f"\nconsole.log(JSON.stringify({expression}));"
-    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise AssertionError(f"node 執行失敗：{result.stderr[-2000:]}")
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return review_ui_source.run_node_expression(stub + "\n" + "\n".join(sources), expression)
 
 
 class DiscussLayoutTests(unittest.TestCase):
