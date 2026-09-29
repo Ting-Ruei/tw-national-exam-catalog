@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate the approved canonical-candidate omissions and seal the result.
 
-This tool is intentionally narrow: it accepts only the two AI395 MinerU latest
+This tool is intentionally narrow: it accepts only the two approved-worker MinerU latest
 pointers and the catalog-derived subject-variant reports currently produced by
 the canonical conflict-resolution workflow.  It verifies the complete initial
 candidate before writing, stages every regenerated file outside the candidate,
@@ -86,7 +86,7 @@ def load_queue(path: Path, expected_hash: str) -> list[dict[str, str]]:
         paths.add(relative)
         expected_pair = (row["resolution"], row["canonical_action"])
         if expected_pair not in {
-            ("regenerate_on_ai395", "omit_then_regenerate"),
+            ("regenerate_on_previous_worker", "omit_then_regenerate"),
             ("regenerate_from_final_catalog", "omit_then_regenerate"),
         }:
             raise FinalizationError(f"unsupported regeneration resolution/action: {relative}")

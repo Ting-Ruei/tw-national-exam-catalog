@@ -78,6 +78,37 @@ def workflow_page() -> bytes:
         return html_page()
 
 
+def _v2_script_response(route: str) -> tuple[bytes, str, str] | None:
+    """Serve `/v2/<name>.js` **from the file, not from a list**.
+
+    Why this is not another `route_map` entry: the list and the `<script src>` list in `v2.html` are
+    two things that have to agree, and on 2026-09-24 they did not. Two area files were added to the
+    page and not to the map; the browser got 404 for them, the area function was therefore undefined,
+    and the 原則區 rendered an empty pane **with no error anywhere** - the page load was `200`, the
+    console was quiet, and the only symptom was a feature that did not exist. A missing route is
+    silent by construction, so the way to stop the class of defect is to have nothing to forget.
+
+    Nothing arbitrary is exposed: the route must be exactly `/v2/<one path segment>.js`. A segment
+    cannot contain `/` or `.` by construction (checked below, character by character), so `..` and
+    nested escapes are unrepresentable - there is no traversal to filter. A name the page never asked
+    for still has to exist on disk to answer.
+    """
+    if not route.startswith("/v2/") or not route.endswith(".js"):
+        return None
+    name = route[len("/v2/"):-len(".js")]
+    # One path segment, and only the characters a filename uses: no `/`, no `.`, nothing to escape.
+    if not name or not all(c.isalnum() or c in "_-" for c in name):
+        return None
+    try:
+        return ((MOBILE_UI_ROOT / "v2" / f"{name}.js").read_bytes(),
+                "text/javascript; charset=utf-8",
+                # `no-cache`: the 304 is revalidated by the file mtime (measured on 3.14:
+                # `os.stat().st_mtime_ns` is an integer), so editing a file is visible on reload.
+                "no-cache")
+    except OSError:
+        return None
+
+
 def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
     """Return a mobile Review UI asset without exposing arbitrary project files.
 
@@ -107,14 +138,12 @@ def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
         "/v2": ("v2.html", "text/html; charset=utf-8", "no-store"),
         "/v2/": ("v2.html", "text/html; charset=utf-8", "no-store"),
         # 一區一檔（載入序＝檔名前綴；`v2.html` 以 `<script src>` 串起）。
-        # `no-cache`：304 由檔案 mtime 復核（本機實測 3.14 的 `os.stat().st_mtime_ns` 為整數）。
-        "/v2/01-core.js": ("v2/01-core.js", "text/javascript; charset=utf-8", "no-cache"),
-        "/v2/02-area-question.js": (
-            "v2/02-area-question.js", "text/javascript; charset=utf-8", "no-cache"),
-        "/v2/03-areas.js": ("v2/03-areas.js", "text/javascript; charset=utf-8", "no-cache"),
-        "/v2/04-area-discuss.js": (
-            "v2/04-area-discuss.js", "text/javascript; charset=utf-8", "no-cache"),
-        "/v2/05-boot.js": ("v2/05-boot.js", "text/javascript; charset=utf-8", "no-cache"),
+        # 這一張表**只留頁面**（`/v2`）與 v1 的相容資產。`v2/*.js` 不列在這裡：清單與
+        # `<script src>` 是兩個會不一致的地方，而 2026-09-24 就真的不一致了——
+        # `03-area-answer.js` 與 `03-area-principles.js` 加進 `v2.html` 之後忘了加進這張表，
+        # 瀏覽器拿到 404，`renderPrinciples` 是 undefined，**整個原則區畫不出東西卻沒有任何錯誤訊息**。
+        # 所以 v2 的每個 `.js` 都由下面的檔名規則供應（見 `_v2_script_response`）：新增一個區
+        # 只要檔案真的存在就會被服務，沒有第二份清單可以忘記。
         "/mobile/manifest.webmanifest": (
             "v1-reference/mobile.webmanifest",
             "application/manifest+json; charset=utf-8",
@@ -133,6 +162,10 @@ def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
             return (MOBILE_UI_ROOT / filename).read_bytes(), content_type, cache_control
         except OSError:
             return None
+    # v2 的每一個區都是一個 `v2/<name>.js`；由檔案供應，不由清單供應（見 `_v2_script_response`）。
+    script = _v2_script_response(route)
+    if script:
+        return script
     if route == "/mobile/icon.png":
         try:
             encoded = (MOBILE_UI_ROOT / "v1-reference" / "mobile-icon.png.b64").read_text(
@@ -329,25 +362,65 @@ def workflow_primary_queue(item: dict[str, Any], evidence: dict[str, Any] | None
 
 
 def _reaffirm_standing_action(event: dict[str, Any], previous: dict[str, Any] | None) -> None:
-    """Keep a note or a correction from replacing the decision it is attached to.
+    """Keep a note from replacing the decision it belongs to, and a correction from wearing its name.
 
-    A correction has always done this; a note has to do the same thing for the same reason. Both say
-    something *about* a question, and neither is a verdict on it - but the event log keeps the latest
-    event as the question's state, so an unreaffirmed `comment` would silently withdraw an `accept`
-    from the formal set (`comment` is not in `QUESTION_READY_ACTIONS`) and make an annotated question
-    look unreviewed again. So the event keeps the action that stands, and `comment` is left as the
-    action only when there is no decision yet - where it promotes nothing, because nothing but
-    `accept`/`unblock` ever marks a question ready.
+    **A note is not a verdict, and must not withdraw one.** A `comment` says something *about* a
+    question; the event log keeps the latest event as the question's state, so an unreaffirmed
+    `comment` would silently withdraw an `accept` from the formal set (`comment` is not in
+    `QUESTION_READY_ACTIONS`) and make an annotated question look unreviewed again. So a note keeps
+    the action that stands, and stays a `comment` only when there is no decision yet - where it
+    promotes nothing, because nothing but `accept`/`unblock` ever marks a question ready.
+
+    **A correction is a decision, and it must be recorded as its own.** It says "this text was wrong
+    and I replaced it", which is neither a note nor a verdict that the text is right - so it is in
+    `STANDING_ACTIONS` (it stands as the question's state, and a later note re-states *it*) and it is
+    deliberately **not** in `QUESTION_READY_ACTIONS`. Until 2026-09-25 this function rewrote a
+    correction's action into whatever it found underneath it (`reviewed`, or the previous
+    `accept`/`block`), on the reasoning that "a correction has always reaffirmed the decision
+    underneath". The reasoning was about the *decision*, but the effect was on the *log*: the one
+    human correction in the live queue (`moex:107100:305:33:1:question:q076`, 2026-09-25T02:24:43)
+    was stored as `reviewed`, so the file could not answer "whose text did a person change?", the list
+    drew it as an ordinary 已過目 row, and the reviewer's own act was unfindable in every chip. The
+    reviewer reported it as "修正完它就通過了，我就找不到了" - and the projection, which has no label
+    for `reviewed`, showed them a decision they had not made.
+
+    The one thing the old rewrite got right is kept: `correction_action` is still stamped, so a
+    correction written before this rule can still be told apart from a bare decision.
+
+    **The second half is the reviewer's note surviving a later decision.** A decision that carries no
+    note must keep the note the question already stands on, because the note is a property of the
+    question and not of one event. Measured in the live log: `moex:105100:305:33:1:question:q046`
+    is comment「檢查上下標」→ comment → `block` with `notes: ""`, and every latest-event-wins reader
+    (the review UI's projection, `repair_loop.read_latest_actions`, the prompt builders) then sees an
+    empty note - so the one sentence the reviewer wrote about that question is invisible to the
+    model that is asked to find the problem. The review UI's decision box sends `notes` only while
+    the box is open, so an empty box is the *normal* case for a decision; the writer is where that
+    has to stop blanking what the person already said. A note the reviewer deliberately changes is
+    what they typed; an empty box must not undo it.
+
+    Only a *standing* decision can give or receive a note (`STANDING_ACTIONS`). A `reset_review` is
+    not a statement about the question's content and a group/visual/mobile event is not about this
+    question at all; `events._merge_note_into_reset` already owns the "a note on a pending reset"
+    rule, and carrying a note into a reset here would give one question's note two owners.
     """
     action = event.get("action")
-    if action not in NOTE_ACTIONS and action != "correct":
-        return
     if action == "correct":
+        # 修正的名字留著。它是一個人對**文字**做的處置，不是對題目的判決；改寫成別人的決定會讓
+        # 日誌說不出「這題的文字被人改過」，而畫面會拿一個他當下沒做過的決定給他看。
         event.setdefault("correction_action", "save")
-    else:
+    elif action in NOTE_ACTIONS:
         event.setdefault("note_action", "note")
-    previous_action = (previous or {}).get("action")
-    if previous_action in STANDING_ACTIONS:
-        event["action"] = previous_action
-    elif action == "correct":
-        event["action"] = "reviewed"
+        previous_action = (previous or {}).get("action")
+        if previous_action in STANDING_ACTIONS:
+            event["action"] = previous_action
+    # 以下那一半（把題目既有的註解帶進這一筆）對**每一筆站著的決定**都要跑，不只對註解與修正：
+    # 一筆不帶註解的 `block` 也必須保留審題者為這一題寫過的那一句。把閘門往上挪成
+    # 「只有註解與修正才跑」正好會把它關掉（2026-09-25 由
+    # `qbr/tests/test_reviewer_notes_reach_the_prompt.py` 的兩條測資抓到）。
+    if event.get("action") not in STANDING_ACTIONS:
+        return
+    if str(event.get("notes") or "").strip():
+        return
+    standing = (previous or {}).get("notes")
+    if str(standing or "").strip() and (previous or {}).get("action") in STANDING_ACTIONS:
+        event["notes"] = standing

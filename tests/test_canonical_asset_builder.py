@@ -264,7 +264,7 @@ class CanonicalAssetBuilderTests(unittest.TestCase):
             fixture.add_file("left", "latest.json", b"left-old")
             fixture.add_file("right", "latest.json", b"right-old")
             fixture.finalize()
-            fixture.resolution_rows[0]["resolution"] = "regenerate_on_ai395"
+            fixture.resolution_rows[0]["resolution"] = "regenerate_on_previous_worker"
             fixture.resolution_rows[0]["canonical_action"] = "omit_then_regenerate"
             fixture.resolution_rows[0]["rebuild_source"] = "runtime reporter"
             write_rows(fixture.resolution, MODULE.RESOLUTION_FIELDS, fixture.resolution_rows)

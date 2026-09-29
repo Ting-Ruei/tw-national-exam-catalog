@@ -91,8 +91,6 @@ After the change:
 .venv/bin/python scripts/compare_skeleton.py
 # Crop completeness — ink *outside* the frame is not evidence; this measures the crop
 .venv/bin/python scripts/verify_crops.py
-# Ask a local model about a question or a crop
-.venv/bin/python scripts/consult_local_model.py --help
 ```
 
 Every script takes `--help`. Ports are parameters — read `QBR_MODEL_BASE_URL` /
@@ -122,9 +120,9 @@ Check in this order, cheapest first:
 - **The crop frame is a property of the paper, not of the parse.**
 - **Ink outside the crop frame cannot be used to judge completeness.**
 - The crop standard must be **consistent** and must **include the question number**.
-- Models in use: `ornith-1.5-mtplx-35b` (127.0.0.1:18120, fastest), `Qwen3.8-27B`
-  (127.0.0.1:8082), `qwen3.8-flash-next` (DGX). **MTPLX builds, not Ollama; not `medgemma`.**
-  All three saturate the arbitration test (111/111) — pick by latency.
+- Use only a locally available, task-approved model. The model name, localhost endpoint,
+  budget, and evidence must be supplied by the current task; do not inherit an old remote worker
+  or old benchmark result. **The current task must explicitly approve the local model and endpoint.**
 
 ## Report honestly
 
@@ -135,3 +133,13 @@ Two habits that produced most of the value here:
 - **When the user says "the picture is not visible", first check whether the picture was scanned
   at all.** The first three explanations were all about rendering; the cause was that the scan
   never saw it.
+
+<!-- project-map:belongs-to -->
+## 這一層在哪（回上層的路）
+
+> **這是本子專屬技能**：只服務這個子專案。其他子專案要用同一件事時，先確認是不是該變成全域共通技能。
+
+- 本層入口：[`../../../AGENTS.md`](../../../AGENTS.md)
+- 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
+- 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
+<!-- /project-map:belongs-to -->

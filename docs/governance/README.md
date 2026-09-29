@@ -1,8 +1,8 @@
 # Project Governance
 
-Status: approved baseline v1
+Status: interim authority decisions (2026-09-26); workflow redesign pending
 
-Effective date: 2026-08-09 (Asia/Taipei)
+Effective date: 2026-09-26 (Asia/Taipei)
 
 This directory is the human-readable governance authority for code changes,
 AI-agent work, and production operations in `tw-national-exam-catalog`.
@@ -13,8 +13,8 @@ stop the affected automation and resolve the mismatch in a reviewed pull request
 
 - Keep `main` reproducible and reviewable.
 - Let agents perform useful low-risk work without receiving owner-level authority.
-- Preserve official-source provenance and append-only human review history.
-- Keep AI advisory output separate from human decisions.
+- Preserve official-source provenance and human review history.
+- Let QBR agents update their own machine review results and workflow status without impersonating a human.
 - Make every production mutation attributable, bounded, reversible, and approved.
 
 ## Authorities by domain
@@ -25,9 +25,9 @@ These authorities cover different domains; one does not silently overwrite anoth
 | --- | --- |
 | Official facts | MOEX pages and official Q / ANS / MOD PDFs, identified by source URL and hash |
 | Code and policy | Reviewed commits on GitHub `main` |
-| Workflow state | AI395 PostgreSQL job state and artifact manifests |
-| Human review | AI395 append-only review event tables |
-| Formal question bank | AI395 formal tables derived through approved gates |
+| Workflow state | The selected QBR queue plus AI-owned review results and their revision provenance |
+| Human review | The selected human review-event store; agents cannot modify these events |
+| Formal question bank | Immutable packages derived through approved gates |
 | Published data | Immutable packages, manifests, checksums, release IDs, and import evidence |
 
 Git history is not a storage authority for official PDFs, MinerU output, candidate
@@ -38,10 +38,11 @@ artifacts.
 
 | Environment | Purpose | Write boundary |
 | --- | --- | --- |
-| Development | Local code, tests, disposable data | Must not write production review events or formal tables |
+| Development | Local code, tests, disposable data | Must not write website production or formal question-bank data |
 | Staging | Isolated workflow, parser, migration, and import validation | Must use separate DB, ports, assets, and credentials |
-| Production | AI395 Review UI, PostgreSQL, formal tables, and immutable releases | Single writer; G3 approval or G4 owner action as defined below |
-| Rollback standby | Stopped Mac Studio evidence retained during the retirement window | Must remain stopped while AI395 accepts writes |
+| QBR review workflow | Mac Studio `192.168.10.70`, LAN Review UI v2 and queue | Agents may update their own AI result and pass/return/block workflow status; human events remain separate |
+| Website production | Mac Studio platform runtime | Existing website production gates remain in force; QBR AI status grants no website write or publish authority |
+| Catalog PostgreSQL reference | MacBook Pro, retired and read-only | Reference lookup only; no active writer or Mac Studio copy |
 
 ## GitHub change flow
 
@@ -74,7 +75,7 @@ or writer-authority change.
 | --- | --- | --- |
 | G0 Observe | Autonomous, read-only inspection | status, verify, diff, tests, reports |
 | G1 Develop | Reversible work on a non-default branch | edit code/docs, commit, push branch, open draft PR |
-| G2 Advise / stage | Versioned, isolated, non-authoritative processing | AI advisory generation, staging ingest, parser or rule proposal |
+| G2 Advise / stage | Versioned workflow processing within the declared QBR scope | AI review status, updates to the agent's own results, staging ingest, parser or rule proposal |
 | G3 Approved production operation | Exact action requires contemporaneous human approval | deploy, production migration, advisory import, publish/import apply |
 | G4 Owner-only authority | Agent may prepare evidence but may not execute | human accept/block, restore, writer switch, event repair, material deletion |
 
@@ -83,15 +84,15 @@ classes and evidence requirements are in [change-control.md](change-control.md).
 
 ## Non-negotiable invariants
 
-1. AI output alone cannot accept or block a question.
-2. Human review events are append-only; repair is an owner-authorized G4 workflow.
-3. AI395 is the only production Review UI and PostgreSQL writer.
+1. QBR agents may automatically pass, return, or block a candidate's workflow status. The status is an AI decision, not a human accept/block decision or formal publication approval.
+2. Agents may update their own AI results while preserving revisions and provenance. They may not write, replace, or delete human review events; human decisions remain attributable to humans.
+3. QBR Review UI v2 is an active LAN workflow on Mac Studio. It is separate from website production and the retired catalog PostgreSQL reference copy.
 4. Parser changes that alter reviewed candidate content append `reset_review` and
    preserve prior notes and provenance.
 5. Immutable releases are built from exact Git SHAs and are never patched in place.
 6. Secrets, credentials, owner tokens, large official assets, and local data roots
    stay out of Git.
-7. Migration and rollback never use `rsync --delete` and never run two writers.
+7. No migration or rollback operation is authorized without a new owner-approved contract.
 
 ## Approval semantics
 
@@ -104,8 +105,10 @@ Valid G3 approval must identify:
 - the approver and approval time.
 
 General statements such as “keep going” or approval of a different PR/run are not
-reusable production authorization. Unattended automation cannot obtain approval
-mid-run and must stop after producing evidence, an issue, a package, or a PR.
+reusable production authorization. An unattended QBR workflow may complete its
+declared G0-G2 work, including AI workflow status updates, then must stop before G3
+or G4 actions. This interim permission does not approve a new model/provider or
+data-transfer scope; the detailed workflow will be redesigned.
 
 ## Audit evidence
 
@@ -117,14 +120,15 @@ Agent and operator workflows should preserve, where applicable:
 - PR, commit, package, release, backup, and approval identifiers;
 - preflight, dry-run, smoke-test, and rollback evidence.
 
-Agent operational logs are separate from human question-review events. An agent
-must never impersonate a human reviewer to satisfy a gate.
+Agent operational logs and AI result revisions are separate from human
+question-review events. An agent must never impersonate a human reviewer or
+present an AI workflow status as a human decision.
 
 ## Related policy
 
 - `AGENTS.md`: concise repository instructions for coding agents.
 - `governance/policy.json`: machine-readable levels, roles, actions, and invariants.
-- `docs/ai395-runtime-maintenance.md`: read-only maintenance entrypoints.
-- `docs/ai395-production-cutover-2026-08-09.md`: production authority and rollback evidence.
+- `docs/local-review-workflow.md`: deterministic local review boundary.
+- `docs/skills/qbr-pipeline-status/SKILL.md`: current package/run status.
 - `docs/review-automation-strategy.md`: deterministic QA, AI advisory, and risk routing.
-- `deploy/openclaw/README.md`: OpenClaw trust-boundary and configuration guidance.
+- `deploy/openclaw/README.md`: retired/future proposal only; it does not authorize installation or access.

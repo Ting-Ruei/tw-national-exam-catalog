@@ -61,6 +61,17 @@ def state_of_body(html: str) -> str:
     return match.group(1)
 
 
+def label_map(html: str) -> dict[str, str]:
+    """`LABEL` 這個 action → 提示文字的對照，讀**活的宣告**而不是抄一份副本。
+
+    回傳的是 `{action: 標籤}`，所以「有沒有給 reset_review 一個名字」可以直接問它，
+    而不用把某一個特定字串寫進測試（寫進去就會在使用者改字時變紅）。
+    """
+    match = re.search(r"const LABEL = \{(.*?)\};", html, re.S)
+    assert match, "找不到 LABEL 宣告"
+    return dict(re.findall(r"(\w+):\s*'([^']*)'", match.group(1)))
+
+
 def row_review_action_body(html: str) -> str:
     match = re.search(r"function rowReviewAction\(candidate\) \{(.*?)\n\}", html, re.S)
     assert match, "v2.html 裡找不到 rowReviewAction"
@@ -127,7 +138,20 @@ class ReturnedChipTests(unittest.TestCase):
 
     def test_a_machine_return_is_not_labelled_as_a_human_flag(self):
         # LABEL 決定提示文字。沒給 reset_review 一個名字，畫面會印出代號或空白。
-        self.assertIn("reset_review: 'AI／管線退回'", self.html)
+        # **不釘字串**：標籤是給人看的字，2026-09-24 使用者把它從「AI／管線退回」改成「AI已解決」，
+        # 2026-09-25 又改成「AI已修改」，這一條當時因此變紅——它測的是自己的說明，正是這個檔案開頭
+        # 說不要做的事。契約是「有名字，而且不叫成人擋那兩個名字」。
+        labels = label_map(self.html)
+        self.assertTrue(labels.get("reset_review"), "reset_review 沒有標籤，畫面會印出代號")
+        self.assertNotIn(labels["reset_review"], {labels.get("block"), labels.get("needs_review")})
+
+    def test_the_negative_control_a_nameless_reset_would_print_its_code(self):
+        # 把 reset_review 那一項從來源拿掉，上面那條「有名字」的斷言就必須失敗——否則它只是在讀
+        # 自己的說明。（同一種負對照的寫法：改字串，看性質是否真的消失。）
+        stripped = re.sub(r"\s*reset_review:\s*'[^']*',?", "", self.html, count=1)
+        self.assertNotEqual(stripped, self.html, "負對照的輸入沒有改到東西")
+        with self.assertRaises(AssertionError):
+            self.assertTrue(label_map(stripped).get("reset_review"), "reset_review 沒有標籤")
 
     # --- 列的記號 -----------------------------------------------------------
     def test_a_returned_row_gets_its_own_mark(self):

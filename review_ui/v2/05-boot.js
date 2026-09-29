@@ -52,6 +52,10 @@ document.addEventListener('keydown', (event) => {
     else if (/^[1-8]$/.test(k)) { focusDiscuss(Number(k)); event.preventDefault(); }
     return;
   }
+  // 原則區沒有自己的快捷鍵（討論區有 `W`/`S`/`1..8`…），所以按鍵**一律**屬於正在打的那個字：
+  // `E`／`S`／`A`／`B` 在那裡是字母，不是判決。下面那一行 `A.area !== 'question'` 本來也會擋掉，
+  // 這一行的意思是把「這一區刻意沒有快捷鍵」寫成一句明說的話，而不是留給人從下一行推論。
+  if (A.area === 'principles') return;
   if (A.area !== 'question') return;
   if (event.target.tagName === 'TEXTAREA' || event.target.tagName === 'INPUT') {
     // `Esc` closes the editor and the note box. `Enter` saves a note - handled by the box's own
@@ -74,4 +78,13 @@ document.addEventListener('keydown', (event) => {
 });
 
 
-boot().then(() => showArea(areaFromHash(), { push: false }));
+// **The mode is read from the hash before anything can overwrite it.**（2026-09-24 修正）
+//
+// 舊版是 `boot().then(() => showArea(areaFromHash(), {push:false}))`。而 `boot()` → `buildScope()`
+// → `refreshScope()` → `applyScope()` → `scopeToHash()` → `history.replaceState()`，**在讀之前
+// 就把 hash 寫成題目區的範圍**。所以 `areaFromHash()` 讀到的 `錯題` 已經被覆寫掉了，重新載入
+// 一律回到題目區。這不是持久化沒做，是**寫入跑在讀取前面**。
+//
+// 現在先抓住當下的模式（讀一次 hash，之後誰都不再改它），boot 完再用那個值決定要去哪一區。
+const bootArea = areaFromHash();
+boot().then(() => showArea(bootArea, { push: false }));

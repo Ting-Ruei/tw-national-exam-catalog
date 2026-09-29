@@ -151,6 +151,60 @@ def test_the_written_principle_reaches_the_prompts_that_will_read_it(tmp_path):
     assert active[0] in system
 
 
+def test_a_principle_that_left_the_table_is_retired_and_a_humans_is_not(tmp_path):
+    """這張表是它自己那組原則的唯一來源：把一段文字改掉，舊的那條要跟著撤掉。
+
+    沒有這一步，流裡會同時躺著修正前與修正後兩句話，而提示詞**兩句都會讀進去**——實測就是
+    這樣：修正「字母下標」那條的範圍時，舊版把 VD／KM 說成沒有人寫過，而它們在
+    `subject-overrides.md:36-42` 的成文清單裡。撤銷的界線要剛好：介面上人自己加的原則
+    （`append_principle` 不寫 `source`）不是策展人的東西，不能被他撤掉。
+    """
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps(_comment("k1", "VD 的 D 是下標")) + "\n", encoding="utf-8")
+    principles = tmp_path / "principles.jsonl"
+    old_rule, human_rule, new_rule = "舊的字母下標原則（含 VD／KM）", "人自己寫的原則", "清單以外的字母下標"
+    for principle_id, text, extra in (("p1", old_rule, {"reviewer": "principle_curator",
+                                                        "source": "comment_review",
+                                                        "evidence": ["k1"]}),
+                                      ("p2", human_rule, {"reviewer": "local"})):
+        discuss.append_event(str(principles), {"schema": "qbr_review_principle_v0.1",
+                                               "action": "add", "principle_id": principle_id,
+                                               "text": text, "scope": "question", **extra})
+
+    real = curate.CURATED
+    curate.CURATED = ({"text": new_rule, "evidence": ["k1"]},)
+    try:
+        assert curate_main(events, principles, apply=True) == 0
+    finally:
+        curate.CURATED = real
+
+    active = discuss.active_principles(discuss.load_events(str(principles)))
+    assert old_rule not in active, "表裡已經沒有它了，流裡卻還作用中——提示詞會同時讀到兩句"
+    assert new_rule in active
+    assert human_rule in active, "人自己寫的原則被策展人撤掉了"
+
+
+def test_an_empty_table_may_not_retire_everything(tmp_path):
+    """空表不該有撤銷全部的權力：那讓打錯一個字變成刪掉一整組原則。"""
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps(_comment("k1", "x")) + "\n", encoding="utf-8")
+    principles = tmp_path / "principles.jsonl"
+    discuss.append_event(str(principles), {"schema": "qbr_review_principle_v0.1",
+                                           "action": "add", "principle_id": "p1",
+                                           "text": "某條策展原則", "scope": "question",
+                                           "reviewer": "principle_curator",
+                                           "source": "comment_review", "evidence": ["k1"]})
+    before = discuss.load_events(str(principles))
+
+    real = curate.CURATED
+    curate.CURATED = ()
+    try:
+        assert curate_main(events, principles, apply=True) == 2
+    finally:
+        curate.CURATED = real
+    assert discuss.load_events(str(principles)) == before, "拒絕了卻還是寫了事件"
+
+
 # ----------------------------------------------------------------- helpers
 
 def curate_main(events, principles, **over):

@@ -1,18 +1,21 @@
-"""四個區：首頁／題目審核區／答案審核區／錯題討論區。
+"""五個區：首頁／題目審核區／答案審核區／錯題討論區／原則區。
 
-使用者要的是把 v2 分成四個區。它們是**一個頁面的四個模式**，不是四個頁面，因為它們是同一份
-佇列的四種讀法：答案區的「可審集合」是由題目區的決定定義的（題目沒被接受，答案就沒有意義），
-而錯題討論區讀的是那兩區產生的人工修正。
+使用者要的是把 v2 分成五個區（2026-09-24 追加第五區「原則區」，因為基本原則與代理的反問原本
+藏在錯題討論區裡）。它們是**一個頁面的五個模式**，不是五個頁面，因為它們是同一份佇列的五種讀法：
+答案區的「可審集合」是由題目區的決定定義的（題目沒被接受，答案就沒有意義），錯題討論區讀的是
+那兩區產生的人工修正，而原則區管的是跨題的規則與反問。
 
-**為什麼不是四個頁面。** 四個頁面會各自載入同一份 198 MB 的 `candidates.jsonl`，也就有四份
-可能對「佇列裡有什麼」有不同意見的讀取器。一個頁面、一個載入器、四種視圖，不一致的地方就少了。
+**為什麼不是五個頁面。** 五個頁面會各自載入同一份 198 MB 的 `candidates.jsonl`，也就有五份
+可能對「佇列裡有什麼」有不同意見的讀取器。一個頁面、一個載入器、五種視圖，不一致的地方就少了。
 
 **為什麼模式要在 hash 裡。** 每個區都要能連結、能重整，重整要回到同一個區。而
 `#類科/年/次/科目/qNNN` 這種舊寫法是既有書籤的契約，所以它在沒有前綴時仍然表示題目區。
+前綴是**應用程式自己寫的那一個拼法**（`#原則`），沒有英文別名——同一件事兩種拼法就是兩個
+會不一致的地方；打錯字會有一個 toast 說明真正的拼法，不會靜默變成題目區。
 
-這個檔案釘的是四個區的**可觀察契約**，不是說明文字：
+這個檔案釘的是五個區的**可觀察契約**，不是說明文字：
 
-  1. 導覽列真的四個區，順序是使用者講的那個順序；
+  1. 導覽列真的五個區，順序是使用者講的那個順序；
   2. 開頁預設是題目審核區（空 hash **不是**首頁）；
   3. 每個區的資料來自**既有**的伺服器端點，不是這一頁自己算的；
   4. 換區是**隱藏**，不是清空——打到一半的註記繞一圈回來必須還在；
@@ -38,16 +41,18 @@ from review_ui_source import server_source  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 BROWSER_TEST = ROOT / "scripts" / "test_v2_areas_browser.mjs"
 
-#: 使用者指定的四個區，以及它們在**同一頁**上的容器 id。
-AREAS = ("home", "question", "answer", "discuss")
+#: 使用者指定的五個區，以及它們在**同一頁**上的容器 id。
+AREAS = ("home", "question", "answer", "discuss", "principles")
 AREA_NODES = {
     "home": "areaHome",
     "question": "areaQuestion",
     "answer": "areaAnswer",
     "discuss": "areaDiscuss",
+    "principles": "areaPrinciples",
 }
 #: 每個區在 hash 裡的前綴。題目區的前綴在來回之後會被拿掉（舊書籤契約）。
-AREA_PREFIX = {"home": "首頁", "question": "審題", "answer": "答案", "discuss": "錯題"}
+AREA_PREFIX = {"home": "首頁", "question": "審題", "answer": "答案", "discuss": "錯題",
+               "principles": "原則"}
 
 
 def script_of(html: str) -> str:
@@ -111,8 +116,8 @@ class AreasTests(unittest.TestCase):
         cls.html = V2.read_text(encoding="utf-8")
         cls.js = script_of(cls.html)
 
-    # ---------------------------------------------------------------- 1. 四個區真的在
-    def test_the_nav_has_the_four_areas_in_the_order_the_user_named_them(self):
+    # ---------------------------------------------------------------- 1. 五個區真的在
+    def test_the_nav_has_the_five_areas_in_the_order_the_user_named_them(self):
         found = re.findall(r'class="area-btn[^"]*" data-area="([a-z]+)"', self.html)
         self.assertEqual(found, list(AREAS), f"導覽列的區是 {found}")
 
@@ -300,7 +305,7 @@ class AreasTests(unittest.TestCase):
         # 而其他區才加上前綴。
         self.assertRegex(body, r"AREA_PREFIX\[next\]")
 
-    def test_the_browser_test_exists_and_covers_all_four_areas(self):
+    def test_the_browser_test_exists_and_covers_all_five_areas(self):
         self.assertTrue(BROWSER_TEST.exists(), "沒有瀏覽器測試")
         text = BROWSER_TEST.read_text(encoding="utf-8")
         # The driver names each area through the `.area-btn[data-area=...]` selector it clicks, built
@@ -316,7 +321,7 @@ class AreasTests(unittest.TestCase):
 
 
 class NegativeControlTests(unittest.TestCase):
-    """若把四個區的機制拆掉，上面的斷言必須會失敗。"""
+    """若把五個區的機制拆掉，上面的斷言必須會失敗。"""
 
     @classmethod
     def setUpClass(cls):
@@ -360,12 +365,16 @@ class NegativeControlTests(unittest.TestCase):
         match = re.search(
             r"document\.addEventListener\('keydown', \(event\) => \{(.*?)\n\}\);", broken, re.S
         )
-        self.assertNotIn("A.area !== 'question'", match.group(1))
+        # 只看**會執行的行**：這一條負對照原本會因為一句**註解**而失敗——`05-boot.js` 的註解裡
+        # 就寫著 `A.area !== 'question'`（「下面那一行本來也會擋掉」）。把散文當成規則，正是這個
+        # 檔案的 `function_body()` 在防的事，這一行漏了同一件事。
+        code = re.sub(r"//[^\n]*", "", match.group(1))
+        self.assertNotIn("A.area !== 'question'", code)
         # 正對照。
         match = re.search(
             r"document\.addEventListener\('keydown', \(event\) => \{(.*?)\n\}\);", self.js, re.S
         )
-        self.assertIn("A.area !== 'question'", match.group(1))
+        self.assertIn("A.area !== 'question'", re.sub(r"//[^\n]*", "", match.group(1)))
 
     def test_a_retyped_label_instead_of_the_measured_bucket_would_be_caught(self):
         # 列標籤必須從伺服器量到的 `queue_bucket` 推出來，不能自己寫死一個類型名稱。

@@ -19,7 +19,6 @@ REQUIRED_FILES = [
     "SKILL.md",
     "agents/openai.yaml",
     "references/automation-strategy.md",
-    "references/ai-max-395-deployment.md",
     "contracts/task.schema.json",
     "contracts/sparse-result.schema.json",
     "contracts/rule-proposal.schema.json",
@@ -48,17 +47,8 @@ REQUIRED_FILES = [
     "scripts/validate_sparse_results.py",
     "scripts/materialize_sparse_corrections.py",
     "scripts/import_advisory_results.py",
-    "scripts/run_ollama_shadow_batches.py",
     "scripts/select_tasks_by_key.py",
     "scripts/validate_rule_proposals.py",
-    "profiles/gpt-5.6-luna.yaml",
-    "profiles/gemini-flash-low.yaml",
-    "profiles/qwen3.6-27b.yaml",
-    "profiles/gemma4-31b.yaml",
-    "profiles/ai-max-qwen3.6-27b.yaml",
-    "profiles/glm-5.3-flash-litellm.yaml",
-    "adapters/openai_compatible.py",
-    "runtimes/ai-max-395.yaml",
     "benchmarks/gold-corpus.jsonl",
 ]
 
@@ -96,6 +86,8 @@ def validate_contracts(errors: list[str]) -> None:
 
 
 def validate_profiles(errors: list[str]) -> list[dict[str, Any]]:
+    if (SKILL_ROOT / "profiles" / ".project-map-ignore").is_file():
+        return []
     profiles: list[dict[str, Any]] = []
     models: set[str] = set()
     for path in sorted((SKILL_ROOT / "profiles").glob("*.yaml")):

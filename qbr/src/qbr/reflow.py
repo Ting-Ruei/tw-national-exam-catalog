@@ -59,11 +59,46 @@ from . import canon, extract, repair
 # `QBR_MODEL_*` names are kept because every existing run command uses them.
 from . import engines as _engines  # noqa: E402  (module-level, one import, no cycle)
 
-_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]
+# The eye and the pen are the same engine as the agent's brain since the designer's ruling of
+# 2026-09-29 (「之後要換就整套換」): one engine, one switch, one place to look when a run is slow.
+# `reflow` does not send images - it reads the extracted cells - so this is the *text* lane, and it
+# is switched on the ruling rather than on a reading measurement.
+_DEFAULT_NAME = "occamy-6bit"
+_DEFAULT = _engines.BUILTIN_ENDPOINTS[_DEFAULT_NAME]
 BASE_URL = os.environ.get("QBR_REFLOW_BASE_URL") or os.environ.get("QBR_MODEL_BASE_URL") or _DEFAULT["url"]
 API_KEY = (os.environ.get("QBR_REFLOW_API_KEY") or os.environ.get("QBR_MODEL_API_KEY")
            or _DEFAULT.get("key", ""))
 MODEL = os.environ.get("QBR_REFLOW_MODEL") or os.environ.get("QBR_MODEL_NAME") or _DEFAULT["name"]
+
+#: Which engine's switch to borrow when the address above is overridden. `QBR_REFLOW_ENGINE` names
+#: an entry in the one table; `QBR_REFLOW_BASE_URL`/`_MODEL` still move the address.
+ENGINE_NAME = os.environ.get("QBR_REFLOW_ENGINE") or _DEFAULT_NAME
+
+
+def _engine():
+    """The engine record this module talks to - address from the env, **switch from the table**.
+
+    The same shape as `reread.endpoint()`, and for the same measured reason: the wrong switch is
+    accepted with an HTTP 200 and silently ignored, so a copy of the spelling is a copy of a knob
+    that may do nothing. `QBR_REFLOW_ENGINE` names the engine; the address is that engine's own
+    unless `QBR_REFLOW_BASE_URL`/`_MODEL`/`_API_KEY` (or the older `QBR_MODEL_*` names) say
+    otherwise. Copying the module-level `BASE_URL` in unconditionally would make the two halves
+    disagree - a `QBR_REFLOW_ENGINE=mtplx-35b` run would send MTPLX's switch to Occamy's address,
+    which is the same class of defect this function exists to prevent (measured: the request went to
+    18130 and was refused by its 65536-token budget instead of reaching 18120).
+    """
+    table = _engines.endpoints()
+    if ENGINE_NAME not in table:
+        raise KeyError("unknown QBR_REFLOW_ENGINE %r; known: %s"
+                       % (ENGINE_NAME, ", ".join(sorted(table))))
+    engine = dict(table[ENGINE_NAME])
+    if os.environ.get("QBR_REFLOW_BASE_URL") or os.environ.get("QBR_MODEL_BASE_URL"):
+        engine["url"] = BASE_URL
+    if os.environ.get("QBR_REFLOW_MODEL") or os.environ.get("QBR_MODEL_NAME"):
+        engine["name"] = MODEL
+    if os.environ.get("QBR_REFLOW_API_KEY") or os.environ.get("QBR_MODEL_API_KEY"):
+        engine["key"] = API_KEY
+    return engine
 
 # A reasoning model spends most of its budget thinking before it answers, and the thinking is
 # charged to `max_tokens`. Measured on this engine: a one-question verdict spent 630 reasoning
@@ -133,14 +168,6 @@ def _decimal(text):
     `isdecimal()` is the predicate that matches what `int()` accepts.
     """
     return bool(text) and text.isdecimal()
-
-
-def _endpoint(base, path="/chat/completions"):
-    """Join a base URL and an OpenAI path without caring whether `/v1` was written down."""
-    base = base.rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    return base + path
 
 
 # --- the line table: what the model is shown ---------------------------------------------
@@ -271,10 +298,10 @@ def cells_with_pages(rows, *, alphabet=()):
     asks about (`\ue000細菌 \ue001白血球 \ue002紅血球 \ue003葡萄糖`), while `\ue18c`-`\ue18f` label the four
     options (`\ue18c僅\ue000\ue001 …`). Sorting the union puts `\ue000` first, so the option marks come
     out as `opt:E`/`opt:F` and `skeleton` - which looks for the label `A` - finds no options at all.
-    Measured over the corpus: the union never yields more options than the most-used family, and on
-    667 papers it yields **none** (every question of the paper), because a paper prints four options
-    per question while its sub-items appear only where it asks over them - so the option family is
-    the most-used one by construction.
+    Measured over 334 papers printing two or more families: the union never yields more options
+    than the most-used family and on 26 papers it yields **none** (every question of the paper),
+    because a paper prints four options per question while its sub-items appear only where it asks
+    over them - so the option family is the most-used one by construction.
     """
     alphabet = tuple(alphabet) or tuple(sorted(repair.option_alphabet(
         "".join(row.get("text") or "" for row in rows))))
@@ -412,16 +439,22 @@ def build_messages(table, *, subject="", year="", count=None, body_size=None, pa
 
 
 # --- the call ------------------------------------------------------------------------------
-# Thinking is a knob, and it is not free. Measured on one crop through the vision prompt, four
-# spellings of "do not think" were tried against the default: `reasoning_effort` (both at the top
-# level and nested), and `thinking_budget: 0` - **all three were ignored**, the engine returned the
-# identical 465 completion tokens and 345 reasoning tokens every time. `enable_thinking: false`
-# was obeyed: 173 tokens, no reasoning tokens, 1.7 s against 4.4 s.
+# Thinking is a knob, and it is not free. Measured on the previous default engine (MTPLX), four
+# spellings of "do not think" were tried: `reasoning_effort` (both at the top level and nested), and
+# `thinking_budget: 0` - **all three were ignored**, the engine returned the identical 465
+# completion tokens and 345 reasoning tokens every time. `enable_thinking: false` was obeyed: 173
+# tokens, no reasoning tokens, 1.7 s against 4.4 s.
+#
+# Which spelling is obeyed is a property of the **engine**, and the other engine in the table
+# answers the opposite way (`engines.py`: mlx-vlm accepts `chat_template_kwargs` and ignores it,
+# and obeys the top-level `enable_thinking`/`reasoning_effort`). So the spelling is not written
+# here any more - `engines.body_for` holds it once, and `_engine()` hands it the engine this run
+# is actually pointed at. A wrong spelling is accepted with HTTP 200 and changes nothing, which is
+# why a second copy is worse than no copy: the run looks like it worked.
 #
 # So the choice is not "think or not" in the abstract. It is a question per task, and the honest
 # way to settle it is to run the task both ways and compare the *answer*, because a faster wrong
 # answer is the most expensive thing here.
-THINK_CHAT_TEMPLATE = {"enable_thinking": False}
 
 
 def ask(messages, *, max_tokens=None, timeout=3600, think=True):
@@ -432,19 +465,26 @@ def ask(messages, *, max_tokens=None, timeout=3600, think=True):
     work and paying for it twice. Measured: a single-question verdict took 5.4 s, so the budget
     for a paper is set by its length rather than by a fixed ceiling.
 
-    `think=False` asks the engine to answer without the reasoning channel. The budget is not
-    reduced with it, because reasoning tokens are drawn from the same `max_tokens` and a budget
-    that only fits the thinking is a budget that returns nothing at all - measured: a paper given
-    22,950 tokens to think with spent every one of them on thinking and emitted no answer.
+    `think=False` asks the engine to answer without the reasoning channel, in the engine's own
+    spelling. The budget is not reduced with it, because reasoning tokens are drawn from the same
+    `max_tokens` and a budget that only fits the thinking is a budget that returns nothing at all -
+    measured: a paper given 22,950 tokens to think with spent every one of them on thinking and
+    emitted no answer.
     """
     import time
-    body = {"model": MODEL, "messages": messages, "temperature": 0,
-            "max_tokens": max_tokens or MIN_COMPLETION_TOKENS}
-    if not think:
-        body["chat_template_kwargs"] = dict(THINK_CHAT_TEMPLATE)
+    engine = _engine()
+    budget = max_tokens or MIN_COMPLETION_TOKENS
+    if think:
+        # No switch at all: the default of the engine in front of us (the mlx-vlm server runs with
+        # `--enable-thinking`, so that default is "think").
+        body = {"model": engine["name"], "messages": messages, "temperature": 0,
+                "max_tokens": budget}
+    else:
+        body = _engines.body_for(engine, messages, max_tokens=budget)
     request = urllib.request.Request(
-        _endpoint(BASE_URL), data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + API_KEY})
+        _engines.endpoint_url(engine["url"]), data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + engine.get("key", "")})
     started = time.time()
     try:
         raw = json.loads(urllib.request.urlopen(request, timeout=timeout).read().decode())
@@ -674,7 +714,7 @@ def _margin_of(table, leftmost):
     return None
 
 
-def _leftmost_cells(table):
+def leftmost_cells(table):
     """The cells that begin their visual line: no other cell on the same line starts further left.
 
     The lines are not passed in, so they are recovered from the geometry the table carries - the
@@ -684,6 +724,12 @@ def _leftmost_cells(table):
 
     A cell at the left margin is the only candidate for a question number, a heading or a section
     title; anything indented is inside something - a table column, a continuation, an option body.
+
+    Public because `reread.band_rows` needs the **same** guard: the crop ruler took its question
+    numbers from the cell's text alone, so a paper that prints its number as its own cell (`27`,
+    measured: 80 of 80 numbers on `1011_醫事檢驗師_微生物學及臨床微生物學`) was not numbered at all
+    and 95.7% of one round's reads found no crop. Two spellings of "a cell at the left margin" is
+    how that gap opened; this is the one the reading already uses.
     """
     rows = table
     # Only cells that could be a question number are tested, and only against cells that start to
@@ -764,7 +810,7 @@ def skeleton(table):
     # is the leftmost cell on its visual line in 76,116 cases, 99.995%. A number inside a table is
     # in a column, so there is a cell or a rule to its left. This is a property of the print form -
     # a question begins at the left margin - and not of any engine or subject.
-    leftmost = _leftmost_cells(table)
+    leftmost = leftmost_cells(table)
     # The second geometric rule, and the one the leftmost rule cannot supply: a question number
     # begins at the paper's own body margin, and a wrapped line of a stem or an option begins in
     # the option column.
@@ -1003,7 +1049,18 @@ def read_paper(pdf_path, *, subject="", year="", count=None, rows=None, emit_raw
               "reasoning_tokens": reasoning_tokens(usage),
               "body_size": body_size, "parsed": parsed is not None}
     if parsed is None:
-        result.update({"admissible": False, "report": {"error": "unparsed"},
+        # A transport/engine refusal (`ask` returns its reason as the text) is a third finding, and
+        # it used to be filed as `unparsed` - the same label as a model that answered and could not
+        # be read. Measured 2026-09-29: reflow's own budget for an 80-question paper is 156,000
+        # completion tokens, Occamy refuses anything over its 65,536-token `MAX_KV_SIZE` with HTTP
+        # 400 (`Request needs 165654 context tokens (9654 prompt + 156000 max generation)`), and the
+        # report said `unparsed / 0 items` - which reads like a model problem and is a budget
+        # problem. The difference decides whether the next move is "escalate to a bigger budget" or
+        # "the engine is refusing to talk".
+        refused = (raw or "").startswith("request failed")
+        result.update({"admissible": False,
+                       "report": {"error": "request-failed" if refused else "unparsed",
+                                  "detail": (raw or "")[:300] if refused else ""},
                        "items": [], "raw": raw if emit_raw else raw[-2000:]})
         return result
     ok, report = verify(parsed, table)

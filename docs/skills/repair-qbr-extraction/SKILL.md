@@ -117,3 +117,13 @@ others shows up as a decrease somewhere. **Zero decreases is the bar.**
    old event, add a new one. Never rewrite a human decision.**
 4. Swap the live queue (keep a dated backup), restart the service, and confirm the fix is visible in
    the UI. **"Packaged" is not "done"; "visible in the UI" is done.**
+
+<!-- project-map:belongs-to -->
+## 這一層在哪（回上層的路）
+
+> **這是本子專屬技能**：只服務這個子專案。其他子專案要用同一件事時，先確認是不是該變成全域共通技能。
+
+- 本層入口：[`../../../AGENTS.md`](../../../AGENTS.md)
+- 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
+- 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
+<!-- /project-map:belongs-to -->

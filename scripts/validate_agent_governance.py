@@ -34,6 +34,8 @@ REQUIRED_ACTION_LEVELS = {
     "branch.modify": "G1",
     "github.pull_request.create": "G1",
     "advisory.generate": "G2",
+    "review.ai_workflow_decision": "G2",
+    "review.ai_result.update": "G2",
     "staging.ingest": "G2",
     "parser_or_rule_change.propose": "G2",
     "reviewed_package.build": "G2",
@@ -49,9 +51,11 @@ REQUIRED_ACTION_LEVELS = {
 }
 
 REQUIRED_INVARIANTS = {
-    "ai_output_cannot_accept_or_block_questions",
+    "ai_workflow_status_is_distinct_from_human_decision_and_formal_publication",
+    "agents_may_update_own_ai_results_with_revision_provenance",
     "human_review_events_are_append_only",
-    "ai395_is_the_single_production_writer",
+    "website_and_review_workflow_authorities_are_separate",
+    "review_writer_and_promotion_authority_must_be_explicitly_declared",
     "reviewed_candidate_changes_require_reset_review_events",
     "immutable_releases_are_never_patched_in_place",
     "secrets_and_large_derived_artifacts_stay_out_of_git",

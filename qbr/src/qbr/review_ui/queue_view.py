@@ -48,6 +48,14 @@ def repair_questions_projection(events: list[dict[str, Any]]) -> dict[str, Any]:
     return discuss.repair_questions_projection(events)
 
 
+def repair_asks_by_key(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The newest **unanswered** ask per `candidate_key` — what the row's own line needs.
+
+    Delegates to `qbr.discuss.repair_asks_by_key`: same folding rule, grouped by question.
+    """
+    return discuss.repair_asks_by_key(events)
+
+
 def category_matches_filter(category: str, category_filter: str) -> bool:
     normalized_category = normalize_category_name(category)
     if category_filter in CATEGORY_GROUP_FILTERS:
@@ -128,6 +136,18 @@ SQL_DISCUSS_PREDICATE = "(" + " OR ".join((
     "(is_reset_unreviewed AND NOT is_repair_pending AND NOT is_accepted_reaudit_pending)",
 )) + ")"
 
+#: `is_reset_unreviewed` 的 SQL 版，與 `review_projection` 的 `reset_waiting` 同一條判準。
+#:
+#: 2026-09-25 之前，兩邊都只讀「最後一筆是不是 reset_review」，於是機器把自己改錯的字收回去
+#: （`applied: "withdrawn"`）的那一題在 SQL 後端仍然算「待複核」——`reviewStatus=reset_review`、
+#: `reviewStatus=discuss` 那兩條路都會把它撈出來，而它在題目區那一列自己的字是「已還原（機器改錯）」。
+#: 撤回不是修改（owner 原文：「「還原」這種事情不是修改」），所以兩個後端都要看同一件事：`applied`。
+#: 站上量到 127 題帶著撤回、其中 3 題是這一種（撤回之後沒有任何人的決定）。
+SQL_RESET_UNREVIEWED_PREDICATE = (
+    "(lq.action IN ('unreviewed', 'reset_review') "
+    "AND COALESCE(lq.event_json->>'applied', '') <> 'withdrawn')"
+)
+
 
 def _paper_of_candidate(row: dict[str, Any]) -> str:
     """The paper a candidate row belongs to, spelled exactly as the browser's `paperOf()`.
@@ -192,7 +212,13 @@ QBR_AI_FINDING_FIELDS = ("candidate_key", "created_at", "model", "endpoint", "pr
                          # mechanical difference, which is what makes the note repairable rather than
                          # merely a report. Dropping them here would leave the finding looking complete
                          # while its evidence and its repair were both missing from the screen.
-                         "crop", "changes")
+                         "crop", "changes",
+                         # Where the finding is *about*, so a list of questions built from this store
+                         # can be read by a person: a dropdown of 25 candidate keys with no question
+                         # number and no paper is a list nobody can choose from. Part of the record
+                         # already (`make_record` writes them), and three short strings per finding is
+                         # cheaper than a second lookup per row.
+                         "question_number", "paper", "subject")
 
 
 def _compact_qbr_finding(record: dict[str, Any]) -> dict[str, Any]:
@@ -388,6 +414,249 @@ class QbrAiFindingsStore:
             return changed
 
 
+#: How many questions the 類似題 dropdown lists for one principle. The list is built **server-side**
+#: over the finding store (73k records on the served queue): a browser cannot scan that, and a list
+#: that silently stops at the cap is the truncation the question area already had to fix - so the
+#: response carries `matched`／`capped` and the screen says it.
+SIMILAR_LIMIT = 25
+
+#: The most a caller may ask for. The list is meant to be read, and a dropdown with 200 rows in it is
+#: a list nobody reads; the cap exists so `?limit=` cannot turn the endpoint into a bulk export.
+SIMILAR_LIMIT_MAX = 200
+
+
+def change_field_key(field: Any) -> str:
+    """One change's **field shape**: `option A` and `option C` are the same shape, `option`.
+
+    The option *letter* is part of the difference, not of its shape - a principle about "an option
+    whose text was misread" covers every letter. And the `where` sentence a finding carries is built
+    from exactly these field names (`confirm_dispute.finding_from` joins them with 「；」), so matching
+    on the field set **is** matching the `where` shape; the machine-readable form is the one that can
+    be compared without parsing a sentence, and parsing it would be a second opinion about what the
+    finding is.
+    """
+    text = str(field or "").strip().lower()
+    return text.split(" ", 1)[0] if text.startswith("option") else text
+
+
+def finding_signature(finding: dict[str, Any] | None) -> dict[str, Any]:
+    """A finding's shape: which detectors raised it, and which fields differ.
+
+    `kinds` is read from `evidence.disputes[].kind` - the dispute kinds the confirmation was made
+    about, which `confirm_dispute._append_finding` stores beside the note. `what` is the model's own
+    code for the shape, used only as a bonus in the score: two findings that name the same code and
+    no shared field are a weaker claim than two that differ in the same field.
+    """
+    record = finding if isinstance(finding, dict) else {}
+    evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
+    kinds = {str(dispute.get("kind") or "").strip()
+             for dispute in (evidence.get("disputes") or []) if isinstance(dispute, dict)}
+    fields = {change_field_key(change.get("field"))
+              for change in (record.get("changes") or []) if isinstance(change, dict)}
+    body = record.get("finding") if isinstance(record.get("finding"), dict) else {}
+    return {"kinds": sorted(kind for kind in kinds if kind),
+            "fields": sorted(field for field in fields if field),
+            "what": str(body.get("what") or "").strip()}
+
+
+def question_identity(item: dict[str, Any] | None) -> dict[str, str]:
+    """Which question a candidate key is: 類別／年／次／科目／第 N 題.
+
+    The five fields the question area prints for a row (`#where`: 「第 N 題 · 類別 · YYYY年第N次 ·
+    科目」), projected off the raw candidate record. It exists as one function because the principles
+    area has to answer "which question is this principle / this question from the agent *about*" for
+    keys that are not on screen — a list of `moex:114020:305:0403:1:question:q054` is a list nobody
+    can read (measured 2026-09-25: 121 open agent questions, all shown as a truncated key). Two
+    places composing that sentence would be two places it can disagree, so the composition is the
+    client's and the *fields* are here.
+
+    A key with no record (a question a rebuild moved away) yields empty strings; the caller says so
+    rather than printing a half-identity, because an identity that is wrong is worse than none.
+    """
+    row = item if isinstance(item, dict) else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return {
+        "question_number": str(row.get("question_number") or ""),
+        "category": str(metadata.get("normalized_category_name") or metadata.get("group_name") or ""),
+        "subject": str(metadata.get("normalized_subject_name") or ""),
+        "year": str(metadata.get("year") or ""),
+        "ordinal": str(metadata.get("exam_ordinal") or ""),
+    }
+
+
+def similar_question_row(candidate_key: str, finding: dict[str, Any] | None, source: str,
+                         score: int = 0) -> dict[str, Any]:
+    """One row of the 類似題 list: enough to *read* it (題號／卷／科目) and to call it up by key."""
+    record = finding if isinstance(finding, dict) else {}
+    return {"candidate_key": str(candidate_key), "question_number": record.get("question_number"),
+            "paper": record.get("paper"), "subject": record.get("subject"),
+            "source": source, "score": int(score)}
+
+
+def similar_questions(principle: dict[str, Any] | None,
+                      findings: dict[str, dict[str, Any]] | None,
+                      *, limit: int = SIMILAR_LIMIT) -> dict[str, Any]:
+    """The questions a principle covers: **its own `evidence` keys first**, then the same shape.
+
+    The order is the claim. `evidence` is what the principle says it came from (a curated principle
+    names its question; one typed in the review UI while a paper is open carries that question's key),
+    so those rows are listed first and marked `source: "evidence"` - they are read off the principle,
+    not guessed from a shape. Everything after them is *inferred*, and is marked as such.
+
+    The shape is the one the principle's own findings have: the union of their dispute `kinds` and
+    their difference `fields` (`finding_signature`). A question matches when it shares at least one of
+    either, and the score is `2 × shared fields + shared kinds` (+1 when the model's own `what` code
+    agrees), because sharing the *field* that was misread is the stronger statement: two findings
+    raised by one detector on different fields are the same kind of suspicion, while two that differ
+    in the same field are the same repair. Ties are broken by candidate key, so the list is stable
+    between two requests - a list that reorders itself looks like new information every time.
+
+    A principle with no evidence has no shape to match on, so the list is empty; that is a real
+    answer, and the screen says 「這條沒有指定題目」 rather than showing nothing.
+    """
+    findings = findings if isinstance(findings, dict) else {}
+    keys = [str(key).strip() for key in ((principle or {}).get("evidence") or []) if str(key).strip()]
+    seeds = [similar_question_row(key, findings.get(key), "evidence") for key in keys]
+    signature = {"kinds": [], "fields": [], "what": ""}
+    for key in keys:
+        one = finding_signature(findings.get(key))
+        signature["kinds"] = sorted(set(signature["kinds"]) | set(one["kinds"]))
+        signature["fields"] = sorted(set(signature["fields"]) | set(one["fields"]))
+        signature["what"] = signature["what"] or one["what"]
+    kinds = set(signature["kinds"])
+    fields = set(signature["fields"])
+    matched: list[tuple[int, str, dict[str, Any]]] = []
+    if kinds or fields or signature["what"]:
+        for key, record in findings.items():
+            key = str(key)
+            if key in keys:
+                continue
+            one = finding_signature(record)
+            score = 2 * len(fields & set(one["fields"])) + len(kinds & set(one["kinds"]))
+            if signature["what"] and one["what"] == signature["what"]:
+                score += 1
+            if score:
+                matched.append((score, key, record))
+    matched.sort(key=lambda item: (-item[0], item[1]))
+    rows = seeds + [similar_question_row(key, record, "shape", score)
+                    for score, key, record in matched]
+    return {"rows": rows[:limit], "matched": len(rows), "returned": min(len(rows), limit),
+            "capped": len(rows) > limit, "limit": limit, "signature": signature,
+            "evidence": keys}
+
+
+#: The three kinds of machine-applied text change, and the owner's words for them:
+#:
+#:   * `field`          「依紙本改字」 — the whole field was replaced from the page read. **This is the
+#:                      one a person has to look at.**
+#:   * `glyph`          「字形替換」 — a character-level change whose characters are *not* all radical
+#:                      codepoints (`ћ`→`①`, Cyrillic U+04xx): the screen shows something different,
+#:                      so it needs eyes.
+#:   * `normalisation`  「正規化（部首碼位）」 — a character-level change where **every** changed
+#:                      character is a CJK radical (`U+2E80–U+2EFF`, `U+2F00–U+2FDF`). The glyph on
+#:                      screen is identical; only the codepoint was wrong.
+#:
+#: The values are the contract the tests assert; the Chinese above is what the screen prints for them.
+#: Why the third class is not folded into the second: measured on the station (2026-09-24), of 354
+#: machine repairs across 225 questions **345 are radical-codepoint normalisations, 9 are Cyrillic /
+#: glyph substitutions and 0 are text-content repairs**. A review bucket where 97% of the rows read
+#: the same on screen as before is a bucket nobody can review; counting them separately is what makes
+#: 「依紙本改字」 a number the owner can act on.
+APPLIED_KINDS = ("field", "glyph", "normalisation")
+
+#: The machine's own retraction of one of those repairs (2026-09-24). It is deliberately **not** in
+#: `APPLIED_KINDS`: those three answer "how much of this bucket do I still have to read", and a
+#: withdrawal is the opposite of work left over — the row is back to the paper's text. It gets its
+#: own count so the owner can see that a machine edit he rejected was actually taken back.
+WITHDRAWN_KIND = "withdrawn"
+
+#: Where a radical codepoint lives: CJK Radicals Supplement and Kangxi Radicals.
+RADICAL_BLOCKS = ((0x2E80, 0x2EFF), (0x2F00, 0x2FDF))
+
+
+def in_radical_blocks(char: str) -> bool:
+    """Is this one character a CJK radical — a glyph whose codepoint was normalised, not a word?"""
+    code = ord(char)
+    return any(low <= code <= high for low, high in RADICAL_BLOCKS)
+
+
+def changed_characters(changes) -> set[str]:
+    """The characters a recorded change actually swapped, read from the change text.
+
+    Both spellings a change may use are read: `from`/`to` (the pair the applier edited) and
+    `stored`/`page` (the whole-field pair from the finding). The **symmetric difference** of the two
+    sides is the set of characters that appeared or disappeared; a character that merely moved
+    position is not in it, which is right — moving a character is not a glyph substitution.
+    """
+    chars: set[str] = set()
+    for change in changes or []:
+        if not isinstance(change, dict):
+            continue
+        before = change.get("from")
+        after = change.get("to")
+        if before in (None, ""):
+            before = change.get("stored")
+        if after in (None, ""):
+            after = change.get("page")
+        chars |= set(str(after or "")) ^ set(str(before or ""))
+    return chars
+
+
+def machine_applied_kind(event: dict[str, Any] | None) -> str | None:
+    """Which of the three classes one machine repair belongs to; `None` when it repaired nothing.
+
+    `None` is the honest answer for an event written before `applied` existed, and for any event that
+    is not a machine repair at all — "not recorded" must not read as "nothing changed on screen"
+    *or* as "changed text", so it stays a third, nameless state and the screen keeps its plain
+    wording.
+
+    The class is decided by, in order: `applied == "field"` (the whole field was replaced — never a
+    normalisation, whatever the characters are); the applier's own `normalisation` flag when it is
+    present (a boolean, so both `true` and `false` are honoured); otherwise the changed codepoints —
+    all radical means the screen did not change, anything else means it did. When a substitution
+    records no change text at all, the fallback is `glyph`: the side that needs eyes is the safe one
+    to be wrong on.
+    """
+    if not isinstance(event, dict):
+        return None
+    applied = str(event.get("applied") or "").strip().lower()
+    if applied == WITHDRAWN_KIND:
+        # The machine took a repair back. Named rather than hidden: the owner rejected the repair
+        # (or the applier refused its own reading on the next run), and the text is the paper's
+        # again, which is a different thing from "never touched" — see `WITHDRAWN_KIND`.
+        return WITHDRAWN_KIND
+    if applied == "field":
+        return "field"
+    if applied != "substitution":
+        return None
+    flag = event.get("normalisation")
+    if isinstance(flag, bool):
+        return "normalisation" if flag else "glyph"
+    chars = changed_characters(event.get("changes"))
+    if chars and all(in_radical_blocks(char) for char in chars):
+        return "normalisation"
+    return "glyph"
+
+
+def machine_activity_counts(reset_reviews: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """How many questions the machine actually touched, per class, over the whole review log.
+
+    Counted from the **same fold the labels come from** (`machine_applied_kind` per reset event), so
+    the home card's three numbers and the three labels on the rows cannot disagree: a number that no
+    row matches is worse than no number. The whole log is walked because the question the card
+    answers is "how much of this bucket do I have to read", which is not a property of the rows
+    currently on screen.
+    """
+    counts = {kind: 0 for kind in APPLIED_KINDS}
+    counts[WITHDRAWN_KIND] = 0
+    for event in (reset_reviews or {}).values():
+        kind = machine_applied_kind(event)
+        if kind:
+            counts[kind] += 1
+    counts["total"] = sum(counts[kind] for kind in APPLIED_KINDS)
+    return counts
+
+
 def review_projection(
     latest_review: dict[str, Any] | None,
     latest_reset_review: dict[str, Any] | None,
@@ -407,7 +676,6 @@ def review_projection(
     reset = latest_reset_review if isinstance(latest_reset_review, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     event = latest or reset or {}
-    reset_waiting = bool(reset and not latest)
     action = _first_event_value(event, "action")
     reset_action = _first_event_value(reset, "action")
     previous_action = _first_event_value(
@@ -417,6 +685,47 @@ def review_projection(
         "previous_review_action",
     )
     approval_ref = _first_event_value(reset, "approval_ref", "approval", "approval_reference")
+    # **機器有沒有真的動到這一題的文字（2026-09-24）。** The applier writes `applied` on its
+    # `reset_review`: `field` when the whole field was replaced from the page read, `substitution`
+    # when character-level substitutions were made. An older reset event carries neither, and
+    # "not recorded" must read as a **plain** reset (the machine returned the question without
+    # touching the text) rather than as a third state - that is the honest reading of an event
+    # written before the field existed, and it is what makes the label below say something true.
+    # Projected here rather than re-read from the log in the browser: the row already carries the
+    # event's projection, and a second reader of the log is a second place the two can disagree.
+    applied_event = reset if _first_event_value(reset, "applied") else latest
+    applied = _first_event_value(applied_event, "applied")
+    applied_kind = machine_applied_kind(applied_event)
+    # **機器在你決定之後動了文字（`pending_reset`）＝這一列等的不是你的判決，是「新文字對不對」。**
+    #
+    # 2026-09-25 owner 回報：「有些 block 的題目其實已經被改好了，但是沒有被歸類到 AI 已解決，我就
+    # 認為 block 還是很多」。站上量到（唯讀）：`latest` 是人的 block 共 **341** 題，其中 **77** 題在
+    # block 之後機器又寫了 reset，而這 77 題**全部**落在 `reviewed`——畫面上就是一句「已標記：阻擋」。
+    # 77 題裡 52 題的 reset 是 `withdrawn`（機器把改動還原，那是他打回的，維持阻擋才對）、
+    # **22 題 `applied=field`（機器的確把字改成了紙本那個字）**、7 題沒有 `applied`（舊事件）。
+    # 那 22 題就是他看到的「block 還是很多」：字已經是他要的字，標籤卻停在阻擋。
+    #
+    # 判準用**檔案順序**而不是時鐘：機器的時鐘是筆電當地時間、人的事件是伺服器 UTC，所以「誰比較晚」
+    # 只能讀出來的順序回答，而那正是 `pending_reset` 這個標記的來源（`events.load_review_events`）。
+    # 「有沒有真的改到文字」用同一個 `machine_applied_kind`，畫面那三種標籤與這裡的桶位就不可能有
+    # 第二種說法。`withdrawn` 不算：文字被還原成抽取原文（`parser_original`），這一題等的是他自己的
+    # 下一個決定，不是複核機器的字。
+    repaired_after_decision = bool((latest or {}).get("pending_reset")
+                                   and applied_kind in APPLIED_KINDS)
+    # **撤回不讓這一題在「AI已修改」那一格等你**（owner 2026-09-25，同一天修）。
+    #
+    # 他的原文：「AI以解決裡面會有一些題目寫「已還原(機器改錯)」…你這樣做是多此一舉，因為你退回
+    # 等於沒有解決…又退回到我一定會認真看的「AI已解決」，就會讓我很火大…可以改成AI已修改，但是
+    # 「還原」這種事情不是修改」。也就是說：機器把自己改錯的字收回去、文字回到紙本那一版，這一列
+    # **沒有被 AI 改過**，它等的不是「新文字對不對」，是那個人自己的下一個決定。
+    #
+    # 站上量到（唯讀，8,712 筆事件）：`applied=withdrawn` 130 筆、127 題。其中 123 題的人為判決還在
+    # `latest`（那些列本來就畫成那個人自己的 `block`，這是 2026-09-24 修好的那一條），**3 題**是
+    # 撤回之後沒有人再做過任何決定——那 3 題當天落進「AI已解決」，而同一列自己的字是
+    # 「已還原（機器改錯）」，讀起來就是「AI 修好了」。判準與 `machine_applied_kind` 同一份：
+    # 只有 `withdrawn` 不算待複核，`field`／`glyph`／`normalisation`（真的動過字）照舊。
+    reset_waiting = (bool(reset and not latest and applied_kind != WITHDRAWN_KIND)
+                     or repaired_after_decision)
     reviewer = _first_event_value(reset or latest, "reviewer")
     repair_kind = _first_event_value(
         reset or latest,
@@ -473,6 +782,14 @@ def review_projection(
         "was_previously_accepted": was_previously_accepted,
         "previous_action": previous_action or None,
         "reset_action": reset_action or None,
+        # `field`／`substitution` when the applier replaced text from the page read, else None.
+        # The browser turns this into the row label (「依紙本改字」 vs 「AI已修改」); the server
+        # does not choose the words, because a label is a sentence and the projection is a fact.
+        "applied": applied or None,
+        # `field`／`glyph`／`normalisation` — the **class** of that change, so the words above have
+        # one source. Absent (None) when nothing was applied, which the screen draws as the plain
+        # wording rather than as a fourth kind.
+        "applied_kind": applied_kind,
         "reviewer": reviewer or None,
         "repair_kind": repair_kind or None,
         "approval_ref": approval_ref or None,

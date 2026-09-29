@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 from qbr import discuss
 import json
-from .constants import AI_FEEDBACK_SCOPES, GROUP_REVIEW_ACTIONS, MOBILE_REVIEW_ACTIONS, NOTE_ACTIONS, RESET_REVIEW_ACTIONS
+from .constants import AI_FEEDBACK_SCOPES, GROUP_REVIEW_ACTIONS, MOBILE_REVIEW_ACTIONS, NOTE_ACTIONS, REPAIR_REVIEWER_PREFIXES, RESET_REVIEW_ACTIONS, STANDING_ACTIONS
 
 def load_ai_feedback_events(
     path: Path,
@@ -143,6 +143,41 @@ def load_correction_feedback_rows(path: Path, *, limit: int = 100) -> list[dict[
     return rows[-max(1, min(int(limit), 500)):]
 
 
+#: Resets that **deliberately reopen** a question rather than repairing its text. Kept apart from
+#: the repair prefixes on purpose: a repair changes the reading and the person's decision still stands
+#: (that is the whole "保留但標示需重看" rule), while these exist *in order to* put the question back in
+#: the queue. `codex-luna-accepted-reaudit` is the one in `tests/test_review_ui_scope.py`: an accepted
+#: question is reopened because its content needs a second look, so "still accept" is the wrong answer
+#: for it - the pending state IS the point.
+REOPEN_REVIEWER_PREFIXES = (
+    "codex-luna-accepted-reaudit",
+    "accepted-reaudit",
+    "qbr_dispute_apply",
+    "repair_dispute_apply",
+)
+
+
+def _is_repair_reset(event: dict[str, Any]) -> bool:
+    """True when this `reset_review` **repairs the text** and must not clear the person's decision.
+
+    This is deliberately narrower than "a machine wrote it". A machine reset that reopens a question
+    on purpose (`REOPEN_REVIEWER_PREFIXES`) must keep doing that; only the ones whose message is
+    「內容被改過，請重看」 preserve the decision. `reviewer` is the primary marker because it is what
+    the writers already set (`REPAIR_REVIEWER_PREFIXES` is the existing list of these prefixes);
+    `repair_kind` is the fallback for a writer whose name does not say so.
+    """
+    reviewer = str(event.get("reviewer") or "").strip().lower()
+    if any(reviewer.startswith(prefix.lower()) for prefix in REOPEN_REVIEWER_PREFIXES):
+        return False
+    if any(reviewer.startswith(prefix) for prefix in REPAIR_REVIEWER_PREFIXES):
+        return True
+    # `content-change-reset` and `repair_dispute_apply` are in the live log with `repair_kind`; the
+    # first is a repair, the second deliberately reopens and is excluded above.
+    if event.get("repair_kind") == "content_change":
+        return True
+    return False
+
+
 def _is_note_event(event: dict[str, Any]) -> bool:
     """A note *about* a question, as opposed to a verdict on it.
 
@@ -151,6 +186,25 @@ def _is_note_event(event: dict[str, Any]) -> bool:
     (in which case `action` is that decision, and the event is still a note).
     """
     return event.get("action") in NOTE_ACTIONS or event.get("note_action") == "note"
+
+
+def with_standing_correction(event: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    """The corrected text is a property of the **question**, not of the one event that carried it.
+
+    A correction says "the text is now this". The next thing written about the same question - a note,
+    a decision - says nothing about the text, so it must not put the extractor's reading back on the
+    reviewer's screen. Measured through the real store (2026-09-25): after `correct`, appending a
+    `comment`/`accept`/`block` and then serving the row returned the **parser's** stem, because the
+    served overlay comes from `latest_review or latest_reset_review` and only the correction event
+    carried a `correction`. The file's own fold already carries it (`load_review_events`); this is the
+    write path's half of the same rule, so the two cannot disagree about the question the reviewer is
+    looking at. It returns the event unchanged when there is nothing to carry, and it does not touch
+    the file - the copy lives only in the in-memory maps, because a correction is a whole question's
+    text and duplicating it into every later event is not the same trade as duplicating one sentence.
+    """
+    if event.get("correction") or not (previous or {}).get("correction"):
+        return event
+    return {**event, "correction": previous["correction"]}
 
 
 def _note_annotates_pending_reset(
@@ -222,6 +276,35 @@ def load_review_events(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str,
                 previous = latest.get(key) or latest_reset.get(key)
                 if not event.get("correction") and previous and previous.get("correction"):
                     event["correction"] = previous["correction"]
+                # **A machine reset does not erase a human decision.**（2026-09-24 修正）
+                #
+                # 舊版一律 `latest.pop(key)`，於是管線為了「內容被改過、請重看」而寫的
+                # `reset_review`，在畫面上把你的 `block` 一起消滅了——實測 72 題。
+                # 你標的 block 還在檔案裡（它是 append-only），但它不再是最後一筆事件，
+                # 所以狀態推導看不到它。人是被自己的紀錄騙了，不是紀錄不見了。
+                #
+                # 判準是**誰寫的**，不是寫了什麼。管線的 reset 會帶 `reviewer` 前綴或
+                # `repair_kind`，人不會。所以：
+                #   管線的 reset  → 保留你的人為決定，另外記 `pending_reset` 提醒你重看
+                #   人的 reset    → 照舊，你的決定本來就可以被你自己改變
+                if _is_repair_reset(event):
+                    if key in latest and latest[key].get("action") in STANDING_ACTIONS:
+                        kept = dict(latest[key])
+                        # The repaired text belongs to the question, not to the reset event. The
+                        # human decided against a specific text; the pipeline just changed it. Both
+                        # have to survive: the decision says "I judged this", the correction says
+                        # "and the text I judged is now this other text" — which is exactly why
+                        # `pending_reset` exists.
+                        if event.get("correction"):
+                            kept["correction"] = event["correction"]
+                        kept["pending_reset"] = {
+                            "at": event.get("created_at") or event.get("at"),
+                            "reviewer": event.get("reviewer"),
+                            "notes": event.get("pipeline_note") or event.get("notes") or "",
+                        }
+                        latest[key] = kept
+                        latest_reset[key] = event
+                        continue
                 latest.pop(key, None)
                 latest_reset[key] = event
                 continue

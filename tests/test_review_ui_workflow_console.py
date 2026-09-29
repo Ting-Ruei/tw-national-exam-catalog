@@ -59,7 +59,7 @@ class ReviewUiWorkflowConsoleTests(unittest.TestCase):
         item = {
             "metadata": {
                 "parser_status": "pass",
-                "ai395_scope_tags": ["notation", "visual_missing"],
+                "review_scope_tags": ["notation", "visual_missing"],
             },
             "issues": [],
             "answer_issues": [],
@@ -117,8 +117,8 @@ class ReviewUiWorkflowConsoleTests(unittest.TestCase):
                             "year": "115",
                             "exam_ordinal": "1",
                             "parser_status": "pass",
-                            "ai395_staging_revision_id": "run:key:r1",
-                            "ai395_staging_revision_status": "active",
+                            "review_revision_id": "run:key:r1",
+                            "review_revision_status": "active",
                         },
                     }
                 ],

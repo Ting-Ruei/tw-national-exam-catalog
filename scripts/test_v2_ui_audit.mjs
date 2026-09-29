@@ -478,6 +478,10 @@ async function main() {
   }
 
   // 側欄與原則／反問面板：新增原則要能開出輸入框。
+  // **2026-09-24：這一塊搬到原則區了**（`#areaPrinciples`），所以稽核要先切到那一區再按——
+  // 否則按的是隱藏的元素，`opened` 會是 false 而看起來像壞掉，而真正該驗的是「在那一頁按得動」。
+  await evaluate(`document.querySelector('[data-area="principles"]').click()`);
+  await sleep(1800);
   const principle = await evaluate(`(async () => {
     const start = document.getElementById('dpStart');
     if (start) {
@@ -490,15 +494,18 @@ async function main() {
       save.click();
       await new Promise((r) => setTimeout(r, 600));
     }
-    return { opened: !!box, hasSave: !!save,
+    return { opened: !!box, hasSave: !!save, visible: !!(box && box.offsetParent !== null),
              saveHandler: !!(save && typeof save.onclick === 'function') };
   })()`);
-  check(principle.opened && principle.saveHandler, 'discuss',
-    '「新增原則」開得出輸入框，且加入鍵接上了（空值會擋）',
-    `opened=${principle.opened} saveHandler=${principle.saveHandler}`);
+  check(principle.opened && principle.visible && principle.saveHandler, 'principles',
+    '「新增原則」開得出輸入框（在原則區、看得見），且加入鍵接上了（空值會擋）',
+    `opened=${principle.opened} visible=${principle.visible} saveHandler=${principle.saveHandler}`);
   // 關掉草稿，不留下半開的狀態。
   await evaluate(`(() => { const c = document.getElementById('dpCancel'); if (c) c.click(); })()`);
   await sleep(600);
+  // 回到討論區：下面幾條驗的是討論區的「儲存修正」，打字的框必須是看得見的那一個。
+  await evaluate(`document.querySelector('[data-area="discuss"]').click()`);
+  await sleep(2000);
 
   // 真正的驗收：**我打的字就是被送出的字**。做法是把 fetch 換成一個只做紀錄的替身，
   // 在兩個框裡打不同的字、按「儲存修正」，然後檢查送出的 payload 帶著那兩個字。
@@ -521,11 +528,19 @@ async function main() {
   await sleep(2600);
 
   /* 最後一道：「**每一個按鈕**」不是只指討論區。
-     走訪四個區，把每個可見的動作控制項抓出來，斷言每一個不是有 handler 就是有真的 href。
+     走訪每一個區（`AREAS`，五個），把每個可見的動作控制項抓出來，斷言每一個不是有 handler 就是
+     有真的 href。
      這與上面的逐項檢驗互補：上面證明「某個按鈕按下去真的有用」，這一條證明「沒有漏掉任何一個」。
      一個沒接上的按鈕不會壞，它只是什麼都不做——而在截圖上與成功的按鈕一模一樣。 */
   const coverage = {};
-  for (const area of ['home', 'question', 'answer', 'discuss']) {
+  // **The list of areas comes from the page itself** (`AREA_BY_NAME` in `03-areas.js`), not from a
+  // literal here. A second list is a second thing to forget: a new area the walk does not visit is
+  // an area whose dead buttons ship silently, which is the defect this pass exists for. 2026-09-24
+  // 就是這樣：加了原則區，而稽核手上有自己的一份四區清單。
+  const walkAreas = await evaluate(`Object.keys(AREA_BY_NAME)`);
+  check(Array.isArray(walkAreas) && walkAreas.length >= 5, 'all',
+    '走訪的區來自頁面自己的區表（不是稽核手上的一份清單）', (walkAreas || []).join(' '));
+  for (const area of walkAreas) {
     await evaluate(`document.querySelector('[data-area="${area}"]').click()`);
     await sleep(area === 'question' || area === 'discuss' ? 3000 : 1500);
     const list = await evaluate(`(${CONTROL_PROBE})('#area${area[0].toUpperCase()}${area.slice(1)}')`);
@@ -536,9 +551,9 @@ async function main() {
       `${area} 區的每一個可見動作控制項都接上了（沒有死的按鈕）`,
       dead.length ? dead.join('、') : `${actions.length} 個都活著`);
   }
-  // 四個區真的都有東西被檢查到，否則這一道可以因為「畫面是空的」而假裝通過。
+  // 每一區真的都有東西被檢查到，否則這一道可以因為「畫面是空的」而假裝通過。
   const thin = Object.entries(coverage).filter(([, v]) => v.total < 3);
-  check(thin.length === 0, 'all', '四個區都真的抓到夠多的控制項（不是空畫面）',
+  check(thin.length === 0, 'all', '每一區都真的抓到夠多的控制項（不是空畫面）',
     Object.entries(coverage).map(([k, v]) => `${k}:${v.total}`).join(' '));
 
   /* 每一區都走完之後：整段過程不可以有 console 例外。

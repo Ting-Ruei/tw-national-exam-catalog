@@ -1,0 +1,19 @@
+{
+  "schema_version": "local_review_v1",
+  "asset_root": "國考題資料夾",
+  "candidate_jsonl": "國考題資料夾/30_normalized_items/question_candidates/20260720-131422/question_candidates__20260720-131422.jsonl",
+  "issue_csv": "國考題資料夾/30_normalized_items/question_candidates/20260720-131422/question_parse_issues__20260720-131422.csv",
+  "groups": ["醫事檢驗師", "藥師"],
+  "per_subject": 10,
+  "output_root": "tmp/local-review",
+  "model_mode": "disabled",
+  "model": "task-selected-local-model",
+  "base_url": "",
+  "max_model_calls": 12,
+  "model_timeout": 120,
+  "model_max_tokens": 2048,
+  "context_limit_tokens": 32768,
+  "render_dpi": 120,
+  "port": 8767,
+  "mobile_port": 8768
+}

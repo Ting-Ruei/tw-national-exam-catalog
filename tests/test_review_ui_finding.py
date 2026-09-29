@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_ui_source import server_source  # noqa: E402
+from test_review_ui_discuss import run_node  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 SERVER = ROOT / "scripts" / "serve_question_review_ui.py"
 
@@ -60,9 +61,18 @@ def js_of(html: str) -> str:
 
 
 def finding_html_body(html: str) -> str:
-    match = re.search(r"function findingHtml\(candidate\) \{(.*?)\n\}", html, re.S)
+    # 定位用（不是契約）：`findingHtml` 是**題目畫面**的一部分，而題目畫面的畫法在 2026-09-24
+    # 抽成共用函式 `questionTextHtml`（原則區右欄上面三分之一要顯示同一題），所以簽名多了一個
+    # 可選開關（`withApply`：那顆「帶入修正」按鈕寫的是題目區的編輯框，別的區不能畫出死按鈕）。
+    # 這裡放寬到「同樣的第一個參數」，函式身體的斷言一個都沒動。
+    match = re.search(r"function findingHtml\(candidate[^)]*\) \{(.*?)\n\}", html, re.S)
     assert match, "v2.html 裡找不到 findingHtml"
     return match.group(1)
+
+
+# 呼叫點（題目畫面／文字面）：不釘呼叫點的字面寫法（共用畫法在同一個模板裡有條件地呼叫它），
+# 只要求「畫題目的那一支真的呼叫了 findingHtml」。`(?<!function )` 是為了排除函式定義本身。
+FINDING_CALL = re.compile(r"(?<!function )findingHtml\(candidate")
 
 
 class FindingVisibleTests(unittest.TestCase):
@@ -168,11 +178,11 @@ class FindingVisibleTests(unittest.TestCase):
     # --- 顯示：真的有畫，而且畫成意見 ---------------------------------------
     def test_the_finding_is_rendered_on_the_text_side(self):
         # 讀呼叫點，不是讀函式定義：有定義但沒呼叫，等於沒顯示。
-        self.assertIn("${findingHtml(candidate)}", self.html)
+        self.assertTrue(FINDING_CALL.search(self.html), "文字面沒有呼叫 findingHtml")
 
     def test_the_negative_control_without_the_call_nothing_is_shown(self):
-        without = self.html.replace("${findingHtml(candidate)}", "")
-        self.assertNotIn("${findingHtml(candidate)}", without)
+        without = FINDING_CALL.sub("", self.html)
+        self.assertFalse(FINDING_CALL.search(without))
         # 定義還在，但畫面上不會出現——所以「有畫出來」這條斷言不是恆真。
         self.assertIn("function findingHtml(", without)
 
@@ -259,6 +269,38 @@ class FindingVisibleTests(unittest.TestCase):
         injected = body.replace("c.stored", "c.from").replace("c.page", "c.to")
         self.assertNotIn("c.stored", injected)
         self.assertNotIn("c.page", injected)
+
+
+class FigureOwnershipOnScreenTests(unittest.TestCase):
+    """「這張圖是誰的」要畫在圖旁邊，因為**沒說出來的那一半看起來跟對的一模一樣**。
+
+    業主 2026-09-25：「有些題目原本沒圖卻截了上下題圖片；AI 截圖檢查只看當下這題、沒上下資訊，
+    於是回報『找不到問題』。」切圖那一步量了每一張圖的歸屬並寫在候選列上（`ownership`），而畫面只
+    印 `description`：框被切到這一題列內的那一種，句尾帶著「還蓋到隔壁題…」（所以看得出來）；
+    **這一題的列量不到、歸屬無法確認的那 414 張沒有任何記號**。
+
+    讀的是真的 `cropFigureHtml`（`02-area-question.js`）跑出來的字串，不是說明文字。
+    """
+
+    def test_a_crop_whose_owner_was_never_measured_says_so_beside_the_picture(self):
+        html = run_node("cropFigureHtml({path:'a.png', asset_role:'figure-crop',"
+                        " label:'embedded-image', ownership:'unverified'})")
+        self.assertIn("無法確認這張圖屬於哪一題", html)
+
+    def test_the_negative_control_a_measured_crop_gains_nothing(self):
+        # 量到歸屬的那一種（站上 4,203 張沒有這個欄位）不可以多出這一句，否則每一張圖都在喊不確定。
+        html = run_node("cropFigureHtml({path:'a.png', asset_role:'figure-crop',"
+                        " label:'embedded-image'})")
+        self.assertIn("embedded-image", html)
+        self.assertNotIn("無法確認這張圖屬於哪一題", html)
+
+    def test_the_crop_that_was_cut_to_this_questions_rows_keeps_its_own_sentence(self):
+        # 切圖那一步自己寫的 `description` 已經說了「還蓋到隔壁題…」——那一句是它的，畫面照印。
+        html = run_node("cropFigureHtml({path:'a.png', asset_role:'figure-crop',"
+                        " description:'第 28 題：embedded-image（紙本這張圖還蓋到隔壁題：上 298.4pt、"
+                        "下 0pt，只切這一題的列）'})")
+        self.assertIn("還蓋到隔壁題", html)
+        self.assertNotIn("無法確認這張圖屬於哪一題", html)
 
 
 class TailLoadedFindingStoreTests(unittest.TestCase):

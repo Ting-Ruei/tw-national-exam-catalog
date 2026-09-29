@@ -22,9 +22,23 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CATALOG="$(cd "${HERE}/.." && pwd)"
-STATION="${QBR_STATION:-192.168.10.70}"
-REMOTE_LOG="/Users/tim/qbr-review/queue/review-ui/question_review_events.jsonl"
-LOCAL_LOG="${CATALOG}/qbr/data/review-queues/live/review-ui/question_review_events.jsonl"
+# Tailscale name by default; `QBR_STATION=192.168.10.70` pins the LAN address.
+STATION="${QBR_STATION:-timmac-studio}"
+REMOTE_DIR="/Users/tim/qbr-review/queue/review-ui"
+LOCAL_DIR="${CATALOG}/qbr/data/review-queues/live/review-ui"
+
+# 兩條流，理由不同但方向相同：
+#
+# * `question_review_events.jsonl` 是人類決定本體——唯一不可重建的東西。
+# * `question_review_principles.jsonl` 是人在討論區寫下的**基本原則**，也就是提示詞的約束。
+#   它拉回來的理由與決定相同：筆電上的副本會**少報**。實測 2026-09-24——第一輪的策展是在
+#   筆電上跑的，那條原則寫進了筆電的流，而站上（真正跑迴圈、真正讀進提示詞的那台）
+#   一個字都沒有；`deploy_station.sh` 因為把它列進 `EVENT_STREAMS`，只保護不搬運。
+#   不拉回來，筆電就會一直拿著一份比站上舊的清單，而看起來像「這就是全部的原則」。
+STREAMS=(
+  "question_review_events.jsonl"
+  "question_review_principles.jsonl"
+)
 
 DRY_RUN=0
 for arg in "$@"; do
@@ -35,47 +49,54 @@ for arg in "$@"; do
   esac
 done
 
-# 站上幾筆（也順便確認站是活的——不可達時不要靜靜地什麼都不做）
-REMOTE_COUNT="$(ssh -n -o BatchMode=yes -o ConnectTimeout=8 "${STATION}" \
-  "wc -l < ${REMOTE_LOG}" 2>/dev/null | tr -d ' ' || true)"
-if [[ -z "${REMOTE_COUNT}" ]]; then
-  echo "連不上常駐機 ${STATION}，或讀不到 ${REMOTE_LOG}" >&2
+# 站上幾筆（也順便確認站是活的——不可達時不要靜靜地什麼都不做）。
+# 兩條流一起數：任一條讀不到就是連不上或不完整，寧可不拉。
+REMOTE_LINES="$(ssh -n -o BatchMode=yes -o ConnectTimeout=8 "${STATION}" \
+  "cd ${REMOTE_DIR} && wc -l ${STREAMS[*]}" 2>/dev/null || true)"
+if [[ -z "${REMOTE_LINES}" ]]; then
+  echo "連不上常駐機 ${STATION}，或讀不到 ${REMOTE_DIR} 下的流" >&2
   echo "（筆電上的紀錄保持不動——寧可不拉，也不要拿一個不知道是什麼的檔案蓋掉它）" >&2
   exit 1
 fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-echo "常駐機 ${STATION} 目前 ${REMOTE_COUNT} 筆"
+STALE=()
+for name in "${STREAMS[@]}"; do
+  remote_count="$(awk -v n="${name}" '$2 == n {print $1}' <<<"${REMOTE_LINES}")"
+  if [[ -z "${remote_count}" ]]; then
+    echo "站上沒有 ${name}——不拉（空檔案會把筆電的蓋掉）。" >&2
+    exit 1
+  fi
+  local_path="${LOCAL_DIR}/${name}"
+  local_count=0
+  [[ -f "${local_path}" ]] && local_count="$(wc -l < "${local_path}" | tr -d ' ')"
+  printf '%-42s 站上 %6s 筆 · 筆電 %6s 筆\n' "${name}" "${remote_count}" "${local_count}"
+  [[ "${remote_count}" == "${local_count}" ]] || STALE+=("${name}:${remote_count}:${local_count}")
+done
 
-if [[ -f "${LOCAL_LOG}" ]]; then
-  LOCAL_COUNT="$(wc -l < "${LOCAL_LOG}" | tr -d ' ')"
-  echo "筆電目前       ${LOCAL_COUNT} 筆"
-else
-  LOCAL_COUNT=0
-  echo "筆電目前       沒有紀錄檔"
-fi
-
-if [[ "${REMOTE_COUNT}" == "${LOCAL_COUNT}" ]]; then
-  echo "筆數相同——沒有新決定，什麼都不做。"
+if [[ "${#STALE[@]}" == 0 ]]; then
+  echo "兩條流的筆數都相同——沒有新資料，什麼都不做。"
   exit 0
 fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-  echo "（dry-run）會拉回 ${REMOTE_COUNT} 筆並覆蓋筆電的 ${LOCAL_COUNT} 筆"
+  echo "（dry-run）會覆蓋：${STALE[*]}"
   exit 0
 fi
 
-# 覆蓋前先備份：這是人類決定，不是產物。
-if [[ -f "${LOCAL_LOG}" ]]; then
-  BACKUP="${LOCAL_LOG%.jsonl}.pre-pull-${STAMP}.jsonl"
-  cp "${LOCAL_LOG}" "${BACKUP}"
-  echo "已備份筆電舊紀錄 → ${BACKUP}"
-fi
-
-scp -q "${STATION}:${REMOTE_LOG}" "${LOCAL_LOG}"
-AFTER="$(wc -l < "${LOCAL_LOG}" | tr -d ' ')"
-if [[ "${AFTER}" != "${REMOTE_COUNT}" ]]; then
-  echo "拉回後筆數 ${AFTER} ≠ 站上 ${REMOTE_COUNT}——拉回不完整。" >&2
-  exit 1
-fi
-echo "已拉回 ${AFTER} 筆 → ${LOCAL_LOG}"
+for entry in "${STALE[@]}"; do
+  IFS=: read -r name remote_count local_count <<<"${entry}"
+  local_path="${LOCAL_DIR}/${name}"
+  # 覆蓋前先備份：這是人寫的東西，不是產物。
+  if [[ -f "${local_path}" ]]; then
+    cp "${local_path}" "${local_path%.jsonl}.pre-pull-${STAMP}.jsonl"
+    echo "已備份筆電舊紀錄 → ${local_path%.jsonl}.pre-pull-${STAMP}.jsonl"
+  fi
+  scp -q "${STATION}:${REMOTE_DIR}/${name}" "${local_path}"
+  after="$(wc -l < "${local_path}" | tr -d ' ')"
+  if [[ "${after}" != "${remote_count}" ]]; then
+    echo "拉回後 ${name} 筆數 ${after} ≠ 站上 ${remote_count}——拉回不完整。" >&2
+    exit 1
+  fi
+  echo "已拉回 ${name}：${local_count} → ${after} 筆"
+done

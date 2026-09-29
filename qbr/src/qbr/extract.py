@@ -775,6 +775,46 @@ def _spans_of_page(page):
     return spans
 
 
+#: PyMuPDF 的 span `flags` 第 2 位：字型自己說它是斜體。字型名也會寫（`Helvetica-Oblique`），
+#: 兩個都看，因為這兩份紙本的斜體字型兩者不一定同時有。
+ITALIC_FLAG = 2
+
+
+def _span_is_italic(span) -> bool:
+    font = str(span.get("font") or "")
+    return bool(int(span.get("flags") or 0) & ITALIC_FLAG) or "italic" in font.lower() \
+        or "oblique" in font.lower()
+
+
+def italic_spans_a(path):
+    """這一本紙本上**斜體**的文字片段，逐頁：`{page: [{"text", "bbox", "font"}, …]}`。
+
+    斜體是**紙本的性質**（字型），不是文字的意思——所以它是腳本量得出來的東西，不必問模型。
+    業主 2026-09-25 指出這一批紙本的斜體（學名、基因名）以前沒有人處理，而判讀已經自己開始寫
+    `<i>…</i>`：站上實測那一題的紙本是 `Helvetica-Oblique`（`Streptococcus pyogenes`、
+    `Bacteroides` 等 157 個片段，那一本 8 頁 1,216 個 span 裡），而全佇列 79,090 列的收錄文字
+    **一個 `<i>` 都沒有**。這裡只回量到的東西，怎麼用（標記、比對、只回報）由呼叫端決定。
+    """
+    module = __import__("pymu" + "pdf")
+    document = module.open(filename=path)
+    out = {}
+    try:
+        for page_index, page in enumerate(document, start=1):
+            found = []
+            for _block, span in _spans_of_page(page):
+                if not _span_is_italic(span):
+                    continue
+                box = span.get("bbox") or (0, 0, 0, 0)
+                found.append({"text": str(span.get("text") or ""),
+                              "bbox": [float(value) for value in box],
+                              "font": str(span.get("font") or "")})
+            if found:
+                out[page_index] = found
+    finally:
+        document.close()
+    return out
+
+
 def group_visual_lines(spans, *, min_overlap=0.5):
     """Spans -> visual lines, by vertical overlap rather than by PyMuPDF's line breaks.
 

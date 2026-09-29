@@ -71,7 +71,7 @@ asset_count, feature_tags}`，且 `asset_manifest.jsonl` 「may include **option
 ### 1.5 風險與阻礙（誠信，但必須告知）
 
 1. **正式來源是 PostgreSQL**（「The external source of truth is PostgreSQL」）。本機（MacBook）
-   與 AI395 目前都reach不到該庫，因此第一階段以 official PDF + 官方 metadata 直接產生 package，
+   目前工作區無法連到該庫，因此第一階段以 official PDF + 官方 metadata 直接產生 package，
    並在 `manifest.json` 記錄此權重（provenance：未經資料庫），待機（395/Studio）回線時再補。
 2. 契約禁止「external absolute paths」進入 package —— 只准相對路徑（relative asset paths）。
 3. `--public-eligible` 需要授權（licensing）；校內（school）與公開（public）是兩次不同的決策。
@@ -208,8 +208,8 @@ Two preconditions must be settled before any comparison is worth the paper it is
    - `40_ready_for_ingest/{staged_candidates, validated_pairs}`：**空**
    - `50_ingested_snapshots/`：**空**
    
-   ⇒ 若你的人工審核記錄（医检、药师两科的「已审核」）主要在 **PostgreSQL**（Mac Studio / AI395），
-   請告知，我目前接觸不到、到處都找不到（395 目前不可用）。也可選擇：直接把 review UI 匯出的
+   ⇒ 若你的人工審核記錄（医检、药师两科的「已审核」）主要在 **PostgreSQL**，
+   請告知，我目前接觸不到、到處都找不到。也可選擇：直接把 review UI 匯出的
    CSV/JSON 放進 `pi_test/question_bank_rebuild/data/`（副本），我即可對照。
 2. **題型的判定**：是否同意把 `constructed_response`（申論題）與 `mixed`（混合卷）納入
    `question_type` 的取值範圍？平台契約未規定枚舉，`question_type` 只寫了 `"single_choice"` 一例。

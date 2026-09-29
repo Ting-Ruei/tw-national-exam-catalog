@@ -37,7 +37,20 @@ ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", PROJECT_ROOT / "國考題資料�
 DEFAULT_CANDIDATE_ROOT = ASSET_ROOT / "30_normalized_items" / "question_candidates"
 
 
-MANUAL_ASSET_ROOT = ASSET_ROOT / "40_manual_assets"
+# Where a person's pasted replacement images are written.
+#
+# **It cannot be `ASSET_ROOT / "40_manual_assets"`.** `ASSET_ROOT` is the corpus: it is mounted
+# read-only on purpose (a review container must not be able to rewrite the source papers), so
+# `MANUAL_ASSET_ROOT` sitting under it made `save_manual_image_asset()` fail with
+# `OSError: [Errno 30] Read-only file system` — measured, every paste. The path was written when
+# nothing wrote there; by the time something did, nobody re-derived the mount.
+#
+# So it has its own root, `REVIEW_UI_MANUAL_ASSET_ROOT`, which the deploy mounts writable at
+# `/queue/manual-assets` (inside the queue, which is the one directory the container owns).
+# The fallback keeps the old path for local runs and for tests that set it by hand.
+MANUAL_ASSET_ROOT = Path(
+    os.environ.get("REVIEW_UI_MANUAL_ASSET_ROOT", ASSET_ROOT / "40_manual_assets")
+).expanduser()
 
 
 MOBILE_UI_ROOT = PROJECT_ROOT / "review_ui"
@@ -136,7 +149,16 @@ ANSWER_READY_ACTIONS = {"accept", "unblock"}
 NOTE_ACTIONS = {"comment"}
 
 
-STANDING_ACTIONS = {"accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed"}
+#: The actions that stand as a question's own state — and therefore the ones a note re-states rather
+#: than replaces (`_reaffirm_standing_action`), and the ones a machine `reset_review` must not erase
+#: (the pipeline reopening a question is not the person changing their mind). `correct` belongs here:
+#: a correction is a decision about the question ("this text was wrong and I replaced it") and it is
+#: not a verdict that the text is *right* — `QUESTION_READY_ACTIONS` is where that lives, and
+#: `correct` is deliberately not in it. Until 2026-09-25 it was outside this set and the writer
+#: rewrote a correction into whatever it found underneath (`reviewed`, or the previous
+#: `accept`/`block`), so the log could not name a correction and the reviewer's own act was
+#: unfindable in the list.
+STANDING_ACTIONS = {"accept", "needs_review", "block", "exclude", "unblock", "comment", "reviewed", "correct"}
 
 
 HUMAN_SUPERSEDES_AI_ACTIONS = {"accept", "unblock", "block", "needs_review", "exclude", "reviewed", "correct"}

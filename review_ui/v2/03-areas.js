@@ -1,20 +1,39 @@
-/* 四區表、`A` 快取、`fetchAreaJson`、`renderArea`；首頁（ counts 只讀伺服器數）＋答案（单卷，`limit` 精簡）。 */
-const AREA_BY_NAME = { home: 'home', question: 'question', answer: 'answer', discuss: 'discuss' };
+/* 五區表、`A` 快取、`fetchAreaJson`、`renderArea`；首頁（counts 只讀伺服器數）。
+   答案與原則兩區的實作在 `03-area-answer.js` 與 `03-area-principles.js`（載入序＝檔名序，兩者都在本檔之前）。 */
+const AREA_BY_NAME = { home: 'home', question: 'question', answer: 'answer', discuss: 'discuss',
+                       principles: 'principles' };
 //: The hash prefix for each area. `審題` is the question area's own name and is accepted too, so a
 //: link written either way works.
-const AREA_PREFIX = { home: '首頁', question: '審題', answer: '答案', discuss: '錯題' };
-const PREFIX_AREA = { 首頁: 'home', 審題: 'question', 題目: 'question', 答案: 'answer', 錯題: 'discuss' };
-const AREA_LABEL = { home: '首頁', question: '題目審核區', answer: '答案審核區', discuss: '錯題討論區' };
+const AREA_PREFIX = { home: '首頁', question: '審題', answer: '答案', discuss: '錯題', principles: '原則' };
+const PREFIX_AREA = { 首頁: 'home', 審題: 'question', 題目: 'question', 答案: 'answer', 錯題: 'discuss',
+                      原則: 'principles' };
+const AREA_LABEL = { home: '首頁', question: '題目審核區', answer: '答案審核區', discuss: '錯題討論區',
+                     principles: '原則區' };
 
 //: One fetch of each area's payload per session, invalidated when a decision could have changed it.
+//: `questionStale` says the question area's own copied state (`S.verdict`/`S.notes`) was seeded before
+//: a write that happened in another area, so returning to it has to re-read the scope's rows.
 const A = { area: 'question', sheets: null, sheetIndex: 0, sheet: null, answerDraft: new Map(),
-            noteDraft: new Map(), feedback: null, error: {}, rendered: {} };
+            noteDraft: new Map(), feedback: null, error: {}, rendered: {}, questionStale: false };
 
 function areaFromHash() {
   const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
   if (!raw) return 'question';  // the baseline is the question area; an empty hash is not the home page
   const head = raw.split('/')[0];
-  return PREFIX_AREA[head] || 'question';
+  const known = PREFIX_AREA[head];
+  if (known) return known;
+  // 一個**看起來像模式**但沒對上的前綴，比一個空的 hash 更危險：整個 hash 被當成範圍，
+  // 靜默開在題目區，而 `boot()` 接著會把它改寫成那一個範圍——於是「打錯字」表現成
+  // 「一切正常但你看的不是你要的那一區」（2026-09-24 我自己用 `#principles` 撞上，
+  // 花了一輪才看出來；應用程式寫的是 `#原則`）。
+  //
+  // 判準故意很窄：只有**純英數**的前綴才可能是模式名的誤寫——類科名是中文
+  // （`#藥師(一)/115/2/…`），所以這條規則碰不到任何合法的範圍寫法。不新增英文別名：
+  // 同一件事兩種拼法就是兩個會不一致的地方，而英文拼法從來沒有發布過，沒有書籤在依賴它。
+  if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(head) && !S.scope.category) {
+    toast(`#${head} 不是一個區；模式前綴是 ${Object.values(AREA_PREFIX).join('、')}。`, true);
+  }
+  return 'question';
 }
 
 function showArea(area, { push = true } = {}) {
@@ -25,7 +44,8 @@ function showArea(area, { push = true } = {}) {
   }
   // A mode that is not chosen is **hidden**, never emptied: the answer area keeps the sheet the
   // reviewer was reading and the note they were typing, and a trip through 首頁 must not discard it.
-  const nodes = { home: 'areaHome', question: 'areaQuestion', answer: 'areaAnswer', discuss: 'areaDiscuss' };
+  const nodes = { home: 'areaHome', question: 'areaQuestion', answer: 'areaAnswer', discuss: 'areaDiscuss',
+                  principles: 'areaPrinciples' };
   for (const [name, id] of Object.entries(nodes)) {
     const node = $(id);
     if (node) node.classList.toggle('on', name === next);
@@ -41,6 +61,12 @@ function showArea(area, { push = true } = {}) {
   // `replaceState`, not a push: the back button should leave the area, not walk through renders of it.
   if (location.hash !== wanted) history.replaceState(null, '', wanted);
   if (next !== 'question') renderArea(next);
+  // 回到題目區時，如果別的區寫過東西，就重讀這個範圍的列（游標留在同一題）。
+  // 「別的區寫過」是 `invalidateAreas()` 立的旗標——沒有它，討論區剛加的註解在題目區看不到。
+  if (next === 'question' && A.questionStale) {
+    A.questionStale = false;
+    refreshScopeRows().catch(() => {});
+  }
   if (push) $('whoami').textContent = `${AREA_LABEL[next]} · ${S.rows.length} 題`;
 }
 
@@ -61,16 +87,38 @@ function renderArea(area, { force = false } = {}) {
   A.rendered[area] = true;
   if (area === 'answer') renderAnswers();
   else if (area === 'discuss') renderDiscuss();
+  else if (area === 'principles') renderPrinciples();
   else if (area === 'home') renderHome();
 }
 
-//: Called by anything that writes. The answer area's eligible set and the discussion area's case
-//: list are both derived from decisions taken in the question area, so a question decision makes
-//: all three panes stale.
+//: Called by anything that writes. Every other area's eligible set is derived from decisions taken
+//: somewhere else - a question decision changes what the answer area may review and what the
+//: discussion area lists; a principle or an answer to a counter-question changes what the next round
+//: of the agent reads - so **a write invalidates all of them**. This is the single invalidation point
+//: (charter: 導覽與內容必須來自同一個來源); a write that does not call it leaves one pane showing the
+//: state before the write, which is exactly the 「前面說我沒做、後面說我做了」 the reviewer reported.
 function invalidateAreas() {
   A.rendered = {};
   A.sheets = null;
   A.feedback = null;
+  // 寫入發生在**別的區**時，題目區手上的 `S.verdict`／`S.notes` 已經是寫入前的值——它不會重讀，
+  // 因為它的 DOM 是保留的。所以立一個旗標，`showArea()` 回到題目區時用它決定要不要重讀
+  // （`refreshScopeRows()`：重讀列，但游標留在同一題）。
+  if (A.area !== 'question') A.questionStale = true;
+}
+
+/* 寫入之後**唯一**的收尾：作廢所有區的快取，然後把你正在看的那一區重畫一次。
+
+   以前每一區自己寫「`invalidateAreas()` ＋ `await renderXxx()`」——同一個動作四份實作，漏掉任何一份，
+   那一區就會停在寫入前的畫面（使用者回報的「各說各話」）。現在只有這一個入口。
+
+   重畫是**無損**的，因為草稿不在 DOM 裡：答案區的字母與註記在 `A.answerDraft`／`A.noteDraft`，
+   題目區的註解在 `S.notes`，所以 `innerHTML` 重來一次不會把正在打的字弄丟（這一條有瀏覽器測試
+   `scripts/test_v2_areas_browser.mjs` 釘住：半打的註記要能穿過一次區間切換）。 */
+async function afterWrite() {
+  const area = A.area;
+  invalidateAreas();
+  await renderArea(area, { force: true });
 }
 
 /* --------------------------------------------------------------- 首頁
@@ -81,21 +129,43 @@ function invalidateAreas() {
 async function renderHome() {
   const cards = $('homeCards');
   cards.innerHTML = '<div class="empty">載入中…</div>';
-  const [questions, answers, feedback] = await Promise.all([
+  const [questions, answers, feedback, discuss, machine] = await Promise.all([
     fetchAreaJson('/api/candidates', { _count: 1 }),
     fetchAreaJson('/api/answer-candidates', { limit: 1 }),
     fetchAreaJson('/api/correction-feedback', { limit: 500 }),
+    fetchAreaJson('/api/discuss', { limit: 1 }),
+    fetchAreaJson('/api/machine-activity'),
   ]);
   const total = questions ? Number(questions.total_count ?? questions.filtered_count ?? 0) : null;
   const answered = questions ? Number(questions.reviewed_count ?? 0) : null;
   const eligible = answers ? Number(answers.eligible_count ?? 0) : null;
   const answerReviewed = answers ? Number(answers.reviewed_count ?? 0) : null;
   const cases = feedback && Array.isArray(feedback.events) ? feedback.events.length : null;
-  const card = (title, big, note, area, action) => `
+  // 原則區的數字與那一頁自己讀的是**同一個投影**（同一個 `/api/discuss` 回應裡的兩個區塊），
+  // 不是另外算的——首頁與它指到的那一頁不一致比沒有首頁更糟。
+  const principleCount = discuss && discuss.principles ? Number(discuss.principles.count ?? 0) : null;
+  const openQuestions = discuss && discuss.repair_questions
+    ? Number(discuss.repair_questions.open_count ?? 0) : null;
+  // 機器改過字的題目：每一格是**一種**機器動作，所以「有沒有改過、是怎麼改的」在首頁就看得出來。
+  // 數字來自 `/api/machine-activity`（伺服器在同一份事件流上算的），這一頁一個數字都不自己算；
+  // **字也只在一份**（`APPLIED_LABEL`，02-area-question.js）：首頁與每一列的說法從此不可能不一致
+  // ——同一個東西寫兩次，就是兩個可以不一致的地方。
+  const activityHtml = machine
+    ? '<div class="mach"><span class="mach-hint">機器改過字</span>'
+      // `entry` **就是**那個字（`APPLIED_LABEL` 的值），不是一個帶 `label` 的物件。寫成
+      // `entry.label` 的下場是首頁四個數字的名字全部變成 `undefined`——而數字是對的，所以
+      // 它看起來只像「標籤怪怪的」。抓到它的是
+      // `scripts/test_v2_principles_browser.mjs`（2026-09-24：`["undefined 1","undefined 1",…]`）。
+      + Object.entries(APPLIED_LABEL)
+        .map(([kind, label]) => `<b>${label} ${Number(machine[kind] ?? 0)}</b>`).join('')
+      + `<i>退回 ${Number(machine.total ?? 0)} 題；其餘退回沒有動到字</i></div>`
+    : '';
+  const card = (title, big, note, area, action, extra = '') => `
     <div class="card" data-go="${area}">
       <h2>${esc(title)}</h2>
       <span class="big">${big === null ? '—' : big}</span>
       <p>${esc(note)}</p>
+      ${extra}
       <span class="go">${esc(action)} →</span>
     </div>`;
   cards.innerHTML = [
@@ -104,7 +174,11 @@ async function renderHome() {
     card('答案審核區', eligible === null ? null : `${answerReviewed ?? 0}／${eligible}`,
          '只審已通過題目的答案卡。沒通過的題目不能審答案，伺服器會直接拒繪。', 'answer', '審答案'),
     card('錯題討論區', cases === null ? null : `${cases}`,
-         '人工修過的個案，依「修改的類型」排列：這一區是把修正累積成可學的東西的地方。', 'discuss', '看個案'),
+         '人工修過的個案，依「修改的類型」排列：這一區是把修正累積成可學的東西的地方。',
+         'discuss', '看個案', activityHtml),
+    card('原則區', principleCount === null ? null : `${principleCount} 條・${openQuestions ?? 0} 題待答`,
+         '基本原則與修理代理的反問。每一條都叫得出原題紙本，讓你知道那條規則是在講哪一題。',
+         'principles', '管原則'),
   ].join('');
   for (const node of cards.querySelectorAll('[data-go]')) {
     node.onclick = () => showArea(node.dataset.go);
@@ -139,216 +213,4 @@ async function fetchAreaJson(path, params = {}) {
     A.error[path] = String(error.message || error);
     return null;
   }
-}
-
-/* --------------------------------------------------------------- 答案審核區
-
-   The gate is the server's, and this area only mirrors it: `/api/answer-candidates` returns
-   questions whose question review is `accept`/`unblock`, and `/api/answer-review` refuses to pass an
-   item whose question has not been accepted. Both are read from the same place, so a reviewer never
-   sees an answer card the server would reject.
-
-   The area is a **sheet** at a time, because that is the unit the paper is: one answer PDF covers
-   one subject of one sitting, and the answers are read off it row by row. Reading it question by
-   question would mean re-finding the sheet on every step.
-
-   A correction is written through `/api/answer-review` with the reviewer's own `corrected_answer`,
-   which is what makes the server record a `question_correction_feedback_events` row with
-   `scope=answer` and `change_class=answer_rule` (see `_record_answer_correction_feedback`). That row
-   is the lesson the 錯題討論區 shows - so this area does not have to learn anything itself. */
-async function renderAnswers() {
-  const list = $('sheetList');
-  const main = $('answerMain');
-  if (!A.sheets) {
-    list.innerHTML = '<div class="empty">載入中…</div>';
-    // 一巻為一單位：一份答案卷的列 ≤ 題數（實測最大 100）。`200` 覆蓋單巻且把承載壓到
-// 約 1/5（實測 `limit=1000` 為 7.8 MB、`limit=60` 為 6.0 MB → 差在首屏的列數，
-// 故 200 是「一巻＋同考次相隣巻」的寬度；多過無益，少則斷導覽（charter §1 第 4 項）。
-    const payload = await fetchAreaJson('/api/answer-candidates', { limit: 200 });
-    if (!payload) {
-      list.innerHTML = `<div class="empty">讀不到答案候選（${esc(A.error['/api/answer-candidates'] || '')}）</div>`;
-      return;
-    }
-    A.sheets = payload.candidates || [];
-  }
-  if (!A.sheets.length) {
-    list.innerHTML = '<div class="empty">這一卷沒有可審的答案卡。答案卡只收「題目已通過」的題目。</div>';
-    main.innerHTML = '<div class="empty">沒有可審的答案。</div>';
-    return;
-  }
-  if (A.sheetIndex >= A.sheets.length) A.sheetIndex = 0;
-  list.innerHTML = A.sheets.map((sheet, index) => {
-    const meta = sheet.metadata || {};
-    const done = Number(sheet.reviewed_count || 0);
-    const count = Number(sheet.reviewable_question_count ?? sheet.question_count ?? 0);
-    return `<button class="sheet-row${index === A.sheetIndex ? ' active' : ''}${done && done >= count ? ' done' : ''}" data-sheet="${index}">
-      <span class="t">${esc(meta.normalized_subject_name || sheet.sheet_key || '(未知科目)')}</span>
-      <span class="m">${esc([meta.normalized_category_name, meta.year && `${meta.year} 年`,
-        meta.exam_ordinal && `第 ${meta.exam_ordinal} 次`, `${done}／${count}`].filter(Boolean).join(' · '))}</span>
-    </button>`;
-  }).join('');
-  for (const row of list.querySelectorAll('[data-sheet]')) {
-    row.onclick = () => { A.sheetIndex = Number(row.dataset.sheet); renderAnswers(); };
-  }
-  renderAnswerSheet();
-}
-
-function renderAnswerSheet() {
-  const main = $('answerMain');
-  const sheet = A.sheets[A.sheetIndex];
-  if (!sheet) { main.innerHTML = '<div class="empty">沒有這一張答案卡。</div>'; return; }
-  const meta = sheet.metadata || {};
-  const rows = sheet.rows || [];
-  const head = `
-    <h1>${esc(meta.normalized_subject_name || '(未知科目)')}</h1>
-    <p class="answer-sub">${esc([meta.normalized_category_name, meta.year && `${meta.year} 年`,
-      meta.exam_ordinal && `第 ${meta.exam_ordinal} 次`, sheet.answer_role_label &&
-      `來源：${sheet.answer_role_label}`].filter(Boolean).join(' · '))}
-      ｜ 已審 ${Number(sheet.reviewed_count || 0)}／${Number(sheet.reviewable_question_count ?? rows.length)}</p>`;
-  const body = rows.map((row) => answerRowHtml(row)).join('');
-  main.innerHTML = `${head}
-    <table class="atable"><thead><tr>
-      <th style="width:52px">題</th><th>題幹</th><th style="width:210px">答案</th><th style="width:120px">審核</th>
-    </tr></thead><tbody>${body}</tbody></table>
-    <div class="answer-bar">
-      <button class="ans-btn" data-sheet-action="accept">整份通過</button>
-      <button class="ans-btn" data-sheet-action="needs_review">整份保留疑問</button>
-      <button class="ans-btn" data-sheet-action="block">整份阻擋</button>
-      <span class="hint" id="answerSaved"></span>
-    </div>`;
-  bindAnswerSheet();
-}
-
-function answerRowHtml(row) {
-  if (row.is_placeholder) {
-    return `<tr class="blocked"><td class="qnum">${esc(row.question_number)}</td>
-      <td class="stem" colspan="3">${esc(row.placeholder_reason || '題目尚未通過審核')}</td></tr>`;
-  }
-  const review = row.answer_review || {};
-  const hint = row.answer_hint || {};
-  const done = review.status === 'reviewed';
-  const blocked = review.action === 'block';
-  const options = (row.options || []).map((option) =>
-    `<span class="ans-btn${String(review.correction?.answer ?? row.answer ?? '') === option.key ? ' on' : ''}"
-       data-answer="${esc(option.key)}" data-key="${esc(row.candidate_key)}">${esc(option.key)}</span>`).join(' ');
-  const stem = String(row.stem || '').slice(0, 240);
-  return `<tr class="${blocked ? 'blocked' : done ? 'done' : ''}" data-key="${esc(row.candidate_key)}">
-    <td class="qnum">${esc(row.question_number)}</td>
-    <td class="stem">${richText(stem)}
-      <div class="opts">${(row.options || []).map((o) => `${esc(o.key)}. ${richText(String(o.text || '').slice(0, 60))}`).join('　')}</div></td>
-    <td class="ans"><span class="ans-current" id="ansNow_${esc(row.question_number)}">${esc(review.correction?.answer ?? row.answer ?? '—')}</span>
-      <div>${options}</div>
-      ${hint.severity === 'warning' ? `<span class="ans-warn">${esc(hint.message || '答案有疑慮')}</span>` : ''}</td>
-    <td>${done ? `<span class="hint">${esc(LABEL[review.action] || review.action || '已審')}</span>` : '<span class="hint">未審</span>'}
-      <textarea class="ans-note" data-note="${esc(row.candidate_key)}" placeholder="註記（可留空）">${esc(A.noteDraft.get(row.candidate_key) ?? review.notes ?? '')}</textarea></td>
-  </tr>`;
-}
-
-function bindAnswerSheet() {
-  const main = $('answerMain');
-  // A typed note is kept in memory as it is typed, so switching to another sheet and back - or
-  // switching to 首頁 - does not throw away a note the reviewer was in the middle of writing. It is
-  // a draft, not a decision: nothing is sent until one of the buttons below is pressed.
-  for (const node of main.querySelectorAll('[data-note]')) {
-    node.addEventListener('input', () => A.noteDraft.set(node.dataset.note, node.value));
-  }
-  // Clicking an option **drafts** the answer; it does not save. A stray click on a 4-row table must
-  // not silently rewrite an answer, so the change is only sent by one of the buttons below, which is
-  // also where the note and the reviewer are read from.
-  for (const button of main.querySelectorAll('[data-answer]')) {
-    button.onclick = () => {
-      const key = button.dataset.key;
-      A.answerDraft.set(key, button.dataset.answer);
-      const row = main.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
-      if (row) {
-        const now = row.querySelector('.ans-current');
-        if (now) now.textContent = button.dataset.answer;
-        for (const sibling of row.querySelectorAll('[data-answer]')) {
-          sibling.classList.toggle('on', sibling === button);
-        }
-      }
-    };
-  }
-  for (const button of main.querySelectorAll('[data-sheet-action]')) {
-    button.onclick = () => answerSheetAction(button.dataset.sheetAction);
-  }
-}
-
-async function answerSheetAction(action) {
-  const sheet = A.sheets[A.sheetIndex];
-  if (!sheet) return;
-  const main = $('answerMain');
-  const notes = {};
-  for (const node of main.querySelectorAll('[data-note]')) {
-    notes[node.dataset.note] = node.value;
-    A.noteDraft.set(node.dataset.note, node.value);
-  }
-  // One request per row that has something to say. `needs_review` and `block` are per row as well,
-  // because an answer sheet's defects are per answer - one wrong key does not make the other 79
-  // wrong, and marking them so would be recording a decision nobody made.
-  const entries = [];
-  for (const row of sheet.rows || []) {
-    if (row.is_placeholder || !row.candidate_key) continue;
-    const drafted = A.answerDraft.get(row.candidate_key);
-    const review = row.answer_review || {};
-    const note = notes[row.candidate_key] ?? A.noteDraft.get(row.candidate_key) ?? review.notes ?? '';
-    const already = review.status === 'reviewed';
-    let rowAction = action;
-    if (drafted && drafted !== String(row.answer ?? '')) rowAction = 'correct';
-    else if (!drafted && action === 'correct') continue;
-    else if (action === 'accept' && already && rowAction === review.action && !note) continue;
-    const entry = {
-      candidate_key: row.candidate_key, action: rowAction, notes: note, reviewer: 'local',
-      // `reviewed_answer` is what the server stores as "the answer this reviewer accepted"; omitting it
-      // would store `{"answer": null}` and silently blank the answer the sheet is being judged
-      // against. It is sent from the row, not from the draft, because it means "what was on the paper".
-      reviewed_answer: { answer: row.answer ?? null },
-      answer_source_registry_key: (row.answer_payload || {}).answer_source_registry_key
-        || row.answer_source_registry_key || '',
-      sheet_key: sheet.sheet_key || '',
-      sheet_action: action,
-    };
-    if (drafted) entry.corrected_answer = drafted;
-    entries.push(entry);
-  }
-  if (!entries.length) {
-    const saved = $('answerSaved');
-    if (saved) saved.textContent = '沒有要寫入的項目（沒有改答案、也沒有註記）。';
-    return;
-  }
-  // `/api/answer-review-batch` takes **one** action for the whole request and ignores a per-entry
-  // `action` (see the handler: `action = payload.get("action")` then every event is stamped with
-  // it). So the rows are grouped by the action they actually earned and sent as one request per
-  // group. Sending one batch with a per-row action would have silently written the sheet's action
-  // onto the rows that disagreed with it - i.e. recorded 79 decisions nobody made.
-  const groups = new Map();
-  for (const entry of entries) {
-    const key = entry.action;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(entry);
-  }
-  let savedTotal = 0;
-  let failure = null;
-  for (const [groupAction, groupEntries] of groups) {
-    const response = await fetch('/api/answer-review-batch', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: groupAction, entries: groupEntries, reviewer: 'local',
-                             sheet_key: sheet.sheet_key || '', sheet_action: action }),
-    });
-    const data = await response.json().catch(() => ({ ok: false, error: '回應不是 JSON' }));
-    if (!data.ok) { failure = data; break; }
-    savedTotal += Number(data.saved_count ?? groupEntries.length);
-  }
-  const saved = $('answerSaved');
-  if (failure) {
-    if (saved) saved.textContent = `寫入失敗：${failure.error || ''}`;
-    toast(`答案審核寫入失敗：${failure.error || ''}`, true);
-    return;
-  }
-  if (saved) saved.textContent = `已寫入 ${savedTotal} 筆。`;
-  toast(`已寫入 ${savedTotal} 筆答案審核`);
-  A.answerDraft.clear();
-  A.noteDraft.clear();
-  invalidateAreas();
-  await renderAnswers();
 }

@@ -113,7 +113,7 @@ VOLATILE_DRIFT_FIELDS = (
 ALLOWED_RESOLUTIONS = {
     ("exclude_both", "omit"),
     ("exclude_from_canonical", "omit"),
-    ("regenerate_on_ai395", "omit_then_regenerate"),
+    ("regenerate_on_previous_worker", "omit_then_regenerate"),
     ("regenerate_from_final_catalog", "omit_then_regenerate"),
 }
 RESERVED_ROOTS = {".linux-name-map", ".canonical-build-incomplete.json"}
@@ -539,7 +539,7 @@ def verify_sources(
         if actual_bytes != int(expected_bytes) or actual != expected_hash:
             volatile_allowed = (
                 allow_approved_volatile_drift
-                and expected["resolution"] == "regenerate_on_ai395"
+                and expected["resolution"] == "regenerate_on_previous_worker"
                 and expected["canonical_action"] == "omit_then_regenerate"
             )
             if not volatile_allowed:
@@ -973,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Continue only for rehashed conflict paths whose approved resolution is "
-            "regenerate_on_ai395 + omit_then_regenerate; all other drift remains fatal."
+            "regenerate_on_previous_worker + omit_then_regenerate; all other drift remains fatal."
         ),
     )
     parser.add_argument("--apply", action="store_true")

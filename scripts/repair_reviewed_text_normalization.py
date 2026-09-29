@@ -344,15 +344,24 @@ def repair_event(
 ) -> dict[str, Any]:
     original_note = str(row.get("notes") or "").strip()
     repair_note = repair_note or "Codex 文字正規化修復：依官方 PDF 與現行 parser 規則更新題幹/選項；保留原審核狀態，請人工複核後再決定是否通過。"
-    note_parts = [original_note] if original_note else []
-    if repair_note and repair_note not in original_note:
-        note_parts.append(repair_note)
-    notes = "\n\n".join(note_parts)
+    # **機器的句子不進 `notes`。**（2026-09-24 修正）
+    #
+    # 舊版把 `repair_note` 接在人的話後面一起寫進 `notes`，於是：
+    #   * 顯示「這一題的註解」時，機器的公告蓋在人的字上面（實測 231 筆）；
+    #   * 介面把 `reset_review` 的說明**預填**進 `comment` 的輸入框，人一送出就變成
+    #     「人寫的原則」——`qbr/tests/test_principles_curation.py` 就是為了擋這件事而寫的，
+    #     它的 docstring 直接說「最貴的失敗模式是把機器自己寫的字當成人寫的」。
+    #
+    # 這個欄位是**兩個作者共用一個位置**，而它從來沒有被這樣設計過。修法不是改文案，
+    # 是分家：`notes` 只放人的字（原封不動，連空白都不動），機器的那句進 `pipeline_note`。
+    # 讀取端要顯示機器說明時讀 `pipeline_note`；要判斷「這是誰寫的」時看它有沒有值。
+    notes = original_note
     event = {
         "candidate_key": row["candidate_key"],
         "reviewer": "codex-text-normalization-repair",
         "action": "reset_review" if row.get("action") in REVIEWED_ACTIONS else (row.get("action") or "unreviewed"),
         "notes": notes,
+        "pipeline_note": repair_note,
         "correction": correction,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "repair_kind": repair_kind,

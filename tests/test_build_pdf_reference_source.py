@@ -44,6 +44,22 @@ class PdfReferenceSourceTests(unittest.TestCase):
         self.assertIn("poppler", result["families"])
         self.assertIn("pypdf", result["families"])
 
+    def test_pdfplumber_and_pdfminer_wrappers_are_one_evidence_family(self):
+        text = "question stem and options"
+        result = self.module.choose_consensus({"pdfplumber": text, "pdfminer": text})
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(result["families"], ["pdfminer.six"])
+        self.assertIn("single_extractor_family", result["flags"])
+
+    def test_poppler_and_pdfminer_agreement_is_independent_consensus(self):
+        text = "question stem and options"
+        result = self.module.choose_consensus({
+            "pdftotext_layout": text,
+            "pdfplumber": text,
+        })
+        self.assertEqual(result["status"], "usable_consensus")
+        self.assertEqual(result["families"], ["pdfminer.six", "poppler"])
+
     def test_disagreement_requires_manual_source_review(self):
         result = self.module.choose_consensus(
             {

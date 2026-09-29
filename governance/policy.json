@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "policy_version": "1.0.0",
-  "effective_date": "2026-08-09",
+  "policy_version": "1.1.0",
+  "effective_date": "2026-09-26",
   "project": "Ting-Ruei/tw-national-exam-catalog",
   "default_branch": "main",
   "allowed_work_branch_patterns": [
@@ -11,9 +11,9 @@
   "authorities": {
     "official_source": "MOEX pages and official Q/ANS/MOD PDFs with source URL and hash",
     "code_and_policy": "reviewed commits on GitHub main",
-    "workflow_state": "AI395 PostgreSQL job state and artifact manifests",
-    "human_review": "AI395 append-only review event tables",
-    "formal_question_bank": "AI395 formal tables derived through approved gates",
+    "workflow_state": "selected QBR queue plus revisioned AI-owned review results",
+    "human_review": "the selected human review-event store; agents cannot modify these events",
+    "formal_question_bank": "validated packages derived through approved gates",
     "published_data": "immutable packages, manifests, checksums, release IDs, and import evidence"
   },
   "environments": {
@@ -25,14 +25,21 @@
       "production_writes": false,
       "isolated": true
     },
+    "review_workflow": {
+      "host": "Mac Studio 192.168.10.70 QBR Review UI v2",
+      "configured": true,
+      "publishes_formal_question_bank": false,
+      "note": "AI-owned workflow results and status only; human review events remain separate."
+    },
     "production": {
-      "host": "AI395",
-      "single_writer": true,
-      "minimum_mutation_level": "G3"
+      "host": "Mac Studio website runtime",
+      "configured": true,
+      "minimum_mutation_level": "G3",
+      "note": "Website production only. Review workflow is separate; catalog PostgreSQL is retired."
     },
     "rollback_standby": {
-      "host": "Mac Studio",
-      "must_remain_stopped_while_production_writes": true
+      "host": null,
+      "configured": false
     }
   },
   "levels": {
@@ -52,9 +59,9 @@
     },
     "G2": {
       "rank": 2,
-      "name": "advise_or_stage",
+      "name": "review_or_stage",
       "autonomous": true,
-      "human_approval": "required_to_promote",
+      "human_approval": "required_for_formal_publication_only",
       "production_mutation": false
     },
     "G3": {
@@ -141,6 +148,22 @@
       "constraints": ["versioned_schema", "provenance_required", "no_human_review_action"]
     },
     {
+      "id": "review.ai_workflow_decision",
+      "level": "G2",
+      "environments": ["review_workflow"],
+      "agent_may_initiate": true,
+      "approval": "owner_approved_interim_scope",
+      "constraints": ["ai_status_only", "pass_return_block", "no_human_review_event", "no_formal_publication", "run_and_source_provenance"]
+    },
+    {
+      "id": "review.ai_result.update",
+      "level": "G2",
+      "environments": ["review_workflow"],
+      "agent_may_initiate": true,
+      "approval": "owner_approved_interim_scope",
+      "constraints": ["agent_own_results_only", "preserve_revisions_and_provenance", "no_human_review_event"]
+    },
+    {
       "id": "staging.ingest",
       "level": "G2",
       "environments": ["staging"],
@@ -199,7 +222,7 @@
     {
       "id": "review.human_decision",
       "level": "G4",
-      "environments": ["production"],
+      "environments": ["review_workflow"],
       "agent_may_initiate": false,
       "approval": "owner_only",
       "constraints": ["agent_must_not_impersonate_reviewer"]
@@ -223,7 +246,7 @@
     {
       "id": "append_only_event.repair",
       "level": "G4",
-      "environments": ["production"],
+      "environments": ["review_workflow"],
       "agent_may_initiate": false,
       "approval": "owner_only",
       "constraints": ["repair_script", "backup", "preserve_history_and_notes", "audit_evidence"]
@@ -231,16 +254,18 @@
     {
       "id": "material_artifact.delete",
       "level": "G4",
-      "environments": ["staging", "production", "rollback_standby"],
+      "environments": ["staging", "review_workflow", "production", "rollback_standby"],
       "agent_may_initiate": false,
       "approval": "owner_only",
       "constraints": ["exact_targets", "backup_proof", "retention_policy", "recovery_plan"]
     }
   ],
   "invariants": [
-    "ai_output_cannot_accept_or_block_questions",
+    "ai_workflow_status_is_distinct_from_human_decision_and_formal_publication",
+    "agents_may_update_own_ai_results_with_revision_provenance",
     "human_review_events_are_append_only",
-    "ai395_is_the_single_production_writer",
+    "website_and_review_workflow_authorities_are_separate",
+    "review_writer_and_promotion_authority_must_be_explicitly_declared",
     "reviewed_candidate_changes_require_reset_review_events",
     "immutable_releases_are_never_patched_in_place",
     "secrets_and_large_derived_artifacts_stay_out_of_git",
@@ -253,9 +278,9 @@
     "docs/governance/",
     ".github/",
     "schemas/database/",
-    "deploy/ai395/",
-    "scripts/ai395_catalog_production.sh",
-    "scripts/ai395_catalog_runtime.sh"
+    "review_ui/",
+    "scripts/",
+    ".env.example"
   ],
   "github_controls": {
     "require_pull_request": true,

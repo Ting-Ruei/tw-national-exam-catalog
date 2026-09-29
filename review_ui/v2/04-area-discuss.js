@@ -1,13 +1,17 @@
-/* 錯題討論區：三欄（左_list＝卡住的題；中_main＝資訊／編輯／原則／代問；右_pdfFrame＝紙本）。
+/* 錯題討論區：三欄（左_list＝卡住的題；中_main＝資訊／編輯；右_pdfFrame＝紙本）。
  *
  * 這一區**只放卡住的題**：人按過「阻擋」，或管線／AI 把它退回待複核。它不再是「整個佇列的
  * 另一種畫法」——那讓 79,090 題全部進來，真正卡住的那 300 題反而找不到。
  *
  * 三個面板各有它的來源，全部來自同一次 `/api/discuss`：
  *   左  卡住的題（伺服器用 `reviewStatus=discuss` 過濾，定義在 `DISCUSS_BUCKETS`）
- *   中  ①機器偵測（disputes）②AI 意見（finding，含模型看過的紙本截圖）③編輯框
- *       ④「基本原則」可加可減，會被編進修題／AI 審核的提示詞 ⑤AI 讀不懂時在這裡反問
+ *   中  ①機器偵測（disputes）②AI 意見（finding，含模型看過的紙本截圖）③原題④擷圖／抽換
+ *       ⑤編輯框⑥註解
  *   右  紙本原卷，永遠是題目卷，與左欄脫鉤
+ *
+ * **基本原則、修理代理的反問與代理工作區已經搬到原則區**（`03-area-principles.js`，2026-09-24）。
+ * 使用者原文：「我已為原則區你會獨立做一頁UI來管理，結果你藏在錯題討論區」。同一條原則被兩個
+ * 地方畫，就是「兩邊各說各話」的那一類缺陷；這裡只留這一題的個案。
  *
  * 鍵：`W`/`S` 走本區清單；`1..6` 聚焦六個選項；`7` 註解  `8` 紙本；`Enter` 儲存、`Shift+Enter` 換行。 */
 const D = {
@@ -28,13 +32,6 @@ const D = {
   draft: new Map(),
   //: 這一區自己的「已載入」狀態。`A.rendered` 由 `invalidateAreas()` 清，這裡只記這一區的資料。
   loaded: false,
-  //: 基本原則與 AI 反問，都是 `/api/discuss` 一起帶回來的。
-  principles: { principles: [], removed: [], count: 0 },
-  questions: { questions: [], open_count: 0 },
-  //: 目前哪一個面板在「新增原則」輸入模式；`null`＝沒有。
-  principleDraft: false,
-  //: 反問的回答草稿，以 question_id 為鍵。
-  answerDraft: new Map(),
   //: A note of "I have looked at this question" per key, so the list can show progress without
   //: the server having to be asked again.
   seen: new Map(),
@@ -61,6 +58,30 @@ try {
   if (Number.isFinite(saved) && saved >= 11 && saved <= 26) D.fontSize = saved;
 } catch (error) { /* 私密模式沒有 localStorage */ }
 
+/* **The question you were on survives a reload.**（2026-09-24 修正）
+ *
+ * 舊版只有字級進 `localStorage`，`D.index` 純記憶體，所以 F5 一律回到第 0 題——審到第 50 題
+ * 的人重新載入就失去位置。`scopeToHash()` 現在也把它寫進 hash（可以分享、上一頁可用），
+ * 這裡再存一份鍵，因為 hash 可能在換範圍時被 `scopeToHash` 重寫，而**你想要回來的是那一題**，
+ * 不是那個範圍。
+ *
+ * 存的是 `candidate_key`，不是序號：清單會隨審核狀態改變而重排（你 A 掉一題，它就離開
+ * 卡住清單），序號於是會指向別的題。鍵是穩定的，所以「回來」回來的是同一題，或者那一題
+ * 已經不在清單裡時，回到清單開頭——而不是隨機跳到第 50 題。
+ */
+const DISCUSS_KEY_STORE = 'v2.discuss.key';
+function rememberDiscussKey(key) {
+  if (!key) return;
+  try { window.localStorage.setItem(DISCUSS_KEY_STORE, key); } catch (error) { /* 私密模式 */ }
+}
+function restoreDiscussIndex() {
+  let key = '';
+  try { key = window.localStorage.getItem(DISCUSS_KEY_STORE) || ''; } catch (error) { key = ''; }
+  if (!key) return;
+  const hit = D.rows.indexOf(key);
+  if (hit >= 0) D.index = hit;
+}
+
 /* 重新載入這一區。`force`＝連資料一起重抓（剛寫入過東西）。 */
 async function renderDiscuss(force) {
   const list = $('discussList'), main = $('discussMain'), pdf = $('discussPdf');
@@ -69,6 +90,9 @@ async function renderDiscuss(force) {
   if (!D.loaded) {
     list.innerHTML = '<div class="empty">載入中…</div>';
     await loadDiscuss();
+    // 清單載進來之後才可能知道「你上次看的那一題」在第幾個——序號是這一輪才決定的。
+    // 只在剛載入時做一次：之後 D.index 是人按出來的，不該被還原覆蓋。
+    if (!D.positionRestored) { D.positionRestored = true; restoreDiscussIndex(); }
   }
   const total = D.rows.length;
   // 左欄是這一區的側邊資訊：先給四層篩選，再說「這裡有幾題、怎麼壞的」，再列題。統計本來被放在
@@ -104,10 +128,14 @@ async function renderDiscuss(force) {
         + `${label ? `<span class="kind">${esc(label)}</span>` : ''}</div>`;
     }).join('');
   for (const node of list.querySelectorAll('[data-i]')) {
-    node.onclick = () => { D.index = Number(node.dataset.i || 0); renderDiscuss(); };
+    node.onclick = () => { D.index = Number(node.dataset.i || 0); rememberDiscussKey(D.rows[D.index]); renderDiscuss(); };
   }
   const key = D.rows[D.index];
   const candidate = D.byKey.get(key) || {};
+  // 記住「當下位置」的三個入口：載入後、點清單、按 W/S。這裡是最後一個共同出口——render 完
+  // 才知道當下的 key，而所有移動最後都會 render。順便把 hash 更新，兩個持久化一起做。
+  rememberDiscussKey(key);
+  if (typeof scopeToHash === 'function') scopeToHash();
   main.innerHTML = discussCenterHtml(candidate, key);
   pdf.innerHTML = discussPdfHtml(candidate);
   bindDiscuss(key);
@@ -147,8 +175,6 @@ async function loadDiscuss() {
   if (payload.stuck_total !== undefined) D.stuckTotal = Number(payload.stuck_total) || 0;
   D.filteredCount = payload.filtered_count === undefined || payload.filtered_count === null
     ? null : Number(payload.filtered_count);
-  D.principles = payload.principles || D.principles;
-  D.questions = payload.repair_questions || D.questions;
   D.loaded = true;
 }
 /* 佇列桶 → 中文標籤。與伺服器 `review_projection` 的 `display_label` 同義，但這裡只認 bucket，
@@ -160,28 +186,47 @@ const DISCUSS_BUCKET_LABEL = {
 function bucketLabel(bucket) { return DISCUSS_BUCKET_LABEL[bucket] || ''; }
 
 /* 一列在左欄怎麼標。人阻擋的題在伺服器的投影裡 bucket 是 `reviewed`（只有退回相關的狀態才
-   自己一個桶），所以用 `action` 認它；退回的才用 bucket。兩者都不算時不標，勝過標一個錯的。 */
+   自己一個桶），所以用 `action` 認它；退回的才用 bucket。兩者都不算時不標，勝過標一個錯的。
+
+   **機器動過字的退回題，標籤說出動的是哪一種**（2026-09-24 使用者原文：「判讀 → 文字 跟 文字 →
+   抽取檔要打通，並且改標籤送到「AI已解決」，我才能知道有沒有改過」）。三種要複核的東西不同：
+   依紙本改字要整欄對紙本、字形替換要逐字看、正規化（部首碼位）只是換了碼位寫法。分類由伺服器
+   算好送在 `review.applied_kind`（`machineAppliedLabel` 只做翻譯），沒有 `applied` 的退回題
+   維持原本那一格——字沒被動過。 */
 function discussRowLabel(candidate) {
   const review = candidate.review || {};
   if (review.action === 'block') return '人阻擋';
-  return bucketLabel(review.queue_bucket || '');
+  return machineAppliedLabel(review) || bucketLabel(review.queue_bucket || '');
 }
 
 /* 這一題為什麼卡住，用一句話說出來。
    人阻擋的題沒有寫原因（阻擋時不必填），所以「有人說它壞」本身就是唯一的線索；修復後退回的題
-   則帶著 `repair_kind`。兩者要分開講，否則讀者會以為人寫了什麼。 */
+   則帶著 `repair_kind`。兩者要分開講，否則讀者會以為人寫了什麼。
+
+   機器動過字的退回題，那句話也要**指名是哪一種動作**：`applied_kind` 是伺服器依兩邊實際的字
+   算出來的（`field`／`glyph`／`normalisation`），所以讀者當場就知道該怎麼複核——整欄對紙本、
+   逐字看字形，還是只是碼位換寫法。 */
 function discussWhyHtml(candidate) {
   const review = candidate.review || {};
+  // 退回事件本身在 `review.reset`（`latest_reset_review`）。**不是** `review.repair_kind`／
+  // `review.reset_action`：那兩個鍵在伺服器送出來的 `review` 投影裡不存在，所以舊的寫法永遠
+  // 走不到「修復種類」那一句——一個說不出原因的標籤就是這一段文字存在的理由。
+  const reset = review.reset || {};
   const bucket = review.queue_bucket || '';
   const label = bucketLabel(bucket);
+  const applied = machineAppliedLabel(review);
+  const repairKind = reset.repair_kind || reset.repair_type || '';
   if (review.action === 'block') {
     return `人按過「阻擋」${review.notes ? `：${esc(review.notes)}` : '（沒有寫原因）'}`;
   }
-  if (review.reset_action || review.repair_kind) {
-    return `${esc(label)}｜修復種類 ${esc(review.repair_kind || '未標')}`
+  if (reset.action === 'reset_review' || reset.repair_kind || review.is_repair_pending) {
+    const what = applied
+      ? `${esc(applied)}（機器改過字）${label ? `｜退回：${esc(label)}` : ''}`
+      : esc(label);
+    return `${what}｜修復種類 ${esc(repairKind || '未標')}`
       + `${review.previous_action ? `（原本是 ${esc(review.previous_action)}）` : ''}`;
   }
-  return esc(label || '（狀態不明）');
+  return esc(applied || label || '（狀態不明）');
 }
 
 /* 六個 option（最多 6 個；不足 6 個的題目只畫它有的）。
@@ -234,68 +279,29 @@ function discussFindingHtml(candidate) {
          loading="lazy" onclick="window.open(this.src,'_blank')">
        <figcaption>模型看到的紙本截圖（${esc(record.model || '未知模型')}）</figcaption></figure>`
     : '<div class="af-line bad">這一筆意見沒有截圖，無法核對。</div>';
-  const raw = (c) => (c.stored !== undefined && c.stored !== null ? c.stored : c.from);
-  const rawTo = (c) => (c.page !== undefined && c.page !== null ? c.page : c.to);
-  const changes = Array.isArray(record.changes) && record.changes.length
-    ? '<div class="af-line"><b>機械比對（程式逐字相減）：</b></div>'
-      + record.changes.map((c) => `<div class="af-change"><code>${esc(c.field)}</code>`
-        + `<span class="from">${esc(String(raw(c) || '').slice(0, 160))}</span>`
-        + '<span class="arrow">→</span>'
-        + `<span class="to">${esc(String(rawTo(c) || '').slice(0, 160))}</span>`
-        + `<button class="af-apply" data-field="${esc(c.field)}">帶入</button></div>`).join('')
-    : '';
+  // 逐欄的兩邊（**抽取檔案裡存的** → **模型從紙本讀到的**）用與原則區同一支畫法
+  // （`changePairsHtml`，`03-area-principles.js`）：同一份資料在兩頁各寫一次，就會有兩個會漂的
+  // 版本。每一列都留著「帶入」——修還是人的動作，這一頁不代按。
+  const changes = changePairsHtml(record.changes, true);
   return `<div class="ai-finding"><div class="af-head"><span>${esc(which)}</span>`
     + `<span class="af-hint">${esc(record.model || '未知模型')}`
     + `${record.prompt_version ? ` · 提示詞 ${esc(record.prompt_version)}` : ''}</span></div>`
     + `${crop}${parts.join('')}${changes}</div>`;
 }
 
-/* ④基本原則：可加可減，會被編進提示詞。 */
-function discussPrinciplesHtml() {
-  const rows = (D.principles.principles || []).map((p) => {
-    return `<li class="principle" data-id="${esc(p.principle_id)}">`
-      + `<span class="ptext">${esc(p.text)}</span>`
-      + `<button class="ghost pl-remove" data-id="${esc(p.principle_id)}"
-           title="移除（append-only：是加一筆 remove，不是刪掉歷史）">移除</button></li>`;
-  }).join('');
-  const input = D.principleDraft
-    ? `<div class="principle-add"><textarea id="dpNew" placeholder="一句可以被機器遵守的原則，例如：中文詞中間不該有空格。Enter 加入、Shift+Enter 換行"></textarea>
-       <button class="act" id="dpSave">加入</button>
-       <button class="ghost" id="dpCancel">取消</button></div>`
-    : '<button class="ghost" id="dpStart">＋ 新增原則</button>';
-  return `<div class="principles"><div class="ph-head">基本原則（${(D.principles.principles || []).length}）`
-    + '<span class="hint">會被編成修題／AI 審核的提示詞，讓模型不無限推論</span></div>'
-    + `<ul class="pl-list">${rows || '<li class="hint">（還沒有原則）</li>'}</ul>${input}</div>`;
-}
+/* ⓪代理工作區、④基本原則與⑤AI 反問**已經搬到原則區**（`03-area-principles.js`，2026-09-24）。
+   三者的 HTML 與綁定都跟著搬過去，class 一個都沒有改，所以 CSS 照樣生效；這裡不再畫它們，
+   否則同一條原則會有兩個地方各說各話。 */
 
-/* ⑤AI 反問：模型讀不懂時，反問這裡，人回答。未回答的排最前面。 */
-function discussQuestionsHtml() {
-  const rows = D.questions.questions || [];
-  const body = rows.length ? rows.map((row) => {
-    const mine = D.answerDraft.get(row.question_id);
-    const answer = row.answer_text || mine || '';
-    return `<li class="rq${row.open ? ' open' : ''}" data-id="${esc(row.question_id)}">`
-      + `<div class="rq-q"><b>${row.open ? '待回答' : '已回答'}</b>`
-      + `${row.candidate_key ? ` <code>${esc(String(row.candidate_key).slice(-18))}</code>` : ''}`
-      + `　${esc(row.question || '')}</div>`
-      + `${row.reason ? `<div class="hint">為什麼問：${esc(row.reason)}</div>` : ''}`
-      + `<textarea class="rq-a" data-id="${esc(row.question_id)}" placeholder="回答（Enter 送出、Shift+Enter 換行）">${esc(answer)}</textarea>`
-      + `<button class="act rqSave" data-id="${esc(row.question_id)}"${row.answer_text ? ' disabled' : ''}>送出回答</button>`
-      + (row.answer_text ? `<span class="hint">已回覆於 ${esc(String(row.answer_at || '').slice(5, 16))}</span>` : '')
-      + '</li>';
-  }).join('') : '<li class="hint">（修理代理沒有卡住的地方。）</li>';
-  return `<div class="repair-qs"><div class="ph-head">修理代理的反問（${D.questions.open_count || 0} 題待答）`
-    + '<span class="hint">模型讀不懂時會停在這裡，而不是猜</span></div>'
-    + `<ul class="rq-list">${body}</ul></div>`;
-}
-
-/* 中欄：依序是「為什麼卡住 → ① 機器 → ② AI → ③ 原題 → ④ 擷圖／抽換 → ⑤ 手動修改 → ⑥ 註解 → ⑦ 原則 → ⑧ 反問」。
+/* 中欄：依序是「為什麼卡住 → ① 機器 → ② AI → ③ 原題 → ④ 擷圖／抽換 → ⑤ 手動修改 → ⑥ 註解」。
    順序就是閱讀順序：先知道它為什麼在這裡，再看機器量到什麼、模型說了什麼，然後**讀一遍原題**，
-   把缺的圖補上，最後才動手改文字、寫下「這題錯在哪」的註解，以及從它歸納出來的原則。
+   把缺的圖補上，最後才動手改文字、寫下「這題錯在哪」的註解。
 
    「讀一遍原題」與「註解」是使用者的回報裡具體缺的兩塊：
    「我需要的是可以看到原題，可以有圖片擷圖與抽換的區域，可以調整字體的區域以及把我的做法
-   給 AI 參考的註解區，這些你都沒有做到」。這四項現在各有自己的一段，而且在同一個滾動流裡。 */
+   給 AI 參考的註解區，這些你都沒有做到」。這四項現在各有自己的一段，而且在同一個滾動流裡。
+
+   基本原則與代理的反問不在這裡：它們是**通則**與**代理停下來的地方**，屬於原則區，不屬於某一題。 */
 function discussCenterHtml(candidate, key) {
   const number = candidate.question_number ?? '?';
   const subject = ((candidate.metadata || {}).normalized_subject_name)
@@ -315,8 +321,6 @@ function discussCenterHtml(candidate, key) {
     + '<div class="dirty" id="dDirty" style="display:none">已改動，按「儲存修正」寫入。</div>'
     + '</div>'
     + discussNoteHtml(candidate)
-    + discussPrinciplesHtml()
-    + discussQuestionsHtml()
     + '<div class="answer-bar">'
     + '<button class="ghost" data-focus="8">8 紙本</button>'
     + '<button class="act" id="dSave">儲存修正 E</button>'
@@ -600,12 +604,11 @@ function discussSideHtml() {
   return '<div id="discussSide" class="discuss-side"><h3>統計</h3>'
     + `<div class="row"><span>卡住的題</span><b class="n">${total}</b></div>`
     + `<div class="row"><span>人阻擋</span><b class="n">${blocked}</b></div>`
-    + `<div class="row"><span>有 AI 意見</span><b class="n">${withAi}</b></div>`
-    + `<div class="row"><span>基本原則</span><b class="n">${(D.principles.principles || []).length}</b></div>`
-    + `<div class="row"><span>待回答反問</span><b class="n">${D.questions.open_count || 0}</b></div></div>`;
+    + `<div class="row"><span>有 AI 意見</span><b class="n">${withAi}</b></div></div>`;
 }
 
-/* 綁定：編輯框的 Enter 儲存、選項聚焦、原則新增／移除、反問回答、以及 finding 的「帶入」。 */
+/* 綁定：編輯框的 Enter 儲存、選項聚焦、擷圖／抽換、註解、字體、以及 finding 的「帶入」。
+   （基本原則與反問的綁定跟著那兩塊搬到原則區，見 `03-area-principles.js`。） */
 function bindDiscuss(key) {
   const dirty = () => { const d = $('dDirty'); if (d) d.style.display = 'block'; };
   for (const node of document.querySelectorAll('#discussMain textarea[data-k]')) {
@@ -617,32 +620,9 @@ function bindDiscuss(key) {
   if (clear) clear.onclick = () => { D.draft.delete(key); renderDiscuss(); };
   const hold = $('dHold');
   if (hold) hold.onclick = () => resetDiscuss(key);
-  // 反問的回答：Enter 送出、Shift+Enter 換行。以 `data-id`（question_id）認，不以行序。
-  for (const node of document.querySelectorAll('#discussMain .rq-a')) {
-    node.oninput = () => D.answerDraft.set(node.dataset.id, node.value);
-    node.onkeydown = (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); answerRepairQuestion(node.dataset.id); }
-    };
-  }
-  for (const button of document.querySelectorAll('#discussMain .rqSave')) {
-    button.onclick = () => answerRepairQuestion(button.dataset.id);
-  }
-  const start = $('dpStart');
-  if (start) start.onclick = () => { D.principleDraft = true; renderDiscuss(); };
-  const cancel = $('dpCancel');
-  if (cancel) cancel.onclick = () => { D.principleDraft = false; renderDiscuss(); };
-  const dpSave = $('dpSave');
-  if (dpSave) dpSave.onclick = addPrinciple;
-  const newBox = $('dpNew');
-  if (newBox) newBox.onkeydown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addPrinciple(); }
-  };
-  for (const button of document.querySelectorAll('#discussMain .pl-remove')) {
-    button.onclick = () => removePrinciple(button.dataset.id);
-  }
   // 模型機械比對的「帶入」：只把那一欄的紙本讀法填進編輯框，不自己寫入任何東西。
   for (const button of document.querySelectorAll('#discussMain .af-apply')) {
-    button.onclick = () => applyFindingChange(button);
+    button.onclick = () => applyDiscussFindingChange(button);
   }
   // 字體：一個 CSS 變數，套在整個 .case 上。不呼叫 renderDiscuss()——重畫會丟掉還沒存檔的
   // 編輯草稿與游標位置；字級只是看的人的眼睛，不該讓題目重新載入。
@@ -824,8 +804,13 @@ async function saveDiscussNote(key) {
   }
 }
 
-/* 把 model 的一條機械 diff 帶進編輯框。**不寫入**——人讀過再按儲存。 */
-function applyFindingChange(button) {
+/* 把 model 的一條機械 diff 帶進編輯框。**不寫入**——人讀過再按儲存。
+
+   名字帶著 `Discuss`：這一支與題目區那一支（`02-area-question.js` 的 `applyFindingChange`）
+   各自填**自己那一頁**的編輯框（`dStem`／`dOpt_*` 對 `editStem`／`editOpt_*`）。兩個同名的
+   頂層函式在瀏覽器裡是**同一個名字**，後載入的這一支（04 在 02 之後）會蓋掉題目區那一支——
+   題目區的「帶入修正」於是去找一個那一頁不存在的欄位，按下去什麼都不會發生。 */
+function applyDiscussFindingChange(button) {
   const key = D.rows[D.index];
   const record = (D.byKey.get(key) || {}).qbr_ai_finding;
   if (!record || !Array.isArray(record.changes)) return;
@@ -904,63 +889,6 @@ async function resetDiscuss(key) {
   }
 }
 
-/* 新增一條基本原則。 */
-async function addPrinciple() {
-  const box = $('dpNew');
-  const text = box ? box.value.trim() : '';
-  if (!text) { toast('原則是空的', true); return; }
-  try {
-    const response = await fetch('/api/principles', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add', text, reviewer: 'local' }),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    D.principles = data;
-    D.principleDraft = false;
-    renderDiscuss();
-    toast('原則已加入；下一次修題會帶進提示詞');
-  } catch (error) {
-    toast(`加入失敗：${error.message || error}`, true);
-  }
-}
-
-/* 移除一條基本原則：append-only，所以是送一格 `remove`，不是刪檔。 */
-async function removePrinciple(principleId) {
-  if (!principleId) return;
-  try {
-    const response = await fetch('/api/principles', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'remove', principle_id: principleId, reviewer: 'local' }),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    D.principles = data;
-    renderDiscuss();
-    toast('原則已移除（歷史留著，只是不再生效）');
-  } catch (error) {
-    toast(`移除失敗：${error.message || error}`, true);
-  }
-}
-
-/* 回答修理代理的反問。 */
-async function answerRepairQuestion(questionId) {
-  if (!questionId) return;
-  const box = document.querySelector(`#discussMain .rq-a[data-id="${questionId}"]`);
-  const answer = box ? box.value.trim() : (D.answerDraft.get(questionId) || '');
-  if (!answer) { toast('回答是空的', true); return; }
-  try {
-    const response = await fetch('/api/repair-question', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'answer', question_id: questionId, answer, reviewer: 'local' }),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    D.questions = data;
-    D.answerDraft.delete(questionId);
-    renderDiscuss();
-    toast('已回答；代理下一輪會讀到');
-  } catch (error) {
-    toast(`回答失敗：${error.message || error}`, true);
-  }
-}
+/* 新增／移除基本原則與回答反問的寫入**已經搬到原則區**（`03-area-principles.js`）：
+   三個寫入路徑（`/api/principles` 的 add／remove、`/api/repair-question`）在那裡各有一份實作，
+   這裡不留第二份——同一條規則兩份實作就是下一個會不一致的地方。 */

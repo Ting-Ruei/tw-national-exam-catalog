@@ -33,7 +33,9 @@ description: 人工審核完一批題目之後，在 tw-national-exam-catalog/ �
 ### 常駐的那一半（不必人在看）
 
 上面是「有人在看的一次工作」。日常跑的是**常駐修理代理**：每 30 分鐘對「人已 block、
-且帶著一個可以看紙本確認的爭議」的那批題，截圖問地端模型，寫下機械差異（advisory）。
+而且上次檢查之後狀態有變」的那批題，截圖問地端模型，寫下機械差異（advisory）。
+**閘門是人的 block，不是「帶著一個可確認的爭議」**（2026-09-24 改；實測本機鏡射：279 題被
+block 的裡面有 174 題一個爭議種類都沒有，而它們正是只有紙本能說出哪裡錯的那些題）。
 它與人在介面上做的事共用同一批資料：
 
 ```
@@ -59,6 +61,13 @@ description: 人工審核完一批題目之後，在 tw-national-exam-catalog/ �
 套用寫一筆 `reset_review`（帶著 `correction`），題目以「修復後待複核」回到討論區；
 **不是 `correct`**——機器不宣告任何人的判定。
 
+### 暫行授權（2026-09-26；流程將另行重設）
+
+QBR Agent 可在明確選定的審題流程內，將自己的 AI 流程狀態設為 `pass`、`return` 或 `block`，
+並更新自己的 AI 結果、保留修訂與來源。這不會建立人工 accept/block，不會正式核准題庫，
+也不允許改寫人工事件或候選題目文字。這份授權只解除治理層的禁止；目前修理 daemon 寫入
+finding 的既有行為不因此自動取得新的狀態寫入實作或模型／資料範圍授權。
+
 ### 這條線上的治理界線（不可越過）
 
 | 誰 | 做什麼 | 等級 |
@@ -66,7 +75,7 @@ description: 人工審核完一批題目之後，在 tw-national-exam-catalog/ �
 | 常駐修理代理 | 只寫 advisory finding；不寫 review event、不改題目文字 | **G2** |
 | 套用修復（`apply_dispute_repairs.py --apply`） | 寫 `reset_review` + `correction` | G3，要當次明示核准 |
 | 討論區的原則／回答 | 人的句子寫進 append-only 流 | 人的輸入，不是決定 |
-| accept / block | 只有人能寫 | **G4** |
+| 人工 accept / block 決定事件 | 只有人能寫 | **G4** |
 
 代理**不得冒充人類審核者**：它的證據留在 `question_ai_findings.jsonl`，人類決定留在
 `question_review_events.jsonl`，兩個檔永遠不同。
@@ -167,8 +176,9 @@ ls -t runs/repair_daemon-*.log | head -1 | xargs tail -30
    `load_review_events` 會保留 `correction`，所以人自己的修正與手動圖片不會被修復弄丟。
 2. **推回前一定要先拉。** 站上是審題的**家**，筆電是消費者。順序錯了守衛會拒絕（那是**真訊號**，
    不是 bug：站上有筆電解釋不了的決定）。驗法是「筆電有、站上沒有 = 0」。
-3. **AI 輸出是 advisory。** 它寫 `question_ai_findings.jsonl`（append-only，沒有 `action`、沒有
-   `reviewer`），**永遠不寫人類審核事件**。只有人能把題目變成 ready。
+3. **Finding 與流程狀態是兩種記錄。** 本迴圈的 `question_ai_findings.jsonl` 保留為 advisory
+   證據（append-only，沒有人工 `action` 或 `reviewer`）；另經宣告的 QBR 流程可維護帶版本與來源的
+   AI `pass`／`return`／`block` 狀態。AI 狀態不是人工決定；人工 accept/block 與正式題庫核准仍需人。
 4. **`--learned` 要帶上這批已知的事。** 提示詞是量測的一部分（`prompt_version`）；把上一批
    學到的方向用 `--learned CODE=意義` 傳給下一批，下一批才不是從零開始。**但 `--learned` 只陳述
    已知／已排除的事，不能寫「去找 X」**——那會把模型推向編造。

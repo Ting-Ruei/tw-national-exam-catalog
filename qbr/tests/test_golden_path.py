@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 import pytest
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
@@ -18,7 +19,8 @@ sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
 from qbr import package  # noqa: E402
-import golden_path  # noqa: E402  (its stages are the units under test, not a subprocess)
+import batch_package  # noqa: E402
+import golden_path  # noqa: E402
 
 RUNS = [path for path in ("/tmp/qbr-golden-001", "/tmp/qbr-golden-002")
         if os.path.isfile(os.path.join(path, "run_manifest.json"))]
@@ -71,6 +73,60 @@ def test_question_key_shape_is_the_one_the_reviewed_packages_use():
         "moex:115090:308:0504:1:question:q007"
     assert package.question_key("moex:115090:308:0504:1", 80) == \
         "moex:115090:308:0504:1:question:q080"
+
+
+def test_paper_metadata_keeps_category_and_subject_codes_distinct():
+    args = SimpleNamespace(
+        registry_key="moex:115090:308:0504:2:question",
+        year=115,
+        ordinal=2,
+        category="醫事檢驗師",
+        subject="生物化學與臨床生化學",
+        category_code=None,
+        subject_code=None,
+        slug="medtech",
+    )
+    metadata = golden_path.paper_metadata(args)
+    assert metadata["year"] == 115
+    assert metadata["category_code"] == "308"
+    assert metadata["subject_code"] == "0504"
+    assert metadata["question_set"] == "2"
+
+
+def test_batch_builder_passes_both_catalog_codes(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=1, stdout="", stderr="blocked")
+
+    monkeypatch.setattr(batch_package.subprocess, "run", fake_run)
+    paper = {
+        "name": "paper.pdf",
+        "year": 115,
+        "ordinal": 2,
+        "category": "醫事檢驗師",
+        "subject": "生物化學與臨床生化學",
+    }
+    resolved = {
+        "registry_key": "moex:115090:308:0504:1",
+        "category_code": "308",
+        "subject_code": "0504",
+        "category_name": paper["category"],
+        "subject_name": paper["subject"],
+        "how": "catalog",
+    }
+    result = batch_package.build_one(
+        paper,
+        resolved,
+        str(tmp_path),
+        package_version="test",
+        slug="medtech",
+    )
+    command = captured["command"]
+    assert command[command.index("--category-code") + 1] == "308"
+    assert command[command.index("--subject-code") + 1] == "0504"
+    assert result["status"] == "blocked"
 
 
 def test_content_hash_ignores_whitespace_but_not_text():

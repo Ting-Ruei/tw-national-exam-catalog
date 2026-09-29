@@ -8,7 +8,7 @@ description: Find and fix a defect in the question Review UI v2 (/v2) — the me
 The console is `tw-national-exam-catalog/review_ui/v2.html` + `review_ui/v2/*.js`
 (`01-core.js`, `02-area-question.js`, `03-areas.js`, `04-area-discuss.js`, `05-boot.js`), served at
 `/v2` by `scripts/serve_question_review_ui.py`. Read `review-ui-v2/SKILL.md` for the *operating*
-contract (keyboard, filter rule, four areas); this is the *repair* procedure and the record of what
+contract (keyboard, filter rule, five areas); this is the *repair* procedure and the record of what
 has already been found — the same relationship `repair-qbr-extraction` has to
 `build-exam-question-bank`.
 
@@ -101,10 +101,14 @@ cd qbr && .venv/bin/python -m pytest tests/test_principles_curation.py -q
 The audit also proves 「打的字＝送出的字」 with a `fetch` stub (types in the box, presses 儲存修正,
 asserts the payload carries the words). The stub sends nothing, so this writes **no record**.
 
-**Coverage guard:** the last pass visits all four areas and asserts every visible action control has
-a handler or a real href — measured **218 controls: home 3 / question 93 / answer 100 / discuss 22**
-— *and* asserts each area found enough controls, so an empty pane cannot pass by being empty. Verify
-this bites by injecting a dead button (done: a `deadProbe` button turned the check red).
+**Coverage guard:** the last pass visits all five areas and asserts every visible action control has
+a handler or a real href — measured 2026-09-24 **328 controls: home 4 / question 93 / answer 150 /
+discuss 20 / principles 61** — *and* asserts each area found enough controls, so an empty pane cannot
+pass by being empty. Verify this bites by injecting a dead button (done: a `deadProbe` button turned
+the check red). The walk reads the area list from the page itself (`Object.keys(AREA_BY_NAME)`), so a new area is
+covered the moment it exists — a second list in the harness is a second thing to forget, and an area
+the walk does not visit is an area whose dead buttons ship silently (2026-09-24: 原則區 was added and
+the harness still had its own four-area list).
 
 ## Defects already found and fixed (read this before changing the console)
 
@@ -123,9 +127,10 @@ this bites by injecting a dead button (done: a `deadProbe` button turned the che
 
 ## What is deliberately NOT done
 
-- **No auto-accept / auto-block.** AI is advisory (`GOV-05`); an agent never presses a decision
-  button and never impersonates a human reviewer. The audit verifies the decision buttons exist and
-  are enabled — it does not press them.
+- **Do not create human accept/block events during UI audit.** An agent never presses a control that
+  records a human decision or impersonates a human reviewer. The interim QBR permission for a separate
+  AI-owned workflow status does not turn these controls into AI controls. The audit verifies the
+  human decision buttons exist and are enabled — it does not press them.
 - **No script that reads the meaning of a comment.** 「哪一句是新的規則」 is *reading what the text
   means*, so the output is one sentence for the model, not a new `if`. The curation script does only
   mechanical things (append, dedup, ground-in-evidence).

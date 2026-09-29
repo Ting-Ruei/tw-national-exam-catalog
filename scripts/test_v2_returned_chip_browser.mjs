@@ -90,9 +90,14 @@ async function main() {
   for (const chip of chips) console.log(`    ${chip.view}\t${chip.label}\t${chip.count}`);
   const byView = Object.fromEntries(chips.map((c) => [c.view, c]));
 
-  check(!!byView.flagged, '有「我擋的・需重看」chip', byView.flagged?.label);
-  check(!!byView.returned, '有「AI・管線退回」chip', byView.returned?.label);
-  check(byView.flagged?.label !== byView.returned?.label, '兩個 chip 的字不一樣');
+  // 只認 `data-view`，不認標籤文字：標籤是給人看的字，2026-09-24 使用者就把「我擋的・需重看」
+  // 改成「block」、「AI・管線退回」改成「AI已解決」，2026-09-25 又改成「AI已修改」，而這一條檢查
+  // 當時因此變紅——它測的不是契約，是字串。契約是「這幾個籤存在、而且篩出不同清單」。
+  check(!!byView.flagged, '有 block 籤', byView.flagged?.label);
+  check(!!byView.returned, '有「AI已修改」籤', byView.returned?.label);
+  check(!!byView.aicannot, '有「AI無法判斷」籤', byView.aicannot?.label);
+  check(new Set([byView.flagged?.label, byView.returned?.label, byView.aicannot?.label]).size === 3,
+    '三個籤的字都不一樣');
   check(byView.flagged?.count !== byView.returned?.count || (byView.flagged?.count === '0'),
     '兩個 chip 的數字不同（或都真的沒有）', `${byView.flagged?.count} vs ${byView.returned?.count}`);
 
@@ -129,7 +134,7 @@ async function main() {
   if (returnedRows.length) {
     const hint = await evaluate(`document.querySelector('#stateHint').textContent`);
     console.log(`  明細提示：${hint}`);
-    check(hint.includes('AI／管線退回'), '退回的題目標成 AI／管線退回', hint.slice(0, 60));
+    check(/AI已修改/.test(hint), '退回的題目標成 AI已修改（2026-09-24 前叫 AI／管線退回）', hint.slice(0, 60));
     check(hint.includes('原為') || hint.includes('修復') || hint.includes('退回'),
       '退回的題目說得出原因', hint.slice(0, 80));
   }

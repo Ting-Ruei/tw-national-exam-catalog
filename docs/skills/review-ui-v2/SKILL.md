@@ -46,18 +46,157 @@ Routes:
 `/v2` is served `no-store` — **editing `v2.html` goes live without restarting the server**, and the
 review log is opened append-only (`"a"`), never truncated.
 
-## The four areas (首頁 / 題目審核區 / 答案審核區 / 錯題討論區)
+The current v2 decision controls and `/api/review` record human actions. The interim QBR permission
+allows separate AI-owned workflow status and result revisions, but this skill does not define or
+implement that writer. Never route an AI status through a human control or human review event; a data
+path for AI status must be defined separately during the planned workflow redesign.
 
-v2 is **one page with a mode switch**, not four pages. Four pages would mean four loaders of the same
-198 MB `candidates.jsonl`, and so four chances for them to disagree about what is in the queue. The
+## The five areas (首頁 / 題目審核區 / 答案審核區 / 錯題討論區 / 原則區)
+
+v2 is **one page with a mode switch**, not five pages. Five pages would mean five loaders of the same
+198 MB `candidates.jsonl`, and so five chances for them to disagree about what is in the queue. The
 topbar switches the pane; the mode is in the hash so each area is linkable and a reload reopens it.
 
 | Area | Hash prefix | Does | Writes |
 |---|---|---|---|
-| 題目審核區 | none (bare `#類科/年/次/科目`) | reads the paper beside the extracted text | `/api/review` |
-| 首頁 | `#首頁/…` | counts only; every number comes from the three endpoints below | **nothing** |
-| 答案審核區 | `#答案/…` | reads the answer sheet, one sheet at a time | `/api/answer-review-batch` |
-| 錯題討論區 | `#錯題/…` | the stuck questions — what a detector measured, what a model read off the page, and what the text should say | `/api/review` (the reviewer's own save), `/api/principles`, `/api/repair-question` |
+| 題目審核區 | none, or `#審題/…` (bare `#類科/年/次/科目`) | reads the paper beside the extracted text | `/api/review` |
+| 首頁 | `#首頁/…` | counts only; every number comes from the endpoints below | **nothing** |
+| 答案審核區 | `#答案/…` | reads the **answer sheet** beside the extracted answers, one sheet at a time | `/api/answer-review-batch` |
+| 錯題討論區 | `#錯題/…` | the stuck questions — what a detector measured, what a model read off the page, and what the text should say | `/api/review` (the reviewer's own save) |
+| 原則區 | `#原則/…` | the standing 基本原則 (what the model must always honour) and the agent's 反問 that are waiting for an answer | `/api/principles`, `/api/repair-question` |
+
+**一區一檔，載入序＝檔名前綴**（`v2.html` 以 `<script src>` 串起；伺服器由檔名供應 `v2/*.js`，見
+`legacy_assets.py::_v2_script_response`）。所以「新增一區」＝新增一個檔＋一個 `<script src>`＋
+一筆 `AREA_BY_NAME`，沒有第二份路由清單可以忘記——2026-09-24 就是忘了那一份，
+兩個新檔在瀏覽器裡 404，原則是**整區空白卻沒有任何錯誤訊息**。
+
+`03-areas.js` 是外殼：區表（`AREA_BY_NAME`／`AREA_PREFIX`／`PREFIX_AREA`／`AREA_LABEL`）、
+`showArea`、`renderArea`、`invalidateAreas`、`afterWrite`、`renderHome`。每一區的畫面與寫入在
+自己的檔案裡（`02-area-question.js`、`03-area-answer.js`、`03-area-principles.js`、
+`04-area-discuss.js`）。
+
+### 寫入之後只有一條路：`afterWrite()`（2026-09-24）
+
+使用者說得很精確：「後面覺得我做了，前面覺得後面都沒做」。原因是每一區各自記著**自己的**快照
+（題目區的 `S.verdict`／`S.notes`、討論區的投影、答案區的草稿），而一筆寫入的真相在伺服器上。
+以前四區各自寫「`invalidateAreas()` ＋ 重畫自己」，於是任何一區寫入之後，**其他區手上的舊答案沒有
+人知道**。
+
+現在：任何一區寫入後呼叫 `afterWrite()`（＝`invalidateAreas()` ＋ 重畫當下這一區）。而
+`invalidateAreas()` 在**別區**寫入時立起 `A.questionStale`，題目區下次被切回來時
+（`showArea('question')`）會走 `refreshScopeRows()`：**重讀這個範圍的列，游標留在同一題**。
+
+驗收（實機，2026-09-24）：在題目區叫 `invalidateAreas()` → 0 次 `/api/candidates`（負對照：自己
+寫入不需要重讀）；切到討論區再叫 → `A.questionStale` 為 true，切回題目區發出 **1** 次
+`/api/candidates`，游標位置不變、`A.questionStale` 歸零。
+
+### 題目審核區：紙本表格用截圖顯示（2026-09-24，owner 的決定）
+
+owner 原話：「叫你這種文字型表格要用截圖來顯示，聽不懂嗎」。文字型表格（紙本排成表格、抽取器
+壓平成一串字，例如 `劑型  給藥途徑  劑量（mg）  AUC (μg．h/mL) 錠劑  口服  100  40…`）人得自己
+數字數才看得出哪個數字屬於哪一欄。
+
+**誰做什麼**：表格長什麼樣子是**讀出來的意義**（判讀在 `transcription.table_lines` 裡引述它讀到的
+那幾行），紙本上那幾條線在哪裡是**量出來的性質**（`crop_run_figures.py --queue` 把那些行在頁面上
+**量到的格子**聯成一個框切一張圖，`asset_role: figure-crop`、`label: paper-table`）。
+owner 否決了「腳本自己猜哪裡是表格」：「表格題不是應該AI讀完定位之後進行切割嗎，你一直擴充腳本又會
+overfitting」——沒有幾何猜測，就沒有下一條為了修正猜測而加的規則。
+
+**畫法**（`02-area-question.js` 的 `questionTextHtml`，一個渲染器，原則區的 `prefix` 重畫走同一支）：
+題幹散文照原本畫，**表格那一段改畫截圖**，抽取到的原字收在截圖底下的
+`<details class="paper-table-text" data-view="table-text">`（原樣、`pre-wrap`、不重排——它仍然是這一題
+的證據，只是不再是第一眼看到的東西）。`data-view` 說的是元素是什麼（與範圍 chips 同一個約定），
+**程式不看摘要上寫的字**。下方的 `figureHtml(candidate, skip)` 收下表格裁切當 skip，所以同一張圖
+不會畫兩次。
+
+**四種形狀都量過**（`node scripts/test_v2_table_browser.mjs <base>`，真 Chrome）：
+沒有裁切的題（站上 q065 今天的樣子）→ 題幹一字不差；有裁切但讀法引的行在題幹裡找不到 → 整段照畫、
+截圖補在後面、不畫空的「文字版」；定位得到 → 題幹只剩散文、截圖在那一格、文字版逐字（且必須是
+那一列 stem 的**後綴**）；題幹整段就是那張表 → 題幹留空、截圖與文字版帶著全部內容。
+**負對照**：把 `git show HEAD:review_ui/v2/02-area-question.js` 蓋回去跑同一個 URL → **7 項 BAD**
+（含「表格的資料列不再是題幹文字」「表格的位置上畫的是那張截圖 0 張」）；換回新版 → 全部符合。
+
+### 答案審核區（`review_ui/v2/03-area-answer.js`）
+
+這一區存在的理由就是「右邊要有答案卷讓我對照」，所以右欄是**答案卷 PDF**（不是題目卷），
+而卡片是**一張答案卡**（一份答案卷一個 `sheet_key`），不是一題一頁。三欄：卡片清單、
+答案對照（題號／抽出的答案／審核狀態），右欄 PDF。`renderAnswerPdf()` 的檔案鏈：
+
+```
+source_files[kind]  →  只有 official_pdf 才退到 metadata.answer_pdf_relative
+                    →  answer_pdf_primary_relative  →  answer_pdf_primary
+```
+
+**為什麼一定要退到 metadata**：2026-09-24 量到線上 `/api/answer-candidates`（113 張卡）的
+`source_files` 四欄**全是 null**，答案卷的路徑只存在 `metadata.answer_pdf_relative`。只讀
+`source_files` 的版本在真實資料上右欄永遠是空的——而那一欄是這一區的全部理由。
+**不要自己推 `_layout`／`_origin` 的兄弟檔名**：那是伺服器的規則（`sibling_pdf`），客戶端再推
+一次就是同一條規則的第二份實作。沒有路徑時要**說出來**（「這一張答案卡沒有答案卷 PDF 路徑，
+右欄無法對照」），不要留一個安靜的空 iframe。
+
+- **每題的「阻擋」是開關**：`answerToggleBlock()` 讀 `row.answer_review.action === 'block'` 決定這次
+  是 `block` 還是 `unreviewed`，單題一個請求，寫入後 `afterWrite()`。實測（scratch log，
+  `POST /api/answer-review-batch`）：`block` → `answer_review.status='reviewed'/action='block'`；
+  再送 `unreviewed` → 回到 `unreviewed`。取消是**真事件**，所以按鈕不會停在紅的。
+- **ABCD 是草稿，不是寫入**：點字母只改 `A.answerDraft`，零個請求；四種寫法（單選／複選＋／
+  任一／任一＋複選）是同一組字母的**另一種寫法**（`parseAnswerSelection`／`formatAnswerSelection`），
+  再點同一字母＝從草稿拿掉。寫入發生在「儲存答案修正」（`correct`）或整份那一排。
+- **`reviewed_answer` 一定要送**：它是「紙本上是什麼」（`row.answer`），不是草稿。省略它會存成
+  `{"answer": null}`，把這一題拿來對照的答案悄悄清掉。
+- **沒有已記錄的審核時，「取消」不送出**：只清草稿並說出來。送一筆沒有內容的取消是假的事件。
+- 伺服器會把**新的** `correct` 在沒有既有決定時改寫成 `reviewed`
+  （`_reaffirm_standing_action`），所以事件檔斷言要看 `corrected_answer` 而不是 `action`；
+  畫面顯示「已審」是對的（`answer_review.correction` 是**字串**，例如 `A+C`）。
+- 驗收：`node scripts/test_v2_areas_browser.mjs`（自起 scratch 伺服器；76 檢查）。
+  負對照（實測，2026-09-24）：把 `03-area-answer.js` 還原成舊行為 → 「再點同一個字母不會把
+  `A` 從草稿拿掉」「答案卷路徑只在 metadata 時右欄開不起來」兩條變紅，其餘全綠。
+
+### 原則區（`review_ui/v2/03-area-principles.js`）
+
+**是獨立的一區**，不是討論區裡的一塊：導覽列第五顆按鈕（`data-area="principles"`）、
+`#areaPrinciples`、hash 前綴 `#原則/…`。它管的是「模型要永遠遵守的話」與「代理問人的話」——
+基本原則 5 條、反問 13 題待答（2026-09-24 本機量到），兩份資料與首頁第四張卡讀的是**同一個**
+`GET /api/discuss` 回應裡的兩個區塊，所以首頁與這一頁不可能各說一個數字。
+
+每一則反問還多一顆 **`去看這一題`**（`gotoQuestionArea`，2026-09-25）：它離**這一區**，切到題目
+審核區並開在那一題上。`叫出原題` 只把紙本叫到右邊的窗格，人還停在原則區——看不到那一題的判讀
+狀態，也不能在那裡判它，而 owner 的原話是「我**找不到**……那些題目」。走的是既有欄位
+（`S.scope` ＋ `S.openQuestion`，也就是貼一個 `#類別/年/次/科目/qNNN` 網址時走的那條路），五個
+欄位取自伺服器的身分投影（`identityOf`，**不從 key 猜**）；欄位不齊或那一卷不在類別樹裡就說出來，
+不亂跳，落地後還會核對游標真的在那一題上（題目區原本的規則是「找不到就回到第一題還沒審的」，
+在這裡那會是一條**安靜的錯路**）。驗收：`test_v2_principles_browser.mjs` 按下它並量題目區的
+`#where`／`#viewStem`，負向控制＝整段沒有任何 POST（看不等於寫）。
+
+每一條原則／每一題反問都給得出**原題紙本**：`叫出原題` 以 `focusKey=<candidate_key>` 問
+`/api/candidates`（**不是** `candidate_key=`——那個參數只有 `/workflow` 認，對 `/api/candidates`
+是無效的，它會回預設的 500 列而你以為那 500 列裡沒有這一題；實測 `focusKey` 回 `focus_injected:true`
+且那一列排第一），取 `source_files.official_pdf` 後開在 `#principlePdf`。寫入走
+`POST /api/principles`（附 `candidate_key`，所以原則帶著它的例子題）與 `POST /api/repair-question`
+（回答反問），寫完 `afterWrite()`——原則區不自己發明收尾順序。
+
+**右欄是兩塊，跟著同一個 `focusKey`**（owner 2026-09-24：「那個原則區的 修理代理的反問 你好歹
+右邊上面三分之一顯示UI的題目畫面，右邊下面顯示PDF，不然我真的很難跟你對話」）：上面三分之一是
+那一題的**題目畫面**，下面三分之二是同一題的官方**題目**紙本（不是答案卷：只讀
+`source_files.official_pdf || metadata.question_pdf_relative`）。上面那塊呼叫**題目區自己的**
+`questionTextHtml`（`review_ui/v2/02-area-question.js`，`renderTextSide` 也用它畫 `#textSide`），
+所以兩區顯示的是同一份文字、同一組答案標記、同一組圖片規則——抄一份會漂移，漂移的那一天人在
+原則區讀到的就不是題目區那一題。傳進去的開關都只有一個意思：**「這是別的區，所以題目區專屬的
+東西不要畫」**：
+
+- `prefix: 'pq_'`：同一頁已經有題目區的 `viewStem`／`viewOpts`，節點 id 不能同名。
+- `finding: false`：模型意見卡在同一頁左欄（原則區的證據卡）已經有一張一樣的（同一張截圖、
+  同一個「哪裡」、同一組逐欄的兩邊），而這塊只有三分之一高——畫進去，題目就被擠到捲軸下面。
+- `chrome: false`：題目區那條抬頭（`side-head`「抽出文字」＋`qnum`「第 N 題」）這一格自己已經有
+  了（`.pdf-head` 寫出科目、卷號、第 N 題與 key）。這 51px 就是「第四個選項掉到捲軸下面」的差。
+- `editor`／`apply` 預設關：編輯框與「帶入修正」按鈕寫的是題目區的 DOM（`#editStem`、委派綁在
+  `#textSide`），畫在別區只會是死掉的控制項。
+
+比例寫在 `review_ui/v2.html`：`.principle-pdf .qview { flex:1 }`（可捲）與
+`.principle-frame { flex:2 }`。同一題按第二次**不會**再問伺服器（`P.rows` 一份 key → row）。
+實測（2026-09-24，`scripts/test_v2_principles_browser.mjs`，1700×957 的視窗）：上 312px／下 568px
+→ 0.355（框線與內距算在內；內容區是精確的 1:2），題幹與**四個選項全部**在第一眼（不捲動）就看得到
+（同一條斷言在畫回那條抬頭時會失敗——那正是負向控制）。
+
 
 ### 錯題討論區 (the stuck-questions area)
 
@@ -85,10 +224,15 @@ The middle column is a reading order, and each block has one author:
 | ④ 擷圖／抽換 | paste (⌘V) / drop / file, placement, replace | the reviewer |
 | ⑤ 手動修改 | the stem and each option, on top of the effective (corrected) text | the reviewer |
 | ⑥ 註解 | what the reviewer changed and why — **for the AI to read** | the reviewer |
-| ⑦ 基本原則 | a sentence the reviewer adds to, pasted into the next prompt | the reviewer |
-| ⑧ 反問 | the agent's open questions | `question_repair_questions.jsonl` |
 | 右 | the question sheet, decoupled | — |
 | 左 | 統計 ＋ 四層篩選 ＋ the stuck list | — |
+
+**⑦ 基本原則 and ⑧ 反問 used to be blocks in this pane and are not any more** (2026-09-24, at the
+reviewer's request): they are a page of their own (原則區). They were the only two blocks in this
+area that are not about *this question*, so keeping them here meant the reviewer scrolled past
+another question's material to do a job that is not about a question at all. The panes were **moved,
+not copied** — deleting them here and adding them there is the whole change, and
+`scripts/test_v2_areas_browser.mjs` asserts this pane no longer contains them.
 
 - **③ 原題 is drawn with `richText()`, not `esc()`.** The paper's inline markup is rendered (so
   `<sub>` is a real subscript); a stuck question must not be shown with *less* of itself than a normal
@@ -191,9 +335,10 @@ Contract rules (all pinned by `tests/test_review_ui_areas.py` + `scripts/test_v2
   decisions nobody made.
 - **Clicking an answer option drafts; it does not save.** A stray click on a 4-row table must not
   rewrite an answer. The draft (`A.answerDraft`) is sent only by the buttons under the table.
-- **The discussion area writes only the reviewer's own words.** Three of them: a 基本原則 sentence,
-  an answer to the agent's question, and a ⑥ 註解 (the same `comment` event the question area's
-  「只加註記」 writes — one stream, not two). The two agent streams are append-only with no SQL mirror
+- **The discussion area writes only the reviewer's own words.** Two of them now: a ⑥ 註解 and a
+  ⑤ 手動修改 (the ⑥ 註解 is the same `comment` event the question area's 「只加註記」 writes — one
+  stream, not two). A 基本原則 sentence and an answer to the agent's question are the same kind of
+  thing but are written from **原則區**. All of them are append-only streams with no SQL mirror
   (the area reads the whole file; a table would be a second representation with nothing reading it
   back). It does **not** learn anything by itself — the `change_class` that the old discussion area
   showed is still recorded by `_record_question_correction_feedback` when a person saves a
@@ -230,9 +375,9 @@ served queue) and it is *append-only by contract* — `qbr/src/qbr/ai_findings.p
   fallback, so one bad line made **every** request fail. A line that does not decode is now skipped
   like one that does not parse.
 
-## 四個區的驗收
+## 五個區的驗收
 
-Verify the four areas end to end (needs a queue built by `build_review_queue.py`):
+Verify the five areas end to end (needs a queue built by `build_review_queue.py`):
 
 ```sh
 REVIEW_UI_ADDITIONAL_ASSET_ROOTS=<queue> python3 scripts/serve_question_review_ui.py \
@@ -265,8 +410,7 @@ node scripts/test_v2_ui_audit.mjs http://127.0.0.1:8897 --json /tmp/audit.json
 
 腳本也驗「打的字＝送出的字」：把 `fetch` 換成只做紀錄的替身，在框裡打字、按「儲存修正」，
 檢查送出的 payload 帶著那些字。替身不發請求，所以這條驗收**一筆紀錄都不會寫**。最後一輪走訪
-四個區，斷言每個可見動作控制項不是有 handler 就是有真的 href（實測 218 個：home 3 / question 93 /
-answer 100 / discuss 22——P5 當時是 213，discuss 17，後來篩選器加了 5 個），並且驗「四個區都真的
+每一區，斷言每個可見動作控制項不是有 handler 就是有真的 href（實測數字見 `review_ui/AGENTS.md`），並且驗「每一區都真的
 抓到夠多控制項」，否則空畫面會假裝通過。
 
 註解與佇列的關係另有一支端到端瀏覽器驗收（自己在隔離的候選與事件檔上開一個 server）：
@@ -286,7 +430,50 @@ node scripts/test_v2_note_keeps_question.mjs   # 寫完註解，那一題必須�
 | `B` | 阻擋 (block) |
 | `E` | edit / save correction |
 
-`W`/`S` step **one position in the drawn list**. They are not "previous/next in the paper".
+`W`/`S` step **one position in the drawn list**。清單就是紙本順序（同一卷之內），所以那一步就是紙本上的
+前一題／下一題；跨卷時仍是照「先按卷、再按題號」的排序（`applyScope()` 的排序），不是紙本翻頁的順序。
+
+### 「全部」= 紙本順序（2026-09-24：重排版當天就被退回）
+
+使用者第一版的要求是「當我點『全部』的時候，優先顯示還沒有審核的，不然我如果照順序審核，會刷不到
+應該看的」。第一版把它做成**重排**（未審段＋已判段），當天就被退回，理由是它同時弄壞了兩件事：
+
+> 「你是直接顯示還沒看的題目，但你不是跟我保證說不會干擾原本的排序嗎……結果你現在只給我顯示還沒看的
+> 題目，原本的順序不見了，我想要往上一題參考也沒有了」
+
+* `W` 在未審段的最上面一列沒有上一列——紙本上的前一題（通常已判過）被搬到清單另一端；
+* 相鄰兩列不再是相鄰兩題，`題組` 的共用題幹與前一題的線索都對不上。
+
+現在：**`S.rows` 就是紙本順序**（與 `S.view` 同一個來源、同一種排序），`W`／`S` 是紙本上的前一題／
+下一題。「優先」由兩件不改變順序的事提供：開範圍時游標放在第一題還沒審的（`firstOpen`），以及
+`未看` 這個籤只留還沒審的題目——**要「只看還沒審的」是一個篩選，不是一種排序。**
+
+### 重新載入時，未審的要開在你面前（2026-09-24 第二次修正）
+
+使用者把同一件事講得更精確：「整體順序不變，但如果有還沒審的題目，在 F5 刷新的情況下，優先顯示在
+面前，但因為整體順序不變，我不論是往上還是往下，都可以自由調整，這才是我想要的狀態，但是你現在
+只是退回原本的樣子」。
+
+**「退回原本的樣子」是真的**：`firstOpen` 早就寫好了，但它在真實操作裡**從來沒生效過**——因為
+`scopeToHash()` 把題目區的當下游標也寫進網址（`#類科/年/次/科目/q41`），`buildScope()` 重新載入時把
+它讀成 `S.openQuestion`，`applyScope()` 就照它開。F5 永遠回到你離開時那一題，而那一題通常已經判完。
+
+修法是把**位置**與**範圍**分開：題目區只把範圍寫進網址，位置不寫。（明講的連結不受影響——
+`scopeFromHash()` 照樣讀 `/qNNN`，所以貼上的 `#類科/年/次/科目/q41` 仍然開在 q41；討論區的 `qNNN`
+也照寫，那是它自己的契約。）於是 F5 → 網址只有範圍 → 游標開在**第一題還沒審的**，而清單仍是紙本
+順序，往上（已判過的）往下都走得動。
+
+順手修掉同一條路上的第二個缺陷：`scopeFromHash()` 用 `rest.join('/')` 當科目，所以
+`#藥師(一)/115/2/藥學(三)` 讀到的科目是整串，不在科目清單裡就被 `resolveLevel()` 換成「全部科目」
+——連結指名的科目靜默消失（畫面還開得起來，只是多出一卷）。科目是**第四段以後**（`tail.join('/')`）。
+
+驗收（`scripts/test_v2_navigation.mjs` check 3c）：題目區的網址只寫範圍、重新載入時沒有具名的題目
+（所以 `firstOpen` 輪得到）、明講的連結仍讀得出 q41、負對照是「舊行為寫出的網址會具名一題，重新載入
+就回到那一題」，以及「舊的 `rest.join('/')` 讀出的科目是整串」。
+
+驗收（`scripts/test_v2_navigation.mjs`）：「整份清單按卷、再按題號」「判一題不會移動任何一列」
+「判一題後游標仍在同一列」「剛判完那一題的上一題是紙本上的前一題（就算它早就判過了）」。
+負對照：把判過的那一題搬到最後，後兩條就必須不成立（同一份資料，只改順序）。
 
 ## The filter contract (this was a real defect)
 
@@ -319,9 +506,61 @@ const target = survived ? was + 1 : S.index;
 
 Stepping past in both cases skips exactly one question per decision while 未看 + accept is active.
 
-Filters: 題組 (exclusive, about structure), 未看, 需重看・阻擋, 爭議 (what the *pipeline* could not
-settle — a separate axis from what the reviewer decided), and the 有圖 toggle. The toggle is part of
-the counted set, so the numbers follow it.
+Filters: 題組 (exclusive, about structure), 未看, `block`, `AI已修改`, `AI無法判斷`, 爭議, and the 有圖
+toggle. The toggle is part of the counted set, so the numbers follow it.
+
+### The chip vocabulary (2026-09-24, at the reviewer's request)
+
+| `data-view` | 標籤 | 判準 | 軸 |
+|---|---|---|---|
+| `flagged` | **block** | `stateOf(item) === 'flagged'`（`block` 或 `needs_review`） | 人做了什麼 |
+| `returned` | **AI已修改** | `stateOf(item) === 'returned'`（最新一筆是 `reset_review`） | 人做了什麼（但作者是機器） |
+| `aicannot` | **AI無法判斷** | `aiCannotTell(item)` | **模型**給不給得出結論 |
+
+**標籤是契約的一部分，`data-view` 才是鍵。** 2026-09-24 使用者把「我擋的・需重看」改成「block」、
+「AI・管線退回」改成「AI已解決」，`test_v2_returned_chip_browser.mjs` 當時因為寫死字串而變紅——所以
+那條檢查改成認 `data-view`。改標籤不必改測試。（2026-09-25 使用者再把「AI已解決」改成「AI已修改」：
+「已解決」把「有人動過它」讀成「它沒問題了」，而機器把自己改錯的字收回（`withdrawn`）的那一題也不是
+修改——它不再屬於這一籤。）
+
+**`AI無法判斷` 是唯一不屬於 `stateOf` 的籤**：它同時問兩件事——**人擋過的**題目裡，**模型**有沒有下結論。
+判準寫在 `02-area-question.js::aiCannotTell()`，第一行就是 `stateOf(item) !== 'flagged' → false`：
+
+| 情況 | 算不算 |
+|---|---|
+| 人擋過（`block`／`needs_review`）＋ `NOT_EXTRACTION`（模型說「不是抽取造成的」＝要人判）、`error`、沒有 verdict | **算** |
+| 人擋過 ＋ **機器已經試滿三次、每一次都被打回**（`review.exhausted`，2026-09-25） | **算**——機器停手了，這一題回到人手上 |
+| 人擋過 ＋ `OK`／`DEFECT`（模型有結論） | 不算 |
+| 人擋過 ＋ 沒有 `qbr_ai_finding`（模型還沒看） | 不算——沒讀過 ≠ 讀了不知道 |
+| 人已經放行（`done`） | 不算——沒有待辦事項 |
+| **人還沒看過（`unseen`）** | **不算**——人還沒表達意見，機器說不出所以然不是人的待辦事項 |
+| 機器已經動過（`returned`＝修復後待複核） | 不算——那一題在「AI已修改」等的是「新文字對不對」 |
+
+**`exhausted` 那一列是業主 2026-09-25 的循環收尾**：「機器改 → 人打回 → 機器再讀一次並依註解改 →
+第三次之後才進『AI無法判斷』」。上限是三次（`withdrawals.MAX_ATTEMPTS`），只數人的 `block`
+（`needs_review` 回答的是另一個問題：這一欄能不能整欄改寫），人 `accept` 或 `unblock` 會把門重新打開。
+伺服器只送事實（`review.attempts`／`review.exhausted`），句子在瀏覽器
+（`findingHtml` 的「機器已經停手：這一題試過 N 次、每一次都被你打回…」）——與 `machineAppliedLabel`
+同一個分工。
+
+也就是說：**這一格是 `block` 的子集**。兩個回報各自砍掉一條：
+
+1. 2026-09-24 上午：「你的 AI無法判斷裡面，有我已經審核的問題啊，我都通過了你是要判斷什麼」→ 排除
+   `done`。
+2. 同日下午：「你把人工看過的放行，怎麼把人工未看過也框入……我才說後面的 agent 循環是僅針對 block
+   去看」→ 排除 `unseen` 與 `returned`，只剩人真的擋下來的。
+
+這一格的存在理由就是人機分工：**人擋的＝要修的工作**（agent 迴圈只做這一批），機器看紙本、能修就修
+（修過的落在那題的「AI已修改」），修不了或說不出所以然的才回到人手上下註解。模型的話在每一題的右欄
+仍然看得到（`findingHtml` 沒有改），這一格只決定要不要催人。
+
+負對照（`test_v2_navigation.mjs` 的 check 4c）：「只看模型、不看人」會在已放行／未看過／機器退回三列上
+不符（那正是第一版的行為）；「有 reading 就算」在五列上不符；「沒讀過也算」在一列上不符。實測站上：
+藥師(一) 115 第2次，`block` 7、`AI無法判斷` 4（子集關係看得出來）。
+
+`qbr_ai_finding` 是**伺服器送出時 join 的**（`review_state.py:176` 從 `--review-log` 旁邊的
+`question_ai_findings.jsonl` 讀），所以原始 `candidates.jsonl` 裡沒有這個欄位——harness 讀原始檔，
+因此它另外塞三列（都是 `block`）來驗篩選接線。
 
 ## Verify a navigation change
 

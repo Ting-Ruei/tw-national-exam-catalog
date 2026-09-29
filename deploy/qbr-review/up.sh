@@ -48,6 +48,14 @@ abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "${HERE}/${1#./}" ;;
 QUEUE="$(abs "${QUEUE_DIR}")"
 LOG="$(abs "${QBR_REVIEW_LOG:-${QUEUE}/review-ui/question_review_events.jsonl}")"
 
+case "${LOG}" in
+  "${QUEUE}/"*) ;;
+  *)
+    echo "QBR_REVIEW_LOG 必須位於 QBR_QUEUE_DIR 內：${LOG}" >&2
+    exit 1
+    ;;
+esac
+
 # ── 0. 找到 docker ─────────────────────────────────────────────────────
 # **非互動式 ssh 沒有 /usr/local/bin 在 PATH 裡。** 實測：`ssh host 'bash up.sh'` 得到的
 # PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，於是 `docker: command not found`——而這正是
@@ -86,6 +94,18 @@ fi
 mkdir -p "$(dirname "${LOG}")"
 touch "${LOG}"
 RECORDS="$(wc -l < "${LOG}" | tr -d ' ')"
+
+# ── 2b. 容器可寫的目錄 ─────────────────────────────────────────────────────
+# `review-ui/` 整包是 rw 掛載（見 compose.yaml 的說明），而其中的 `manual-assets/` 是
+# 補圖的家。Docker 的 bind mount 若指向**不存在**的路徑會建立一個 root 擁有的目錄，
+# 容器（非 root）就寫不進去——所以先建好，所有權才對。
+# 量的是「目錄存在且現在可寫」，不是「mkdir 沒有報錯」。
+MANUAL_DIR="${QUEUE}/review-ui/manual-assets"
+mkdir -p "${MANUAL_DIR}"
+if [[ ! -w "${MANUAL_DIR}" ]]; then
+  echo "補圖目錄不可寫：${MANUAL_DIR}" >&2
+  exit 1
+fi
 
 # ── 3. 起服務 ──────────────────────────────────────────────────────────────
 # 匯出**絕對**路徑，否則 `.env` 裡的相對路徑會被 compose 以自己的目錄為基準再解一次，

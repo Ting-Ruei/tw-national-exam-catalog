@@ -695,28 +695,39 @@ def assert_no_addresses(paths):
 
 # --------------------------------------------------------------------------- driver
 
-def run_stages(args):
-    registry_key = args.registry_key
-    # `moex:115090:308:0504:1` -> paper 115090, subject_code 0504, ordinal 1. The key is
-    # colon-separated and the roles (`:question`, `:answer`) hang off the end of it, so the
-    # paper is the second field whether or not a role is present.
-    bits = str(registry_key or "").split(":")
-    parts = {"paper": bits[1] if len(bits) > 1 else None,
-             "year": bits[2] if len(bits) > 2 else None,
-             "subject": bits[3] if len(bits) > 3 else None,
-             "session": bits[4] if len(bits) > 4 else None}
-    meta = {
-        "year": int(args.year or (parts.get("year") or 0)),
+def paper_metadata(args):
+    """Resolve registry codes independently; the exam year comes from paper metadata.
+
+    The key's fields are positional: `moex:115090:308:0504:1` = catalog paper 115090,
+    category code 308, subject code 0504, session 1. Reading both codes off the same field
+    (the pre-2026-09-29 shape) wrote `category_code: "0504"` into every record of the golden
+    paper — the same wrong value `batch_package` never produced, because its resolver
+    (§registry-manifest) reads bits[2] as the category. A test pins the two apart.
+    """
+    bits = str(args.registry_key or "").split(":")
+    parts = {
+        "paper": bits[1] if len(bits) > 1 else None,
+        "category_code": bits[2] if len(bits) > 2 else None,
+        "subject": bits[3] if len(bits) > 3 else None,
+        "question_set": bits[4] if len(bits) > 4 else "1",
+    }
+    return {
+        "year": int(args.year or 0),
         "exam_number": int(args.ordinal),
         "category_name": args.category,
         "subject_name": args.subject,
-        "category_code": args.category_code or parts.get("subject"),
-        "subject_code": args.category_code or parts.get("subject"),
-        "exam_code": parts.get("paper"),
-        "question_set": 1,
+        "category_code": args.category_code or parts["category_code"],
+        "subject_code": args.subject_code or parts["subject"],
+        "exam_code": parts["paper"],
+        "question_set": parts["question_set"],
         "slug": args.slug,
         "subject_mapping_note": None,
     }
+
+
+def run_stages(args):
+    registry_key = args.registry_key
+    meta = paper_metadata(args)
 
     run_dir = os.path.abspath(args.out)
     os.makedirs(run_dir, exist_ok=True)
@@ -779,11 +790,16 @@ def run_stages(args):
                     return 1
             elif stage == "S4_records":
                 # The sheet paths belong to the record: a reader of the package must be able
-                # to walk from an answer back to the paper that spoke it.
+                # to walk from an answer back to the paper that spoke it. The sha256 travels
+                # with the path — a path alone does not prove the bytes, and the reviewer's
+                # provenance contract (charter §8) names the checksum, not the filename.
                 meta.update({
                     "question_pdf": sheets.get("question", {}).get("path"),
+                    "question_pdf_sha256": sheets.get("question", {}).get("sha256"),
                     "answer_pdf": sheets.get("answer", {}).get("path"),
+                    "answer_pdf_sha256": sheets.get("answer", {}).get("sha256"),
                     "corrected_pdf": sheets.get("corrected", {}).get("path"),
+                    "corrected_pdf_sha256": sheets.get("corrected", {}).get("sha256"),
                 })
                 rows, sources = stage_records(parsed, gate, table, sheets, meta, registry_key,
                                               args.review_status)
@@ -953,6 +969,7 @@ def main(argv=None):
     parser.add_argument("--category", default="醫事檢驗師")
     parser.add_argument("--subject", default="生物化學與臨床生化學")
     parser.add_argument("--category-code")
+    parser.add_argument("--subject-code")
     parser.add_argument("--slug", default="medtech")
     parser.add_argument("--package-version", default="tw-national-exam-medtech-v0.0.1")
     parser.add_argument("--question-pdf")

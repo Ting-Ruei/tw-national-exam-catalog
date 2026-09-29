@@ -69,7 +69,7 @@ class CanonicalFinalizerTests(unittest.TestCase):
             [
                 {
                     "logical_relative_path": path,
-                    "resolution": "regenerate_on_ai395",
+                    "resolution": "regenerate_on_previous_worker",
                     "canonical_action": "omit_then_regenerate",
                     "authority": "runtime_generated",
                     "rebuild_source": "scripts/report_mineru_status.py",

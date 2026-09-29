@@ -1,5 +1,7 @@
 # 本地 RAG 知識庫資源評估
 
+> 歷史資源盤點：不授權目前資料庫、模型、provider、endpoint 或 deployment；需以新契約重做。
+
 本文件評估在 `tw-national-exam-catalog` 本機環境建立 RAG 知識庫所需的硬體、軟體、資料庫、模型與儲存資源。
 
 評估時間：2026-06-17

@@ -256,6 +256,252 @@ The question to answer first is always: **is it not drawing, or is the thing not
 (`build-exam-question-bank/SKILL.md` records the same lesson: the first three explanations were
 about rendering; the cause was that the scan never saw the picture.)
 
+## The report step was O(n²), and that stalled the loop (2026-09-24)
+
+`qbr/scripts/report_repair_progress.py` is step ③ of every round, and it was taking **27.8 s** —
+enough that a round looked hung (a round is ~59 s total, and the process tree showed it sitting in
+this step for minutes under contention).
+
+`cProfile` put **20.8 s of 22.6 s inside `summarize`'s loop**, while parsing the whole 500 MB stream
+was 0.96 s. The cause was the per-class dedup: `if key not in entry["questions"]`, where
+`questions` grows to **81,151 keys** in the biggest class — a linear scan per record, i.e. O(n²).
+Replaced with a per-class `set` (dropped again before returning, so the summary's shape is
+unchanged): **27.8 s → 1.7 s**, with byte-identical output.
+
+Two traps on the way, both worth keeping:
+
+- **The obvious "fix" was slower.** Streaming the file backwards in 1 MB chunks to avoid
+  materialising it measured **17.1 s vs 1.49 s** — an 11× regression — because back-to-front
+  decoding allocates a new bytes object per chunk while the forward read is one linear pass with OS
+  readahead. Memory was never the binding constraint. The real fix was finding the O(n²), not
+  avoiding the allocation.
+- **"Newest first" is a property of the walk, not a reversal of the result.** A question appearing
+  in several records is kept at its **first sighting**, so reversing each class's list is *not* the
+  same as reversing the records. Measured: class `verdict:DEFECT` led with `q002` (records reversed)
+  vs `q053` (lists reversed), both holding 155 questions. `load_findings` now reverses once, at the
+  end, and `summarize` consumes newest-first.
+
+The read is bounded at `max_records=200_000` and returns `(rows, capped)`; `main` prints
+「紀錄很長，只讀最新 N 筆」 when it cuts, so a capped summary never reads as a total.
+
+## The repair loop runs **on the station** (2026-09-24)
+
+The loop (scan → read the paper → orchestrator triage) and the browser UI must be **the same
+machine**, because the progress panel reads the loop's own files. Until 2026-09-24 the loop ran only
+on the laptop, so the station's 錯題討論區 showed "排隊中 0 題" while a laptop somewhere was working
+— the panel was honest and useless.
+
+```
+~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist   RunAtLoad + every 600s ← the loaded one
+~/Library/LaunchAgents/com.qbr.repair-daemon.plist   the retired laptop copy; NOT loaded (see below)
+~/qbr-review/code/qbr/scripts/com.qbr.repair-daemon.station.plist   (in the repo - a plist that
+                                                                     exists on one machine is a
+                                                                     machine that cannot be rebuilt)
+~/qbr-review/logs/repair-daemon.{out,err}.log        launchd's view
+~/qbr-review/code/qbr/runs/repair_daemon-*.log       what each round did
+```
+
+**There is exactly one such job, and it is this one.** The laptop's was unloaded on 2026-09-24
+because two loops maintain two `scan_state.json` ledgers, and a queue sync pushes the laptop's over
+the station's while the laptop's findings stream is protected (never pushed): the station would then
+treat the laptop's questions as already read and never read them, without printing anything.
+Measured 0 such questions on the day; the mechanism is the reason, not an incident. The laptop's
+plist was deleted from the repo the same day — a plist nobody loads is a trap for the next person
+who installs the wrong one.
+
+Install on the station:
+
+```sh
+launchctl bootout gui/$(id -u)/com.qbr.repair-daemon 2>/dev/null || true
+cp ~/qbr-review/code/qbr/scripts/com.qbr.repair-daemon.station.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist
+launchctl print gui/$(id -u)/com.qbr.repair-daemon   # verify it EXISTS, not that bootstrap was quiet
+```
+
+Four things the station shape needs, each measured:
+
+- **`QBR_PYTHON=/usr/bin/python3`.** The station has no `qbr/.venv`; its system Python 3.9 already
+  carries PyMuPDF and Pillow, which is everything the loop imports. Verified by running `--help` on
+  all three scripts there.
+- **`ORCHESTRATE=litellm-orchestrator`, and it is a *different flag* from `--escalate`.** The daemon
+  originally passed only `--escalate` (ask the person) and never `--orchestrate` (ask the second
+  engine), so every finding was written **without an `orchestration` key** and 指揮者分流 stayed
+  empty forever. The loop ran, the findings were written, only that one column never moved.
+- **The litellm key is read from `~/Services/litellm/.env`, never stored.** `engines.py` takes
+  `QBR_LITELLM_API_KEY` from the environment only. The daemon extracts just
+  `LITELLM_MASTER_KEY` from that file (not `source` — it also holds `POSTGRES_PASSWORD`) and exports
+  it. Without it the orchestrator correctly refuses: 「需要 API key，但環境變數沒有值；不送未認證的請求」.
+- **`QBR_ALLOW_EXTERNAL_LLM=1` is written into the plist on purpose.** The default is off
+  (`engines.py::external_egress_allowed`); enabling it is a data-boundary act that has to be visible
+  in a file, not inherited from a shell someone once exported in.
+
+**Never `sudo osascript quit` Docker Desktop here** — this host is also the always-on exam platform.
+To exercise the watchdog, stop only the container.
+
+### Two rebuild-time gaps, and what was measured about them (2026-09-24)
+
+Neither is a live fault today. Both are things a rebuild from the repo alone would get wrong, which
+is exactly the class of defect the plist-in-repo rule above exists to prevent.
+
+**There is no installer for the repair-daemon job.** `deploy/qbr-review/install-watchdog.sh` exists
+for the review-UI watchdog (bootout → copy → bootstrap → verify `launchctl list`), and
+`deploy_station.sh --restart` calls `up.sh`. Nothing installs `com.qbr.repair-daemon`. So the
+sequence above is manual, and a fresh station gets the code but not the job. Measured: the only
+`install-*` script under `deploy/qbr-review/` is `install-watchdog.sh`.
+
+**The plist does not set `QBR_LLM_ENV_FILE`.** `repair_daemon.sh` defaults to
+`$HOME/Services/litellm/.env`; a station where that file sits elsewhere silently falls through to no
+key, and `engines.py` then refuses (correctly) — the orchestrator degrades instead of answering.
+
+What was measured on the station (2026-09-24), so this is a latent risk, not a current failure:
+
+| check | result |
+|---|---|
+| `~/Services/litellm/.env` exists | ✓ `-rw-------`, 432 bytes |
+| `~/qbr-review/queue` writable | ✓ — `scan_state.json` writes work |
+| port 4000 listener | Docker (`com.docke`), i.e. **not** in the review-ui container |
+| latest findings carry `orchestration` | ✓ `['verdict','why','self_look','model','seconds']` |
+
+That last row is the one that settles it: a degraded orchestrator writes a finding **without** a
+usable verdict, so a real `verdict` in the newest records is direct evidence the station's loop is
+reaching the model. The `127.0.0.1:4000` in the plist is the **host's** loopback — the loop runs
+under launchd on the host, not inside the review-ui container, and `deploy/qbr-review/compose.yaml`
+defines no LiteLLM service. A container-side `127.0.0.1` would mean that container, not the host.
+
+### `scan_state.json` must travel with the queue
+
+`deploy_station.sh --queue` copies `review-queues/live/review-ui/` → `queue/review-ui/`, but
+`scan_state.json` lives **one level up, at the queue root** — so it was never copied and the
+station's 錯題討論區 permanently read 「還沒跑過掃描」 even while a scan was running. The script now
+syncs it explicitly and reports 「排隊中 N 題、已看過 M 題」, counted through
+`scan_state.pending_keys` rather than a hand-written second reader of that file's schema (the first
+attempt used `d.get("done")`, which is not a key that exists, and printed 0).
+
+`scan_state.json` is safe to sync because it is **not** a human artefact — the scan can be re-run.
+The findings stream (`question_ai_findings.jsonl`) is in the protected list and is **not** synced by
+`deploy_station.sh`, so deploying code does not overwrite what a station has produced.
+
+**Do not over-read that as "the station's stream only ever holds the station's own verdicts."** Two
+other paths write the same file: `scripts/push_reviews_to_station.sh` appends laptop findings to the
+station's stream on purpose (that is how a laptop's work reaches the reviewer), and the station's own
+daemon appends to it every round. So the station file can be a **merged** stream. The accurate claim
+is narrow: *`deploy_station.sh` does not sync findings*, which is what keeps a deploy from clobbering
+them. `push_reviews_to_station.sh`'s comment that the file is "written by the laptop, the station only
+holds what was pushed" did not survive the station loop being deployed, and it should be read as
+describing the push direction only.
+
+## `question_review_principles.jsonl` is protected from deletion but is **not** delivered
+
+`deploy_station.sh` lists this stream in `EVENT_STREAMS`, so `--delete` will not remove it. That
+protects the station's copy — and it also means **a deploy never brings the laptop's copy over**.
+
+Measured 2026-09-24: the station had **no such file at all**.
+
+```sh
+ssh macstudio 'ls -la ~/qbr-review/queue/review-ui/*.jsonl'   # 6 files, no principles stream
+ssh macstudio 'find ~/qbr-review -name question_review_principles.jsonl'   # empty
+```
+
+The laptop held exactly one principle (the table rule, `p1`, written 2026-09-23) that had never
+been applied on the station. So the split was: **the machine that runs the loop and reads the
+stream into its prompts had zero principles, and the machine that had one does not run the loop.**
+Nothing was broken or lost; the constraint simply never reached a prompt.
+
+**Curate on the station, not on the laptop.** The station is where the UI's 「新增原則」 button
+writes (`review_state.append_principle`) and where the daemon reads them, so it is the home:
+
+```sh
+ssh macstudio 'cd ~/qbr-review/code/qbr && /usr/bin/python3 scripts/curate_principles_from_comments.py \
+  --events ~/qbr-review/queue/review-ui/question_review_events.jsonl \
+  --principles ~/qbr-review/queue/review-ui/question_review_principles.jsonl --apply'
+```
+
+Verify by reading the number back out of the stream rather than trusting the write:
+
+```sh
+ssh macstudio 'cd ~/qbr-review/code/qbr && /usr/bin/python3 -c "
+import sys; sys.path.insert(0, \"src\")
+from qbr import discuss
+print(len(discuss.active_principles(discuss.load_events(
+    \"/Users/tim/qbr-review/queue/review-ui/question_review_principles.jsonl\"))))"'
+```
+
+`ask_about_blocks.py` also prints 「基本原則 N 條（路徑）」 as its first line, and the count changes
+`ai_findings.prompt_version`, so adding or retiring one principle marks every existing finding
+**stale** and the next `--restale` re-asks them. Measured: 186 questions.
+
+The same script retires principles that have left its `CURATED` table (append-only: a `remove`
+event, not a deletion), so re-running it after editing the table converges instead of leaving two
+versions of the same rule in the prompt.
+
+**The inspection direction carries both streams.** `pull_station_reviews.sh` used to pull only
+`question_review_events.jsonl`, so the laptop kept whatever principles it had last written itself —
+measured 2026-09-24: the station had **7** principle events (5 active) while the laptop had **1**,
+and a local dry-run therefore said 「作用中的原則：1 條」 and proposed four rules that were already
+in force. It now counts and pulls both streams in one pass:
+
+```sh
+scripts/pull_station_reviews.sh --dry-run   # 兩條流的筆數，逐一列出
+scripts/pull_station_reviews.sh             # 各自備份後才覆蓋
+```
+
+### The station's own round logs were being deleted by every deploy (fixed 2026-09-24)
+
+The code rsync carries `--delete`, and `qbr/runs/` was **not** excluded, so every deploy removed
+whatever the station's daemon had written there — the laptop simply has different filenames, so
+rsync read them as "extra files in the target". Measured on the station:
+
+```sh
+ssh macstudio 'cat ~/qbr-review/logs/repair-daemon.out.log'   # names its own log...
+#   [daemon] log=/Users/tim/qbr-review/code/qbr/runs/repair_daemon-20260924-113324.log
+ssh macstudio 'ls ~/qbr-review/code/qbr/runs/repair_daemon-20260924-113324.log'   # ...which is gone
+```
+
+Of the 31 files in the station's `qbr/runs/`, **every one that carries a 「掃描」 line names the
+laptop's queue path** — zero station rounds had survived. The fix is `--exclude='qbr/runs/'`, and the
+negative control is a dry run with the old exclude list:
+
+```sh
+rsync -an --delete <old excludes> -i ./ macstudio:qbr-review/code/ | grep runs/
+#   *deleting qbr/runs/.deploy-sentinel      <- an old-style deploy plans to delete it
+```
+
+The consequence was worse than a missing log: reading `runs/` **on the station** returned the
+laptop's records, which look identical except that their 「掃描」 line names a path the station does
+not even have. Any log left from before this fix is the laptop's; the tell is that path.
+
+**Two repair daemons are installed, one on each machine** (measured 2026-09-24): the station's
+(`QUEUE=/Users/tim/qbr-review/queue`, `LANE=dgx-qwen3.8-flash`) and the laptop's
+(`~/Library/LaunchAgents/com.qbr.repair-daemon.plist`, plist dated 2026-09-24 01:09, rounds all day
+every ~30 min against `qbr/data/review-queues/live`). The section above says the loop and the UI
+must be the same machine, and that was done by *installing* the station job — the laptop job was
+never retired. Whether it should be is a decision for the owner: the two write findings into
+**different** streams, so they do not overwrite each other directly, but they do ask the same
+questions of the same engine and one of the streams only reaches the reviewer through
+`push_reviews_to_station.sh`.
+
+> **Superseded 2026-09-25 — the laptop job *is* retired, and this paragraph is now the trap it
+> warns about.** Measured on the laptop: `launchctl list | grep qbr` prints nothing (no job),
+> `~/Library/LaunchAgents/` holds no `com.qbr.repair-daemon.plist`, and the file is at
+> `~/Library/LaunchAgents-retired/com.qbr.repair-daemon.plist.retired-20260924`. On the station the
+> loaded job is `com.qbr.repair-daemon` from `~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist`
+> — read back with `launchctl print gui/$(id -u)/com.qbr.repair-daemon`: `INTERVAL => 600`,
+> `StartInterval => 600`, `WINDOW => 60` (owner, 2026-09-25: 「現階段改成10分鐘掃描一次」). A
+> **second, unloaded** copy of the retired laptop plist still sits in the station's
+> `~/Library/LaunchAgents/`; its own log (`~/qbr-review/logs/launchd-repair-daemon.out.log`) ends
+> `2026-09-24T03:38:14Z` with `window=5`. Both labels are `com.qbr.repair-daemon`, so only the
+> loaded one matters — but the stale file misled a reader on 2026-09-25 into believing the loop ran
+> at 1800s/WINDOW=5. Delete the unloaded copy rather than read it.
+
+**A backfill and the resident loop share one engine, and there is no coordination.** Measured
+2026-09-24 while re-asking 186 stale questions with `--concurrency 4` on the station: the daemon's
+30-minute round started mid-backfill on the same DGX, and **16 of 108 calls came back
+`request failed`** (14.8%). Those failures are now retryable (`ai_findings.is_answer` treats a record
+with `finding: None` as unanswered, so `--restale` picks them up again) — before that fix they were
+recorded with the current `prompt_version` and would never have been asked again. So the practical
+consequence is "the backfill converges over more than one pass", not corruption; expect to run
+`--restale` twice rather than assuming one pass finished the list.
+
 ## Deploying to another machine (the sequence that worked)
 
 **From the laptop, there are two scripts for this — use them, not hand-run `rsync` + `ssh`:**
@@ -264,9 +510,36 @@ about rendering; the cause was that the scan never saw the picture.)
 scripts/deploy_station.sh                # sync code to the station + record provenance
 scripts/deploy_station.sh --queue        # also sync the queue (after a rebuild)
 scripts/deploy_station.sh --restart      # sync, then up.sh on the station
+scripts/deploy_station.sh --force        # 明知有迴圈在跑還是要部署（那一輪會少做事）
 
 scripts/pull_station_reviews.sh          # bring the human decisions back (one-way)
 ```
+
+### Do not deploy while a round is running (the guard, 2026-09-24)
+
+The repair daemon runs rounds on the station every 30 minutes, and a round is a bash script that
+calls other scripts **by path**. Replacing those files mid-round does not crash the round: bash reads
+a script lazily, so it continues at whatever offset it had reached in the **new** file, and the steps
+it never reached are simply skipped. **A round that skips steps looks exactly like a round that
+finished.**
+
+Measured, 2026-09-24 18:06:55: a `--restart` deploy replaced `repair_daemon.sh` while a round sat
+between ② and ③. That round's log ends right after ② with 「第 1 輪結束」; its ③ (the applier), ④
+(the text producer) and ⑤ (the report) never ran, and nothing anywhere said so. The consequence is
+not a broken artifact, it is a **missing one** — the very repairs the round was supposed to apply
+were silently not applied.
+
+So `deploy_station.sh` now refuses to start when the station has `repair_daemon`, `confirm_dispute`,
+`apply_dispute_repairs`, `apply_text_corrections`, `scan_category_principles` or `ask_about_blocks`
+running (`pgrep -fl` over the full command line, checked **before any rsync**, exit code 3):
+
+```sh
+ssh macstudio 'pgrep -fl "confirm_dispute|repair_daemon"'   # empty means safe to deploy
+```
+
+A round in flight is not an emergency: wait for it (`ls -t ~/qbr-review/code/qbr/runs/repair_daemon-*.log
+| head -1` names the current log). `--force` exists for the case where the loop is genuinely wedged
+and you accept that the running round loses its remaining steps.
 
 `deploy_station.sh` exists because hand-running the copy misses two things silently: the
 `code/國考題資料夾` **mountpoint** (see step 3 below) and the **source revision** that

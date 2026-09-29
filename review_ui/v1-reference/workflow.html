@@ -472,9 +472,9 @@
     } else {
       diff = '<div class="finding"><strong>本題尚未有人工修訂 diff</strong><p>AI staging 只提出 advisory；沒有自動覆寫 candidate。若人工修正，這裡會顯示 before／after 以及需要重跑的 lane。</p></div>';
     }
-    const feedbackMeta = feedback ? `<div class="feedback-card"><strong>護欄回饋已建立</strong><p>feedback <code>${esc(feedback.feedback_id || '—')}</code> · ${esc(feedback.source_kind || '—')} · scope ${esc(feedback.scope || '—')} · changed ${esc((feedback.changed_fields || []).join(', ') || '—')}</p><p>這筆前後差異會送入 n8n 的 GLM curator；模型只能提出 rule／checklist／Skill 草稿，仍需 owner approval，不會直接啟用。</p></div>` : '';
+    const feedbackMeta = feedback ? `<div class="feedback-card"><strong>護欄回饋已建立</strong><p>feedback <code>${esc(feedback.feedback_id || '—')}</code> · ${esc(feedback.source_kind || '—')} · scope ${esc(feedback.scope || '—')} · changed ${esc((feedback.changed_fields || []).join(', ') || '—')}</p><p>這筆前後差異只作 advisory evidence；任何 rule／checklist／Skill 草稿仍需 owner approval，不會直接啟用。</p></div>` : '';
     return `<div class="section"><div class="section-head"><h2>Revision / invalidation</h2><span class="meta">${esc(review.queue_label || '未看過')}</span></div><div class="section-body"><div class="revision-grid">
-      <div class="kv"><div class="kv-label">active revision</div><div class="kv-value"><code>${esc(metadata.ai395_staging_revision_id || 'candidate 原始 revision')}</code></div></div>
+      <div class="kv"><div class="kv-label">active revision</div><div class="kv-value"><code>${esc(metadata.review_revision_id || 'candidate 原始 revision')}</code></div></div>
       <div class="kv"><div class="kv-label">parser / source</div><div class="kv-value">${esc(metadata.parser_version || '未提供')} · ${esc(metadata.parser_status || '未提供')}</div></div>
       <div class="kv"><div class="kv-label">人工事件</div><div class="kv-value">${fmt(review.event_count || 0)} 筆；AI 不可冒充</div></div>
       <div class="kv"><div class="kv-label">formal gate</div><div class="kv-value">${candidate.formal?.ready_for_formal ? 'question＋answer ready' : '尚未達正式入庫 gate'}</div></div>

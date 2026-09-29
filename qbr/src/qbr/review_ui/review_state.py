@@ -81,10 +81,11 @@ import time
 import urllib.request
 from .ai_audit import ai_patch_safety_reason, ai_review_reference, ai_suggested_correction, ai_visual_status, answer_review_hint, candidate_visual_profile, compact_ai_lane_results, compact_candidate_for_ai, effective_ai_audit_status, human_review_supersedes_ai, int_or_zero, issue_quality_status, normalized_correction, openai_question_ai_audit, repair_event_info, split_ai_audit_scopes
 from .constants import AI_FEEDBACK_RATINGS, AI_FEEDBACK_SCOPES, AI_RESET_REVIEW_ACTIONS, AI_REVIEW_PROMPT_VERSION, ANSWER_ISSUE_CODES, ANSWER_READY_ACTIONS, CATEGORY_GROUP_FILTERS, CATEGORY_GROUP_NORMALIZED_FILTERS, GROUP_REVIEW_ACTIONS, MANUAL_ASSET_ROOT, MOBILE_REVIEW_ACTIONS, NON_QUESTION_REVIEW_ACTIONS, NOTE_ACTIONS, QBR_AI_FINDINGS_STREAM, QUESTION_READY_ACTIONS, REPAIR_REVIEWER_PREFIXES, RESET_REVIEW_ACTIONS, SQL_ANSWER_CATEGORY_EXPR, SQL_CANDIDATE_CATEGORY_EXPR, SQL_REVIEW_ACCEPTED_REAUDIT_EXPR, SQL_REVIEW_REPAIR_PENDING_EXPR, SqlWriteError, TABLE_DEPENDENCY_SQL_RE, VISUAL_DEPENDENCY_SQL_RE, WORKFLOW_QUEUE_DEFINITIONS
-from .events import _merge_note_into_reset, _note_annotates_pending_reset, file_signature, load_ai_feedback_events, load_ai_learning_events, load_append_only_events, load_correction_feedback_events, load_correction_feedback_rows, load_group_review_events, load_keyed_events, load_latest_events, load_review_events
+from .events import _is_repair_reset, _merge_note_into_reset, _note_annotates_pending_reset, file_signature, load_ai_feedback_events, load_ai_learning_events, load_append_only_events, load_correction_feedback_events, load_correction_feedback_rows, load_group_review_events, load_keyed_events, load_latest_events, load_review_events, with_standing_correction
+from ..dispute_apply.withdrawals import MAX_ATTEMPTS, rejection_counts
 from .legacy_assets import _reaffirm_standing_action, load_issues, load_jsonl, workflow_primary_queue
 from .paths import data_url_to_bytes, display_path, safe_path_segment, sibling_pdf, strip_structured_tables
-from .queue_view import DISCUSS_BUCKETS, PRINCIPLES_STREAM, QbrAiFindingsStore, REPAIR_QUESTIONS_STREAM, SQL_DISCUSS_PREDICATE, category_filter_values, category_matches_filter, is_discuss_bucket, normalize_category_name, paper_entries_for, principles_projection, repair_questions_projection, review_projection
+from .queue_view import DISCUSS_BUCKETS, PRINCIPLES_STREAM, QbrAiFindingsStore, REPAIR_QUESTIONS_STREAM, SQL_DISCUSS_PREDICATE, SQL_RESET_UNREVIEWED_PREDICATE, category_filter_values, category_matches_filter, is_discuss_bucket, normalize_category_name, paper_entries_for, principles_projection, question_identity, repair_asks_by_key, repair_questions_projection, review_projection
 
 class ReviewState:
     def __init__(
@@ -185,12 +186,17 @@ class ReviewState:
             self.latest_group_reviews = {}
             self.latest_answer_reviews, self.answer_review_counts, self.latest_answer_reset_reviews = {}, {}, {}
             self.latest_ai_reviews, self.ai_review_counts = {}, {}
+            self.rejection_counts = {}
             self.latest_ai_feedbacks = {}
             self.latest_ai_learnings = {}
             self.latest_correction_feedbacks = {}
             self._ensure_ai_feedback_schema()
         else:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = load_review_events(review_log)
+            # **循環的次數**（業主 2026-09-25：循環三次之後才送入「AI無法判斷」）。定義只有一個
+            # （`withdrawals.rejection_counts`，與套用端的閘門同一份），而且是**在重載時**算一次、
+            # 不是每個請求算：這是一趟獨立的直線掃描，只有事件檔變了才跑。
+            self.rejection_counts = rejection_counts(review_log)
             self.latest_group_reviews = load_group_review_events(review_log)
             self.latest_answer_reviews, self.answer_review_counts, self.latest_answer_reset_reviews = load_latest_events(self.answer_review_log)
             self.latest_ai_reviews, self.ai_review_counts = load_keyed_events(
@@ -211,6 +217,11 @@ class ReviewState:
         # they are re-read whole when their signature changes rather than tailed like the findings.
         self.principles_events = load_append_only_events(self.principles_log)
         self.repair_questions_events = load_append_only_events(self.repair_questions_log)
+        #: `candidate_key -> 那一題最新一筆還沒被回答的反問`（`repair_asks_by_key`）。題目區要用它
+        #: 說出「這一題機器讀到了但沒有自己改，原因是什麼」——那個原因只寫在反問裡，而反問原本
+        #: 只在討論區看得到，所以業主看著一列有建議、沒有改動的題目時，看不到原因。每次請求重算
+        #: 184 筆事件的投影沒有意義，所以與其他流一樣：簽章變了才重讀（見 `_refresh_...`）。
+        self.repair_asks = repair_asks_by_key(self.repair_questions_events)
         self._candidate_signature = file_signature(self.candidate_path)
         self._issue_signature = file_signature(self.issue_path) if self.issue_path else None
         self._review_log_signature = file_signature(self.review_log)
@@ -394,14 +405,12 @@ class ReviewState:
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             review = item.get("review") if isinstance(item.get("review"), dict) else {}
             ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+            # 「哪一題」的五個欄位由 `question_identity` 投影（與 `/api/discuss` 的 `questions`
+            # 同一支）：畫面上兩處印同一件事，就不該有兩種算法。
             summary = {
                 "candidate_key": key,
-                "question_number": str(item.get("question_number") or ""),
                 "stem_preview": self._short_text(item.get("stem"), 220),
-                "category": str(metadata.get("normalized_category_name") or metadata.get("group_name") or ""),
-                "subject": str(metadata.get("normalized_subject_name") or ""),
-                "year": str(metadata.get("year") or ""),
-                "ordinal": str(metadata.get("exam_ordinal") or ""),
+                **question_identity(item),
                 "primary_queue": queue["id"],
                 "queue_label": queue["label"],
                 "severity": queue["severity"],
@@ -576,6 +585,7 @@ class ReviewState:
         review_signature = file_signature(self.review_log)
         if review_signature != self._review_log_signature:
             self.latest_reviews, self.review_counts, self.latest_reset_reviews = load_review_events(self.review_log)
+            self.rejection_counts = rejection_counts(self.review_log)
             self.latest_group_reviews = load_group_review_events(self.review_log)
             self._review_log_signature = review_signature
 
@@ -619,7 +629,18 @@ class ReviewState:
         repair_questions_signature = file_signature(self.repair_questions_log)
         if repair_questions_signature != self._repair_questions_log_signature:
             self.repair_questions_events = load_append_only_events(self.repair_questions_log)
+            self.repair_asks = repair_asks_by_key(self.repair_questions_events)
             self._repair_questions_log_signature = repair_questions_signature
+
+    def attempts_on(self, key: str) -> int:
+        """機器修復被這個人打回、而還沒被接受的次數（業主 2026-09-25 的循環上限用的那個數字）。
+
+        來源只有一份（`withdrawals.rejection_counts`，套用端的閘門讀的也是它）。`getattr` 是因為
+        有些呼叫端會直接組一個 `ReviewState` 而不跑載入那一段（聚焦的單元測試就是這樣）：那時
+        「不知道有誰被退過」與「沒被退過」在這一欄得到同一個答案——這一欄只決定標籤與前端那一格，
+        不決定任何寫入。
+        """
+        return int((getattr(self, "rejection_counts", None) or {}).get(key) or 0)
 
     def _sql_connection(self):
         if not self.sql_review_enabled or psycopg is None or not self.database_url:
@@ -1464,7 +1485,7 @@ base AS (
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
         (lq.candidate_key IS NULL) AS is_never_reviewed,
-        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_RESET_UNREVIEWED_PREDICATE} AS is_reset_unreviewed,
         {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
         {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         lai.action AS ai_action,
@@ -1780,7 +1801,7 @@ base AS (
         la.action AS answer_review_action,
         (lq.action IS NOT NULL AND lq.action NOT IN ('unreviewed', 'reset_review')) AS is_reviewed,
         (lq.candidate_key IS NULL) AS is_never_reviewed,
-        (lq.action IN ('unreviewed', 'reset_review')) AS is_reset_unreviewed,
+        {SQL_RESET_UNREVIEWED_PREDICATE} AS is_reset_unreviewed,
         {SQL_REVIEW_ACCEPTED_REAUDIT_EXPR} AS is_accepted_reaudit_pending,
         {SQL_REVIEW_REPAIR_PENDING_EXPR} AS is_repair_pending,
         (
@@ -2152,6 +2173,21 @@ filtered AS (
                         previous = latest.get(key) or latest_reset.get(key)
                         if not event.get("correction") and previous and previous.get("correction"):
                             event["correction"] = previous["correction"]
+                        # Same rule as the JSONL fold in `events.py` — spelled the same, because two
+                        # folds with two behaviours is how the 錯題討論區 and `review_projection` end up
+                        # disagreeing about which questions are stuck. A machine reset reopens the
+                        # question; it does not erase the person's decision.
+                        if _is_repair_reset(event) and key in latest \
+                                and latest[key].get("action") in STANDING_ACTIONS:
+                            kept = dict(latest[key])
+                            kept["pending_reset"] = {
+                                "at": event.get("created_at") or event.get("at"),
+                                "reviewer": event.get("reviewer"),
+                                "notes": event.get("pipeline_note") or event.get("notes") or "",
+                            }
+                            latest[key] = kept
+                            latest_reset[key] = event
+                            continue
                         latest.pop(key, None)
                         latest_reset[key] = event
                         continue
@@ -3349,8 +3385,30 @@ filtered AS (
         copy["repair_status"] = repair_event_info(latest_review, latest_reset_review, metadata)
         review_event = latest_review or latest_reset_review
         correction = normalized_correction(review_event.get("correction") if review_event else None)
+        # **撤回之後，這一列的文字就是撤回後的那一份。**（2026-09-24）A withdrawal
+        # (`applied == "withdrawn"`) is the machine taking its own text back: the producer
+        # (`scripts/apply_text_corrections.py`) has already restored the row to `parser_original`, and
+        # the withdrawal is the **latest** revision of that row's text. Overlaying the older
+        # correction here would put the machine's withdrawn text back on the reviewer's screen while
+        # the file says the opposite — measured, `115090:305:0401:1:question:q037`: file
+        # 「下列有關抗癲癇藥物的敘述」, served payload 「…抗癲癲…」, which is precisely the
+        # 「只有覆蓋、檔案沒改」 complaint this fold used to be the whole answer to. The row's own
+        # text wins; the event's correction still rides along in `review["correction"]` for
+        # provenance, and `review["applied_kind"]` says 已還原（機器改錯）.
+        if str((review_event or {}).get("applied") or "").strip().lower() == "withdrawn":
+            correction = None
         if correction:
-            copy["parser_original"] = {
+            # The row may already carry a `parser_original`: the producer
+            # (`scripts/apply_text_corrections.py`) persists one when it folds a correction into
+            # `candidates.jsonl`, and it runs before this fold - so by now `item`'s own text is
+            # already the corrected one. Rebuilding the dict from `item` would then store the
+            # *corrected* text as the "original" and overwrite the one record of what the extractor
+            # read. One source for what "original" means: whatever the row already persisted, for the
+            # fields it covers (the fields it does not cover are untouched text, so `item` is still
+            # the original for those).
+            persisted = item.get("parser_original")
+            persisted = persisted if isinstance(persisted, dict) else {}
+            parser_original = {
                 "stem": item.get("stem"),
                 "options": item.get("options"),
                 "answer": item.get("answer"),
@@ -3361,6 +3419,10 @@ filtered AS (
                 "answer_image_refs": item.get("answer_image_refs"),
                 "visual_review": item.get("visual_review"),
             }
+            for field, value in persisted.items():
+                if field in parser_original:
+                    parser_original[field] = value
+            copy["parser_original"] = parser_original
             for field in ("stem", "answer", "group_ref", "group_sequence_no", "image_refs", "stem_image", "answer_image_refs", "visual_review"):
                 if field in correction:
                     if field == "group_ref" and not str(correction.get(field) or "").strip():
@@ -3432,9 +3494,22 @@ filtered AS (
             "previous_action": review_projection_data["previous_action"],
             "queue_bucket": review_projection_data["queue_bucket"],
             "queue_label": review_projection_data["display_label"],
+            "applied": review_projection_data["applied"],
+            "applied_kind": review_projection_data["applied_kind"],
+            # 機器試過幾次、有沒有到上限（`withdrawals.MAX_ATTEMPTS`）。**投影給事實，句子在瀏覽器**
+            # ——與 `applied_kind` 同一個分工。前端用它把這一題放進「AI無法判斷」，並在卡片上寫一句
+            # 「機器已經試過 N 次、每一次都被打回」。
+            "attempts": self.attempts_on(key),
+            "exhausted": self.attempts_on(key) >= MAX_ATTEMPTS,
         }
         correction_feedback = latest_correction_feedbacks.get(key)
         copy["correction_feedback"] = correction_feedback
+        # 代理對這一題的反問（**只有還沒被回答的**，`repair_asks_by_key`）。題目區用它說出「這一題
+        # 機器讀到了、但沒有自己改，原因是什麼」：那個原因（`reason`，例如「紙本判讀被閘門擋住：
+        # 第二次判讀的結論是 CARE…」）只寫在反問裡，而反問原本只在討論區畫得出來，所以業主在題目
+        # 區看著一列有建議、沒有改動的題目時，看不到原因（2026-09-25 他問「為什麼會有這樣的差異」）。
+        # 沒有人事件、也沒有反問的那些（機器只改人擋過的題）由前端照同一條契約說一句，不在此欄。
+        copy["repair_ask"] = (getattr(self, "repair_asks", None) or {}).get(key)
         latest_action = latest_review.get("action") if latest_review else None
         formal = dict(formal_question_map.get(key) or {"in_formal": False})
         physical_in_formal = bool(formal.get("in_formal"))
@@ -3559,7 +3634,7 @@ filtered AS (
             "question_markdown": metadata.get("question_markdown_relative") or metadata.get("question_markdown"),
         }
         copy["answer_source_files"] = {
-            "official_pdf": metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_primary"),
+            "official_pdf": metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_relative") or metadata.get("corrected_answer_pdf_relative") or metadata.get("answer_pdf_primary"),
             "mineru_layout_pdf": sibling_pdf(metadata.get("answer_markdown_relative") or metadata.get("answer_markdown") or "", "_layout"),
             "mineru_origin_pdf": sibling_pdf(metadata.get("answer_markdown_relative") or metadata.get("answer_markdown") or "", "_origin"),
             "answer_markdown": metadata.get("answer_markdown_relative") or metadata.get("answer_markdown"),
@@ -3571,8 +3646,8 @@ filtered AS (
         return "|".join(
             str(value or "")
             for value in [
-                item.get("answer_source_registry_key"),
-                metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_primary"),
+                ",".join(str(source) for source in item.get("answer_source_registry_keys") or []) or item.get("answer_source_registry_key"),
+                metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_relative") or metadata.get("corrected_answer_pdf_relative") or metadata.get("answer_pdf_primary"),
                 metadata.get("exam_code"),
                 metadata.get("category_code"),
                 metadata.get("subject_code"),
@@ -3710,7 +3785,7 @@ filtered AS (
             "answer_role_label": "MOD" if role == "correction" else "ANS" if role == "answer" else role or "unknown",
             "metadata": metadata,
             "source_files": {
-                "official_pdf": metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_primary"),
+                "official_pdf": metadata.get("answer_pdf_primary_relative") or metadata.get("answer_pdf_relative") or metadata.get("corrected_answer_pdf_relative") or metadata.get("answer_pdf_primary"),
                 "mineru_layout_pdf": sibling_pdf(metadata.get("answer_markdown_relative") or metadata.get("answer_markdown") or "", "_layout"),
                 "mineru_origin_pdf": sibling_pdf(metadata.get("answer_markdown_relative") or metadata.get("answer_markdown") or "", "_origin"),
                 "answer_markdown": metadata.get("answer_markdown_relative") or metadata.get("answer_markdown"),
@@ -4155,6 +4230,10 @@ filtered AS (
                 "previous_action": review_projection_data["previous_action"],
                 "queue_bucket": review_projection_data["queue_bucket"],
                 "queue_label": review_projection_data["display_label"],
+                "applied": review_projection_data["applied"],
+                "applied_kind": review_projection_data["applied_kind"],
+                "attempts": self.attempts_on(key),
+                "exhausted": self.attempts_on(key) >= MAX_ATTEMPTS,
             }
             category = metadata.get("normalized_category_name") or metadata.get("group_name") or ""
             subject = metadata.get("normalized_subject_name") or ""
@@ -6194,9 +6273,16 @@ filtered_sheets AS (
     def append_review(self, event: dict[str, Any]) -> dict[str, Any]:
         event = dict(event)
         key = event.get("candidate_key")
+        standing = self.current_question_review(str(key or ""))
         feedback_before = self._feedback_before_snapshot(str(key or "")) if event.get("correction") else None
-        if event.get("action") in (NOTE_ACTIONS | {"correct"}):
-            _reaffirm_standing_action(event, self.current_question_review(str(key or "")))
+        # **Every** event is reaffirmed, not only a note or a correction. Both rules the function
+        # applies have to run on the events the old gate skipped: a bare `block`/`accept` carrying no
+        # note keeps the question's standing note (`legacy_assets._reaffirm_standing_action`), which is
+        # what stops the reviewer's 註解 from being erased by the next click of a decision button.
+        # Measured in the live log: `moex:105100:305:33:1:question:q046` is comment「檢查上下標」→
+        # comment → `block` with `notes: ""`, and the empty note is what every latest-event-wins
+        # reader - this state's own projection, `repair_loop`, the prompts - then saw.
+        _reaffirm_standing_action(event, standing)
         event.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
         sql_storage = self._insert_sql_question_review_event(event)
         jsonl_storage = self._legacy_jsonl_storage(self.review_log, event)
@@ -6216,18 +6302,27 @@ filtered_sheets AS (
         if key:
             if event.get("action") not in MOBILE_REVIEW_ACTIONS:
                 self.review_counts[key] = self.review_counts.get(key, 0) + 1
+            # **The event that is *written* stays as it was written** - only the in-memory maps take
+            # the standing correction, because the file's own fold (`events.load_review_events`)
+            # applies the same carry and the two must not disagree about the question the reviewer is
+            # looking at. Measured 2026-09-25: the served row lost the corrected text the moment a
+            # note or a decision followed it, because `refresh_event_logs` only re-folds when the
+            # file's signature changed - and this process had just changed it.
+            in_memory = with_standing_correction(event, standing)
             if event.get("action") in MOBILE_REVIEW_ACTIONS:
                 pass
             elif event.get("action") in GROUP_REVIEW_ACTIONS:
+                # A group event is about a shared stem, not about this question's text: the carry
+                # does not apply (see `with_standing_correction`).
                 self.latest_group_reviews[key] = event
             elif event.get("action") in RESET_REVIEW_ACTIONS:
                 self.latest_reviews.pop(key, None)
-                self.latest_reset_reviews[key] = event
+                self.latest_reset_reviews[key] = in_memory
             elif _note_annotates_pending_reset(event, key, self.latest_reviews, self.latest_reset_reviews):
                 # In-memory half of the same rule: a note on a stuck question keeps it stuck.
-                self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], event)
+                self.latest_reset_reviews[key] = _merge_note_into_reset(self.latest_reset_reviews[key], in_memory)
             else:
-                self.latest_reviews[key] = event
+                self.latest_reviews[key] = in_memory
                 self.latest_reset_reviews.pop(key, None)
         formal_sync = None
         if key and event.get("action") not in NON_QUESTION_REVIEW_ACTIONS:
@@ -6248,8 +6343,9 @@ filtered_sheets AS (
             key = str(event.get("candidate_key") or "")
             if not key:
                 continue
-            if event.get("action") in (NOTE_ACTIONS | {"correct"}):
-                _reaffirm_standing_action(event, self.current_question_review(key))
+            # Unconditional for the same reason as `append_review`: a decision with no note keeps the
+            # question's standing note, and that rule has to run on the events the old gate skipped.
+            _reaffirm_standing_action(event, self.current_question_review(key))
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:
@@ -6301,8 +6397,9 @@ filtered_sheets AS (
         event = dict(event)
         key = event.get("candidate_key")
         feedback_before = self._feedback_before_snapshot(str(key or "")) if "corrected_answer" in event else None
-        if event.get("action") in (NOTE_ACTIONS | {"correct"}):
-            _reaffirm_standing_action(event, self.latest_answer_reviews.get(key or ""))
+        # Unconditional, like the question path: an answer 註解 is erased by the next bare decision on
+        # the same answer in exactly the same way.
+        _reaffirm_standing_action(event, self.latest_answer_reviews.get(key or ""))
         event.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
         sql_storage = self._insert_sql_answer_review_event(event)
         jsonl_storage = self._legacy_jsonl_storage(self.answer_review_log, event)
@@ -6339,8 +6436,11 @@ filtered_sheets AS (
     def append_answer_reviews_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized_events: list[dict[str, Any]] = []
         latest_for_correct: dict[str, dict[str, Any]] = {}
-        if any(event.get("action") in (NOTE_ACTIONS | {"correct"}) for event in events):
-            keys = [str(event.get("candidate_key") or "") for event in events if event.get("candidate_key")]
+        # Read for **every** batch, not only when one event is a note/correction: each event is
+        # reaffirmed below, and a bare decision with no note needs the answer's standing state to keep
+        # the note that stands on it.
+        keys = [str(event.get("candidate_key") or "") for event in events if event.get("candidate_key")]
+        if keys:
             if self.sql_review_enabled:
                 latest_for_correct, _counts, _reset = self._sql_latest_event_maps(
                     "exam.answer_review_events",
@@ -6355,8 +6455,7 @@ filtered_sheets AS (
             key = str(event.get("candidate_key") or "")
             if not key:
                 continue
-            if event.get("action") in (NOTE_ACTIONS | {"correct"}):
-                _reaffirm_standing_action(event, latest_for_correct.get(key))
+            _reaffirm_standing_action(event, latest_for_correct.get(key))
             event.setdefault("created_at", created_at)
             normalized_events.append(event)
         if not normalized_events:
@@ -6512,6 +6611,19 @@ filtered_sheets AS (
             "scope": str(payload.get("scope") or "question").strip() or "question",
             "reviewer": reviewer,
         }
+        # **一條原則要說得出它是在講哪一題（2026-09-24）。**
+        #
+        # 策展出來的原則帶著 `evidence`（一或多個 candidate_key），所以原則區可以把原題與紙本叫出來；
+        # 而人在介面上打的原則以前**沒有任何 key**，只能是一句沒有出處的話——使用者要的正是
+        # 「叫得出原題 PDF 讓我了解情況」。所以寫入路徑收一個選填的 `candidate_key`（或 `evidence`），
+        # 存成與策展那條路**同一個欄位名**（`evidence`：candidate_key 的列表），讀的那一邊不必學新東西。
+        keys = [str(k).strip() for k in (payload.get("evidence") or []) if str(k).strip()]
+        single = str(payload.get("candidate_key") or "").strip()
+        if single and single not in keys:
+            keys.append(single)
+        if action == "add" and keys:
+            event["evidence"] = keys
+            event["source"] = str(payload.get("source") or "review_ui").strip() or "review_ui"
         if action == "remove":
             event["reason"] = str(payload.get("reason") or "").strip()[:2000]
         # Written through the shared writer, so the line format (sorted keys, one `open("a")`) cannot
@@ -6618,6 +6730,30 @@ filtered_sheets AS (
                         rows.append(json.loads(raw_candidate))
                 return rows
 
+    def question_identities(self, candidate_keys: Any) -> dict[str, dict[str, str]]:
+        """Each key → which question it is: 類別／年／次／科目／第 N 題 (`question_identity`).
+
+        One batch read, because the caller is a *list* of keys (a principle's `evidence`, the agent's
+        open questions) and reading 121 rows one at a time is 121 round trips on the SQL backend.
+        The two backends hold the candidates differently - SQL reads the rows asked for, the JSONL
+        backend keeps every row in memory - so the difference is contained here, next to the one
+        other place that resolves a key to a row (`_raw_candidate_for_feedback`).
+
+        A key the current queue does not hold (a rebuild moved the question away, or a key typed by
+        hand) comes back with five empty fields; that is a real answer and the screen says
+        「查不到這一題」. A missing key is never silently dropped from the map: the caller iterates
+        the keys it asked for and must find each of them.
+        """
+        keys = [str(key or "").strip() for key in (candidate_keys or [])]
+        keys = list(dict.fromkeys(key for key in keys if key))
+        if not keys:
+            return {}
+        if self.sql_review_enabled:
+            rows = self._candidates_by_key_sql(keys)
+        else:
+            rows = {key: self.candidate_by_key[key] for key in keys if key in self.candidate_by_key}
+        return {key: question_identity(rows.get(key)) for key in keys}
+
     def discuss_payload(self, params: dict[str, str] | None = None) -> dict[str, Any]:
         """Everything the 錯題討論區 draws, in one response.
 
@@ -6635,6 +6771,16 @@ filtered_sheets AS (
         # over the current filter (see `discuss_taxonomy`). `stuck_total` is the tree's own count, so
         # the "卡住的題" number and the branches the pickers offer are the same measurement.
         taxonomy, stuck_total = self.discuss_taxonomy()
+        principles = principles_projection(self.principles_events)
+        repair_questions = repair_questions_projection(self.repair_questions_events)
+        # The repair loop's own progress. Owner (2026-09-24) asked why the interaction UI looked
+        # unfinished: it was built to show the agent's *questions*, and the agent asks almost
+        # none, so the screen was empty while 796 questions waited. These keys are what makes
+        # 「代理正在做什麼」 visible instead of inferred from a log file.
+        # Read once: the two questions it answers (what the agent is doing, and which questions the
+        # agent and the orchestrator disagree about) come from the same record, and the
+        # disagreement keys are also identity keys below.
+        agent = self.agent_progress()
         return {
             "candidates": rows,
             # The number the scope really holds, and the number that fit. A capped list that does not
@@ -6644,11 +6790,130 @@ filtered_sheets AS (
             "returned_count": len(rows),
             "taxonomy": taxonomy,
             "stuck_total": stuck_total,
-            "principles": principles_projection(self.principles_events),
-            "repair_questions": repair_questions_projection(self.repair_questions_events),
+            "principles": principles,
+            "repair_questions": repair_questions,
+            # Which question each principle, each agent question, and each flagged disagreement is
+            # *about*, keyed by `candidate_key`: 類別／年／次／科目／第 N 題. None of those three
+            # carries it (a principle carries `evidence` keys, an ask a `candidate_key`, a
+            # disagreement a `candidate_key`), and the screen has 121 open asks - so the identity is
+            # resolved here, in one lookup over the keys actually mentioned, instead of the client
+            # asking for 121 candidates or the reviewer reading `03:1:question:q054`. A key with no
+            # candidate row comes back empty and the client says 「查不到這一題」 rather than guessing.
+            "questions": self.question_identities(
+                [*(row.get("candidate_key") for row in repair_questions["questions"]),
+                 *(key for row in principles["principles"] for key in (row.get("evidence") or [])),
+                 *(row.get("candidate_key") for row in (agent.get("disagreements") or []))],
+            ),
             "buckets": list(DISCUSS_BUCKETS),
             "storage": self.candidate_data_status(),
+            "agent": agent,
         }
+
+    def agent_progress(self) -> dict[str, Any]:
+        """The repair loop's state, from the files the loop itself writes.
+
+        **Counted over the whole finding stream, not over the rows on screen.** The first version
+        tallied the orchestrator's verdicts from `rows`, which is the stuck population — and the
+        questions the loop is currently working through are mostly *not* stuck, so the panel showed
+        「沒有判斷」 while four TRUST verdicts sat in the stream (measured 2026-09-24). The progress
+        panel answers "what is the agent doing", which is not a property of the filtered list.
+
+        `pending` comes from `scan_state` (the scan's own record). The verdict tally is counted over
+        the stream because that is where the orchestrator's judgements are actually written; a
+        separate tally file would be a second place the same number could drift.
+        """
+        progress: dict[str, Any] = {"pending": None, "orchestration": {}, "disagreements": []}
+        try:
+            from qbr import scan_state
+
+            # `candidate_path` is `<queue-root>/review-ui/candidates.jsonl`, so the queue root — where
+            # `scan_state.json` lives — is two levels up. Taken from the path the server already holds
+            # rather than from a second configuration value, because two answers for "where is this
+            # queue" is the defect that made the scan queue 813 questions and the repair pass report
+            # nothing (see `scan_for_repairs.queue_root`).
+            root = self.candidate_path.parent.parent if self.candidate_path else None
+            progress["pending"] = len(scan_state.pending_keys(str(root))) if root else None
+        except Exception:
+            # A missing or unreadable state file means "no scan has run", which is a real answer;
+            # it must not take the discuss screen down with it.
+            progress["pending"] = None
+        try:
+            progress.update(self._orchestration_tally())
+        except Exception:
+            # Same rule as above: a progress panel that cannot be read is an empty panel, never a
+            # broken screen. The findings are advisory and the loop keeps its own log.
+            pass
+        return progress
+
+    def _orchestration_tally(self) -> dict[str, Any]:
+        """Verdict counts and disagreements, read from the findings the loop writes.
+
+        **A bounded tail, and the panel says so.** The stream is 500 MB and grows by ~6 KB per
+        question, so reading it whole on every screen load is not an option. The first version read
+        a 2 MB tail and presented the counts as the total — which would silently shrink as older
+        verdicts slid out of the window (measured 2026-09-24: ~330 records fit in 2 MB, i.e. about
+        1.4 days at 5 per half hour). A number that means "the recent ones" while reading as "all of
+        them" is the kind of wrong that never announces itself.
+
+        So the window is larger, the count is explicitly *recent*, and `window_bytes` is returned
+        for the caller to show. A resident loop writing 5 questions every 30 minutes produces
+        ~240 records a day; 32 MB covers weeks of that.
+        """
+        stream = self._ai_findings_path()
+        if stream is None or not stream.exists():
+            return {}
+        window_bytes = 32_000_000
+        tally: dict[str, int] = {}
+        disagreements = []
+        # Read the tail by bytes: the file is append-only and large, and `readlines()` on 500 MB per
+        # screen load is the kind of thing that makes a reviewer think the server is down.
+        truncated = False
+        with open(stream, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            start = max(0, size - window_bytes)
+            truncated = start > 0
+            handle.seek(start)
+            blob = handle.read().decode("utf-8", errors="replace")
+        for line in blob.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue                      # the first line after a mid-file seek is partial
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            block = record.get("orchestration")
+            if not isinstance(block, dict):
+                continue
+            if block.get("degraded") or "verdict" not in block:
+                tally["未分流"] = tally.get("未分流", 0) + 1
+                continue
+            verdict = str(block.get("verdict"))
+            tally[verdict] = tally.get(verdict, 0) + 1
+            second = block.get("second_look")
+            if isinstance(second, dict) and second.get("disagrees_with_local"):
+                disagreements.append({
+                    "candidate_key": record.get("candidate_key"),
+                    "question_number": record.get("question_number"),
+                    "why": str(second.get("why") or "")[:200],
+                })
+        # No `orchestration_seen` counter: it counted records that *carried* a block while the tally
+        # above counts what the block *said*, so the two could disagree (measured: an "unsplit"
+        # record made the counter 10 and the tally 9). A number nothing consumes that contradicts
+        # the number beside it is worse than no number.
+        #
+        # `recent` is how the panel stays honest about the window: when the stream is longer than we
+        # read, the counts describe the newest stretch, and the screen says so instead of implying
+        # they are the whole history.
+        return {"orchestration": tally, "disagreements": disagreements[:50],
+                "recent": truncated, "window_bytes": window_bytes}
+
+    def _ai_findings_path(self):
+        """Where the repair loop writes its findings, or `None`."""
+        if not self.candidate_path:
+            return None
+        return self.candidate_path.parent / "question_ai_findings.jsonl"
 
     def append_ai_learning(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Append a human-selected training example bound to one exact AI audit."""

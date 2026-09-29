@@ -121,7 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="只讀回已寫的 category-scan 紀錄，印各考別統計後結束")
     # Default only to an approved loopback endpoint. A remote inference host needs a fresh owner-
     # approved contract and must not remain a convenience default when it is unavailable.
-    parser.add_argument("--model", default="mtplx-35b", choices=sorted(ask_about_blocks.ENDPOINTS),
+    # Occamy since the designer's 2026-09-29 ruling (「之後要換就整套換」). The 藥師 lanes in
+    # `scan_pharmacist_track.sh` name `--model mtplx-35b` explicitly, so this default only decides
+    # what an unadorned run uses.
+    parser.add_argument("--model", default="occamy-6bit", choices=sorted(ask_about_blocks.ENDPOINTS),
                         help="本機引擎名稱（見 engines.py），不是 URL")
     parser.add_argument("--principles", metavar="PATH",
                         help="審題者的基本原則流（預設：這一條 queue 自己的 "
