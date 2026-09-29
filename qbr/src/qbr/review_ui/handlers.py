@@ -38,8 +38,16 @@ from .ai_audit import normalized_correction
 from .constants import ANSWER_REVIEW_ACTIONS, QUESTION_REVIEW_ACTIONS, SqlWriteError
 from .legacy_assets import html_page, mobile_asset_response, mobile_review_event, workflow_page
 from .paths import content_type_of, safe_file_path
-from .queue_view import principles_projection, repair_questions_projection
+from .queue_view import (SIMILAR_LIMIT, SIMILAR_LIMIT_MAX, machine_activity_counts,
+                         principles_projection, repair_questions_projection, similar_questions)
+from .events import load_append_only_events
+from qbr import discuss
 from .review_state import ReviewState
+
+#: How many question keys one `/api/findings` request may ask about. The principles screen asks for
+#: the keys its cards name (a handful); the cap is there so a mistyped URL cannot turn the endpoint
+#: into a bulk export of the finding store.
+FINDING_KEYS_LIMIT = 50
 
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.0 closes the socket after every response, so a page that loads one paper, its six
@@ -362,6 +370,66 @@ class Handler(BaseHTTPRequestHandler):
             params.setdefault("limit", "500")
             self.send_json(self.state.discuss_payload(params))
             return
+        if parsed.path == "/api/findings":
+            # **What the model saw, in one request, for the questions one screen is about.**
+            #
+            # The 原則區 draws a principle's (and a 反問's) evidence: the crop, the per-field
+            # stored→page pair, and `where`. The finding already travels to the browser on every
+            # discuss row (`candidate_payload` attaches `qbr_ai_finding`), but the principles screen
+            # fetches no rows at all - it would have to ask `/api/candidates?focusKey=…` once per
+            # key (501 rows each) just to read one record. This endpoint reads the **same store**
+            # (`QbrAiFindingsStore`, the one the discuss rows are filled from) for the keys named,
+            # so both screens show the same record and there is no second source of "what the model
+            # said". A key with no finding comes back as `null` rather than being left out, so the
+            # caller can say 「這一題還沒有 AI 意見」 instead of guessing.
+            self.state.refresh_event_logs()
+            query = urllib.parse.parse_qs(parsed.query)
+            keys = [key.strip() for key in (query.get("keys", [""])[0] or "").split(",") if key.strip()]
+            if not keys:
+                self.send_json({"ok": False, "error": "keys is required"}, status=400)
+                return
+            if len(keys) > FINDING_KEYS_LIMIT:
+                self.send_json({"ok": False,
+                                "error": f"too many keys (max {FINDING_KEYS_LIMIT})"}, status=400)
+                return
+            store = self.state.latest_qbr_ai_findings or {}
+            self.send_json({"ok": True, "findings": {key: store.get(key) for key in keys}})
+            return
+        if parsed.path == "/api/principles/similar":
+            # The questions a principle covers. Computed **here** because the finding store is
+            # 73k records on the served queue - a browser cannot scan it, and a dropdown built from
+            # the row window would silently cover only the questions that happen to be loaded.
+            # One endpoint per principle, so the cost is paid when a person opens the dropdown
+            # (the browser fetches it on first use) rather than on every screen load.
+            self.state.refresh_event_logs()
+            query = urllib.parse.parse_qs(parsed.query)
+            principle_id = (query.get("principle_id", [""])[0] or "").strip()
+            if not principle_id:
+                self.send_json({"ok": False, "error": "principle_id is required"}, status=400)
+                return
+            projection = principles_projection(self.state.principles_events)
+            principle = next((row for row in projection["principles"]
+                              if str(row.get("principle_id")) == principle_id), None)
+            if principle is None:
+                self.send_json({"ok": False, "error": "unknown principle_id"}, status=404)
+                return
+            try:
+                limit = int((query.get("limit", [""])[0] or SIMILAR_LIMIT))
+            except ValueError:
+                limit = SIMILAR_LIMIT
+            limit = max(1, min(limit, SIMILAR_LIMIT_MAX))
+            self.send_json({"ok": True, "principle_id": principle_id,
+                            **similar_questions(principle, self.state.latest_qbr_ai_findings,
+                                                limit=limit)})
+            return
+        if parsed.path == "/api/machine-activity":
+            # How much of the 「AI已修改」 bucket is text a person has to look at. Counted per class
+            # over the **whole** review log (see `machine_activity_counts`) from the same fold that
+            # labels the rows, so the home card's numbers and the three labels cannot disagree.
+            self.state.refresh_event_logs()
+            self.send_json({"ok": True,
+                            **machine_activity_counts(self.state.latest_reset_reviews)})
+            return
         if parsed.path == "/file":
             query = urllib.parse.parse_qs(parsed.query)
             path = safe_file_path(query.get("path", [""])[0])
@@ -374,21 +442,47 @@ class Handler(BaseHTTPRequestHandler):
             # directory, so the bytes behind a given path never change. Measured, the server sent
             # no caching header at all and HTTP/1.0 closed the socket, so every step onto question
             # 31 re-downloaded all four option pictures of question 30 - the reviewer's crops were
-            # re-fetched once per press. The ETag makes a repeat request a 304 instead of a
+            # re-fetched once per press. The ETag makes a repeat request cheap instead of a
             # 484 KB body, and the same token lets the PDF viewer and the browser's image cache
             # agree about what they already hold.
             data_signature = hashlib.sha256(data).hexdigest()[:32]
             etag = f'"{data_signature}"'
-            self.send_response(200)
+            # A **crop** is immutable: it is addressed by path and a rebuild writes a new queue
+            # directory, so the bytes behind a given path never change.
+            #
+            # A **paper** is not, and treating it as one cost a repair its effect. Measured
+            # 2026-09-23: `/file` served the official PDFs with `immutable`, so when the papers
+            # whose scanned pages are JPEG 2000 were rewritten into a form Chrome can draw, every
+            # browser that had already opened one kept the blank copy for the full day and no
+            # amount of reloading revalidated it. The reviewer's report was exactly that - "still
+            # white, and slow" - because the fix was live and invisible.
+            #
+            # `no-cache` is not `no-store`: the body is still kept and still saved, but it is
+            # revalidated with the ETag before use, so a corrected paper appears on the next
+            # reload while a repeat request stays a 304 and not 2.5 MB. It costs one round trip
+            # per paper open, which is far cheaper than a paper that cannot be corrected.
+            is_crop = path.suffix.lower() != ".pdf"
+            cache_control = (
+                "public, max-age=86400, immutable" if is_crop else "no-cache"
+            )
+            # Revalidation MUST answer 304, not 200-with-no-body. Measured 2026-09-23: this branch
+            # called `send_response(200)` first, so a browser that sent `If-None-Match` got
+            # `200 OK` with `Content-Length: 0`. Chrome believes the 200 and keeps the empty body,
+            # so its PDF viewer draws a blank pane - the reviewer sees a question whose paper
+            # "won't display" while an incognito window (no cache, therefore no `If-None-Match`)
+            # works. The status line has to be chosen before it is written, which is why 304 is
+            # sent on its own rather than after a 200.
             if self.headers.get("If-None-Match", "") == etag:
+                self.send_response(304)
                 self.send_header("ETag", etag)
-                self.send_header("Cache-Control", "public, max-age=86400, immutable")
+                self.send_header("Cache-Control", cache_control)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("ETag", etag)
-            self.send_header("Cache-Control", "public, max-age=86400, immutable")
+            self.send_header("Cache-Control", cache_control)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -661,8 +755,31 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "ai_learning_log": str(self.state.ai_learning_log), "event": event})
             return
         if parsed.path == "/api/principles":
+            # `add`／`remove` keep their writer (`state.append_principle`). `approve`／`unapprove` are
+            # appended **here**, through the same `qbr.discuss.append_event` the other two use, because
+            # that writer accepts exactly two actions and the decision events are a different statement
+            # about an existing principle (`discuss.principle_decision_event` builds the record, so the
+            # fields written and the fields folded stay one definition).
+            action = str(payload.get("action") or "add").strip().lower()
             try:
-                event = self.state.append_principle(payload)
+                if action in discuss.DECISION_ACTIONS:
+                    principle_id = str(payload.get("principle_id") or "").strip()
+                    if principle_id not in {str(row.get("principle_id"))
+                                            for row in principles_projection(
+                                                self.state.principles_events)["principles"]}:
+                        # A decision about a principle the stream does not hold would be recorded and
+                        # then projected away - a write that looks like it worked and changes nothing.
+                        raise ValueError("unknown principle_id")
+                    event = discuss.append_event(
+                        self.state.principles_log,
+                        discuss.principle_decision_event(
+                            principle_id, action, payload.get("reviewer") or "local"))
+                    # Re-read the stream rather than appending to the cached list: the next request
+                    # would reload it anyway (the file signature changed), and the response below
+                    # must carry the projection **as it now is**.
+                    self.state.principles_events = load_append_only_events(self.state.principles_log)
+                else:
+                    event = self.state.append_principle(payload)
             except ValueError as exc:
                 self.send_json({"ok": False, "error": str(exc)}, status=400)
                 return

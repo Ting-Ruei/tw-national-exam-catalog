@@ -55,9 +55,12 @@ import queue_index  # noqa: E402
 QUEUE_ROOT = os.path.join(QBR, "data", "review-queues", "live")
 QUEUE = os.path.join(QUEUE_ROOT, "review-ui")
 CANDIDATES = os.path.join(QUEUE, "candidates.jsonl")
-STORE = os.path.join(SANDBOX, "agent", "store", "agent_feedback.jsonl")
+STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.join(SANDBOX, "agent", "store")
 # `REPAIR_AGENT_STORE` redirects the whole sandbox store, for tests. Nothing else should set it.
-STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.dirname(STORE)
+# `STORE` is derived from `STORE_DIR`, not spelled out again: it used to be a second, independent
+# path, so a test that set the variable still appended its rows to the **real** learning stream
+# (measured 2026-09-29: a redirected smoke run grew `store/agent_feedback.jsonl` by one line).
+STORE = os.path.join(STORE_DIR, "agent_feedback.jsonl")
 DEFAULT_ENGINE = "occamy-6bit"
 
 # --- the byte-offset index ---------------------------------------------------------------
@@ -578,6 +581,62 @@ def do_crop(args) -> dict:
     }
 
 
+def experience_for(key, *, queue="", principles=""):
+    """這一題的「人寫的經驗」四條通道 ＋ 這一題圖的事實，用**正式的載入器**取。
+
+    四個通道來自 `confirm_dispute.load_prompt_inputs`——與 `confirm_dispute.confirm_one`（正式那一條
+    判讀路徑）**同一個載入器**。沙盒的判讀原本只送 `endpoint/max_tokens/timeout/number`，
+    所以人寫的「基本原則」「對反問的回答」「這一題的註解」「上一次被退掉的改動」到不了模型眼前，
+    而正式路徑四個都送：同一件事兩份讀法，就是兩份會不一致的東西。
+
+    回傳的是**原形**（`transcribe` 要什麼給什麼），選題由 `key` 決定。
+    """
+    import confirm_dispute
+
+    inputs = confirm_dispute.load_prompt_inputs(queue or QUEUE, principles or None)
+    return {
+        "queue": queue or QUEUE,
+        "principles": inputs["principles"],
+        "answers": (inputs["answers_by_key"] or {}).get(key),
+        "notes": (inputs["notes_by_key"] or {}).get(key),
+        "rejected": (inputs["rejections_by_key"] or {}).get(key),
+        # 第五個輸入（圖的事實）。`transcribe_system` 的 docstring 把它列在同一個「送出什麼就記什麼」
+        # 規則裡，所以它跟四條通道一起進出。
+        "figures": _figures_note_of(key),
+    }
+
+
+def _figures_note_of(key):
+    from qbr import ai_findings
+
+    try:
+        return ai_findings.figures_note(load_question(key)) or None
+    except SystemExit:
+        # `load_question` 找不到題目時會 `_die`；這裡只是要一段描述，不值得讓整個動作失敗。
+        return None
+
+
+def experience_summary(exp):
+    """把原形收成「這一題用了哪幾條經驗」——給紀錄與畫面用的那一份。
+
+    每個欄位都用**既有的正規化器**（`ai_findings.latest_note`／`answers_note`），不自己走一次列：
+    `load_prompt_inputs` 給的形狀是 `answers_by_key[key] = {"questions": [...]}`、`notes_by_key[key]`
+    是事件列，手寫的走訪會在形狀改變時靜默給出空的摘要。畫面要回答的是「模型這次被交代了什麼」，
+    所以文字取原文，不做摘要。
+    """
+    from qbr import ai_findings
+
+    rejected = exp.get("rejected") or None
+    return {
+        "principles": [str(p).strip() for p in (exp.get("principles") or [])],
+        "note": ai_findings.latest_note(exp.get("notes")),
+        "answers": ai_findings.answers_note(exp.get("answers")) or None,
+        "rejected": ({"count": rejected.get("count"), "fields": rejected.get("fields")}
+                     if isinstance(rejected, dict) else None),
+        "figures": exp.get("figures") or None,
+    }
+
+
 def do_read(args) -> dict:
     import confirm_dispute
     from qbr import engines
@@ -585,6 +644,10 @@ def do_read(args) -> dict:
     question = load_question(args.key)
     pdf = pdf_path_of(question)
     number = question.get("question_number")
+
+    exp = experience_for(args.key, queue=args.queue, principles=args.principles)
+    principles, answers, notes = exp["principles"], exp["answers"], exp["notes"]
+    rejected, figures = exp["rejected"], exp["figures"]
 
     out_png = args.out or os.path.join(
         STORE_DIR, "crops",
@@ -612,6 +675,11 @@ def do_read(args) -> dict:
             max_tokens=args.max_tokens,
             timeout=args.timeout,
             number=number,
+            principles=principles,
+            answers=answers,
+            notes=notes,
+            rejected=rejected,
+            figures=figures,
         )
 
     # `compare` compares two `{key: text}` maps, and `options_of` is the tested normaliser for the
@@ -643,6 +711,16 @@ def do_read(args) -> dict:
         "raw": raw[:4000],
         "complaint": complaint,
         "diff": diff,
+        # 送出什麼就記什麼：`transcribe_system` 是 `transcribe` 內部實際組出來的那一段，所以這個
+        # 欄位不可能與送出的提示詞不一致（自己再拼一次就會）。`experience` 是同一批輸入的摘要，
+        # 讓畫面回答「這一題用了哪幾條經驗」而不必自己從提示詞裡再讀一次。
+        "review_context": {
+            "queue": exp["queue"],
+            "experience": experience_summary(exp),
+            "system": confirm_dispute.transcribe_system(
+                principles, answers, notes, rejected, figures
+            ),
+        },
     }
 
 
@@ -666,6 +744,12 @@ def do_feedback(args) -> dict:
         "reason": (args.reason or "")[:2000],
         "engine": args.engine,
         "source": args.source,
+        # 「這一題用了哪幾條經驗」記在**判讀這一側的紀錄**裡，不在評語裡：評語是結論，經驗是
+        # 這一次判讀的輸入。少了它，下一輪就無法回答「同一題為什麼換了答案」——那是提示詞變了，
+        # 還是題目變了。用同一個載入器取（`experience_for`），所以它與 `read` 送出去的一致。
+        "experience": experience_summary(
+            experience_for(question.get("candidate_key"), queue=args.queue)
+        ),
     }
     os.makedirs(os.path.dirname(STORE), exist_ok=True)
     with open(STORE, "a", encoding="utf-8") as handle:
@@ -692,6 +776,54 @@ def do_question(args) -> dict:
 
 # The human review stream: the designer's own decisions. Read-only here, always.
 HUMAN_EVENTS = os.path.join(QUEUE, "question_review_events.jsonl")
+
+#: Every action the reviewer's stream carries, and which of them is a **verdict** on the question.
+#:
+#: The designer's complaint (2026-09-29): 「沙盒沒有把已經審過、有問題嚴格區分出來」. He was right, and
+#: the list was worse than it looked: until now the loop kept only `block`／`comment` and folded every
+#: other action away, so **10,371 questions he had accepted and 3,938 he had reset were drawn exactly
+#: like questions nobody had ever opened** — measured on the local mirror, 2026-09-27: accept 11,239
+#: events／10,371 questions, reset_review 7,767／3,938, block 1,145／756, comment 102／87, correct 67／51.
+HUMAN_ACTIONS = ("accept", "block", "comment", "correct", "needs_review", "reviewed",
+                 "reset_review")
+
+#: The actions that say what he decided. A verdict is a *state*: `accept` then `block` means blocked
+#: (the stream is append-only and read in file order, which is time order).
+VERDICT_ACTIONS = ("accept", "block", "needs_review", "reviewed")
+
+#: `reset_review` is not a verdict, it is the withdrawal of one: the parser changed what is under the
+#: question, so a question that was accepted may not be the question he accepted. 7,767 of those
+#: exist. Keeping the old verdict would be the list claiming a decision about text nobody looked at.
+STATUS_LABELS = {
+    "accept": "已接受",
+    "block": "已封鎖",
+    "needs_review": "需人工確認",
+    "reviewed": "已審",
+    "reset": "已重設（需重審）",
+    "commented": "只有註解",
+    "untouched": "未審",
+}
+#: Codes the list can filter on, in the order the UI shows them.
+STATUS_CODES = ("untouched", "accept", "block", "needs_review", "reviewed", "commented", "reset")
+
+
+def human_status_of(entry) -> str:
+    """One status code per question, from the folded stream (see `do_browse`).
+
+    Precedence, and why: a live verdict outranks a withdrawal (a `reset_review` that came before a
+    later `accept` is history, not the current state); a withdrawal outranks a bare comment (the
+    question's text changed, so the comment is about text that is gone); a comment alone is its own
+    state, because 「他寫過話」 and 「他沒看過」 are different facts and the list has to say which.
+    """
+    if not entry:
+        return "untouched"
+    if entry["verdict"]:
+        return entry["verdict"]
+    if entry["reset"]:
+        return "reset"
+    if entry["counts"].get("comment") or entry["counts"].get("correct"):
+        return "commented"
+    return "untouched"
 
 
 def human_disputes(actions=("block", "comment"), limit: int = 50) -> dict:
@@ -856,7 +988,14 @@ def do_browse(args) -> dict:
     # The designer's own guidance, read **once**. Measured 2026-09-29: calling `prior_judgements()`
     # inside the row loop below opened this file once per candidate — 79,090 opens, 3.38 s, for a
     # 15 KB file. Same rows, read once, in the same file order.
+    #
+    # `store/agent_feedback.jsonl` holds **two** kinds of judgement, and they are not the same fact:
+    # the agent writes its own (`"source": "agent"`, 27 rows on 2026-09-29) and the designer writes
+    # his from the pane (`"source": "designer"`, 2 rows). One `judged` flag covering both is how a
+    # list ends up saying 「已判」 about a question no person has opened. They stay split; `judged`
+    # keeps its old meaning (any rating at all) so the existing `未判讀` filter is unchanged.
     priors = {}
+    judged_by = {"agent": {}, "designer": {}}
     if os.path.exists(STORE):
         with open(STORE, encoding="utf-8") as handle:
             for line in handle:
@@ -865,31 +1004,55 @@ def do_browse(args) -> dict:
                 except ValueError:
                     continue
                 key = row.get("candidate_key")
-                if key:
-                    judgments[key] = row.get("rating")
-                    priors.setdefault(key, []).append(row)
+                if not key:
+                    continue
+                judgments[key] = row.get("rating")
+                if row.get("source") in judged_by:
+                    judged_by[row["source"]][key] = row.get("rating")
+                priors.setdefault(key, []).append(row)
 
     # The designer's own sentences, keyed for the list. His friction, verbatim: 「我原本在 v2
     # 審核過的大量題目也沒有紀錄，我想要針對 block 的題目跟你進行對話暫時也做不到」. A list that
     # cannot show which questions he already flagged is a list he has to remember his way through.
+    #
+    # 2026-09-29: this loop kept **only** `block`／`comment` (a `'"block"' in line` pre-filter), so
+    # his 10,371 accepted questions and 3,938 reset ones were drawn exactly like untouched ones — and
+    # he said so: 「沙盒沒有把已經審過、有問題嚴格區分出來」. Every action is folded now, in file
+    # order (the stream is append-only, so file order is time order), into one status per question.
     dispute_notes = {}
+    human = {}
     if os.path.exists(HUMAN_EVENTS):
         with open(HUMAN_EVENTS, encoding="utf-8") as handle:
             for line in handle:
-                if '"block"' not in line and '"comment"' not in line:
+                if '"action"' not in line:
                     continue
                 try:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if row.get("action") not in ("block", "comment"):
+                action = row.get("action")
+                if action not in HUMAN_ACTIONS:
                     continue
                 key = row.get("candidate_key") or row.get("canonical_question_key")
+                if not key:
+                    continue
+                entry = human.setdefault(key, {"verdict": None, "reset": False, "counts": {},
+                                               "notes": ""})
+                entry["counts"][action] = entry["counts"].get(action, 0) + 1
                 notes = (row.get("notes") or "").strip()
-                entry = dispute_notes.setdefault(key, {"actions": [], "notes": ""})
-                entry["actions"].append(row["action"])
                 if notes:
                     entry["notes"] = notes
+                if action == "reset_review":
+                    entry["verdict"] = None
+                    entry["reset"] = True
+                elif action in VERDICT_ACTIONS:
+                    entry["verdict"] = action
+                    entry["reset"] = False
+                if action in ("block", "comment"):
+                    said = dispute_notes.setdefault(key, {"actions": [], "notes": ""})
+                    said["actions"].append(action)
+                    if notes:
+                        said["notes"] = notes
 
     by_category = {}
     with open(CANDIDATES, encoding="utf-8") as handle:
@@ -902,6 +1065,7 @@ def do_browse(args) -> dict:
             if args.category and args.category not in category:
                 continue
             key = row.get("candidate_key")
+            status = human_status_of(human.get(key))
             entry = {
                 "candidate_key": key,
                 "question_number": row.get("question_number"),
@@ -918,6 +1082,15 @@ def do_browse(args) -> dict:
                 # so the agent is looking at the same sentence the reviewer saw.
                 "notes": (dispute_notes.get(key) or {}).get("notes", ""),
                 "prior_judgements": priors.get(key) or [],
+                # Three separate facts, never one flag. `human_status` is what the **reviewer**
+                # decided on the station (folded above); `judged_by_designer` is what he pressed in
+                # this sandbox; `judged_by_agent` is what the agent said on its own. A list that
+                # merges them can say 「已判」 about a question nobody has opened.
+                "human_status": status,
+                "human_status_label": STATUS_LABELS[status],
+                "human_actions": (human.get(key) or {}).get("counts") or {},
+                "judged_by_designer": judged_by["designer"].get(key),
+                "judged_by_agent": judged_by["agent"].get(key),
             }
             by_category.setdefault(category, []).append(entry)
 
@@ -930,7 +1103,13 @@ def do_browse(args) -> dict:
                  "total": len(rows),
                  "judged": sum(1 for row in rows if row.get("judged")),
                  "with_figures": sum(1 for row in rows if row.get("figures")),
-                 "disputed": sum(1 for row in rows if row.get("disputed"))}
+                 "disputed": sum(1 for row in rows if row.get("disputed")),
+                 # What the reviewer has already decided, per category, in the station's own
+                 # vocabulary (accept／block／reset…), not in this list's private store's. This is
+                 # the number that answers 「我做到哪了」 — the old one only counted questions the
+                 # agent had rated, which is a different question wearing the same word.
+                 "human": {code: sum(1 for row in rows if row.get("human_status") == code)
+                           for code in STATUS_CODES}}
                 for name, rows in sorted(by_category.items(), key=lambda kv: -len(kv[1]))
             ],
         }
@@ -949,6 +1128,11 @@ def do_browse(args) -> dict:
     # moves within that list (the v2 rule: 導覽跟隨被畫出的清單).
     if getattr(args, "disputed", False):
         rows = [row for row in rows if row.get("disputed")]
+    if getattr(args, "status", None):
+        # Comma-separated codes (`untouched,block`). Filtering on the **list** only, same rule as
+        # `--disputed`: the walker follows what is drawn.
+        wanted = [code for code in str(args.status).split(",") if code]
+        rows = [row for row in rows if row.get("human_status") in wanted]
     total = len(rows)
     rows = rows[args.offset:args.offset + args.limit] if args.limit else rows[args.offset:]
     return {"category": args.category, "total": total, "offset": args.offset, "questions": rows}
@@ -1027,6 +1211,9 @@ def main() -> int:
     p_browse.add_argument("--with-figures", action="store_true", help="only questions that have a figure")
     p_browse.add_argument("--disputed", action="store_true",
                           help="only questions the designer flagged (block/comment)")
+    p_browse.add_argument("--status", default="",
+                          help="only these reviewer statuses (comma-separated: "
+                               + ",".join(STATUS_CODES) + ")")
     p_browse.add_argument("--offset", type=int, default=0)
     p_browse.add_argument("--limit", type=int, default=0, help="0 = all")
     p_browse.set_defaults(func=do_browse)
@@ -1062,6 +1249,9 @@ def main() -> int:
     p_read.add_argument("--max-tokens", type=int, default=2000)
     p_read.add_argument("--timeout", type=int, default=300)
     p_read.add_argument("--no-image", action="store_true", help="negative control: same prompt, no picture")
+    # 預設就是 live 快照的 `review-ui/`；`--queue` 是為了在別的快照上量同一件事（測試與 A/B）。
+    p_read.add_argument("--queue", default="", help="queue dir holding the review streams (default: live snapshot)")
+    p_read.add_argument("--principles", default="", help="principles stream path override")
     p_read.set_defaults(func=do_read)
 
     p_feedback = sub.add_parser("feedback", help="append a judgement to the learning store")
@@ -1072,6 +1262,7 @@ def main() -> int:
                             choices=("question", "group", "visual", "answer"))
     p_feedback.add_argument("--engine", default="")
     p_feedback.add_argument("--source", default="agent", choices=("agent", "human"))
+    p_feedback.add_argument("--queue", default="", help="queue dir holding the review streams (default: live snapshot)")
     p_feedback.set_defaults(func=do_feedback)
 
     args = parser.parse_args()

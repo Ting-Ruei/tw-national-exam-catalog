@@ -21,6 +21,10 @@ const S = {
   // year on the next redraw.
   scope: { category: null, year: null, sitting: null, subject: null },
   scopeTotal: 0,
+  //: 範圍讀取的**世代**。每開一個範圍就加一，讀完之後才准寫畫面；晚回來的舊回應比對不到自己的
+  //: 世代，就什麼都不做。加這個欄位之前的行為量得到：開 A 範圍、還沒回來就換 B 範圍，B 先回來、
+  //: A 後回來 ⇒ 清單是 A 的題目而麵包屑是 B 的範圍（`applyScope()` 的註解說的那一類缺陷）。
+  scopeRequest: 0,
   tree: null,
 };
 const $ = (id) => document.getElementById(id);
@@ -82,7 +86,10 @@ const verdictOf = (key) => S.verdict.get(key) || '';
 // make a question count as 已過目. Notes are kept beside it, because a note the reviewer cannot see
 // again is a note they will write twice - or stop writing.
 const noteOf = (key) => S.notes.get(key) || '';
-const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正', comment: '只加註記', reset_review: 'AI／管線退回' };
+// 2026-09-25：`reset_review` 那一籤由「AI已解決」改名為「AI已修改」。owner 原文：「可以改成AI已修改，
+// 但是「還原」這種事情不是修改」——「已解決」把「有人動過它」讀成了「它沒問題了」，而這一格裡還有
+// 沒被動過字的純退回；改成「已修改」之後，撤回（`withdrawn`）也不再屬於這一籤（見 `rowReviewAction`）。
+const LABEL = { accept: '確認正常', needs_review: '需重看', block: '阻擋', correct: '已修正', comment: '只加註記', reset_review: 'AI已修改' };
 //: The one place that says whether an action is a *verdict on* a question or a *note about* it. The
 //: server applies the same distinction (a note reaffirms the decision it is attached to rather than
 //: replacing it); here it decides whether the question counts as 已過目.
@@ -152,7 +159,37 @@ function rowReviewAction(candidate) {
   // events are append-only, so after a repair the old `accept` is still on the row and the newest
   // statement about the question is the reset.
   if (review.is_reset_unreviewed) return 'reset_review';
-  return String(review.action || '');
+  // **人的決定優先於「這一題的字被改過」**（owner 2026-09-29：「我當時的決定（accept 就是通過，
+  // block 就是阻擋）」）。
+  //
+  // 這不是措辭問題，是 635 列搬家。量法：拿站上快照（`question_review_events.jsonl`，20,329 事件／
+  // 13,780 題）先跑伺服器的投影組成真正送進瀏覽器的那份 `review`，再把兩版規則逐列跑一次 ——
+  // `action=accept` ＋ 有（非撤回）correction 的 **560** 列、`action=block` 的 **74** 列、
+  // `action=needs_review` 的 **1** 列；correction 優先的那一版把它們全畫成「已修正」（那一格共 648 列），
+  // 這一版畫成那個人當時的決定（「已修正」只剩 13 列）。
+  //
+  // 為什麼 action 先問：清單這一格要回答的是「我對這一題做過什麼」。`correct` 說的是「這一題的字被改過」，
+  // 那是同一列的另一件事，它不會消失（`review.correction` 與詳情區的 `applied_kind` 都還留著），
+  // 但它不可以蓋掉那個人自己已經下過的判斷。
+  const action = String(review.action || '');
+  if (action === 'accept' || action === 'needs_review' || action === 'block') return action;
+  // 沒有上面那三個人的決定時，這一列的事實才是「字被改過」。為什麼要讀 `correction` 而不是只讀
+  // `review.action`：append-only 的日誌裡，2026-09-25 之前的修正事件被寫成 `reviewed`（`correct` 被前
+  // 一個決定覆寫，那是已修掉的缺陷），但那筆修正的內容還在這一列上（站上
+  // `moex:107100:305:33:1:question:q076`：`action: "reviewed"` ＋ `has_correction: true`）。只讀 action，
+  // 畫面上那一題就是「已看過」，而「已修正」那一格是 0 ——「修正完之後找不到那一題」正是使用者回報的缺陷。
+  //
+  // **機器把自己那一筆收回時，這一列不再是「已修正」**（2026-09-25 量到，同一天修）：撤回的事件仍然帶著
+  // `correction`，那是紀錄、不是畫面（伺服器的投影是 `applied_kind: "withdrawn"`，且依 2026-09-24 的規則
+  // 不再把 correction 疊回列上）。撤回之後沒有人再看過的那幾題回到「未看」，詳情區仍由 `applied_kind`
+  // 顯示「已還原（機器改錯）」。
+  const withdrawn = String(review.applied_kind || review.applied || '').toLowerCase() === 'withdrawn';
+  if (!withdrawn && review.correction && typeof review.correction === 'object') return 'correct';
+  // 撤回不是人的決定，也不是「AI 改了這一題」（owner 2026-09-25：「「還原」這種事情不是修改」）。
+  // 伺服器不再把撤回投影成待複核，所以這一列剩下的 `action` 若是機器自己寫的 `reset_review`，它就只是
+  // 紀錄——這一列沒有人做過決定，讀成未看。
+  if (withdrawn && action === 'reset_review') return '';
+  return action;
 }
 
 /* The paper's identity: the official PDF's file name without its extension. */
@@ -214,11 +251,30 @@ function treeFrom(items) {
 function scopeFromHash() {
   const raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
   if (!raw) return null;
-  const [category, year, sitting, ...rest] = raw.split('/');
-  if (!category) return null;
+  const parts = raw.split('/');
+  // **A mode prefix is not a category.**（2026-09-24 修正）
+  //
+  // `#錯題/藥師/115/1/藥物治療學/q41` 的第一段是**模式**，不是類科。舊版把整串從第一段開始
+  // 當成 scope，於是「錯題」被拿去查類科樹查不到 → 這條連結被丟掉 → 範圍回落到預設紙本。
+  // 而 `scopeToHash()` 又把 `S.scope.category` 寫回第一段，所以模式一旦寫進 hash 就會被
+  // 下一輪的 scope 覆寫掉——`showArea` 永遠讀不到它。兩個缺陷疊在一起，結果就是
+  // **重新載入一定回到題目區**。
+  //
+  // 剝掉前綴之後，兩者共用同一個 `#模式/類科/年/次/科目/qNNN` 形狀，各自讀它認得的部分：
+  // 模式讀第一段（`areaFromHash`），範圍讀其餘四段（這裡）。
+  const hasMode = Object.prototype.hasOwnProperty.call(PREFIX_AREA, parts[0]);
+  const rest = hasMode ? parts.slice(1) : parts;
+  if (hasMode && !rest.length) return null;   // `#錯題` 只有模式，沒有範圍：不覆寫現有範圍
+  const [category, year, sitting, ...tail] = rest;
+  if (category === undefined) return null;
   // A trailing `q41` names a question, so a link can point at one question of one paper. It is
   // the unit an argument about a question is conducted in.
-  let subject = rest.join('/');
+  //
+  // **科目是第四段以後，不是整串。**（2026-09-24 修正）舊版寫 `rest.join('/')`，於是
+  // `#藥師(一)/115/2/藥學(三)` 讀到的科目是 `藥師(一)/115/2/藥學(三)`——那個字串不在科目清單裡，
+  // `resolveLevel()` 就把它換成「全部科目」，連結指名的科目**靜默消失**（畫面仍開得起來，只是多出
+  // 一卷）。`tail` 本來就已經解構出來了，只是沒被用到。
+  let subject = tail.join('/');
   let question = '';
   const hit = subject.match(/\/(q\d+)$/);
   if (hit) { question = hit[1]; subject = subject.slice(0, -hit[0].length); }
@@ -227,9 +283,39 @@ function scopeFromHash() {
 
 function scopeToHash() {
   const { category, year, sitting, subject } = S.scope;
-  const number = S.rows[S.index] ? `q${S.rows[S.index].question_number}` : '';
   const parts = [category, year, sitting, subject].map((v) => encodeURIComponent(v || ''));
-  history.replaceState(null, '', `#${parts.join('/')}${number ? '/' + number : ''}`);
+  // **The mode prefix is written back.**（2026-09-24 修正）
+  //
+  // 舊版只寫 scope，不寫模式，所以 `history.replaceState` 會把 `#錯題/...` 覆寫成 `#類科/...`。
+  // 啟動時 `buildScope()` 先跑（它寫 hash），`showArea(areaFromHash())` 才讀——讀到的已經
+  // 不是 `錯題` 了。模式因此永遠不可能從 hash 復原，不論重新載入或按上一頁。
+  //
+  // 討論區的當前題目也寫進來（`#錯題/.../q41`），因為它是這一區的「當下位置」：重新載入
+  // 回到第 0 題等於把審到一半的位置丟掉。題目區**不寫**（見下面 `here` 的理由），但兩者共用
+  // 同一個形狀，各自解讀——`scopeFromHash` 讀其餘四段，`areaFromHash` 讀第一段。
+  const mode = A.area === 'question' ? '' : (AREA_PREFIX[A.area] || '');
+  const head = mode ? `${encodeURIComponent(mode)}/` : '';
+  // `D.rows` holds **candidate keys, not rows** (see `loadDiscuss`: `D.rows.push(candidate.candidate_key)`).
+  // Reading `.question_number` off it gives `undefined`, which is how `#錯題/.../qundefined` got written
+  // into the address bar. The number lives on the candidate, so the key has to be resolved first.
+  const discussNumber = A.area === 'discuss' ? (D.byKey.get(D.rows[D.index]) || {}).question_number : null;
+  // **題目區不寫「當下這一題」（2026-09-24）。**
+  //
+  // 舊版把題目區的當下游標也寫進 hash，於是**重新載入一定會回到離開時那一題**——`buildScope()`
+  // 把它讀成 `S.openQuestion`，`applyScope()` 就照它開，`firstOpen`（第一題還沒審的）永遠輪不到。
+  // 也就是說「未審優先」在畫面上從來沒發生過：使用者按 F5，看到的還是他離開時那一題，而那一題通常
+  // 已經判完了。使用者原文：「如果有還沒審的題目，在 F5 刷新的情況下，優先顯示在面前……但是你現在
+  // 只是退回原本的樣子」。
+  //
+  // 所以位置在這裡不寫了：重新載入 → hash 只有範圍 → `applyScope()` 開在**第一題還沒審的**，
+  // 而整體順序仍是紙本順序，往上（已判過的）往下都走得動。**明講的連結不受影響**：
+  // `scopeFromHash()` 照樣讀 `/qNNN`，所以手寫或貼上的 `#類科/年/次/科目/q41` 仍然開在 q41。
+  // 討論區的 `qNNN` 也照寫（那是它自己的「當下位置」契約，重新載入回到第 0 題會丟掉審到一半的位置）。
+  const here = A.area === 'discuss'
+    ? (discussNumber === null || discussNumber === undefined ? '' : `q${discussNumber}`)
+    : '';
+  // A question the queue did not carry has no number: write the scope without it rather than `qundefined`.
+  history.replaceState(null, '', `#${head}${parts.join('/')}${here ? '/' + here : ''}`);
 }
 
 function buildScope(tree) {
@@ -274,6 +360,25 @@ function buildScope(tree) {
   refreshScope();
 }
 
+/* 換篩選（晶片、只看有圖）：重建清單 → 重畫三個面板。
+
+   **這是一個頂層函式，不是 `refreshScope()` 裡的閉包**，理由是可驗證性：晶片是使用者實際按的東西，
+   而「按了晶片之後 `全部` 的分段有沒有重算」是這次改動唯一會壞掉的地方。寫成閉包的話，只有真的
+   打開 Chrome 按下去才測得到；寫成頂層函式，`scripts/test_v2_navigation.mjs` 就能直接呼叫**同一個**
+   函式（它本來就已經把 `v2/*.js` 原封不動載進來跑），不必在測試裡另外拼一條「像晶片的路徑」——
+   那會變成第二個實作，而兩個做同一件事的東西就是兩個可以不一致的地方。
+
+   它同時做四件事，因為它們是同一件事的四個面：清單要重畫（`renderList`）、右邊兩個面板可能因為
+   `S.index` 移動而指向別的題目（`renderTextSide`、`renderPaperSide`），而範圍變了要寫回網址
+   （`scopeToHash`）。少做任何一件，畫面就會出現「清單說一題、面板說另一題」。 */
+function refilter() {
+  rebuildRows();
+  renderList();
+  renderTextSide();
+  renderPaperSide();
+  scopeToHash();
+}
+
 /* The years of the chosen category, and the sittings of the chosen year.
    The sitting is its own level and not part of the year, because the same subject is set twice a
    year and the two settings are two different papers: 1151 and 1152 of 藥師(一) 藥學(二) share a
@@ -312,13 +417,8 @@ function refreshScope() {
   // The panels are re-rendered as well, because `rebuildRows` can move `S.index` - a question that
   // the new filter excludes is not the question shown beside the list - and a cursor that says one
   // thing while the panel says another is the tracking error this whole change removes.
-  const refilter = () => {
-    rebuildRows();
-    renderList();
-    renderTextSide();
-    renderPaperSide();
-    scopeToHash();
-  };
+  //
+  // 這裡只接線：工作內容在頂層的 `refilter()`，理由寫在那裡（測試要能直接呼叫同一個函式）。
   $('figuresOnly').onchange = refilter;
   document.querySelectorAll('#chips .chip').forEach((chip) => {
     chip.onclick = () => {
@@ -478,25 +578,13 @@ function scopePapers() {
 
    So the filter is the server's, which is where the whole queue is, and the browser asks for the
    scope it is showing. The response also carries `filtered_count`, which is the number the scope
-   really holds - not the number that happened to fit. */
-async function applyScope() {
-  S.index = 0;
-  S.editing = false;
-  scopeToHash();
-  renderCrumbs();
-  const papers = scopePapers();
-  if (!papers || !papers.length) {
-    S.view = [];
-    // `S.rows` is cleared with it. It is a separate array now, so emptying only `S.view` would leave
-    // the previous scope's rows drawn and walkable - the list would show one paper while the crumbs
-    // named another, which is the class of defect this whole change is about.
-    S.rows = [];
-    S.index = 0;
-    renderList();
-    $('textSide').innerHTML = '<div class="empty">這個範圍沒有題目</div>';
-    return;
-  }
-  $('listBody').innerHTML = '<div class="empty">載入中…</div>';
+   really holds - not the number that happened to fit.
+
+   **這一段是共用的**（`applyScope()` 開一個範圍，`refreshScopeRows()` 重讀同一個範圍），理由與
+   `refilter()` 寫成頂層函式相同：兩份「怎麼把伺服器的列變成 S.view」就是兩個會不一致的地方，
+   而這裡算的正好是**這一行已經判過了沒、它的註記是什麼**——最不該有兩種答案的東西。
+   回傳 false 代表讀失敗（`S.view` 維持原狀，畫面由上層決定怎麼說）。 */
+async function loadScopeRows(papers, requestId) {
   const wanted = new Set(papers);
   try {
     // The fetch is per sitting, not per scope and not per paper.
@@ -536,6 +624,10 @@ async function applyScope() {
       if (!response.ok) throw new Error(`HTTP ${response.status}（${where.year} 年第${where.ordinal}次）`);
       return response.json();
     }));
+    // 世代比對，**在寫任何狀態之前**：這一批回應回來時若已經開了別的範圍，它們就不再是畫面上
+    // 那個範圍的答案。少了這一行的量測結果：開 A、還沒回來就換 B，B 先回來、A 後回來，清單變成
+    // A 的題目而麵包屑寫 B（`S.scopeRequest` 的註解記了同一件事）。
+    if (requestId === undefined || requestId !== S.scopeRequest) return false;
     const rows = [];
     for (const data of responses) {
       if (!data.candidates) throw new Error(data.error || '伺服器沒有回傳 candidates');
@@ -578,9 +670,50 @@ async function applyScope() {
     }
     S.scopeTotal = S.view.length;
   } catch (error) {
+    // 同一個世代比對：舊範圍的失敗不可以蓋掉新範圍的畫面（那會是「讀不到這個範圍」壓在上一個
+    // 範圍的題目上，或蓋掉新範圍剛讀回來的列）。
+    if (requestId === undefined || requestId !== S.scopeRequest) return false;
     S.view = [];
     $('textSide').innerHTML = `<div class="empty">無法讀取這個範圍：${esc(error.message || error)}</div>`;
+    return false;
   }
+  return true;
+}
+
+/* 開一個範圍：讀它的列、把游標放在**第一題還沒審的**（或有具名的那一題）。
+
+   重新載入時「未審的要開在你面前」之所以成立，是因為題目區不再把當下游標寫進網址（見
+   `scopeToHash()`）：`S.openQuestion` 只在網址明講 `/qNNN` 時才有值，所以平常這一條會走
+   `firstOpen`。 */
+async function applyScope() {
+  // 開一個範圍＝新的一個世代（見 `S.scopeRequest`）：這一刻之後回來的舊回應都不准再寫畫面。
+  const requestId = ++S.scopeRequest;
+  S.index = 0;
+  S.editing = false;
+  scopeToHash();
+  // 舊範圍的列在讀取期間不可以留在 `S.rows` 裡：畫面上已經寫「載入中…」，但留著的列還是可以被
+  // `W`／`S` 走到、被決定送出，而它們是上一個範圍的題目。跟下面那個 `!papers.length` 分支清的是
+  // 同一件事，只是發生得早一點。
+  S.view = [];
+  S.rows = [];
+  renderCrumbs();
+  const papers = scopePapers();
+  if (!papers || !papers.length) {
+    S.view = [];
+    // `S.rows` is cleared with it. It is a separate array now, so emptying only `S.view` would leave
+    // the previous scope's rows drawn and walkable - the list would show one paper while the crumbs
+    // named another, which is the class of defect this whole change is about.
+    S.rows = [];
+    S.index = 0;
+    renderList();
+    $('textSide').innerHTML = '<div class="empty">這個範圍沒有題目</div>';
+    return;
+  }
+  $('listBody').innerHTML = '<div class="empty">載入中…</div>';
+  if (!await loadScopeRows(papers, requestId)) return;
+  // 讀完才畫計數。上面那一次 `renderCrumbs()` 是為了在等待時先把範圍名畫出來（`S.view` 還是空的），
+  // 所以它畫出來的「0 題」必須在這裡被真的數字蓋掉——2026-09-24 把讀取拆成 `loadScopeRows()` 時
+  // 漏了這一行，畫面上會一直寫「0 卷 · 0 題」，而清單裡明明有 80 列。
   renderCrumbs();
   // `S.rows` is built here, once per scope, and every later filter change rebuilds it from `S.view`
   // with `rebuildRows()`. Building it before the first `go()` matters: `go()` indexes `S.rows`, so a
@@ -600,6 +733,28 @@ async function applyScope() {
   S.openQuestion = '';
   const firstOpen = S.rows.findIndex((item) => !verdictOf(item.candidate_key));
   await go(named >= 0 ? named : (firstOpen >= 0 ? firstOpen : 0));
+}
+
+/* 從別的區寫入之後回到題目區：重讀同一個範圍的列，**游標留在同一題**。
+
+   為什麼需要它：一筆寫入的真相在伺服器上（那一列的 `review` 投影就是「判過了沒、註記是什麼」），
+   而題目區的 `S.verdict`／`S.notes` 是進這個範圍時種下的。在討論區寫一筆註解、再切回題目區，
+   畫面就會拿著**寫入前**的註記與狀態——使用者形容的「後面覺得我做了，前面覺得後面都沒做」。
+   （`showArea()` 在 `A.questionStale` 時呼叫這裡；旗標由 `invalidateAreas()` 在別區寫入時立起。）
+
+   游標留在同一題的理由與 `refilter()` 相同：切一個區回來就被彈到別的地方，等於把審到一半的位置
+   丟掉。找不到原來那一題（被別的寫入移出這個範圍）才回到第 0 列。 */
+async function refreshScopeRows() {
+  const key = (S.rows[S.index] || {}).candidate_key;
+  const papers = scopePapers();
+  if (!papers || !papers.length) return;
+  // 重讀也是新的一個世代：重讀期間如果有人換了範圍，兩邊的回應只能有一個寫畫面。
+  const requestId = ++S.scopeRequest;
+  if (!await loadScopeRows(papers, requestId)) return;
+  if (!rebuildRows(null)) return;
+  const at = key ? S.rows.findIndex((item) => item.candidate_key === key) : -1;
+  await go(at >= 0 ? at : 0);
+  renderCrumbs();
 }
 
 function renderCrumbs() {

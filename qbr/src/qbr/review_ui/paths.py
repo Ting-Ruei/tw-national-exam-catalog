@@ -29,6 +29,8 @@ import os
 import re
 from .constants import ASSET_ROOT, PROJECT_ROOT, STRUCTURED_TABLE_RE
 
+from qbr.browser_safe_pdf import DERIVED_DIR_NAME as BROWSER_SAFE_DIR_NAME
+
 def project_path(value: str) -> Path:
     path = Path(value).expanduser()
     parts = path.parts
@@ -79,6 +81,28 @@ def content_type_of(name: str, data: bytes) -> str:
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
+def _browser_safe_variant(resolved: Path) -> Path | None:
+    """The servable rewrite of `resolved`, when one exists.
+
+    Some official papers store each scanned page as a JPEG 2000 image, which Chrome's PDF viewer
+    cannot decode: the page is blank and the viewer stays on 「正在擷取 PDF 檔的文字…」. The paper
+    is rewritten once, at build time, by `qbr.scripts.build_browser_safe_papers`, and the copy lives
+    under `<asset_root>/10_official_pdf_browser_safe/` mirroring the corpus tree.
+
+    Preferring it here rather than in the queue keeps a paper's relative path the stable identifier
+    it already is: no queue row is rewritten, and a corpus without the derived tree behaves exactly
+    as before, which is what makes this safe to ship ahead of the build.
+    """
+    if resolved.suffix.lower() != ".pdf":
+        return None
+    try:
+        relative = resolved.relative_to(ASSET_ROOT.resolve())
+    except ValueError:
+        return None
+    variant = ASSET_ROOT.resolve().joinpath(BROWSER_SAFE_DIR_NAME, relative)
+    return variant if variant.is_file() else None
+
+
 def safe_file_path(value: str) -> Path | None:
     if not value:
         return None
@@ -87,6 +111,9 @@ def safe_file_path(value: str) -> Path | None:
         resolved = path.resolve()
     except FileNotFoundError:
         return None
+    variant = _browser_safe_variant(resolved)
+    if variant is not None:
+        resolved = variant
     allowed_roots = [ASSET_ROOT.resolve()]
     # Local staged runs keep derived PNGs separate from the source archive.
     # Explicit roots avoid granting access to the entire project (and .env).

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  修理代理的排程 — **常駐機版**（192.168.10.70 / macstudio）。
+
+  這一支是**唯一**的一支。原本還有一份筆電版（`com.qbr.repair-daemon.plist`，指向 git checkout 與
+  `qbr/.venv`），2026-09-24 已連同筆電上的 job 一起退掉，理由不是偏好而是資料：`deploy_station.sh`
+  同步佇列時會把筆電的 `scan_state.json` 蓋到常駐機，但筆電的 `question_ai_findings.jsonl` 在受保護
+  清單裡、**永遠不會被推上去**。於是筆電讀過的題，常駐機會拿到「已看過」的指紋、拿不到那次判讀 →
+  常駐機不會再讀它，而且不報任何訊息。實測當天是 0 題（還沒咬到），但兩支都跑就是這個結果。
+
+  三個「這台機器的實際形狀」（與原本筆電版的差別）：
+
+  1. **路徑是 `~/qbr-review/code`。** 常駐機不從 git checkout 服務；它有自己的部署樹
+     （`deploy_station.sh` 送的），所以排程要指向那一份。
+  2. **`QBR_PYTHON` 指向系統 Python 3.9。** 常駐機沒有 `qbr/.venv`，而它的系統 Python
+     已經帶著 PyMuPDF 與 Pillow——那正是這條迴圈 import 的全部東西（2026-09-24 實測）。
+  3. **`QUEUE` 指向 `/Users/tim/qbr-review/queue`。** 那是審題容器掛載的同一份佇列，
+     所以面板顯示的進度與迴圈實際在做的事是**同一個目錄**，不是兩份。
+
+  如果將來真的要在第二台機器上跑：複製這一份、改這三個路徑，**不要**把 `scan_state.json` 當成
+  可以在兩台之間同步的東西（它記的是「這台已經看過什麼」）。
+
+  安裝（在常駐機上）：
+    launchctl bootout gui/$(id -u)/com.qbr.repair-daemon 2>/dev/null || true
+    cp ~/qbr-review/code/qbr/scripts/com.qbr.repair-daemon.station.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist
+    launchctl print gui/$(id -u)/com.qbr.repair-daemon      # 看狀態
+    launchctl kickstart -p gui/$(id -u)/com.qbr.repair-daemon   # 現在跑一輪
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.qbr.repair-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>exec "/Users/tim/qbr-review/code/qbr/scripts/repair_daemon.sh" loop</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Launchd 做一輪 G2 掃描與唯讀摘要；不呼叫模型、不套用修復。 -->
+        <key>ONCE</key>
+        <string>1</string>
+        <key>INTERVAL</key>
+        <string>600</string>
+        <!-- 與審題容器掛載的是同一份 queue。 -->
+        <key>QUEUE</key>
+        <string>/Users/tim/qbr-review/queue</string>
+        <key>QBR_PYTHON</key>
+        <string>/usr/bin/python3</string>
+        <!-- 只供 owner 手動 repair 子命令；loop 不讀此 lane。 -->
+        <key>LANE</key>
+        <string>mtplx-35b</string>
+        <key>WINDOW</key>
+        <string>1</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/tim/qbr-review/code</string>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 一輪做不完（模型慢）不該被 launchd 當成「掛掉」而重啟：它會自己結束。 -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/tim/qbr-review/logs/repair-daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/tim/qbr-review/logs/repair-daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

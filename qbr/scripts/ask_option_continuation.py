@@ -14,7 +14,6 @@ using a result as a decision.
 
 Usage:
     .venv/bin/python scripts/ask_option_continuation.py --engine splash --papers 8 --limit 10
-    .venv/bin/python scripts/ask_option_continuation.py --engine dgx-flash --papers 8 --limit 10
 """
 """The closed question about a picture: does the printed option continue past where we stopped?
 
@@ -64,11 +63,11 @@ def ask(endpoint, prompt, budget=2000, timeout=180, splash=False):
     """One call through the **shared** request builder.
 
     The request used to be built here, with a hard-coded URL and a `splash` flag choosing which
-    spelling of "stop thinking" to send. That is the exact shape `qbr.engines` exists to prevent: the
-    wrong spelling is accepted with HTTP 200 and silently ignored, so a copy that drifts costs 4.7x
-    the latency with no error to catch. `engines.body_for` applies the engine's own switch, so the
-    flag is gone and the endpoint carries its spelling - which also means repointing this at the DGX
-    Spark is a `--engine` choice, not an edit.
+    spelling of "stop thinking" to send. That is the exact shape `qbr.engines` exists to prevent:
+    the wrong spelling is accepted with HTTP 200 and silently ignored, so a copy that drifts costs
+    4.7x the latency with no error to catch. `engines.body_for` applies the engine's own switch, so
+    the flag is gone and the endpoint carries its spelling - which also means repointing this at the
+    DGX Spark is a `--engine` choice, not an edit.
 
     `splash` is kept only so existing call sites do not break; it is no longer read.
     """

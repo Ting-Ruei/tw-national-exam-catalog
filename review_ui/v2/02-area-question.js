@@ -1,34 +1,88 @@
 /* 題目審核區：清單視窗（`LIST_WINDOW`）與 `W`/`S` 走法同一個 `S.view`（charter：導覽跟隨被畫出的清單）；左頁＝题目（6 個 option 以 1..6 對映），右頁＝紙本 PDF（與左頁脫鉤）。`A/R/B/E`＝審題；`1..6` 聚焦选项、`7` 註解、`8` 紙本；`Enter` 儲存、`Shift+Enter` 換行、`Esc` 關框。前 6 項的標籤用紙本的「題號（數字）」；答案卷若用 `1．A` 式標號 likewise 數字，字號不同即不同题。同紙題號重複時 `S.byKey` 以最後筆為準（實測：`S.rows` 79,090、`S.byKey` 79,088，重複 2 題：`305:22` 與 `305:0403`）。重複號的浮動標記專用於 **題目區**（`PAPER.*` 前綴）；答案卷僅 4 題 likewise 用 1..4，`5..8` 在答案卷無對應而直往跳之（浮動）。浮動對照前 6 項（數字）`document`;`PAPER[1-6]`（`PAPER[7]`/`PAPER[8]` 之浮動對照 *note* 記号（`PAPER.*` 前綴））。 */
 const LIST_WINDOW = 400;
 
-/* Which of the four states a question is in, and which one the reviewer is looking at.
+/* Which state a question is in, and which one the reviewer is looking at.
 
    These are **states of the question**, not of the reviewer's session: 未看 means "no decision
    recorded", a flag means "a decision was recorded that says this needs another look". They are
    disjoint and together with 確認正常 they cover every row, so the chips partition the scope and
    the counts add up - which is what makes the number beside a chip trustworthy.
 
-   需重看 and 阻擋 are **one** chip, because they are the same act - the reviewer saying "do not ship
-   this as it stands" - and they are reviewed the same way, by reading the question again. Splitting
-   them would make the reviewer choose a category before deciding what is wrong.
+   `需重看` and `阻擋` are **one** chip (2026-09-24 改名為「block」), because they are the same act -
+   the reviewer saying "do not ship this as it stands" - and they are reviewed the same way, by
+   reading the question again. Splitting them would make the reviewer choose a category before
+   deciding what is wrong.
 
-   **AI／管線退回 is a different chip, because it is a different author.** A `reset_review` event is
-   not the reviewer's opinion: the pipeline changed the question's text (a repair) or the model
-   raised a finding, and the question came *back*. The reviewer never flagged it; something else
-   decided the reading it was approved under is no longer the reading on screen. Merging it with the
-   reviewer's own blocks hid that distinction on the one screen where it matters most - the reviewer
-   cannot tell whether a question is waiting because they said so or because a machine said so, and
-   the second case needs a different question answered ("is the new text right?") than the first
-   ("what is wrong?"). Measured on the served queue: 106 blocks, of which 9 are resets.
+   **The `reset_review` state is a different chip, because it is a different author** (2026-09-24
+   改名為「AI已解決」，2026-09-25 再改名為「AI已修改」). A `reset_review` event is not the reviewer's
+   opinion: the pipeline changed the
+   question's text (a repair) or the model raised a finding, and the question came *back*. The
+   reviewer never flagged it; something else decided the reading it was approved under is no longer
+   the reading on screen. Merging it with the reviewer's own blocks hid that distinction on the one
+   screen where it matters most - the reviewer cannot tell whether a question is waiting because they
+   said so or because a machine said so, and the second case needs a different question answered
+   ("is the new text right?") than the first ("what is wrong?"). Measured on the served queue: 106
+   blocks, of which 9 are resets.
 
-   The two chips stay in the same 不要出貨 family, so nothing about the walk changes - only the
+   **撤回（`applied_kind: withdrawn`）不在這一格**（2026-09-25，owner 原文：「「還原」這種事情不是
+   修改」）：機器把自己改錯的字收回之後，這一列的文字回到紙本，等的是那個人自己的下一個決定，不是
+   複核「新文字對不對」。判準在伺服器（`queue_view.review_projection` 的 `reset_waiting`）與
+   `rowReviewAction`，不是這裡。
+
+   A third chip (「AI無法判斷」) is the **model's** axis rather than the reviewer's - see
+   `aiCannotTell()` below. The first two are states of the question's record; that one asks what the
+   model was able to conclude, so a row can be in it *and* in `block` at the same time.
+
+   **已修正 is its own state, not 已過目** (2026-09-25, 業主回報). A `correct` action says the text was
+   wrong and the reviewer replaced it; it does *not* say the question is right (`correct` is not in
+   `QUESTION_READY_ACTIONS`, so it never marks a question ready). Drawing it as an ordinary done row
+   was the defect: the reviewer saved a correction, the row lost its mark, and it could not be found
+   under any chip - "修正完它就通過了，我就找不到了". It keeps its own mark colour and its own chip,
+   and the same row is findable again by the reviewer who wrote it.
+
+   The state chips stay in the same 不要出貨 family, so nothing about the walk changes - only the
    count and the filter. */
 function stateOf(item) {
   const v = verdictOf(item.candidate_key);
   if (v === 'reset_review') return 'returned';
   if (v === 'needs_review' || v === 'block') return 'flagged';
+  if (v === 'correct') return 'corrected';
   if (v) return 'done';
   return 'unseen';
+}
+
+/* 機器動過的字：同一格「AI已修改」底下其實有**三種不同的東西**（2026-09-24；那一格 2026-09-25 前
+   叫「AI已解決」）。
+
+   使用者原文：「判讀 → 文字 跟 文字 →抽取檔要打通，並且改標籤送到「AI已解決」，我才能知道有沒有
+   改過」。一筆 `reset_review` 只說「這一題退回來了」，沒說**別人用什麼方式動了它的字**。三種要
+   分開，因為要複核的東西不同：
+
+     * `field`         整欄依紙本換掉。要複核的是**這一欄的文字是不是紙本上的那一欄**——讀紙本、
+                       讀抽取檔，兩份整欄對照。
+     * `normalisation` 被換掉的字**全部**落在部首碼位區（U+2E80–U+2EFF／U+2F00–U+2FDF），例如
+                       `⺟`→`母`。同一個字換一種碼位寫法，讀法沒有變。
+     * `glyph`         換掉的字**不是**全部落在那一區：字形本身被改過（例如 `ћ`→`①`）。這一種要
+                       逐字看紙本。
+
+   分類**不在這裡算**：`applied_kind` 由伺服器依紙本／抽取兩邊**實際的字**算出來
+   （`queue_view.machine_applied_kind`），送在每一列的 `review` 裡。在瀏覽器再實作一次就是第二個
+   意見，而這裡要的正是它與判讀那一邊一致。
+
+   沒有 `applied` 的一律是空字串——那是最常見的一種（管線退回、模型提問）：字沒有被動過，所以
+   不該有標籤，畫面維持原本那一格。
+
+   `withdrawn`（2026-09-24 加）不在上面那一組裡：它**不是**那三種要讀的修復，而是機器把自己改過的
+   字收回（`queue_view.WITHDRAWN_KIND`）。它仍然要有自己的字——與「沒改過」同一個樣子的話，人就
+   看不出機器曾經改錯又被收回。 */
+const APPLIED_LABEL = {
+  field: '依紙本改字',
+  glyph: '字形替換',
+  normalisation: '正規化（部首碼位）',
+  withdrawn: '已還原（機器改錯）',
+};
+function machineAppliedLabel(review) {
+  return APPLIED_LABEL[(review || {}).applied_kind] || '';
 }
 
 /* 題組 is a property of the question, not of the reviewer: two or more questions printed under one
@@ -43,6 +97,49 @@ const isGrouped = (item) => Number(item.group_size || 1) > 1;
    and `[]` never occurs - the builder writes `null` rather than an empty list so that "not looked
    at" stays distinguishable from "looked at, nothing found". */
 const hasDispute = (item) => Array.isArray(item.candidate.disputes) && item.candidate.disputes.length > 0;
+
+/* 「AI無法判斷」：**人擋過的**題目裡，模型讀過但**沒有下「有問題／沒問題」的結論**的那些。
+
+   使用者要的第三格（原文：「新增一個「AI無法判斷」，我就可以為這些下註解」）。它與 stateOf 是
+   兩條不同的軸：`stateOf` 說的是**人**對這一題做了什麼（未看／block／退回／已判），這一格說的
+   是**模型**給不給得出結論。所以一題可以同時是「block」與「AI無法判斷」——那正是要看的組合。
+
+   判準寫在這一題自己的 `qbr_ai_finding`（伺服器已經送在每一個 candidate 上，題目區右欄的
+   「② AI 意見」用的就是同一筆），不是重新推導：
+
+     `NOT_EXTRACTION`  模型說「不是抽取造成的」＝要人判。`confirm_dispute.py` 就是這樣稱呼它的
+                       （"that is exactly NOT_EXTRACTION, and it is the human-judgment case"）。
+     `error` / 沒有 verdict  那一筆呼叫沒有讀出結論，同樣是「模型沒能判斷」。
+     `OK` / `DEFECT`   模型有結論（沒發現異常／認為有問題），不屬於這一格。
+
+   **只有人擋過的（`block`／`需重看`）算。** 這一格是**人的**註解工作清單，而它的存在理由是人機
+   分工：人擋下來的＝要修的工作，機器看紙本、能修就修（修過的落在那題的「AI已修改」），
+   修不了或說不出所以然的才回到人手上。所以：
+
+   * 人已經放行的（`done`）不算——沒有待辦事項。第一版漏了這一條，使用者原文：「你的 AI無法判斷
+     裡面，有我已經審核的問題啊，我都通過了你是要判斷什麼」。
+   * **人還沒看過的（`unseen`）也不算**——人還沒表達意見，機器說不出所以然並不是人的待辦事項，
+     而且把整個未掃描的佇列算進來會讓這個數字等於全部。使用者原文：「你把人工看過的放行，怎麼把
+     人工未看過也框入……我才說後面的 agent 循環是僅針對 block 去看」。
+   * 機器已經動過的（`returned`＝修復後待複核）不算——那一題在「AI已修改」等的是「新文字對不對」，
+     不是「哪裡有問題」。
+
+   結果：這一格是 `block` 的子集（實測站上：藥師(一) 115 第2次 5 → 4，少掉的那一列是機器退回的）。
+   模型的話在每一題的右欄仍然看得到，這一格只決定要不要催人。 */
+function aiCannotTell(item) {
+  /* **退滿三次＝機器不再試了**（業主 2026-09-25 的循環上限）。原文：「循環三次之後才送入 AI無法
+     判斷」。判準是伺服器量到的次數（`review.exhausted`／`review.attempts`，
+     `withdrawals.rejection_counts` 那一個定義），不在瀏覽器再數一次——數兩次就會有兩個答案。
+     這一條放在 `qbr_ai_finding` 之前：人可能三次都被打回、而這一題當下的判讀是 OK 或根本沒有紀錄，
+     那時機器仍然已經停手，這一題仍然要回到人手上。 */
+  if ((item.candidate.review || {}).exhausted) return true;
+  const record = item.candidate.qbr_ai_finding;
+  if (!record) return false;
+  if (stateOf(item) !== 'flagged') return false;
+  if (record.error) return true;
+  const verdict = (record.finding || {}).verdict;
+  return !verdict || (verdict !== 'OK' && verdict !== 'DEFECT');
+}
 
 function viewMode() {
   const chosen = document.querySelector('input[name="view"]:checked');
@@ -102,6 +199,9 @@ function visibleRows() {
     if (mode === 'unseen') return stateOf(item) === 'unseen';
     if (mode === 'flagged') return stateOf(item) === 'flagged';
     if (mode === 'returned') return stateOf(item) === 'returned';
+    if (mode === 'corrected') return stateOf(item) === 'corrected';
+    // 「AI無法判斷」與 stateOf 是兩條軸：它問的是模型給不給得出結論，不是人做了什麼。
+    if (mode === 'aicannot') return aiCannotTell(item);
     // 爭議 is what the *pipeline* could not settle, not what the reviewer decided. It is a separate
     // axis from the state chips and deliberately so: a question can be a settled `確認正常` and still
     // carry a dispute the pipeline raised, and collapsing them would hide the machine's uncertainty
@@ -110,6 +210,27 @@ function visibleRows() {
     return true;
   });
 }
+
+/* ------------------------------------------------ 全部：紙本順序，游標停在還沒審的第一題
+
+   使用者要的是「優先顯示還沒有審核的」，理由他也說了（原文）：「不然我如果照順序審核，會刷不到
+   應該看的」。**但「優先」不等於「重排」**，而 2026-09-24 的第一版把兩者當成同一件事：
+
+   * 畫出來的清單被分成「未審段＋已判段」。於是 `W` 在未審段的最上面一列**沒有上一列**——
+     使用者原文：「我想要往上一題參考也沒有了」；他要的是紙本上的前一題（那一題通常已經判過），
+     而重排把它放到清單的另一端去了。
+   * 「還沒審的排前面」也就等於「紙本順序不見了」：相鄰兩列不再是相鄰兩題，`題組` 的共用題幹
+     與前一題的線索都對不上。
+
+   所以現在只有一句話：**`S.rows` 就是紙本順序**（與 `S.view` 同一個來源、同一種排序），
+   `W`／`S` 是紙本上的前一題／下一題。「優先」由兩件不改變順序的事提供：
+
+   * `applyScope()` 開一個範圍時把游標放在**第一題還沒審的**（`firstOpen`），所以打開就看到
+     該動的地方，不必從 q1 開始翻；
+   * `未看` 這個籤只留還沒審的題目——要「只看還沒審的」是一個篩選，不是一種排序。
+
+   判決本來就不會移動任何一列（現在更是如此：沒有任何東西會重排），所以 `next()` 的
+   `was`／`survived` 算術成立：判完還在同一列，往前走一格，按 `W` 回到剛看的那一題。 */
 
 /* The counts beside the chips, computed over the same set the list draws from, so a chip can never
    promise rows the list will not show. The figure toggle is part of that set, which is why the
@@ -123,6 +244,8 @@ function renderChips() {
   $('nUnseen').textContent = n((item) => stateOf(item) === 'unseen');
   $('nFlagged').textContent = n((item) => stateOf(item) === 'flagged');
   $('nReturned').textContent = n((item) => stateOf(item) === 'returned');
+  $('nCorrected').textContent = n((item) => stateOf(item) === 'corrected');
+  $('nAiCannot').textContent = n(aiCannotTell);
   $('nDisputed').textContent = n(hasDispute);
   document.querySelectorAll('#chips .chip').forEach((chip) => {
     chip.classList.toggle('on', chip.dataset.view === viewMode());
@@ -149,13 +272,24 @@ function renderList() {
     const v = verdictOf(item.candidate_key);
     const cls = ['row'];
     if (position === S.index) cls.push('active');
-    if (v) cls.push('done');
+    // 已修正 不是 已過目（見 `stateOf`）：它有自己的底色，因為「像通過」正是業主回報的那個缺陷。
+    if (v === 'correct') cls.push('corrected');
+    else if (v) cls.push('done');
     if (v === 'needs_review' || v === 'block') cls.push('flag');
     if (v === 'reset_review') cls.push('returned');
+    // **退回來的題目要說出是哪一種退回**：一筆 reset 只說「有人動過」，這裡說出動的是什麼
+    // （依紙本改字／字形替換／正規化（部首碼位）），沒有 `applied` 的一律空的——那代表字沒有被
+    // 動過，標籤不該出現。`review` 是伺服器送的那一份投影，不是這一頁猜的。
+    // 人自己改的那一筆（`correct`）同理：它也是「這一題的字被動過」，只是動手的是人，所以在同一
+    // 格說出來，人不必展開 chip 就知道這一列發生過什麼。
+    const applied = v === 'reset_review'
+      ? machineAppliedLabel((item.candidate || {}).review)
+      : (v === 'correct' ? '已修正' : '');
     return `<button class="${cls.join(' ')}" data-pos="${position}">
       <span class="mark"></span><span class="num">${esc(item.question_number)}</span>
       <span class="fig">${item.has_figure ? '▣' : ''}</span>
       <span class="grp">${isGrouped(item) ? '組' : ''}</span>
+      <span class="who">${esc(applied)}</span>
       <span>${esc(String(item.stem_preview || '').replace(/<[^>]*>/g, '').slice(0, 12))}</span></button>`;
   }).join('')
     + (to < rows_.length ? `<div class="empty">… 下面還有 ${rows_.length - to} 題</div>` : '');
@@ -237,7 +371,10 @@ function disputeHtml(candidate) {
    box, disputes are the system's own paper measurements; here it is one model's reading of the same
    text, and it can be wrong. Naming the model and showing that a person's own block is what brought
    the question here is what lets a reader weigh it rather than obey it. */
-function findingHtml(candidate) {
+/* `withApply` 是**題目區專屬**的開關：那顆「帶入修正」按鈕寫的是題目區的編輯框（`#editStem`
+   在 `renderTextSide` 的那一份 innerHTML 裡，而委派綁定綁的是 `#textSide`）。別的區用同一支畫
+   同一題時，按鈕會是一顆按了沒反應的按鈕——所以預設不畫，只有題目區自己要。 */
+function findingHtml(candidate, withApply) {
   const record = candidate.qbr_ai_finding;
   if (!record) return '';
   const f = record.finding || {};
@@ -281,12 +418,44 @@ function findingHtml(candidate) {
         + `<span class="af-from">${esc(String(raw(c) || '').slice(0, 200))}</span>`
         + `<span class="af-arrow">→</span>`
         + `<span class="af-to">${esc(String(rawTo(c) || '').slice(0, 200))}</span>`
-        + `<button class="af-apply" data-field="${esc(c.field)}">帶入修正</button></div>`).join('')
+        + (withApply ? `<button class="af-apply" data-field="${esc(c.field)}">帶入修正</button>` : '')
+        + '</div>').join('')
     : '';
+  // **為什麼沒有自動改**（2026-09-25，業主問「同樣情況，在block的題目，你也提出一堆建議，但是卻
+  // 沒有改，為什麼會有這樣的差異」）。兩個來源，順序固定：
+  //
+  //  1. 代理的**反問**（`candidate.repair_ask`，伺服器 `discuss.repair_asks_by_key` 的投影，只有
+  //     還沒被回答的）。那一筆的 `reason` 就是機器自己寫下的理由（「紙本判讀被閘門擋住：第二次判讀
+  //     的結論是 CARE…」），照抄，不翻譯、不改寫。它原本只在討論區畫得出來。
+  //  2. 沒有反問的那些：機器只改人擋過的題（這是業主自己的規則），所以**還沒被擋過的題目**它讀到
+  //     也不會自己整欄改寫。這一句是**規則的敘述**，不是這一題的判斷——判斷只有一個地方做
+  //     （`dispute_apply.page_read` 的閘門），畫面不重算、也不猜第二個理由。
+  //
+  // 機器真的改過字（`applied_kind` 是那三種修復）時兩者都不畫：那時卡片下方那一列本來就寫著
+  // 「已標記：AI已修改・<哪一種改動>」，多一句「沒有自己改」會互相矛盾。
+  const appliedKind = String((candidate.review || {}).applied_kind || '');
+  const machineWrote = appliedKind !== '' && appliedKind !== 'withdrawn';
+  const ask = candidate.repair_ask || {};
+  // 退滿上限的那一題要說出**機器停手了**（而不是「它還沒讀」）：這是業主 2026-09-25 的循環終點，
+  // 沒有這一句的話畫面與其他沒有反問的題一模一樣，而它們的處置完全不同。
+  const attempts = Number((candidate.review || {}).attempts || 0);
+  const exhausted = Boolean((candidate.review || {}).exhausted);
+  const stopped = (exhausted && !machineWrote)
+    ? `<div class="af-fence"><b>機器已經停手：</b>這一題試過 ${attempts} 次、每一次都被你打回，`
+      + '它不再自己改這一題（放回或接受會讓它重新開始）。</div>'
+    : '';
+  const fence = machineWrote ? ''
+    : (stopped || (ask.reason
+      ? `<div class="af-fence"><b>機器沒有自己改：</b>${esc(ask.reason)}</div>`
+      : (changes && !rowReviewAction(candidate)
+        ? '<div class="af-fence">機器只改你擋過的題：這一題你還沒拒絕，所以它讀到了也不會自己改。</div>'
+        : '')));
+  // 卡身（`af-body`）自己捲動：題目區那一張卡封頂（`v2.html` 的 `#areaQuestion .ai-finding`），
+  // 但紙本截圖與逐字比對是證據，不截短——往下捲就讀得到，而「模型認為…」那一行留在捲動區之外。
   return `<div class="ai-finding"><div class="af-head"><span>模型意見（${esc(label)}）</span>`
     + `<span class="af-hint">${esc(record.model || '未知模型')} · ${esc(who)}`
     + `${record.prompt_version ? ` · 提示詞版本 ${esc(record.prompt_version)}` : ''}</span></div>`
-    + `${crop}${parts.join('')}${changes}</div>`;
+    + `<div class="af-body">${fence}${crop}${parts.join('')}${changes}</div></div>`;
 }
 
 /* Carry one of the model's mechanical changes into the manual editor.
@@ -335,25 +504,27 @@ function applyFindingChange(button) {
   toast(`已把「${field}」的紙本讀法帶入編輯框；請自己確認後再儲存修正`);
 }
 
-function renderTextSide() {
-  const item = S.rows[S.index];
-  // 一個篩選可以合法地剩下 0 列（例如「AI／管線退回」在這一卷沒有題目）。以前這條路沒有守
-  // 衛，`S.rows[S.index]` 是 undefined，`item.candidate` 直接拋錯——而丟錯的地方在 refilter 裡，
-  // 所以畫面會停在上一輪的內容、按什麼都沒反應。清單本身（renderList）已經有同樣的空集合
-  // 守衛；這裡補上，讓兩個面板對「沒有題目」用同一種行為。
-  if (!item) {
-    $('where').innerHTML = '';
-    $('stateHint').textContent = '';
-    $('textSide').innerHTML = '<div class="empty">這個篩選在目前範圍內沒有題目。</div>';
-    return;
-  }
-  // The question itself comes from `/api/candidates`, which is the endpoint that returns
-  // `stem`, `options` and `answer`. `/api/workflow` returns only the queue's metadata - a
-  // `stem_preview` of about twelve characters and no options at all - and its `selected`
-  // field is null unless a single candidate was asked for. Reading the text from there left
-  // every question looking like an empty stem, which is what the reviewer saw: the text pane
-  // was never carrying the paper's text in the first place.
-  const candidate = item.candidate || {};
+/* 一題的**題目畫面**：題目區畫的就是這一支，原則區的右欄上面那三分之一畫的也是這一支。
+
+   owner 2026-09-24：「那個原則區的 修理代理的反問 你好歹右邊上面三分之一顯示UI的題目畫面，
+   右邊下面顯示PDF，不然我真的很難跟你對話」。反問問的是某一題的某一段文字，而那一題的長相
+   本來只在題目區；人得離開原則區、回頭找那一題，才能回答自己被問什麼。所以右欄要顯示那一題
+   的畫面——而「那一題的畫面」只有一個定義：題目區自己那一份。抄一份一定會漂移，漂移的那一天
+   人就會在原則區讀到跟題目區不同的題目（兩邊的答案標記、圖、題組共用題幹都是靠這裡的規則畫
+   的），所以畫法抽成這支回傳字串的純函式，兩邊呼叫同一支。
+
+   `opts.editor`（題目區的編輯框）與 `opts.apply`（「帶入修正」按鈕）都預設**關**：那兩樣是
+   題目區自己的狀態與 DOM（`#editStem`、委派綁在 `#textSide` 上），別的區畫出來只會是死掉的
+   控制項。`opts.finding === false` 則連模型意見卡都不畫（預設**畫**，與題目區一致）：那一張卡
+   在同一頁的左欄已經有一張一模一樣的（截圖、哪裡、逐欄的兩邊），而右欄上面那三分之一只有
+   三分之一——被那張卡佔掉，owner 就看不到題目，那正是他要的東西。
+   `opts.chrome === false` 也不畫題目區自己的那條抬頭（`side-head`＋`qnum`，預設**畫**）。原則區的
+   右欄上面那三分之一只有三百多像素，而這一格自己的抬頭（`.pdf-head`）已經寫出科目、卷號、
+   「第 N 題」與 key——再畫一次那條，掉到捲軸下面的就是第四個選項。`opts.prefix` 給呼叫者自己的
+   id 前綴，免得同一頁出現第二個 `viewStem`。 */
+function questionTextHtml(item, candidate, opts) {
+  const conf = opts || {};
+  const prefix = conf.prefix || '';
   const metadata = candidate.metadata || {};
   // Which options are correct, read from `accepted_values` rather than split out of the answer
   // string.
@@ -374,10 +545,58 @@ function renderTextSide() {
     String(candidate.answer || '').split(/[,，或]/)
       .map((v) => v.trim().toUpperCase()).filter(Boolean).forEach((v) => accepted.add(v));
   }
-  const answer = accepted;
   const options = candidate.options || [];
-  const v = verdictOf(item.candidate_key);
   const flags = (item.reason_codes || []).filter(Boolean);
+  const edited = metadata.review_status === 'human_corrected' || (candidate.review || {}).has_correction;
+  const note = noteOf(item.candidate_key);
+  // 紙本表格：讀法指出表格的那一題，表格那一段從題幹切出來，改畫紙本的截圖（見 `tableBlockHtml`）。
+  // 切不出來（`split` -1）就是整段照原本畫，截圖補在後面——寧可多看到一次文字，也不要把散文切掉
+  // 或畫出一個空的區塊。
+  const tableCrops = tableCropRefs(candidate);
+  const stem = candidate.stem || '';
+  const split = tableCrops.length ? tableSplitIndex(stem, tableCrops[0].table_lines) : -1;
+  // 切點在 0 是「整段題幹就是那張表」：題幹那一格留空（`（題幹空白）` 是「沒有字」的講法，
+  // 這裡的字都在下面的截圖與文字版裡，不該說它空白）。
+  const stemHtml = split >= 0 ? richText(stem.slice(0, split)) : richText(stem || '（題幹空白）');
+  return `
+    ${conf.chrome === false ? '' : `<div class="side-head">抽出文字${edited ? '（已人工修正）' : ''}<span class="hint">${flags.length ? flags.map(esc).join(' · ') : '與右側紙本對照'}</span></div>
+    <div class="qnum">第 ${esc(item.question_number)} 題</div>`}
+    ${disputeHtml(candidate)}
+    ${conf.finding === false ? '' : findingHtml(candidate, conf.apply)}
+    ${groupHtml(candidate)}
+    <div class="stem" id="${prefix}viewStem">${stemHtml}</div>
+    ${tableCrops.length ? tableBlockHtml(tableCrops, split >= 0 ? stem.slice(split) : '') : ''}
+    ${lostGlyphHtml(candidate)}
+    <div class="opts" id="${prefix}viewOpts">${options.map((option) => `
+      <div class="opt${accepted.has(option.key) ? ' is-answer' : ''}">
+        <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${richText(option.text)}</span>
+      </div>`).join('')}</div>
+    ${figureHtml(candidate, tableCrops)}
+    ${note ? `<div class="noteShown">註記：${esc(note)}</div>` : ''}
+    ${conf.editor ? `<div class="edit on" id="${prefix}editor">${editorHtml(candidate, options)}</div>` : ''}
+    ${conf.editor ? '' : evidenceHtml(candidate, metadata)}`;
+}
+
+function renderTextSide() {
+  const item = S.rows[S.index];
+  // 一個篩選可以合法地剩下 0 列（例如「AI／管線退回」在這一卷沒有題目）。以前這條路沒有守
+  // 衛，`S.rows[S.index]` 是 undefined，`item.candidate` 直接拋錯——而丟錯的地方在 refilter 裡，
+  // 所以畫面會停在上一輪的內容、按什麼都沒反應。清單本身（renderList）已經有同樣的空集合
+  // 守衛；這裡補上，讓兩個面板對「沒有題目」用同一種行為。
+  if (!item) {
+    $('where').innerHTML = '';
+    $('stateHint').textContent = '';
+    $('textSide').innerHTML = '<div class="empty">這個篩選在目前範圍內沒有題目。</div>';
+    return;
+  }
+  // The question itself comes from `/api/candidates`, which is the endpoint that returns
+  // `stem`, `options` and `answer`. `/api/workflow` returns only the queue's metadata - a
+  // `stem_preview` of about twelve characters and no options at all - and its `selected`
+  // field is null unless a single candidate was asked for. Reading the text from there left
+  // every question looking like an empty stem, which is what the reviewer saw: the text pane
+  // was never carrying the paper's text in the first place.
+  const candidate = item.candidate || {};
+  const options = candidate.options || [];
 
   $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)}`;
   const standing = verdictOf(item.candidate_key);
@@ -386,34 +605,49 @@ function renderTextSide() {
   // 原因就在清單自己帶的 `review.reset` 裡（退回事件的 notes／reset_notes 與 previous_action），
   // 不是另一支 API 才有的欄位。人按的 block／needs_review 沒有這塊：原因就是審題者自己。
   const resetEvent = (candidate.review || {}).reset || {};
-  const returnedNote = standing === 'reset_review'
+  // 退回來的題目要說出**動的是哪一種**：`applied_kind` 是伺服器算出來的三分之一
+  // （依紙本改字／字形替換／正規化（部首碼位）），讀同一份投影；沒有 `applied` 的（管線退回、
+  // 模型提問）不會多出這一節，維持原本那一句話。
+  //
+  // **「機器在你標記之後把字改好了」的那些題目走的就是這一條路**（owner 2026-09-25 回報：有些
+  // block 的題目其實已經被改好了，卻還顯示成阻擋，於是他以為 block 還很多）。伺服器在那 22 題上
+  // （`queue_view.review_projection`：人的 `block` 被保留、`pending_reset` 存在、`applied_kind`
+  // 是那一種改動）會把 `is_reset_unreviewed` 也設起來，所以這裡的 `standing` 讀成 `reset_review`
+  // → 標籤「AI已修改」（2026-09-25 前叫「AI已解決」），再加上下面那一節說出機器動了哪一種字、
+  // 以及他原本的標記是什麼（`resetEvent.previous_action` → 「原為：阻擋」）。實測站上
+  // `藥師(一)/103/2 q29`：「已標記：AI已修改・依紙本改字（…｜原為：阻擋）」。
+  //
+  // 這一格沒有第二條分支可以走：`is_repair_pending` 是 `reset_waiting` 的子集，而
+  // `reset_waiting` 一成立就等於 `is_reset_unreviewed`，也就是 `rowReviewAction()` 一定回
+  // `reset_review`。所以「機器改好了、等你複核」在畫面上**只會**是這一種說法——想再加一句
+  // 「待你複核」就是第二個說法，而兩個說同一件事的地方就是兩個可以不一致的地方。
+  //
+  // **撤回（`withdrawn`）不走那一句話**（owner 2026-09-25：「「還原」這種事情不是修改」）。機器把
+  // 自己改錯的字收回去之後，這一列**沒有**被 AI 改過：伺服器也不再把它投影成待複核
+  // （`queue_view.review_projection` 的 `reset_waiting`），所以那些題目的 `standing` 回到那個人
+  // 自己的判決（實測 127 題撤回裡 123 題如此）、或回到未看（3 題）。撤回本身仍是這一列的事實，
+  // 只是自己說一句、畫在後面（`#stateHint .af-withdrawn`）——一句「已標記：AI已修改・已還原（機器
+  // 改錯）」會把「還原」讀成「修改」，那正是他打回的那個說法。
+  const withdrawnNote = String((candidate.review || {}).applied_kind || '') === 'withdrawn'
+    ? machineAppliedLabel(candidate.review) : '';
+  const appliedNote = standing === 'reset_review' && !withdrawnNote
+    ? machineAppliedLabel(candidate.review) : '';
+  const returnedNote = standing === 'reset_review' && !withdrawnNote
     ? [resetEvent.reset_notes || resetEvent.notes,
        resetEvent.previous_action ? `原為：${LABEL[resetEvent.previous_action] || resetEvent.previous_action}` : '']
         .filter(Boolean).join('｜')
     : '';
-  $('stateHint').textContent = standing
-    ? `已標記：${LABEL[standing] || standing}${returnedNote ? `（${returnedNote}）` : ''}`
-    : (note ? '只有註記・尚未決定' : '');
+  $('stateHint').innerHTML = [
+    standing
+      ? `已標記：${esc(LABEL[standing] || standing)}${appliedNote ? `・${esc(appliedNote)}` : ''}`
+        + `${returnedNote ? `（${esc(returnedNote)}）` : ''}`
+      : (note ? '只有註記・尚未決定' : ''),
+    withdrawnNote ? `<span class="af-withdrawn">${esc(withdrawnNote)}</span>` : '',
+  ].filter(Boolean).join(' ');
 
-  const edited = metadata.review_status === 'human_corrected' || (candidate.review?.has_correction);
-  const editor = S.editing ? `<div class="edit on" id="editor">${editorHtml(candidate, options)}</div>` : '';
-
-  $('textSide').innerHTML = `
-    <div class="side-head">抽出文字${edited ? '（已人工修正）' : ''}<span class="hint">${flags.length ? flags.map(esc).join(' · ') : '與右側紙本對照'}</span></div>
-    <div class="qnum">第 ${esc(item.question_number)} 題</div>
-    ${disputeHtml(candidate)}
-    ${findingHtml(candidate)}
-    ${groupHtml(candidate)}
-    <div class="stem" id="viewStem">${richText(candidate.stem || '（題幹空白）')}</div>
-    ${lostGlyphHtml(candidate)}
-    <div class="opts" id="viewOpts">${options.map((option) => `
-      <div class="opt${answer.has(option.key) ? ' is-answer' : ''}">
-        <span class="k">${esc(option.key)}</span>${optionCropHtml(candidate, option)}<span class="t">${richText(option.text)}</span>
-      </div>`).join('')}</div>
-    ${figureHtml(candidate)}
-    ${note ? `<div class="noteShown">註記：${esc(note)}</div>` : ''}
-    ${editor}
-    ${S.editing ? '' : evidenceHtml(candidate, metadata)}`;
+  // The text pane is the shared builder's output, not a second copy of it: whatever the reviewer
+  // reads here is literally the same markup the 原則區 draws for the same key.
+  $('textSide').innerHTML = questionTextHtml(item, candidate, { editor: S.editing, apply: true });
 
   if (S.editing) {
     $('editStem').value = candidate.stem || '';
@@ -455,17 +689,107 @@ function optionCropHtml(candidate, option) {
     title="${esc(ref.source === 'image-object' ? '取自圖物件本身' : '取自頁面區域')}" loading="lazy">`).join('');
 }
 
-function figureHtml(candidate) {
+/* 紙本表格（`label: 'paper-table'` 的那一筆裁切）：題幹要讓位給它。
+
+   owner 2026-09-24：「叫你這種文字型表格要用截圖來顯示，聽不懂嗎」。這一題的抽取結果是一串壓平的
+   字（`劑型  給藥途徑  劑量（mg）  AUC (μg．h/mL) 錠劑  口服  100  40…`）：欄位之間只剩兩個空格，
+   人得自己數字數才看得出哪個數字屬於哪一欄，而紙本上本來就是一張看得懂的表，機器也已經依讀法把它
+   裁下來了（`crop_run_figures.py --queue` 寫進 `image_refs`，`label: 'paper-table'`）。
+
+   所以畫法**取代**原本那一段，不是並排新增：散文照原本畫，表格那一段換成截圖，抽取到的原字收在
+   截圖底下的「文字版」（原樣，不重排）。文字仍然是這一題的證據，只是不再是第一眼看到的東西。
+   `data-view` 說的是元素是什麼（與範圍 chips 同一個約定），程式不看摘要上寫的字。 */
+const TABLE_REF_LABEL = 'paper-table';
+
+function tableCropRefs(candidate) {
+  return (candidate.image_refs || []).filter((ref) => ref && typeof ref === 'object'
+    && ref.exists !== false && ref.asset_role !== 'option-image' && ref.label === TABLE_REF_LABEL);
+}
+
+/* NFKC＋去掉空白之後的字串，以及每個字回推到**原字串**的位置（`at`）。
+
+   兩份文字要對得起來就得先縮成同一種寫法：紙本與抽取檔的差別都在標點與空白的寫法（`（`／`(`、
+   `．`／`·`、全形空白），字本身一樣。`at` 是為了切回原字串——切出來的那一段要逐字印回畫面，
+   不能是我重排過的版本。 */
+function foldedIndex(text) {
+  const chars = [];
+  const at = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const folded = text[i].normalize('NFKC').replace(/\s+/g, '');
+    for (let j = 0; j < folded.length; j += 1) {
+      chars.push(folded[j]);
+      at.push(i);
+    }
+  }
+  return { text: chars.join(''), at };
+}
+
+/* 題幹在哪一個字開始是表格。
+
+   錨是**讀法自己引的第一行**（`table_lines[0]`），比對的是 NFKC＋去空白之後的前綴：表格第一列的
+   欄名在紙本與抽取檔兩邊一定一樣，差異都落在後面（實測 q065：紙本 `AUC（μg·h/mL）`、抽取檔
+   `AUC (μg．h/mL)`——整行比對失敗，前 12 個字一樣）。最長的前綴先試，因為短前綴可能在散文裡
+   出現；再用**最後一行**當第二個錨，它必須落在第一個錨後面，這樣才不會切在散文中間。回 -1 就是
+   切不出來，呼叫者把整段當散文畫、截圖補在後面。 */
+function tableSplitIndex(stem, lines) {
+  if (!stem || !lines || !lines.length) return -1;
+  const folded = foldedIndex(stem);
+  const head = foldedIndex(lines[0]).text;
+  const tail = foldedIndex(lines[lines.length - 1]).text;
+  for (let length = Math.min(12, head.length); length >= 4; length -= 1) {
+    const start = folded.text.indexOf(head.slice(0, length));
+    if (start < 0) continue;
+    if (tail && folded.text.indexOf(tail, start + length) < 0) continue;
+    // 切點在 0（整段題幹就是那張表）也算：那時散文是空的，題幹那一格留空，表格那一塊帶著全部的內容。
+    const at = folded.at[start];
+    if (at !== undefined) return at;
+  }
+  return -1;
+}
+
+/* 這一張圖**是誰的**，在截圖旁邊說出來——量到的那一半才有話說。
+
+   業主 2026-09-25：「有些題目原本沒圖卻截了上下題圖片；AI 截圖檢查只看當下這題、沒上下資訊，
+   於是回報『找不到問題』。」切圖那一步（`crop_run_figures`）量了每一張圖的歸屬，而畫面上只印了
+   `description`：框蓋到隔壁題的那一種，句尾帶著「（紙本這張圖還蓋到隔壁題：…，只切這一題的列）」
+   ——所以它看得出來；**列量不到、歸屬無法確認的那一種（站上 414 張）沒有任何記號**，而它在畫面上
+   長得跟「這一題的圖」一模一樣。標籤是這一句，事實是 `ownership`（伺服器／切圖那一步寫的）。 */
+function cropOwnershipNote(ref) {
+  return String((ref || {}).ownership || '') === 'unverified'
+    ? '（無法確認這張圖屬於哪一題：紙本上量不到這一題的列）' : '';
+}
+
+/* One crop, drawn the same way wherever it appears. */
+function cropFigureHtml(ref) {
+  const caption = (ref.description || ref.label || '') + cropOwnershipNote(ref);
+  return `<figure class="crop">
+      <img src="${esc(fileUrl(ref.path))}" alt="${esc(ref.description || ref.raw_ref || '裁切圖')}" loading="lazy">
+      <figcaption>${esc(caption)}</figcaption>
+    </figure>`;
+}
+
+/* 表格那一塊：截圖在上，抽取到的原字收在下方的「文字版」。
+
+   `flattened` 空的時候只畫截圖——那代表這一筆裁切沒有帶讀法引的行（較早的裁切），寧可只畫圖，
+   也不要畫一個空的「文字版」。 */
+function tableBlockHtml(refs, flattened) {
+  return `<div class="paper-table" data-view="table-crop">
+    ${refs.map(cropFigureHtml).join('')}
+    ${flattened ? `<details class="paper-table-text" data-view="table-text">
+      <summary>文字版（抽取到的表格文字，原樣）</summary>
+      <div class="paper-table-raw" style="white-space:pre-wrap;margin-top:8px;font-size:13px;color:var(--muted)">${richText(flattened)}</div>
+    </details>` : ''}</div>`;
+}
+
+function figureHtml(candidate, skip) {
+  const already = new Set(skip || []);
   const refs = (candidate.image_refs || []).filter((ref) => ref && typeof ref === 'object'
-    && ref.exists !== false && ref.asset_role !== 'option-image');
+    && ref.exists !== false && ref.asset_role !== 'option-image' && !already.has(ref));
   const optionImages = (candidate.options || []).filter((o) => o && o.image && typeof o.image === 'object' && o.image.exists !== false);
   const all = refs.concat(optionImages.map((o) => o.image));
   if (!all.length) return '';
   return `<div class="crops"><div class="crops-head">圖片（機器裁切，僅供對照）<span class="hint">${all.length} 張</span></div>
-    ${all.map((ref) => `<figure class="crop">
-      <img src="${esc(fileUrl(ref.path))}" alt="${esc(ref.description || ref.raw_ref || '裁切圖')}" loading="lazy">
-      <figcaption>${esc(ref.description || ref.label || '')}</figcaption>
-    </figure>`).join('')}</div>`;
+    ${all.map(cropFigureHtml).join('')}</div>`;
 }
 
 /* The shared stem of a question group.
@@ -741,9 +1065,48 @@ async function decide(action) {
   }
 }
 
-/* Save the correction. It is stored as an append-only `correct` event carrying the edited
-   text, so what the reviewer typed can be diffed against what the parser produced; the
-   decision itself stays `reviewed`, waiting for an explicit accept. */
+/* 把一列換成**伺服器手上那一份**。
+
+   缺陷（2026-09-25 業主回報）：「我用帶入修正、儲存修正，它就通過了，我就找不到了」，而且
+   「**改動跟真實畫面顯示是不同的**」。畫面上的字來自 `S.rows[i].candidate`，那是**開這個範圍時**
+   讀進來的那一份；儲存修正只把事件寫進日誌，這一列沒有任何欄位被更新，所以按下儲存之後人看到的
+   是**改動前**的字，而 `next()` 同時把他帶到下一題——他沒有任何機會對照「我改的」與「存下來的」。
+
+   所以存完之後重讀那一列，並用 `toItem()`（開範圍時把伺服器的列變成畫面上那一列的同一支函式）
+   重建它：重讀之後看到的，就是重新載入會看到的。`focusKey` 會把這一列插在回傳清單最前面
+   （`focus_injected`），所以當下的範圍或 chip 不會讓它找不到——`03-area-principles.js` 的
+   「叫出原題」走的是同一條路。
+
+   回傳 false 代表讀失敗。那時**不能**假裝畫面是新的：由呼叫者說出來。 */
+async function refetchRow(key) {
+  const payload = await fetchAreaJson('/api/candidates', { focusKey: key });
+  const fresh = payload
+    ? (payload.candidates || []).find((c) => c.candidate_key === key) : null;
+  if (!fresh) return false;
+  // 兩份清單都要換掉：`S.rows` 是畫出來的、`S.view` 是過濾的來源，只換一份的話下一次
+  // `rebuildRows()` 會把舊的那一份放回來。
+  for (const list of [S.view, S.rows]) {
+    const at = list.findIndex((entry) => entry.candidate_key === key);
+    if (at >= 0) list[at] = toItem(fresh);
+  }
+  // 狀態與註解照 `loadScopeRows()` 的同一條規則重讀。`rowReviewAction` 讀的是伺服器的投影，
+  // 不是這一頁的猜測；`comment` 不進 `S.verdict`，因為註解不是決定。
+  const action = rowReviewAction(fresh);
+  if (action && !NOTE_ACTIONS.has(action)) S.verdict.set(key, action);
+  else S.verdict.delete(key);
+  const note = String((fresh.review || {}).notes || '');
+  if (note) S.notes.set(key, note);
+  else S.notes.delete(key);
+  return true;
+}
+
+/* 儲存修正。它以 append-only 的 `correct` 事件存下來（帶著改過的文字），所以人打的字可以與抽取
+   器產生的一份逐字對照；它**不**等於通過——`correct` 不在 `QUESTION_READY_ACTIONS` 裡，所以這一題
+   不會因此進入正式題庫，人還要另外按 `A`（確認）或 `B`（阻擋）。
+
+   存完之後**停在這一題**，並把伺服器存下來的那一份畫出來（`refetchRow`）。從前這裡是
+   `await next()`：人看不到自己剛存的東西，還被帶去下一題——業主 2026-09-25 回報的正是這一段
+   （「改動跟真實畫面顯示是不同的」）。修正的價值一半在「人當下確認畫面」；把他帶走就等於取消驗收。 */
 async function saveCorrection() {
   const item = S.rows[S.index];
   const candidate = (item || {}).candidate || {};
@@ -782,9 +1145,14 @@ async function saveCorrection() {
     // a reload.
     invalidateAreas();
     $('reasonText').value = '';
-    toast(`第 ${item.question_number} 題：修正已儲存`);
+    // 重讀這一題，再離開編輯模式（`setEditMode(false)` 會重畫文字面），最後重畫清單：列的底色與
+    // 「已修正」那一格都要跟著換。**不呼叫 `next()`**——修正之後人要看到存下來的那一份。
+    const drawn = await refetchRow(item.candidate_key);
     setEditMode(false);
-    await next();
+    renderList();
+    toast(drawn
+      ? `第 ${item.question_number} 題：修正已儲存，畫面以下是存下來的那一份`
+      : `第 ${item.question_number} 題：修正已儲存，但重讀這一題失敗，畫面可能還是舊的`, !drawn);
   } catch (error) {
     toast(`修正儲存失敗：${error.message || error}`, true);
   }
@@ -817,11 +1185,12 @@ async function next() {
   renderTextSide();
 }
 
-/* ==================================================================== 四個區
-   The request named four areas: 首頁 / 題目審核區 / 答案審核區 / 錯題討論區. They are one page with a
-   mode switch, not four pages, because they are four readings of **one** queue: the answer area's
-   eligible set is defined by the question area's decisions, and the discussion area reads the
-   corrections those two produced. Four pages would mean four loaders of the same 198 MB
+/* ==================================================================== 五個區
+   The request named four areas (首頁 / 題目審核區 / 答案審核區 / 錯題討論區); 原則區 was added as a
+   fifth on 2026-09-24. They are one page with a mode switch, not five pages, because they are five
+   readings of **one** queue: the answer area's eligible set is defined by the question area's
+   decisions, and the discussion area reads the corrections those two produced. Five pages would
+   mean five loaders of the same 198 MB
    `candidates.jsonl`, and four chances for them to disagree about what is in the queue.
 
    What each area is allowed to do is the whole point of separating them:

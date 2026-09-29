@@ -1,9 +1,8 @@
 # 全國專技術題题库重建 — 建議工作流程（measured proposal, v0.1）
 
 Location: `pi_test/question_bank_rebuild/`. Everything below was produced on this MacBook
-against copies of the official assets; `AI Max 395` / AI395 and its services (Review UI,
-PostgreSQL, the 395 OCR fleet) were treated as absent, as instructed, and no reachable
-service was configured or written to.
+against copies of the official assets. No external review, database, or inference service
+was configured or written to.
 
 Safety of this run:
 
@@ -275,10 +274,10 @@ they are not learned twice** (`src/qbr/canon.py`, `reports/DEFECTS-AND-FIXES.md`
    rows; verify visually against the rendered page (the two defect families both live here).
 6. **Quarantine + review UI**: the sandbox writes `quarantine/` bundles with evidence; the
    existing `review_ui/` may consume them later (not required for the pilot, and not run
-   against AI395/PostgreSQL).
-7. **Scale-up**: 1,000 papers ≈ 45 s CPU + 0 GPU. If (and only if) the strip-OCR of bullet
-   strips needs a model, that — and only that — may go to the DGX endpoint
-   `http://192.168.10.90:8888`; per-paper budget must be recorded in the manifest.
+   against a remote review or database service).
+7. **Scale-up**: 1,000 papers ≈ 45 s CPU + 0 GPU. If (and only if) strip-OCR of bullet
+   strips later needs a model, it must use a separately approved local task endpoint;
+   per-paper budget must be recorded in the manifest.
 
 ## 8. What I need from you (decisions, not approvals of production changes)
 

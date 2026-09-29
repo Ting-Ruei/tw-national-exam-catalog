@@ -499,6 +499,7 @@ class Handler(BaseHTTPRequestHandler):
             unjudged=(query.get("unjudged") or ["0"])[0] in ("1", "true"),
             with_figures=(query.get("with_figures") or ["0"])[0] in ("1", "true"),
             disputed=(query.get("disputed") or ["0"])[0] in ("1", "true"),
+            status=(query.get("status") or [""])[0],
             offset=int((query.get("offset") or ["0"])[0] or 0),
             limit=int((query.get("limit") or ["0"])[0] or 0),
         )

@@ -300,24 +300,43 @@ from qbr.review_ui.ai_audit import (  # noqa: F401,E402
 )
 
 from qbr.review_ui.queue_view import (  # noqa: F401,E402
+    APPLIED_KINDS,
     CATEGORY_GROUP_NORMALIZED_FILTERS,
     DISCUSS_BUCKETS,
     PRINCIPLES_STREAM,
     QBR_AI_FINDING_FIELDS,
     QbrAiFindingsStore,
+    RADICAL_BLOCKS,
     REPAIR_QUESTIONS_STREAM,
+    SIMILAR_LIMIT,
+    SIMILAR_LIMIT_MAX,
     SQL_DISCUSS_PREDICATE,
     _compact_qbr_finding,
     _paper_of_candidate,
     category_filter_values,
     category_matches_filter,
+    change_field_key,
+    changed_characters,
+    finding_signature,
+    in_radical_blocks,
     is_discuss_bucket,
     load_qbr_ai_findings,
+    machine_activity_counts,
+    machine_applied_kind,
     normalize_category_name,
     paper_entries_for,
     principles_projection,
+    question_identity,
     repair_questions_projection,
     review_projection,
+    similar_question_row,
+    similar_questions,
+)
+
+from qbr.review_ui.handlers import (  # noqa: F401,E402
+    FINDING_KEYS_LIMIT,
+    Handler,
+    MobileHandler,
 )
 
 from qbr.review_ui.legacy_assets import (  # noqa: F401,E402

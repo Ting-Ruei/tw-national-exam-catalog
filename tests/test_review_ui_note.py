@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_ui_source import server_source  # noqa: E402
+from test_review_ui_areas import function_body  # noqa: E402
 V2 = ROOT / "review_ui" / "v2.html"
 
 
@@ -124,12 +125,29 @@ class NoteActionTests(unittest.TestCase):
         self.assertEqual(events[-1]["action"], "accept")
 
     def test_no_path_still_treats_only_correct_as_needing_reaffirming(self):
-        # A note must be reaffirmed on every path, so the old `correct`-only checks must not survive
-        # anywhere - a note reaffirmed on one path and not another is two behaviours for one rule.
+        # A note — and now a standing 註解 on a bare decision — must be reaffirmed on every path, so
+        # the old `correct`-only checks must not survive anywhere: a note reaffirmed on one path and
+        # not another is two behaviours for one rule.
+        #
+        # 2026-09-24: the call became **unconditional**. The gate that used to stand here
+        # (`if event.get("action") in (NOTE_ACTIONS | {"correct"})`) was itself the defect — a bare
+        # `block` arriving after a 註解 was never reaffirmed, so it blanked the note the reviewer had
+        # written on that very question (real case: `moex:105100:305:33:1:question:q046`, a comment
+        # 「檢查上下標」 followed by `block` with `notes:""`). `_reaffirm_standing_action` is now a
+        # no-op for events with nothing to carry, which is what makes calling it for every event
+        # safe; `qbr/tests/test_reviewer_notes_reach_the_prompt.py` pins that no-op property.
         source = server_source()
         self.assertNotIn('if event.get("action") == "correct":\n            previous =', source)
         self.assertNotIn('if event.get("action") == "correct":\n                previous =', source)
-        self.assertIn('if event.get("action") in (NOTE_ACTIONS | {"correct"}):', source)
+        self.assertNotIn('if event.get("action") in (NOTE_ACTIONS | {"correct"}):', source)
+        # Every appender reaffirms, and **none of them asks what the action is first**. Four call
+        # sites, one per appender (`append_review`, `append_reviews_batch`, `append_answer_review`,
+        # `append_answer_reviews_batch`); the count is the check that one of them did not keep a
+        # private gate. The helper itself is a no-op for an event that carries nothing to reaffirm.
+        calls = [line for line in source.splitlines() if line.strip().startswith("_reaffirm_standing_action(")]
+        self.assertEqual(4, len(calls), f"重申的呼叫點有 {len(calls)} 個：{calls}")
+        for line in calls:
+            self.assertNotIn("if ", line.split("_reaffirm_standing_action(")[0], line)
 
 
 class NoteKeepsTheQuestionInTheStuckQueueTests(unittest.TestCase):

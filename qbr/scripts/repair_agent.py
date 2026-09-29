@@ -58,24 +58,33 @@ def _thinking_on(name):
     return endpoint
 
 
-def pending_keys(queue_root: str) -> list:
-    """本批要問的 candidate_key（依人號優先、單號）。開頭是未答的题。"""
+def pending_entries(queue_root: str) -> list:
+    """本批要問的題目（`explain` 的順序），連同審題者寫在上面的註解。
+
+    **回傳整個 entry，不是只有 key。** `ask_one` 需要審題者的註解才送得出去，而手上只有一個 key 的
+    呼叫者沒有東西可傳——這個檔案就是這樣寫成 `"notes": ""` 的：模型被問了一題**人已經寫下位置**
+    的題目，卻拿到一句空字串，於是只能自己重新猜一次。註解本來就在 `explain` 的 entry 裡（它讀
+    的是 `repair_loop` 的折疊，也就是工作清單自己用的那一個），所以它只是沒有被傳下去。
+    """
     qdir = repair_loop.review_ui_dir(queue_root)
     blocked, rows = repair_loop.collect_blocks(qdir)
-    _explained, unexplained = repair_loop.explain(blocked, rows)
+    # 被退過的次數與那筆被退的改動：`ask_one` 會把它交給提示詞，讓第二輪不要重貼同一個改動。
+    rejections = repair_loop.rejections_by_key(
+        os.path.join(qdir, "question_review_events.jsonl"))
+    _explained, unexplained = repair_loop.explain(blocked, rows, rejections)
     # 同 `--resume` 的定義：只有「有 finding」的題才算問過。空內容的重試（極大 2）會留下
     # 一筆 `finding: null` 的記錄，它不是「已答」，所以要重回列；這與 latest_by_question
-    # 的「最後一筆為準」配合（last-write-wins）。
+    # 的「最後一筆為準」配合（last-write-wins）。判準放在 `ai_findings.is_answer`，
+    # 不在這裡再寫一次——同一個問題有兩個實作就是兩個可以不一致的地方。
     done = {key for key, record in ai_findings.latest_by_question(
-        ai_findings.store_path(queue_root)).items() if record.get("finding")}
-    return [entry["candidate_key"] for entry in unexplained
-            if entry["candidate_key"] not in done]
+        ai_findings.store_path(queue_root)).items() if ai_findings.is_answer(record)}
+    return [entry for entry in unexplained if entry["candidate_key"] not in done]
 
 
 def run_once(queue_root: str, window: int, lane: str) -> int:
     """一趟：拿鑰匙 → 輪流問 → 寫記錄 → 更新經驗檔。回傳本批題數。"""
-    keys = pending_keys(queue_root)[:window]
-    if not keys:
+    entries = pending_entries(queue_root)[:window]
+    if not entries:
         print("本批沒有待問的 candidate_key。")
         return 0
     all_rows = list(repair_loop.load_candidates(os.path.join(
@@ -84,15 +93,18 @@ def run_once(queue_root: str, window: int, lane: str) -> int:
     learned = load_experience(queue_root)
     endpoint = _thinking_on(lane)
     print("批 %d 題，引擎 %s（思考開），學習塊 %d 條。"
-          % (len(keys), endpoint["name"], len(learned.get("lessons") or [])))
+          % (len(entries), endpoint["name"], len(learned.get("lessons") or [])))
     asked = 0
-    for key in keys:
+    for entry in entries:
+        key = entry["candidate_key"]
         question = by_key.get(key)
         if question is None:
             print("  ! %s 不在 candidates.jsonl，跳過" % key)
             continue
-        finding = ask_mod.ask_one({"candidate_key": key, "question": question, "notes": "",
-                                  "kinds": [], "population": "blocked"},
+        finding = ask_mod.ask_one({"candidate_key": key, "question": question,
+                                  "notes": entry.get("notes") or "",
+                                  "kinds": entry.get("kinds") or [],
+                                  "population": "blocked"},
                                  endpoint=endpoint,
                                  out=ai_findings.store_path(queue_root),
                                  args=argparse.Namespace(max_tokens=12000, learned=None,

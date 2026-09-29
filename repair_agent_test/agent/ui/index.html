@@ -78,6 +78,16 @@
   .judged.up { background: #e6f6ea; color: var(--ok); }
   .judged.down { background: #fdecea; color: var(--bad); }
   .judged.hold { background: #fff6e0; color: var(--warn); }
+  /* The reviewer's decision on the station, drawn separately from the agent's own rating.
+     Two chips with different colours, because 「人審過」 and 「代理看過」 are two facts: the list used
+     to draw one of them for both, which is how a question nobody had opened could read as 「已判」. */
+  .human { font-size: 11px; padding: 0 5px; border-radius: 3px; font-weight: 600; }
+  .human.accept { background: #e6f6ea; color: var(--ok); }
+  .human.block { background: #fdecea; color: var(--bad); }
+  .human.needs_review, .human.reset { background: #fff6e0; color: var(--warn); }
+  .human.commented { background: #eef1f5; color: #55606d; }
+  #legend { font-size: 11px; color: var(--muted); line-height: 1.5; margin: 4px 0 2px; }
+  #legend b { color: #55606d; }
   .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
   .stem { white-space: pre-wrap; margin: 0 0 12px; padding: 10px; background: var(--bg);
           border-radius: 6px; border: 1px solid var(--line); }
@@ -126,6 +136,9 @@
   #write h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
               color: var(--muted); margin: 0 0 6px; font-weight: 600; }
   .empty-note { color: var(--muted); font-style: italic; }
+  /* 「這一題用了哪幾條經驗」的原則清單：編號讓人在回話時能指「第 2 條」。 */
+  ol.exp-list { margin: 4px 0 8px 20px; padding: 0; }
+  ol.exp-list li { margin: 2px 0; }
 
   /* The platform's own typography, reproduced so the reviewer sees the question a learner sees.
      `platform-app/frontend-next/app/globals.css` wraps the same fields in `.study-prose` and sizes
@@ -197,9 +210,22 @@
     <h2>候選列表</h2>
     <div id="list-filters">
       <select id="category"><option value="">載入中…</option></select>
+      <select id="human-status" title="人在站上（v2）對這一題做過的裁決">
+        <option value="">人的狀態：全部</option>
+        <option value="untouched">未審</option>
+        <option value="accept">已接受</option>
+        <option value="block">已封鎖</option>
+        <option value="needs_review">需人工確認</option>
+        <option value="reset">已重設（需重審）</option>
+        <option value="commented">只有註解</option>
+      </select>
       <label><input type="checkbox" id="only-unjudged">未判讀</label>
       <label><input type="checkbox" id="only-figures">有圖</label>
       <label><input type="checkbox" id="only-disputed" title="設計者曾標記為有問題（block／comment）">有問題的（你說過的）</label>
+    </div>
+    <div id="legend">
+      <b>人的狀態</b>＝你在 v2 按的裁決（讀站上的 review events；沙盒是快照，可能落後）。
+      <b>你判</b>＝你在這一頁按的判讀；<b>代理</b>＝代理自己判的。三者分開畫，因為它們不是同一件事。
     </div>
     <div id="cat-count">—</div>
     <div id="list"></div>
@@ -443,6 +469,36 @@ function renderSaid(rows) {
 }
 
 /**
+ * 「這一題用了哪幾條經驗」——判讀送出去**之前**，他寫過的四條通道 ＋ 這一題圖的事實。
+ *
+ * 這是輸入那一側，所以畫在「模型讀到什麼」之前。`experience` 由 `bridge.py` 用正式載入器
+ * （`confirm_dispute.load_prompt_inputs`）取，與真正送進提示詞的是同一批；原文照登，不做摘要——
+ * 畫面上要能回答的是「模型這次被交代了什麼」，摘要會讓一句沒送出去的話看起來像送出去了。
+ *
+ * 空的經驗**不畫**（不是畫成「無」）：三十五筆舊判讀在這一欄之前就寫了，畫成「無」會把
+ * 「這一輪還沒有紀錄」講成「這一題沒有經驗」。
+ */
+function renderExperience(who, exp) {
+  if (!exp) return "";
+  const ps = exp.principles || [];
+  const parts = [];
+  if (ps.length) {
+    parts.push(`<div>基本原則 ${ps.length} 條（已核准）：</div>
+      <ol class="exp-list">${ps.map((p) => `<li>${esc(p)}</li>`).join("")}</ol>`);
+  }
+  if (exp.note) parts.push(`<div>這一題的註解：<i>${esc(exp.note)}</i></div>`);
+  if (exp.answers) parts.push(`<pre class="raw">${esc(exp.answers)}</pre>`);
+  if (exp.rejected) {
+    const fields = (exp.rejected.fields || []).join("、");
+    parts.push(`<div>被退過的改動：${esc(String(exp.rejected.count ?? "?"))} 次${
+      fields ? `（${esc(fields)}）` : ""}</div>`);
+  }
+  if (exp.figures) parts.push(`<div>這一題的圖：${esc(exp.figures)}</div>`);
+  if (!parts.length) return "";
+  return `<h3>用了哪幾條經驗（${who}）</h3>${parts.join("")}`;
+}
+
+/**
  * What the model actually read and produced.
  *
  * The designer asked for this by name (2026-09-28): 「你可以顯示JSONL實際上記錄到什麼，
@@ -459,6 +515,9 @@ function renderAiRead(question) {
   const sections = [];
   for (const row of rows) {
     const who = esc(row.engine || row.source || "agent");
+    // 輸入先於輸出：先畫被交代了什麼，再畫模型讀到什麼。
+    const exp = renderExperience(who, row.experience);
+    if (exp) sections.push(exp);
     if (row.seen) {
       sections.push(`<h3>模型讀到什麼（${who}）</h3>
         <pre class="raw">${esc(JSON.stringify(row.seen, null, 2))}</pre>`);
@@ -513,6 +572,11 @@ function renderTrace(rows) {
 // -- the candidate list ---------------------------------------------------------------------
 // The list is the way in. A candidate_key box alone made the UI usable only by whoever built it.
 const JUDGED_LABEL = { up: "沒問題", down: "有問題", hold: "暫存" };
+// The reviewer's own decisions on the station, in his words. Same labels as `bridge.STATUS_LABELS`.
+const HUMAN_LABEL = {
+  untouched: "未審", accept: "已接受", block: "已封鎖", needs_review: "需人工確認",
+  reviewed: "已審", reset: "已重設", commented: "只有註解",
+};
 let listRows = [];
 
 function renderList(rows, total) {
@@ -521,8 +585,16 @@ function renderList(rows, total) {
     ? `${total} 題`
     : `顯示 ${rows.length}／${total} 題`;
   $("list").innerHTML = rows.length ? rows.map((q) => {
-    const judged = q.judged
-      ? `<span class="judged ${esc(q.judged)}">${esc(JUDGED_LABEL[q.judged] || q.judged)}</span>` : "";
+    // Three chips, three sources, drawn apart. He said the sandbox did not strictly separate
+    // 「已經審過」 from 「有問題」 (2026-09-29); it was drawing one `judged` flag for what is really
+    // (a) his decision on the station, (b) his decision pressed here, (c) the agent's own rating.
+    const human = q.human_status && q.human_status !== "untouched"
+      ? `<span class="human ${esc(q.human_status)}" title="站上 v2 的裁決">人：${esc(HUMAN_LABEL[q.human_status] || q.human_status)}</span>`
+      : '<span class="tag" title="站上 v2 沒有這一題的紀錄">人：未審</span>';
+    const mine = q.judged_by_designer
+      ? `<span class="judged ${esc(q.judged_by_designer)}">你判：${esc(JUDGED_LABEL[q.judged_by_designer] || q.judged_by_designer)}</span>` : "";
+    const agent = q.judged_by_agent
+      ? `<span class="judged ${esc(q.judged_by_agent)}">代理：${esc(JUDGED_LABEL[q.judged_by_agent] || q.judged_by_agent)}</span>` : "";
     const figures = q.figures ? `<span class="tag">圖 ${q.figures}</span>` : "";
     // The designer's own flag, and his own words. He said the sandbox made his earlier review
     // invisible (「我原本在 v2 審核過的大量題目也沒有紀錄」); a list that shows what he wrote is the
@@ -530,7 +602,7 @@ function renderList(rows, total) {
     const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
     const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
     return `<div class="row" data-key="${esc(q.candidate_key)}">
-      <div class="top"><span class="no">q${esc(q.question_number)}</span>${judged}${disputed}${figures}</div>
+      <div class="top"><span class="no">q${esc(q.question_number)}</span>${human}${mine}${agent}${disputed}${figures}</div>
       <div class="sub">${esc(q.subject || "")} ${esc(q.year || "")}</div>
       <div class="snip">${esc(q.stem || "")}</div>
       ${note}
@@ -549,9 +621,15 @@ function highlightCurrent() {
 async function loadCategories() {
   try {
     const data = await api("/api/browse");
+    // The number that answers 「我做到哪了」 is the reviewer's own, not this list's private store's:
+    // `人已審` counts questions with a live verdict on the station; `未審` the rest. `代理已判` is
+    // the agent's own rating and is labelled as such, so the two are never read as one.
     const options = ['<option value="">— 選一個科目 —</option>'].concat(
-      (data.categories || []).map((c) =>
-        `<option value="${esc(c.category)}">${esc(c.category)}（${c.total}，已判 ${c.judged}，有圖 ${c.with_figures}）</option>`));
+      (data.categories || []).map((c) => {
+        const h = c.human || {};
+        const reviewed = (h.accept || 0) + (h.block || 0) + (h.needs_review || 0) + (h.reviewed || 0);
+        return `<option value="${esc(c.category)}">${esc(c.category)}（${c.total} 題；人已審 ${reviewed}，未審 ${h.untouched || 0}${h.reset ? `，已重設 ${h.reset}` : ""}；代理已判 ${c.judged}；有圖 ${c.with_figures}）</option>`;
+      }));
     $("category").innerHTML = options.join("");
   } catch (error) {
     $("category").innerHTML = '<option value="">載入失敗</option>';
@@ -597,6 +675,7 @@ async function loadList() {
   if ($("only-unjudged").checked) query.set("unjudged", "1");
   if ($("only-figures").checked) query.set("with_figures", "1");
   if ($("only-disputed").checked) query.set("disputed", "1");
+  if ($("human-status").value) query.set("status", $("human-status").value);
   try {
     const data = await api("/api/browse?" + query);
     renderList(data.questions || [], data.total || 0);
@@ -964,6 +1043,7 @@ $("category").addEventListener("change", loadList);
 $("only-unjudged").addEventListener("change", loadList);
 $("only-figures").addEventListener("change", loadList);
 $("only-disputed").addEventListener("change", loadList);
+$("human-status").addEventListener("change", loadList);
 $("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loadQuestion(); });
 $("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
 

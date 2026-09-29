@@ -50,19 +50,22 @@ for (const id of ['textSide', 'listBody', 'crumbs', 'scopeCount', 'doneCount', '
   'doneBar', 'paperSide', 'paperHint', 'paperFrame', 'reasonText', 'reasonBox', 'dirtyBox',
   'toast', 'figureNote', 'editor', 'viewStem', 'viewOpts', 'actFix', 'actSave', 'actAccept',
   'editStem', 'pickCategory', 'pickYear', 'pickSitting', 'pickSubject', 'figuresOnly',
-  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nReturned', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
+  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nReturned', 'nCorrected', 'nAiCannot', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
   'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where',
-  // The four-area shell. The navigation contract is about the *question* area's walk, which this
+  // The five-area shell. The navigation contract is about the *question* area's walk, which this
   // harness drives directly by calling `go`/`next` - it never clicks an area button. But the
-  // script still wires the shell's elements at load time (the area buttons and the three other
+  // script still wires the shell's elements at load time (the area buttons and the four other
   // panes), so those nodes must exist or the script throws before the harness can reach it. The
-  // behaviour of the areas themselves is pinned by `test_v2_areas_browser.mjs` against real Chrome.
-  'whoami', 'homeCards', 'homeScope', 'sheetList', 'answerMain', 'discussMain', 'discussSide',
-  'areaHome', 'areaQuestion', 'areaAnswer', 'areaDiscuss']) makeElement(id);
+  // behaviour of the areas themselves is pinned by the real-Chrome harnesses
+  // (`test_v2_areas_browser.mjs`, `test_v2_principles_browser.mjs`).
+  // `answerPdf`／`principle*` came with the 2026-09-24 split (答案卷在右欄、原則區自成一個區)。
+  'whoami', 'homeCards', 'homeScope', 'sheetList', 'answerMain', 'answerPdf', 'discussMain', 'discussSide',
+  'principleList', 'principleMain', 'principlePdf',
+  'areaHome', 'areaQuestion', 'areaAnswer', 'areaDiscuss', 'areaPrinciples']) makeElement(id);
 elements.get('figuresOnly').tagName = 'INPUT';
 
 /* The chip radios: only the chip the test selects should read as checked. */
-const chipViews = ['all', 'group', 'unseen', 'flagged', 'returned', 'disputed'];
+const chipViews = ['all', 'group', 'unseen', 'flagged', 'returned', 'aicannot', 'disputed'];
 const chipNodes = chipViews.map((view) => {
   const radio = makeElement(`radio_${view}`, 'input');
   radio.value = view;
@@ -96,8 +99,10 @@ const document_ = {
   createElement: (tag) => makeElement(`auto_${Math.random()}`, tag),
 };
 
-const history_ = { replaceState() {} };
 const location_ = { hash: '' };
+// `replaceState` 在瀏覽器裡會**改掉網址**，所以這裡也要改：`scopeToHash()` 的產物就是
+// check 3c 要驗的東西（重新載入時網址裡有沒有具名一題）。留成 no-op 的話那一條驗不到任何字。
+const history_ = { replaceState(state, title, url) { if (typeof url === 'string' && url.startsWith('#')) location_.hash = url; } };
 
 const sandbox = {
   document: document_,
@@ -117,8 +122,8 @@ const sandbox = {
    with a no-op so the harness can build the state itself from the JSONL. The pattern is anchored on
    the boot call only, so the rest of the shell (including `showArea`) stays in place. */
 const wrapped = script.replace(/\nboot\(\)[^\n]*\n?\s*$/, '\n')
-  + '\n;globalThis.__qbr = { S, rebuildRows, visibleRows, viewMode, isGrouped, stateOf, hasDispute, '
-  + 'go, next, renderList, renderChips };';
+  + '\n;globalThis.__qbr = { S, A, rebuildRows, visibleRows, viewMode, isGrouped, stateOf, hasDispute, '
+  + 'aiCannotTell, refilter, go, next, renderList, renderChips, scopeToHash, scopeFromHash, invalidateAreas };';
 
 const fn = new Function(...Object.keys(sandbox), wrapped);
 const ctx = { ...sandbox };
@@ -126,6 +131,10 @@ fn(...Object.values(ctx));
 const qbr = globalThis.__qbr;
 function setView(view) {
   for (const chip of chipNodes) chip.querySelector('input').checked = (chip.dataset.view === view);
+  // A chip click in the UI runs `refilter()` (it re-splits, rebuilds and redraws). The harness flips
+  // the radio itself, so it has to run the same function - otherwise a view change would silently
+  // reuse the previous view's `全部` split, and this harness would be testing a path nobody clicks.
+  qbr.refilter();
 }
 
 /* --- the real queue, in the order the UI puts it in ---------------------------------------- */
@@ -287,18 +296,141 @@ check('畫出的位置就是走訪陣列的索引（兩者同源）',
 check('active 那一列就是 S.index', activeAt && Number(activeAt[1]) === S.index,
   `畫出 ${activeAt ? activeAt[1] : '?'} vs S.index ${S.index}`);
 
-/* --- check 3: the negative control - no filter, the walk is the whole paper ----------------- */
+/* --- check 3: 全部 = 整份紙本，**紙本順序**（不是「未審排前面」） ----------------------------
+   2026-09-24 使用者退回的那一版把「優先顯示還沒審的」做成**重排**（未審段＋已判段），於是
+   「往上一題參考」沒有了：未審段的最上面一列沒有上一列，而紙本上的前一題被搬到清單另一端。
+   使用者原文：「你是直接顯示還沒看的題目，但你不是跟我保證說不會干擾原本的排序嗎……我想要往上一題
+   參考也沒有了」。
+
+   所以現在釘住的是：**畫出來的清單就是紙本順序**，而「優先」由 `applyScope()` 把游標放在第一題
+   還沒審的（`firstOpen`）提供，不靠改順序。 */
 setView('all');
 elements.get('figuresOnly').checked = false;
 qbr.rebuildRows(null);
 check('全部：S.rows === S.view', S.rows.length === S.view.length, `${S.rows.length} vs ${S.view.length}`);
-const allPapers = S.rows.map((r) => r.paper);
-const allNumbers2 = S.rows.map((r) => r.question_number);
-// Same distinction: paper first, number second. Sorting by number alone would interleave the six
-// papers of a sitting, which is the defect the sort in `applyScope()` exists to prevent.
-const sortedOk = S.rows.every((r, i) => i === 0 || allPapers[i - 1] < allPapers[i]
-  || (allPapers[i - 1] === allPapers[i] && allNumbers2[i - 1] <= allNumbers2[i]));
-check('全部：先按卷、再按題號（同一卷內遞增，換卷才換號）', sortedOk);
+// 先按卷、再按題號。只按題號排會把同一次考試的六份卷交錯開來，那是 `applyScope()` 的排序要擋掉的
+// 缺陷。全部不重排，所以這一條對**整份**清單都成立（重排的那一版只能對每一段成立）。
+const inPaperOrder = (list) => list.every((r, i) => i === 0
+  || list[i - 1].paper < r.paper
+  || (list[i - 1].paper === r.paper && list[i - 1].question_number <= r.question_number));
+check('全部：整份清單按卷、再按題號（紙本順序）', inPaperOrder(S.rows),
+  `第一處不遞增在第 ${S.rows.findIndex((r, i) => !inPaperOrder(S.rows.slice(0, i + 1)))} 列`);
+
+/* 「上一題」必須是紙本上的前一題，**即使那一題已經判過**。這一條就是使用者抱怨的那件事，而它只能在
+   有已判過的題目時才測得到，所以先在中間判一題、再問它的上一列是誰。（負對照：把未審的排到前面，
+   剛判過的這一題就會離開原位，`S.index - 1` 於是不再是紙本上的前一題。） */
+qbr.rebuildRows(null);
+const paperBefore = S.rows.map((r) => r.candidate_key);
+const midAt = Math.floor(S.rows.length / 2);
+const midKey = paperBefore[midAt];
+const prevKey = paperBefore[midAt - 1];
+S.verdict.set(midKey, 'accept');
+qbr.rebuildRows(midKey);
+check('全部：判一題不會移動任何一列',
+  S.rows.map((r) => r.candidate_key).join(',') === paperBefore.join(','),
+  `${midKey} 判決後跑到第 ${S.rows.findIndex((r) => r.candidate_key === midKey)} 列（原第 ${midAt} 列）`);
+check('全部：判一題後游標仍在同一列',
+  S.index === midAt && (S.rows[S.index] || {}).candidate_key === midKey,
+  `游標在第 ${S.index} 列（${(S.rows[S.index] || {}).candidate_key}），應在第 ${midAt} 列`);
+check('全部：剛判完那一題的「上一題」是紙本上的前一題（就算它早就判過了）',
+  (S.rows[S.index - 1] || {}).candidate_key === prevKey,
+  `上一列是 ${(S.rows[S.index - 1] || {}).candidate_key}，應為 ${prevKey}`);
+/* 負對照：同一份清單，把判過的那一題搬到最後（就是 2026-09-24 被退回的那一版），上面三條裡的
+   最後兩條就必須不成立。用同一份資料跑，差別只有順序。 */
+{
+  const splitRows = S.rows.filter((r) => r.candidate_key !== midKey).concat([S.rows[midAt]]);
+  const splitAt = splitRows.findIndex((r) => r.candidate_key === midKey);
+  check('負對照：把判過的排到後面，「上一題」就不再是紙本上的前一題',
+    splitAt !== midAt && (splitRows[splitAt - 1] || {}).candidate_key !== prevKey,
+    `重排後那一題在第 ${splitAt} 列、上一列是 ${(splitRows[splitAt - 1] || {}).candidate_key}`
+      + `（紙本前一題是 ${prevKey}）`);
+}
+S.verdict.delete(midKey);
+qbr.rebuildRows(null);
+
+/* --- check 3b: `next()` 判完之後往前走一格，走的是紙本順序 ----------------------------------
+   判決不重排時，`next()` 的 `was`／`survived` 算術成立：判完還在同一列，所以往前走一格就是紙本上
+   的下一題。這一條用真的 `next()` 走三步，比對每一步都落在紙本順序的下一列。 */
+setView('all');
+qbr.rebuildRows(null);
+const walkKeys = S.rows.map((r) => r.candidate_key);
+const walkStart = Math.floor(S.rows.length / 2);
+S.index = walkStart;
+for (let step = 0; step < 3; step += 1) {
+  const at = walkStart + step;
+  const key = walkKeys[at];
+  S.verdict.set(key, 'accept');
+  qbr.next(key);
+  check(`全部：判第 ${at} 列後游標在第 ${at + 1} 列（紙本下一題）`,
+    S.index === at + 1 && (S.rows[S.index] || {}).candidate_key === walkKeys[at + 1],
+    `游標在第 ${S.index} 列（${(S.rows[S.index] || {}).candidate_key}），應在第 ${at + 1} 列`);
+}
+for (const key of walkKeys.slice(walkStart, walkStart + 3)) S.verdict.delete(key);
+qbr.rebuildRows(null);
+
+/* --- check 3c: 重新載入之後，未審的要開在你面前（而不是離開時那一題） -------------------------
+   使用者 2026-09-24 的第三個回報：整體順序不變（check 3 已驗），但**重新載入時游標要開在第一題
+   還沒審的**，之後往上（已判過的）往下都走得動。這一條在這一版之前做不到，因為 `scopeToHash()`
+   把題目區的當下游標也寫進網址，重新載入時 `buildScope()` 讀成 `S.openQuestion`、`applyScope()`
+   照它開——`firstOpen` 永遠輪不到。所以這裡驗的是**網址的字**：題目區只寫範圍，不寫 `qNNN`。
+
+   明講的連結不受影響：`scopeFromHash()` 照樣把 `/q41` 讀成 `{question:'q41'}`。
+   討論區的 `qNNN` 也照寫（那是它自己的契約）。 */
+{
+  S.scope = { ...S.scope, category: 'x', year: '115', sitting: '1', subject: 'y' };
+  S.index = 3;
+  qbr.A.area = 'question';
+  qbr.scopeToHash();
+  const questionHash = location_.hash;
+  check('重新載入：題目區的網址只寫範圍，不寫「當下這一題」',
+    questionHash === '#x/115/1/y', `寫成 ${questionHash}`);
+  const named = qbr.scopeFromHash();
+  check('重新載入：所以重新載入時沒有具名的題目，`firstOpen`（第一題還沒審的）才輪得到',
+    named && named.question === '',
+    `scopeFromHash 讀到 question=${JSON.stringify(named && named.question)}`);
+  // 負對照：舊行為（把當下游標也寫進去）會讓重新載入直接回到那一題——上面兩條就會不成立。
+  const oldHash = `#x/115/1/y/q${S.rows[S.index].question_number}`;
+  const oldNamed = qbr.scopeFromHash.call(null) && (() => {
+    const saved = location_.hash;
+    location_.hash = oldHash;
+    const got = qbr.scopeFromHash();
+    location_.hash = saved;
+    return got;
+  })();
+  check('負對照：舊行為寫出的網址會具名一題，重新載入就回到那一題（firstOpen 失效）',
+    oldNamed.question !== '', `舊網址讀到 question=${JSON.stringify(oldNamed.question)}`);
+  // 明講的連結仍然有效：這是「這一題」的連結形狀，`/q41` 必須讀得出來，而且科目必須是**第四段**。
+  {
+    const saved = location_.hash;
+    location_.hash = '#x/115/1/y/q41';
+    const got = qbr.scopeFromHash();
+    location_.hash = saved;
+    check('明講的連結：`#類科/年/次/科目/q41` 仍然讀得出 q41，科目是第四段',
+      got.question === 'q41' && got.category === 'x' && got.year === '115' && got.subject === 'y',
+      JSON.stringify(got));
+    // 負對照：舊版的 `rest.join('/')` 會把前三段也當成科目（`x/115/1/y`），那個字串不在科目清單裡，
+    // 於是 `resolveLevel()` 把它換成「全部科目」——連結指名的科目靜默消失。
+    const oldSubject = ['x', '115', '1', 'y'].join('/');
+    check('負對照：舊的 `rest.join(\'/\')` 讀出的科目是整串，不是第四段',
+      oldSubject === 'x/115/1/y' && oldSubject !== got.subject, `舊讀法得到 ${oldSubject}`);
+  }
+  location_.hash = questionHash;
+  qbr.A.area = 'question';
+}
+
+/* --- check 3d: 別區寫入之後，題目區要知道自己手上的狀態過期了 ------------------------------- */
+{
+  qbr.A.area = 'discuss';
+  qbr.A.questionStale = false;
+  qbr.invalidateAreas();
+  check('別的區寫入 → 題目區立起「過期」旗標（回來時才重讀列）', qbr.A.questionStale === true);
+  // 負對照：題目區自己寫入時不立旗標——它就在畫面上，自己會重畫；立了旗標只是多一次重讀。
+  qbr.A.area = 'question';
+  qbr.A.questionStale = false;
+  qbr.invalidateAreas();
+  check('負對照：題目區自己寫入時不立旗標', qbr.A.questionStale === false,
+    `得 ${qbr.A.questionStale}，應為 false`);
+}
 
 /* --- check 4: a filter that matches nothing must not break the walk ------------------------ */
 setView('disputed');
@@ -354,6 +486,123 @@ check('未看：每次決策只前進一題（沒有跳過題目）',
   judged.join(' → '));
 // Restore for later checks.
 for (const k of seen) S.verdict.delete(k);
+setView('all');
+qbr.rebuildRows(null);
+
+/* --- check 4c: 「AI無法判斷」＝ 模型讀了但沒有結論 --------------------------------------------
+   這一格與 `stateOf` 是兩條軸（模型給不給得出結論 vs 人做了什麼），所以它不參與上面的走法契約；
+   這裡驗的是**判準**與**篩選不吞列／不多收**。判準用的是真函式 `qbr.aiCannotTell`，邊界另外用
+   合成的 row 直接問它，因為「這一卷剛好沒有某種列」不該讓一條規則變成沒被測到。 */
+setView('aicannot');
+qbr.rebuildRows(null);
+const expected = S.view.filter((i) => qbr.aiCannotTell(i)).length;
+check('AI無法判斷：每一列都是模型沒有結論的題', S.rows.every((i) => qbr.aiCannotTell(i)));
+check('AI無法判斷：該收的一題都沒漏、沒有多收', S.rows.length === expected,
+  `S.rows=${S.rows.length}，S.view 裡符合的有 ${expected}`);
+// The two verdicts that ARE conclusions must not appear: this is what makes "cannot tell" meaningful
+// rather than "the model said something".
+check('AI無法判斷：OK 與 DEFECT 的題不在這一格', S.rows.every((i) => {
+  const v = ((i.candidate.qbr_ai_finding || {}).finding || {}).verdict;
+  return v !== 'OK' && v !== 'DEFECT';
+}));
+console.log(`  （這一卷 ${S.view.length} 題，其中「AI無法判斷」${S.rows.length} 題）`);
+/* 這一卷可能一題都沒有（`qbr_ai_finding` 是**伺服器送出的時候 join 的**，原始 candidates.jsonl
+   裡沒有這個欄位，所以這個 harness 讀到的 row 全都沒有 reading）。空集合上「每一列都符合」是恆真，
+   等於沒測——所以另外塞三列進去看篩選真的只留一列。這是**篩選接線**的檢查，判準本身由下面的
+   案例檢查。
+   三列都必須是**人擋過的**：這一格是 block 的子集（2026-09-24 使用者的第二個回報），所以
+   「未看過」的列本來就不該出現——塞未看的列進來只會驗到「未看的不收」，驗不到 verdict 的分辨。 */
+{
+  const fake = (key, verdict) => ({
+    candidate_key: key, question_number: key, paper: 'zzz/0/0/zzz',
+    group_size: 1, has_figure: false, stem_preview: key,
+    candidate: { candidate_key: key, qbr_ai_finding: verdict ? { finding: { verdict } } : null },
+  });
+  const injected = [fake('zz_ok', 'OK'), fake('zz_defect', 'DEFECT'), fake('zz_unknown', 'NOT_EXTRACTION')];
+  for (const item of injected) S.verdict.set(item.candidate_key, 'block');
+  S.view = S.view.concat(injected);
+  setView('aicannot');
+  qbr.rebuildRows(null);
+  const drawn = S.rows.map((i) => i.candidate_key);
+  check('AI無法判斷：塞三列（OK／DEFECT／NOT_EXTRACTION）進去，只畫得出 NOT_EXTRACTION 那一列',
+    drawn.length === 1 && drawn[0] === 'zz_unknown', `畫出 ${JSON.stringify(drawn)}`);
+  setView('all');
+  qbr.rebuildRows(null);
+  check('AI無法判斷：換到「全部」時三列都在（篩選沒有弄壞別的籤）',
+    S.rows.filter((i) => i.candidate_key.startsWith('zz_')).length === 3);
+  S.view = S.view.filter((i) => !i.candidate_key.startsWith('zz_'));
+  for (const item of injected) S.verdict.delete(item.candidate_key);
+}
+setView('aicannot');
+qbr.rebuildRows(null);
+{
+  const cannotTellRow = (key) => ({
+    candidate_key: key, candidate: { qbr_ai_finding: { finding: { verdict: 'NOT_EXTRACTION' } } },
+  });
+  const errorRow = (key) => ({ candidate_key: key, candidate: { qbr_ai_finding: { error: 'unparsed' } } });
+  const noVerdictRow = (key) => ({ candidate_key: key, candidate: { qbr_ai_finding: { finding: {} } } });
+  const noReadingRow = (key) => ({ candidate_key: key, candidate: {} });
+  const okRow = (key) => ({ candidate_key: key, candidate: { qbr_ai_finding: { finding: { verdict: 'OK' } } } });
+  const defectRow = (key) => ({ candidate_key: key, candidate: { qbr_ai_finding: { finding: { verdict: 'DEFECT' } } } });
+  /* 業主的循環收尾（2026-09-25）：機器試滿三次、每一次都被打回 ⇒ 機器停手，這一題回到人手上。
+     這一列的模型 verdict 是 DEFECT（有結論），所以**舊行為會把它排除**——那正是這一條要抓的。 */
+  const exhaustedRow = (key) => ({ candidate_key: key, candidate: {
+    qbr_ai_finding: { finding: { verdict: 'DEFECT' } }, review: { attempts: 3, exhausted: true } } });
+  const attemptedRow = (key) => ({ candidate_key: key, candidate: {
+    qbr_ai_finding: { finding: { verdict: 'DEFECT' } }, review: { attempts: 2, exhausted: false } } });
+
+  /* 每一列都問它兩件事：模型有沒有結論、**人**對這一題做了什麼。第二件事掛在 `S.verdict` 上
+     （判準讀的就是它），所以案例自己把 verdict 放進去、跑完拿掉。 */
+  const cases = [
+    // [說明, 人的 verdict（null＝未看）, 這一列, 應不應該收]
+    ['人擋過（block）＋模型說「不是抽取造成的」→ 要人下註解', 'block', cannotTellRow('c1'), true],
+    ['人按了需重看（needs_review）＋模型沒有結論 → 一樣要', 'needs_review', cannotTellRow('c2'), true],
+    ['人擋過＋模型讀失敗（error）', 'block', errorRow('c3'), true],
+    ['人擋過＋有記錄但沒有 verdict', 'block', noVerdictRow('c4'), true],
+    ['人擋過＋沒有 reading：沒讀過不等於讀了不知道', 'block', noReadingRow('c5'), false],
+    ['人擋過＋模型說 OK（沒發現異常）', 'block', okRow('c6'), false],
+    ['人擋過＋模型說 DEFECT（認為有問題）', 'block', defectRow('c7'), false],
+    ['人已經確認正常（accept）→ 沒有待辦事項', 'accept', cannotTellRow('c8'), false],
+    ['人還沒看過（unseen）→ 不是人的待辦事項', null, cannotTellRow('c9'), false],
+    ['機器退回、等人複核（reset_review）→ 在「AI已修改」等，不是這一格', 'reset_review', cannotTellRow('c10'), false],
+    ['人擋過＋機器試滿三次（exhausted）→ 機器停手，回到人手上', 'block', exhaustedRow('c11'), true],
+    ['人擋過＋只試了兩次（還沒停手）＋模型有結論 → 不催人', 'block', attemptedRow('c12'), false],
+  ];
+  for (const [name, verdict, item, want] of cases) {
+    if (verdict) S.verdict.set(item.candidate_key, verdict);
+    else S.verdict.delete(item.candidate_key);
+    const got = qbr.aiCannotTell(item);
+    check(`AI無法判斷的判準：${name}`, got === want, `得 ${got}，應為 ${want}`);
+    S.verdict.delete(item.candidate_key);
+  }
+
+  /* Negative controls: the three rules a person writes first, applied to the same cases. Each must
+     disagree with the expectations above - if one agreed, those checks would be pinning nothing.
+       1. 有 reading 就算（不分模型有沒有結論）
+       2. 沒讀過也算
+       3. 只看模型、不看人做了什麼（這是第一版，使用者的第二個回報就是它：未看過的也被框進來） */
+  const looseRule = (item) => !!item.candidate.qbr_ai_finding;
+  const unreadRule = (item) => !item.candidate.qbr_ai_finding || qbr.aiCannotTell(item);
+  const modelOnlyRule = (item) => {
+    const record = item.candidate.qbr_ai_finding;
+    if (!record) return false;
+    if (record.error) return true;
+    const verdict = (record.finding || {}).verdict;
+    return !verdict || (verdict !== 'OK' && verdict !== 'DEFECT');
+  };
+  const disagree = (rule) => cases.filter(([, verdict, item, want]) => {
+    if (verdict) S.verdict.set(item.candidate_key, verdict);
+    const got = rule(item) === want;
+    S.verdict.delete(item.candidate_key);
+    return !got;
+  }).length;
+  check('負對照：「有 reading 就算」會在 OK／DEFECT／已放行／未看過／機器退回／只試兩次 6 列上不符',
+    disagree(looseRule) === 6, `${disagree(looseRule)} 列不符`);
+  check('負對照：「沒讀過也算」會在沒有 reading 的那一列不符', disagree(unreadRule) === 1,
+    `${disagree(unreadRule)} 列不符`);
+  check('負對照：「只看模型、不看人」會在已放行／未看過／機器退回／試滿三次 4 列上不符（＝第一版的行為）',
+    disagree(modelOnlyRule) === 4, `${disagree(modelOnlyRule)} 列不符`);
+}
 setView('all');
 qbr.rebuildRows(null);
 
