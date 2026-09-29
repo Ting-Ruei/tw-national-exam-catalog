@@ -297,7 +297,15 @@ def cleaned_source_metadata(row: dict[str, Any], qjson: dict[str, Any], asset_re
         "year",
         "parser_version",
         "question_pdf_relative",
+        "question_pdf_sha256",
+        "answer_pdf_relative",
         "answer_pdf_primary_relative",
+        "answer_pdf_sha256",
+        "corrected_answer_pdf_relative",
+        "corrected_answer_pdf_sha256",
+        "answer_source_registry_key",
+        "answer_source_registry_keys",
+        "answer_source_documents",
         "question_markdown_relative",
         "answer_markdown_relative",
         "answer_role_primary",
@@ -305,6 +313,26 @@ def cleaned_source_metadata(row: dict[str, Any], qjson: dict[str, Any], asset_re
     ]
     source_metadata = {key: metadata.get(key) for key in wanted_keys if metadata.get(key) not in (None, "")}
     visual_profile = build_visual_profile(row, asset_records)
+    answer_source_registry_key = (
+        row.get("answer_source_registry_key") or metadata.get("answer_source_registry_key")
+    )
+    answer_role = row.get("answer_document_role") or metadata.get("answer_role_primary")
+    answer_pdf_relative = (
+        row.get("answer_pdf_relative")
+        or metadata.get("answer_pdf_primary_relative")
+        or metadata.get("answer_pdf_relative")
+    )
+    answer_pdf_sha256 = row.get("answer_pdf_sha256") or metadata.get("answer_pdf_sha256")
+    answer_source_documents = metadata.get("answer_source_documents")
+    if not isinstance(answer_source_documents, list):
+        answer_source_documents = []
+    if answer_source_registry_key:
+        answer_source_documents = [{
+            "role": answer_role,
+            "registry_key": answer_source_registry_key,
+            "pdf_relative": answer_pdf_relative,
+            "sha256": answer_pdf_sha256,
+        }]
     source_metadata.update(
         {
             "external_source": EXTERNAL_SOURCE,
@@ -319,6 +347,26 @@ def cleaned_source_metadata(row: dict[str, Any], qjson: dict[str, Any], asset_re
             "review_status": row.get("review_status"),
             "parser_version": row.get("parser_version") or source_metadata.get("parser_version"),
             "canonical_subject_name": row.get("canonical_subject_name"),
+            "question_pdf_relative": row.get("question_pdf_relative") or source_metadata.get("question_pdf_relative"),
+            "question_pdf_sha256": row.get("question_pdf_sha256") or source_metadata.get("question_pdf_sha256"),
+            "answer_pdf_relative": answer_pdf_relative,
+            "answer_pdf_primary_relative": answer_pdf_relative,
+            "answer_pdf_sha256": answer_pdf_sha256,
+            "answer_role_primary": answer_role,
+            "answer_source_registry_key": answer_source_registry_key,
+            "answer_source_registry_keys": (
+                [answer_source_registry_key] if answer_source_registry_key
+                else source_metadata.get("answer_source_registry_keys")
+            ),
+            "answer_source_documents": answer_source_documents,
+            "corrected_answer_pdf_relative": (
+                answer_pdf_relative if answer_role == "correction"
+                else source_metadata.get("corrected_answer_pdf_relative")
+            ),
+            "corrected_answer_pdf_sha256": (
+                answer_pdf_sha256 if answer_role == "correction"
+                else source_metadata.get("corrected_answer_pdf_sha256")
+            ),
             "subject_mapping_note": row.get("subject_mapping_note"),
             "asset_refs": asset_records,
             "visual_profile": visual_profile,
@@ -506,6 +554,7 @@ def build_question_record(
         "visual_profile": visual_profile,
         "feature_tags": feature_tags,
         "metadata": metadata,
+        "answer_source_registry_key": row.get("answer_source_registry_key") or metadata.get("answer_source_registry_key"),
     }
     record["metadata"]["source_content_hash"] = content_hash
     if row.get("canonical_subject_name"):
@@ -528,6 +577,11 @@ SELECT jsonb_build_object(
     'answer_json', ans.answer_json,
     'is_correction', ans.is_correction,
     'answer_source_registry_key', ans_od.registry_key,
+    'answer_document_role', ans_od.document_role,
+    'question_pdf_relative', question_pdf.relative_asset_path,
+    'question_pdf_sha256', question_pdf.sha256,
+    'answer_pdf_relative', answer_pdf.relative_asset_path,
+    'answer_pdf_sha256', answer_pdf.sha256,
     'formal_group_ref', g.group_key,
     'options', COALESCE((
         SELECT jsonb_agg(
@@ -593,6 +647,24 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) ans ON true
 LEFT JOIN exam.official_documents ans_od ON ans_od.id = ans.answer_source_document_id
+LEFT JOIN LATERAL (
+    SELECT a.relative_asset_path, a.sha256
+    FROM exam.document_assets da
+    JOIN exam.assets a ON a.id = da.asset_id
+    WHERE da.official_document_id = od.id
+      AND a.asset_type = 'pdf'
+    ORDER BY CASE WHEN da.role = 'primary_pdf' THEN 0 ELSE 1 END, da.role, a.asset_key
+    LIMIT 1
+) question_pdf ON true
+LEFT JOIN LATERAL (
+    SELECT a.relative_asset_path, a.sha256
+    FROM exam.document_assets da
+    JOIN exam.assets a ON a.id = da.asset_id
+    WHERE da.official_document_id = ans_od.id
+      AND a.asset_type = 'pdf'
+    ORDER BY CASE WHEN da.role = 'primary_pdf' THEN 0 ELSE 1 END, da.role, a.asset_key
+    LIMIT 1
+) answer_pdf ON true
 LEFT JOIN exam.canonical_subject_mappings csm
     ON csm.category_group_name = c.group_name
     AND csm.official_category_name = c.official_category_name
@@ -833,6 +905,9 @@ def main() -> None:
                 "exam.answers",
                 "exam.question_assets",
                 "exam.question_groups",
+                "exam.official_documents",
+                "exam.document_assets",
+                "exam.assets",
             ],
             "group_export_policy": "groups.jsonl and question group_ref are exported only from confirmed formal question_group_id links to exam.question_groups.",
             "visual_export_policy": "questions.jsonl exports top-level visual_profile and feature_tags derived from formal question_assets, asset_quality_status, visual_review, and visual dependency text markers; asset_manifest.jsonl is the package asset copy plan.",

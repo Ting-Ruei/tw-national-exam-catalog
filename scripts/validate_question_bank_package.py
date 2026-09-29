@@ -13,13 +13,23 @@ import hashlib
 import json
 import re
 from collections import Counter, defaultdict
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 REQUIRED_FILES = ("manifest.json", "subjects.json", "questions.jsonl", "groups.jsonl", "asset_manifest.jsonl")
 SUPPORTED_QUESTION_TYPES = {"single_choice", "single", "multiple", "truefalse", "group"}
-ABSOLUTE_LOCAL_RE = re.compile(r"(/Users/|/Volumes/|file://|[A-Za-z]:\\\\)")
+#: Review statuses a package may be **built** from. `agent_verified` is deliverable and reported
+#: separately (`package_agent_verified_not_human_accepted`): an agent's verification is weaker than
+#: a person's acceptance, and collapsing the two is the governance floor's one prohibition.
+#: `machine_verified_pending_human` stays refused — it was already the pipeline's own default, so
+#: admitting it here would make this gate accept a record whose only claim is that a script ran.
+DELIVERABLE_REVIEW_STATUSES = ("accepted", "agent_verified")
+ABSOLUTE_LOCAL_RE = re.compile(
+    r"(/Users/|/Volumes/|file://|[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])",
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +70,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def build_issue(severity: str, code: str, message: str, count: int, examples: list[Any] | None = None) -> dict[str, Any]:
     return {
         "severity": severity,
@@ -82,6 +96,23 @@ def contains_abs_local(value: Any) -> bool:
     if isinstance(value, dict):
         return any(contains_abs_local(item) for item in value.values())
     return False
+
+
+def is_relative_package_path(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or text.startswith("~") or "\\" in text:
+        return False
+    posix_path = Path(text)
+    windows_path = PureWindowsPath(text)
+    parsed = urlsplit(text)
+    return (
+        not posix_path.is_absolute()
+        and ".." not in posix_path.parts
+        and not windows_path.is_absolute()
+        and not windows_path.drive
+        and not parsed.scheme
+        and not parsed.netloc
+    )
 
 
 def asset_paths_from_question(question: dict[str, Any]) -> list[str]:
@@ -147,11 +178,131 @@ def validate_manifest_counts(args: argparse.Namespace, package_dir: Path, manife
         issues.append(build_issue("error", "package_export_warnings_present", "Exporter warnings must be resolved before formal import.", int(actual.get("warnings") or 0), []))
 
 
+def validate_manifest_files(args: argparse.Namespace, package_dir: Path, manifest: dict[str, Any], issues: list[dict[str, Any]]) -> None:
+    entries = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    expected_files = {
+        "questions": "questions.jsonl",
+        "subjects": "subjects.json",
+        "groups": "groups.jsonl",
+        "asset_manifest": "asset_manifest.jsonl",
+        "warnings": "warnings.jsonl",
+    }
+    missing_entries: list[str] = []
+    invalid_paths: list[dict[str, Any]] = []
+    missing_files: list[dict[str, Any]] = []
+    size_mismatches: list[dict[str, Any]] = []
+    sha_mismatches: list[dict[str, Any]] = []
+    declared_hashes: dict[str, str] = {}
+    package_root = package_dir.resolve()
+
+    for name, expected_path in expected_files.items():
+        entry = entries.get(name)
+        if name == "warnings" and entry is None:
+            if int((manifest.get("counts") or {}).get("warnings") or 0) > 0:
+                missing_entries.append(name)
+            continue
+        if not isinstance(entry, dict):
+            missing_entries.append(name)
+            continue
+        path_text = str(entry.get("path") or "")
+        relative = Path(path_text)
+        if (
+            path_text != expected_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            invalid_paths.append({"file": name, "path": path_text})
+            continue
+        path = (package_dir / relative).resolve()
+        if not path.is_relative_to(package_root):
+            invalid_paths.append({"file": name, "path": path_text})
+            continue
+        if not path.is_file():
+            missing_files.append({"file": name, "path": path_text})
+            continue
+        if entry.get("bytes") != path.stat().st_size:
+            size_mismatches.append({
+                "file": name,
+                "manifest": entry.get("bytes"),
+                "actual": path.stat().st_size,
+            })
+        expected_sha = str(entry.get("sha256") or "")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha):
+            sha_mismatches.append({"file": name, "manifest": expected_sha})
+        else:
+            declared_hashes[name] = expected_sha
+            actual_sha = sha256_file(path)
+            if expected_sha != actual_sha:
+                sha_mismatches.append({
+                    "file": name,
+                    "manifest": expected_sha,
+                    "actual": actual_sha,
+                })
+
+    if missing_entries:
+        issues.append(build_issue(
+            "error", "package_manifest_file_entry_missing",
+            "Manifest must list every package data file and any emitted warning file.",
+            len(missing_entries), limited(args, missing_entries),
+        ))
+    if invalid_paths:
+        issues.append(build_issue(
+            "error", "package_manifest_file_path_invalid",
+            "Manifest file paths must be the expected package-relative paths.",
+            len(invalid_paths), limited(args, invalid_paths),
+        ))
+    if missing_files:
+        issues.append(build_issue(
+            "error", "package_manifest_listed_file_missing",
+            "Every manifest-listed file must exist inside the package.",
+            len(missing_files), limited(args, missing_files),
+        ))
+    if size_mismatches:
+        issues.append(build_issue(
+            "error", "package_manifest_file_size_mismatch",
+            "Manifest file byte counts must match the packaged files.",
+            len(size_mismatches), limited(args, size_mismatches),
+        ))
+    if sha_mismatches:
+        issues.append(build_issue(
+            "error", "package_manifest_file_sha256_mismatch",
+            "Manifest file hashes must match the packaged files.",
+            len(sha_mismatches), limited(args, sha_mismatches),
+        ))
+
+    required_hashes = ("questions", "subjects", "groups", "asset_manifest")
+    if all(name in declared_hashes for name in required_hashes):
+        asset_root = package_dir / "assets"
+        asset_files = sorted(path for path in asset_root.rglob("*") if path.is_file()) if asset_root.exists() else []
+        content_payload = {
+            "questions": declared_hashes["questions"],
+            "subjects": declared_hashes["subjects"],
+            "groups": declared_hashes["groups"],
+            "asset_manifest": declared_hashes["asset_manifest"],
+            "asset_files": [sha256_file(path) for path in asset_files],
+        }
+        expected_content_sha = sha256_text(json.dumps(
+            content_payload, ensure_ascii=False, sort_keys=True,
+        ))
+        manifest_content_sha = str(manifest.get("package_content_sha256") or "")
+        if manifest_content_sha != expected_content_sha:
+            issues.append(build_issue(
+                "error", "package_content_sha256_mismatch",
+                "package_content_sha256 must bind all manifest data files and packaged assets.",
+                1, [{"manifest": manifest_content_sha, "actual": expected_content_sha}],
+            ))
+    else:
+        issues.append(build_issue(
+            "error", "package_content_hash_inputs_missing",
+            "Package content hash cannot be checked without all required manifest file hashes.",
+            1, [],
+        ))
+
+
 def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]], groups: list[dict[str, Any]], assets: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
     seen: set[str] = set()
     duplicate_keys: list[str] = []
     invalid_required: list[dict[str, Any]] = []
-    agent_verified: list[str] = []
     duplicate_options: list[dict[str, Any]] = []
     unsupported_types: list[dict[str, Any]] = []
     missing_visual: list[str] = []
@@ -161,6 +312,7 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
     question_group_refs: Counter[str] = Counter()
     missing_asset_refs: list[dict[str, Any]] = []
     visual_dependency_without_asset: list[str] = []
+    agent_verified: list[str] = []
 
     for question in questions:
         key = str(question.get("source_question_key") or "")
@@ -173,18 +325,10 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
             for field in ("source_question_key", "source_registry_key", "stem", "options", "answer", "question_type", "metadata")
             if not question.get(field)
         ]
-        if metadata.get("review_status") == "accepted":
-            pass
-        elif metadata.get("review_status") == "agent_verified":
-            # A reviewing agent checked this record on the paper and found it clean. It is
-            # deliverable, but it is **weaker than `accepted`**: the two are reported separately
-            # (see `validate_review_status_split`) rather than collapsed, because a package whose
-            # manifest cannot say which records met a person is a package that has quietly raised
-            # its own assurance level. The status itself is never rewritten to `accepted` — that
-            # is a human decision and the governance floor forbids an agent from writing it.
-            agent_verified.append(key)
-        else:
+        if metadata.get("review_status") not in DELIVERABLE_REVIEW_STATUSES:
             required_missing.append("metadata.review_status in (agent_verified, accepted)")
+        elif metadata.get("review_status") == "agent_verified":
+            agent_verified.append(key)
         if not metadata.get("source_content_hash"):
             required_missing.append("metadata.source_content_hash")
         if not metadata.get("canonical_subject_name"):
@@ -215,17 +359,10 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
 
     if duplicate_keys:
         issues.append(build_issue("error", "package_duplicate_source_question_key", "source_question_key must be unique.", len(duplicate_keys), limited(args, duplicate_keys)))
-    if agent_verified:
-        # A warning, not an error: the records are deliverable, but the package must say out loud
-        # that they met an agent rather than a person. Reported as its own code so a reader can
-        # count it, and so "how much of this package is human-reviewed" is answerable from a
-        # package without re-reading every record.
-        issues.append(build_issue(
-            "warning", "package_agent_verified_not_human_accepted",
-            "Records carry review_status=agent_verified: reviewed by an agent, not accepted by a human.",
-            len(agent_verified), limited(args, agent_verified)))
     if invalid_required:
         issues.append(build_issue("error", "package_question_required_fields_invalid", "Question records are missing required import fields.", len(invalid_required), limited(args, invalid_required)))
+    if agent_verified:
+        issues.append(build_issue("warning", "package_agent_verified_not_human_accepted", "Questions carry an agent's verification, not a person's acceptance: deliverable, but counted separately.", len(agent_verified), limited(args, agent_verified)))
     if duplicate_options:
         issues.append(build_issue("error", "package_duplicate_option_keys", "Question options must not contain duplicate keys.", len(duplicate_options), limited(args, duplicate_options)))
     if unsupported_types:
@@ -238,6 +375,96 @@ def validate_questions(args: argparse.Namespace, questions: list[dict[str, Any]]
         issues.append(build_issue("error", "package_question_asset_ref_missing_manifest", "Question asset references must appear in asset_manifest.jsonl.", len(missing_asset_refs), limited(args, missing_asset_refs)))
     if visual_dependency_without_asset:
         issues.append(build_issue("warning", "package_visual_dependency_without_asset", "Questions mention visual dependencies but do not have packaged assets; importer/display should decide fallback behavior.", len(visual_dependency_without_asset), limited(args, visual_dependency_without_asset)))
+
+
+def validate_source_document_lineage(args: argparse.Namespace, questions: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
+    invalid_question_sources: list[dict[str, Any]] = []
+    invalid_answer_sources: list[dict[str, Any]] = []
+    inconsistent_answer_keys: list[dict[str, Any]] = []
+
+    def valid_source_path(value: Any) -> bool:
+        return is_relative_package_path(value)
+
+    def valid_sha256(value: Any) -> bool:
+        return bool(re.fullmatch(r"[0-9a-fA-F]{64}", str(value or "")))
+
+    for question in questions:
+        key = str(question.get("source_question_key") or "")
+        metadata = question.get("metadata") if isinstance(question.get("metadata"), dict) else {}
+        if (
+            not valid_source_path(metadata.get("question_pdf_relative"))
+            or not valid_sha256(metadata.get("question_pdf_sha256"))
+        ):
+            invalid_question_sources.append({"source_question_key": key})
+
+        if not question.get("answer"):
+            continue
+        source_documents = metadata.get("answer_source_documents")
+        if not isinstance(source_documents, list) or not source_documents:
+            invalid_answer_sources.append({
+                "source_question_key": key,
+                "reason": "answer_source_documents_missing",
+            })
+            continue
+        source_keys: list[str] = []
+        for source in source_documents:
+            if not isinstance(source, dict):
+                invalid_answer_sources.append({
+                    "source_question_key": key,
+                    "reason": "answer_source_document_invalid",
+                })
+                continue
+            role = str(source.get("role") or "")
+            registry_key = str(source.get("registry_key") or "")
+            role_suffix = {"answer": ":answer", "correction": ":correction"}.get(role)
+            source_keys.append(registry_key)
+            if (
+                role_suffix is None
+                or not registry_key.endswith(role_suffix or "")
+                or not valid_source_path(source.get("pdf_relative"))
+                or not valid_sha256(source.get("sha256"))
+            ):
+                invalid_answer_sources.append({
+                    "source_question_key": key,
+                    "registry_key": registry_key,
+                    "role": role,
+                })
+        declared_keys = metadata.get("answer_source_registry_keys")
+        if not isinstance(declared_keys, list):
+            singular = metadata.get("answer_source_registry_key")
+            declared_keys = [singular] if singular else []
+        declared_keys = [str(value) for value in declared_keys]
+        singular_key = metadata.get("answer_source_registry_key")
+        if (
+            declared_keys != source_keys
+            or (len(source_keys) == 1 and singular_key != source_keys[0])
+            or (len(source_keys) != 1 and singular_key not in (None, ""))
+        ):
+            inconsistent_answer_keys.append({
+                "source_question_key": key,
+                "declared": declared_keys,
+                "sources": source_keys,
+                "singular": singular_key,
+            })
+
+    if invalid_question_sources:
+        issues.append(build_issue(
+            "error", "package_question_pdf_lineage_invalid",
+            "Each question must retain a relative official-PDF path and its source SHA-256.",
+            len(invalid_question_sources), limited(args, invalid_question_sources),
+        ))
+    if invalid_answer_sources:
+        issues.append(build_issue(
+            "error", "package_answer_pdf_lineage_invalid",
+            "Each nonempty answer must retain its exact answer/correction document key, path, and source SHA-256.",
+            len(invalid_answer_sources), limited(args, invalid_answer_sources),
+        ))
+    if inconsistent_answer_keys:
+        issues.append(build_issue(
+            "error", "package_answer_source_keys_inconsistent",
+            "Answer source keys must exactly match the answer-source document records.",
+            len(inconsistent_answer_keys), limited(args, inconsistent_answer_keys),
+        ))
 
 
 def validate_groups(args: argparse.Namespace, questions: list[dict[str, Any]], groups: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
@@ -286,7 +513,7 @@ def validate_assets(args: argparse.Namespace, package_dir: Path, assets: list[di
         if package_path in seen_paths:
             duplicate_paths.append(package_path)
         seen_paths.add(package_path)
-        if not package_path or Path(package_path).is_absolute() or contains_abs_local(row):
+        if not is_relative_package_path(package_path) or contains_abs_local(row):
             invalid_path.append(row)
             continue
         path = package_dir / package_path
@@ -362,8 +589,10 @@ def main() -> None:
         raise SystemExit(f"Package directory not found: {package_dir}")
     manifest, subjects, questions, groups, assets = validate_files(args, package_dir, issues)
     if manifest:
+        validate_manifest_files(args, package_dir, manifest, issues)
         validate_manifest_counts(args, package_dir, manifest, subjects, questions, groups, assets, issues)
         validate_questions(args, questions, groups, assets, issues)
+        validate_source_document_lineage(args, questions, issues)
         validate_groups(args, questions, groups, issues)
         validate_assets(args, package_dir, assets, issues)
         validate_subjects(args, subjects, issues)
@@ -376,15 +605,6 @@ def main() -> None:
         "asset_manifest_rows": len(assets),
         "package_version": manifest.get("package_version") if isinstance(manifest, dict) else None,
     }
-    # The review split is a summary number, not a footnote: a package's headline claim is how far
-    # its contents have been verified, and "all accepted" and "all agent_verified" must never
-    # render as the same line.
-    review_split: Counter[str] = Counter()
-    for question in questions:
-        metadata = question.get("metadata") if isinstance(question.get("metadata"), dict) else {}
-        review_split[str(metadata.get("review_status") or "(none)")] += 1
-    if review_split:
-        summary["review_status"] = dict(sorted(review_split.items()))
     report = {
         "status": "fail" if error_count else "pass",
         "package_dir": str(package_dir),
