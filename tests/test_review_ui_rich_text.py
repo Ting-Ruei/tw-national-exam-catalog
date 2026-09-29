@@ -18,6 +18,8 @@ import re
 import unittest
 from pathlib import Path
 
+from review_ui_source import run_node_script
+
 
 ROOT = Path(__file__).resolve().parents[1]
 V2 = ROOT / "review_ui" / "v2.html"
@@ -129,11 +131,6 @@ class RichTextTests(unittest.TestCase):
             # The JS is driven through node when it is available; the table is the contract, so a
             # divergence is a defect in one of the two, never in the table.
             import json
-            import shutil
-            import subprocess
-            node = shutil.which('node')
-            if not node:
-                self.skipTest('node 不在這台機器上')
             script = (
                 'const RICH_TAGS = ["sub", "sup", "u", "b", "i"];\n'
                 'const esc = (v) => String(v ?? "").replace(/[&<>"\']/g, (c) => '
@@ -141,9 +138,8 @@ class RichTextTests(unittest.TestCase):
                 f'function richText(value) {{{source}\n}}\n'
                 f'console.log(JSON.stringify(richText({json.dumps(value)})));'
             )
-            result = subprocess.run([node, '-e', script], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), expected, f'input={value!r} (JS)')
+            stdout = run_node_script(script)
+            self.assertEqual(json.loads(stdout), expected, f'input={value!r} (JS)')
 
 
 if __name__ == '__main__':
