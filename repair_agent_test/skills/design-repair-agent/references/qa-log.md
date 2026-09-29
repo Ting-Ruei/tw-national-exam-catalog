@@ -3767,3 +3767,89 @@ store 沒改時剛好落在正確位置；一改，就走丟。**改成本模組
 3. 對話框第二種（**不綁題**）什麼時候做？設計者說「兩者都要，1 先做」——**1 已完成**，等指示做 2。
 4. 要不要現在開始掃**藥師(二)**（4,309 題純文字）？
 5. A1（`question_page`）要不要合併？（未合併 → 全庫 79,090 題 PDF 面板都開第 1 頁）
+
+---
+
+## Q41 — 設計者的六個問題（2026-09-28，第二輪）：全庫、兩個 UI、對話框第二種、JSONL 視圖
+
+> 協定：每次問答**當次**寫進本檔。這一輪設計者一次問了六件事，逐項記錄**查到的證據**與**改了什麼**。
+
+### §A 逐項回答
+
+| # | 設計者問 | 查到的實情 | 處置 |
+|---|---|---|---|
+| 1 | 我本來就是要 **occamy** 當主力 | 腦＝`ornith-1.5-mtplx-35b`（18120），眼＝`occamy-1.0-6bit`（18130）；**兩者同一架構**（`Qwen3_5MoeForConditionalGeneration`）。`read_page` 預設已經是 `occamy-6bit` | 保留兩顆的唯一理由是**錯誤只 37.8% 重疊**（兩個獨立引擎比同一顆看兩次強）。**是否把腦也換成 occamy 是設計者的決定**（待裁決 #1） |
+| 2 | **Agent 看不到全局** | **真的**。所有工具的第一個參數都是 `key`；`bridge.do_browse` 存在但**沒被包成工具**。所以它答「我需要更多資訊…還沒有指定哪一道題」**是對的**——那是**缺一個端**，不是模型笨 | 新增 **`see_corpus`**（`bridge.overview`）與 **`find_disputed`**（`bridge.disputes`）。**實測**：79,090 題／759 爭議／313 有字；藥師(一) 334 爭議、99 有字 |
+| 3 | **哪個 UI 是主場** | 設計者**在 v2 工作**（他的紀錄、A/B 快速切換都在那）；沙盒是**平行 console**。「重複造車」的真正形狀＝**agent 沒接在他已經在的那個畫面上**（v2 讀 `question_ai_findings.jsonl`，agent 寫 `agent_feedback.jsonl`） | **縮小差距、不長大沙盒**：沙盒加 `W`/`S` 走清單、`J`/`K` 判、**「有問題的（你說過的）」過濾**＋**把設計者的 `notes` 畫在列上**。建議路線仍是 **B＋C**（判讀接回 v2 讀的檔） |
+| 4 | **掃描藥師(二)** 是什麼 | **管線早就有題目**（藥師(二) 4,410 已在 queue）。真正的缺口是**稽核／判讀**，不是重新抽取。「掃描」是講錯了 | 只回答，未改碼 |
+| 5 | **JSONL 視圖沒看到** | **做過但沒有帶入**：上輪兩處 edit **原子失敗**（第 2 個不匹配 → 第 1 個也丟），`renderAiRead` **有定義、從未被呼叫**；舊測試只找字串所以**通過而功能是死的** | 把 raw `<details>` **真的接進 `renderQuestion`**，並新增 **`renderPipelineFindings`** 讀 `question_ai_findings.jsonl`（**707 MB／108,181 行**：`prompt_system`、`prompt_user`、`finding`、`raw`、`usage`）。**v2 只顯示解析後的 `finding`** |
+| 6 | **A1 合併** 是什麼 | A1＝分支 `agent/export-question-page-20260927`，加 `question_page` 欄位。**未合併 → 全庫 79,090 題 PDF 面板都開第 1 頁** | 待裁決 #5 |
+
+### §B 全庫工具（`see_corpus` / `find_disputed`）—— 實測輸出
+
+```
+總題數: 79090  爭議題: 759  agent判過: 2
+  物理治療師   15280  有圖 424   爭議 0   (有字 0)
+  醫事檢驗師   15280  有圖 448   爭議 98  (有字 22)   例: q041 '答案沒進去'
+  醫事放射師   15120  有圖 987   爭議 0   (有字 0)
+  醫師(二)      9920  有圖 806   爭議 0   (有字 0)
+```
+
+`find_disputed` 的形狀（**`notes` 不是 `reason`**——每一筆人工事件的 `reason` 都是空的）：
+
+```json
+{"candidate_key": "...:q51", "action": "block", "notes": "圖片夾在題目中，建議AI截整題看一下，然後補(如下圖)"}
+{"candidate_key": "...:q55", "action": "block", "notes": "答案包含文字與截圖，你嘗試解決看看"}
+{"candidate_key": "...:q60", "action": "block", "notes": "上標"}
+```
+
+**一句話結論（agent 自己講的，接工具後）**：題庫近 8 萬題、機器全未標記；設計者火力集中在**藥師**系科目
+（759 題被點名、313 題有留言），缺陷集中在**上下標錯誤、圖片／表格裁切錯誤、答案沒寫進**三件事。
+
+### §C 對話框第二種（不綁題）—— 實作完成
+
+- `chat.mjs`：`if (!key)` 走**全庫 seed**（叫它用 `see_corpus`／`find_disputed`，**不要回答「我需要更多資訊」**）；
+  未綁題 session 有自己的目錄（`corpus-<sha256 前12碼>`）；transcript 的 `candidate_key` 記 **`null`**。
+- `server.py`：`/api/chat/ask` 的 `key` **可以是空的**（＝未綁題），不再 400；`chat_turns("")` 讀回 `null` 那一組。
+- `index.html`：對話框標題加**兩個模式按鈕**（`綁這一題`／`全庫`）；全庫模式**載入題目不會搶走對話**。
+- **實測**：`POST /api/chat/ask {"key":""}` → 自己叫 `see_corpus`＋`find_disputed` 後作答；`store/chat.jsonl` 末筆
+  `candidate_key=None`；`/api/chat?key=` 讀回 1 則；session 目錄 `store/chat-sessions/corpus-18647b1c60e2/`。
+
+### §D 沙盒接上設計者的 v2 workflow
+
+- `bridge.do_browse`：新增 `--disputed` 過濾；每列帶 `disputed`／`dispute_actions`／`notes`／`prior_judgements`；
+  科目清單帶 `disputed` 數字。
+- `index.html`：`#only-disputed` 勾選框（「有問題的（你說過的）」）；列上 `你說過` 標籤＋**他的原文**；
+  `go(step)`（`W`/`S` 走**被畫出的清單**）＋`judgeKey()`（`J`/`K`，空 reason 不寫）。
+- **實測**：`/api/browse?category=藥師(一)&disputed=1` → **334 題**，q51/q55/q60 帶他的字。
+
+### §E 測試 38 → 42（負對照全部實測 FAIL）
+
+| 新測試 | 證明什麼 | 負對照（拿掉能力）| 結果 |
+|---|---|---|---|
+| raw view really renders | **跑真的 renderer** 並斷言輸出（SYSTEM/USER/WHERE/RAW-MARKER、`content_parts`） | 拿掉 `${renderAiRead}`／`${renderPipelineFindings}` | ✅ FAIL |
+| the pipeline's AI findings…reach the view | 走**真的 bridge**，證明欄位**離開磁碟**（不只是合成後能畫） | bridge 回 `ai_findings: []` | ✅ FAIL |
+| the agent can look at the whole corpus | `see_corpus`／`find_disputed` 存在且**真的呼叫 bridge**；disputes 有 key 有 notes | `see_corpus` 改名／notes 填空 | ✅ FAIL |
+| there is an unbound conversation… | 無 key 的 seed、自己的 session 目錄、server 接受空 key、讀得回 | server 恢復 `chat needs a key` | ✅ FAIL |
+| the designer's disputes are reachable… | 過濾、他的字畫在列上、走被畫出的清單 | 拿掉 `--disputed` 過濾 | ✅ FAIL |
+
+**教訓（第二次同型）**：**檢查字串存在 ≠ 功能活著**。raw view 的舊檢查就是這樣通過的；
+新檢查**執行函式並看輸出**，另一支**驅動真入口**（`bridge.py`）。
+
+### §F 設計者原話（本輪）
+
+> 「我本來就是要用 occamy 當主力…」「目前的 Agent 無法看到全局」
+> 「審題的 reviewUI/v2 我可以快速的上下切換跟 A 或 B，但你現在做的這個切換題目有點困難」
+> 「我原本在 v2 審核過的大量題目也沒有紀錄，我想要針對 block 的題目跟你進行對話暫時也做不到」
+> 「你可以顯示 JSONL 實際上記錄到什麼，或是 AI 實際上讀到/產生什麼，這是我要跟 AI 對話所需之到的樣子」
+> 「掃描藥師(二)…」
+
+### §G 待裁決（累積）
+
+1. **腦（`ornith`）要不要也換成 `occamy`？**——`read_page` 預設已是 occamy；把 `read_page` 預設引擎
+   改成 `ornith` 會改變它的語意（從「第二意見」變成「自己再看一次」）。
+2. **「平台視圖」白名單從平台 `sanitize.ts` 導出**（不抄一份 Python 清單），可以嗎？
+3. ✅ **對話框第二種（不綁題）已完成**（本輪）。
+4. 要不要現在開始**審藥師(二)**？還是先做**藥師(一) 99 題有字的爭議**？
+5. **A1（`question_page`）要不要合併？**（未合併 → 全庫 PDF 面板都開第 1 頁）
+6. **v2 也要顯示 `prompt_system`／`prompt_user` 嗎？**（設計者主場在 v2；本輪只補了沙盒）
