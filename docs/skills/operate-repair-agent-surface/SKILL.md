@@ -891,7 +891,7 @@ ssh macstudio 'launchctl print gui/$(id -u)/com.qbr.repair-daemon'
 # 2026-09-29 兩邊逐檔比對（sha256 前 16 碼）——**同一天稍晚再量一次，human events 已經不同了**
 #   candidates.jsonl            7cfb26734f2f063f   兩邊相同
 #   figure_ownership.json       201b112b026bcdf3   兩邊相同
-#   question_ai_findings.jsonl  站上 b9d255ea…／筆電 2a0df06e…  ← 筆電多 200 行（全是失敗紀錄，見下）
+#   question_ai_findings.jsonl  兩邊**濾掉失敗列後完全相同**（見下），差別只有失敗重試次數
 #   question_review_events.jsonl 站上 58faa93644fcbc09（20,329）／筆電 508046fb225606f2（20,324）
 ```
 
@@ -902,13 +902,26 @@ ssh macstudio 'launchctl print gui/$(id -u)/com.qbr.repair-daemon'
 站上的 `question_ai_findings.jsonl` 仍是 2026-09-25 22:30 的 mtime／同一個 sha，代表站的 AI 流
 自那之後沒動過。
 
-筆電 findings 多出的 200 行**全部是失敗紀錄**：
-`error: "request failed"`、`model: incoai/Qwen3.8-27B-Splash`、`endpoint: http://127.0.0.1:8088`
-（該端點自 2026-09-25 起是 down），5 題 × 40 次，時間 2026-09-28T16:31 – 2026-09-29T12:04，
-`finding.verdict` 全是 `null`。
+筆電 findings 的 200 行差異——**2026-09-29 稍晚用過濾後的 sha256 證明「要回流的是零筆」**：
+把 `error` 非空的列濾掉之後，兩邊的位元組流**完全相同**（各 105,100 列，sha256 前 16 碼
+`e99d5bf683c24541`）。差的全是失敗列：筆電 3,096 列（`incoai/Qwen3.8-27B-Splash`，端點
+`http://127.0.0.1:8088` 自 2026-09-25 起 down），站上 2,891 列（`Splash` 145 列＋
+`qwen3.8-flash-next`（DGX lane）2,746 列）。所以**findings 這條線沒有東西要同步**——
+之前用「行數差 200」推論的那個數字會隨每次失敗重試變動，不要再用它當依據。
 
-→ **現在不要推**：要回流的是判讀，不是打不通的嘗試。真要推就先濾掉 `error` 非空的列，
-否則站上的 findings 會多出 200 筆「沒有結論」的紀錄，而面板分不出那是失敗還是模型說不知道。
+```sh
+# 兩邊各自算（濾掉 error 非空的列之後再 sha256；直接比整檔只會比到失敗重試的次數）
+python3 -c 'import hashlib,json,sys
+kept=bytearray()
+for line in open(sys.argv[1],"rb"):
+    try: rec=json.loads(line)
+    except Exception: kept+=line; continue
+    if not rec.get("error"): kept+=line
+print(len(kept), hashlib.sha256(bytes(kept)).hexdigest()[:16])' <findings.jsonl>
+```
+
+→ **findings 不用推，也沒東西可推**：判讀內容兩邊已經一致（上面的 sha256），推上去只會多帶
+失敗列，而面板分不出那是失敗還是模型說不知道。真要動這條線，先決定「失敗列要不要進檔」。
 
 **要恢復的指令在 plist 自己的檔頭**（單一來源，不要在這裡抄第二份）：
 `~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist`（Label `com.qbr.repair-daemon`；
