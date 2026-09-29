@@ -264,6 +264,17 @@ def cells_with_pages(rows, *, alphabet=()):
     The option alphabet is worked out from the rows themselves when the caller has not measured
     it: `repair.option_alphabet` reads the paper's own use of private-use codepoints, which is a
     property of the print form, so the same answer comes out of any paper that uses one.
+
+    It is the paper's **most-used** family and not the union of every family it prints, because a
+    paper can print two private-use families and only one of them labels the options. Measured on
+    `1001_醫事檢驗師_臨床生理學與病理學` Q65: `\ue000`-`\ue003` label the four sub-items the question
+    asks about (`\ue000細菌 \ue001白血球 \ue002紅血球 \ue003葡萄糖`), while `\ue18c`-`\ue18f` label the four
+    options (`\ue18c僅\ue000\ue001 …`). Sorting the union puts `\ue000` first, so the option marks come
+    out as `opt:E`/`opt:F` and `skeleton` - which looks for the label `A` - finds no options at all.
+    Measured over the corpus: the union never yields more options than the most-used family, and on
+    667 papers it yields **none** (every question of the paper), because a paper prints four options
+    per question while its sub-items appear only where it asks over them - so the option family is
+    the most-used one by construction.
     """
     alphabet = tuple(alphabet) or tuple(sorted(repair.option_alphabet(
         "".join(row.get("text") or "" for row in rows))))
