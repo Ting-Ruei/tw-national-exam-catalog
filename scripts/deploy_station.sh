@@ -8,6 +8,7 @@
 #     scripts/deploy_station.sh                     # 部署目前的程式碼（不含佇列與語料）
 #     scripts/deploy_station.sh --queue             # 連佇列一起（重建佇列後用）
 #     scripts/deploy_station.sh --restart           # 部署後重啟服務
+#     scripts/deploy_station.sh --force             # 明知有迴圈在跑還是要部署（那一輪會少做事）
 #
 # 它**不帶**語料（常駐機已有，且只留 by_official_catalog），也**不帶** `qbr/data/`（那是筆電的
 # 產物，不是部署內容）。審核紀錄永遠不在 rsync 範圍內——它是常駐機的家，方向是反過來的
@@ -16,7 +17,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CATALOG="$(cd "${HERE}/.." && pwd)"
-STATION="${QBR_STATION:-192.168.10.70}"
+# The station is named by its **Tailscale** name, not its LAN address: the same machine answers on
+# `192.168.10.70` only when the caller is on that LAN, and this repo is worked on from more than one
+# host. Override with `QBR_STATION=192.168.10.70` to pin the LAN address.
+STATION="${QBR_STATION:-timmac-studio}"
 REMOTE_HOME="/Users/tim/qbr-review"
 
 # 常駐機上的人工紀錄。**這些永遠不可以被 rsync 刪掉或蓋掉**，所以它們同時是：
@@ -47,6 +51,18 @@ EVENT_STREAMS=(
 )
 # 還有人類的偏好設定與任何非事件檔的人工產物。
 PROTECTED_EXTRA=(review_ui_preferences.json)
+
+# 站上獨有的**目錄**，其中一個是容器的掛載點。
+#
+# `manual-assets/` 是補圖的家（人工為題目補的圖）。它只存在於常駐機：容器把它單獨掛成
+# `rw`（見 compose.yaml 的第五條掛載），所以在站上被建立，而筆電的工作樹裡沒有它。
+# 於是帶 `--delete` 的 rsync 會把它當成「目標多出來的目錄」而嘗試刪除——**失敗**，因為
+# 容器正把它掛著（`rsync ... unlinkat: Permission denied`，2026-09-24 實測）。
+# 那次 rsync 回 rc=23，而 `deploy_station.sh` 在它之後繼續跑，所以整個部署看起來像成功。
+#
+# 保護它的理由與保護人類紀錄相同：它不是從題庫重建得出來的資料，靜默刪掉就沒有第二次。
+# 差別只在刪不掉的時候它會吵，而吵的方式是一行 rsync 錯誤——很容易被當成雜訊。
+PROTECTED_DIRS=(manual-assets)
 # 站上獨有的設定檔。**這曾經被這支腳本的 `--delete` 刪掉過。** 筆電的 `.gitignore:31`
 # 忽略了 `deploy/qbr-review/.env`，所以筆電根本沒有它，因此 rsync 把站上的那一份當成
 # 「目標多出來的檔」刪除——而那是**唯一**記載站上埠號（8765 而非 8774）與絕對路徑的地方。
@@ -56,14 +72,40 @@ PROTECTED_CONFIG=(.env)
 
 DO_QUEUE=0
 DO_RESTART=0
+DO_FORCE=0
 for arg in "$@"; do
   case "${arg}" in
     --queue) DO_QUEUE=1 ;;
     --restart) DO_RESTART=1 ;;
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --force) DO_FORCE=1 ;;
+    -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知參數：${arg}" >&2; exit 2 ;;
   esac
 done
+
+# 0. **迴圈在跑就不准部署。**
+#
+# 實測 2026-09-24 18:06：迴圈走到 ② 與 ③ 之間時，一次 `--restart` 部署把站上的
+# `repair_daemon.sh` 換掉，bash 讀到新檔就從那裡繼續，那一輪的 ③④⑤ 被安靜跳過——
+# 日誌在 ② 之後就寫「第 1 輪結束」，看起來像正常收工。被換掉腳本的那一輪不是壞掉，
+# 是**少做事**，而少做事沒有任何錯誤訊息。
+#
+# 所以檢查點在**任何 rsync 之前**：站上有 `repair_daemon` 或它跑的那幾支程式就算在跑。
+# 真的要蓋過去（例如迴圈卡死）用 `--force`，但那是「我知道那一輪會少做事」的決定。
+if [[ "${DO_FORCE}" != 1 ]]; then
+  # The bracketed first character prevents pgrep from matching its own command line.
+  RUNNING="$(ssh -n -o BatchMode=yes "${STATION}" \
+    'pgrep -fl "[r]epair_daemon|[c]onfirm_dispute|[a]pply_dispute_repairs|[a]pply_text_corrections|[s]can_category_principles|[a]sk_about_blocks" || true')"
+  if [[ -n "${RUNNING}" ]]; then
+    {
+      echo "常駐機上有迴圈在跑，這次不部署（換掉腳本會讓那一輪安靜地少做事）："
+      echo "${RUNNING}" | sed 's/^/    /'
+      echo "  等它結束；明知要覆蓋就加 --force。查進度："
+      echo "    ssh ${STATION} 'ls -t ${REMOTE_HOME}/code/qbr/runs/repair_daemon-*.log | head -1'"
+    } >&2
+    exit 3
+  fi
+fi
 
 cd "${CATALOG}"
 
@@ -73,17 +115,46 @@ echo "來源 ${CATALOG}"
 echo "  HEAD  ${SRC_HEAD:0:12}$( [[ "${SRC_DIRTY}" -gt 0 ]] && echo "  +${SRC_DIRTY} 個未提交檔（工作樹直送，站上也許沒有等價 commit）" )"
 
 # 1. 程式碼。排除語料／產物／版本控制／虛擬環境——那些都不是「部署內容」。
+#
+# `qbr/runs/` 是**常駐機自己的**迴圈日誌，理由與下面的 `deploy/qbr-review/.env` 完全相同，
+# 而且同樣已經發生過：它沒有被排除，所以筆電上不同的檔名讓 rsync 把站上那一份當成
+# 「目標多出來的檔」刪掉。實測 2026-09-24——站上 `repair-daemon.out.log` 說它這一輪寫到
+# `runs/repair_daemon-20260924-113324.log`，而那個檔案在站上**不存在**；留在 `runs/` 裡的
+# 反而是**筆電的**日誌（檔頭寫著筆電的佇列路徑 `/Users/tim/AI workspace/...`）。
+# 後果不只是少一份日誌：在站上讀 `runs/` 會讀到另一台機器的紀錄，而它看起來一模一樣。
 rsync -a --delete \
   --exclude='國考題資料夾*' --exclude='tmp/' --exclude='qbr/data/' \
+  --exclude='qbr/runs/' \
   --exclude='.git/' --exclude='.venv/' --exclude='__pycache__/' \
   --exclude='.DS_Store' --exclude='*.pyc' \
   --exclude='deploy/qbr-review/.env' \
   ./ "${STATION}:qbr-review/code/"
-echo "  程式碼已同步（站上獨有的 deploy/qbr-review/.env 已排除在刪除範圍外）"
+echo "  程式碼已同步（站上獨有的 deploy/qbr-review/.env 與它自己的 qbr/runs/ 已排除在刪除範圍外）"
 
 # 2. 掛載點。compose 把語料掛在唯讀的 /workspace 裡面，Docker 建不出那個目錄，
 #    所以來源樹裡必須先有它（否則容器以 read-only file system 失敗）。
 ssh -n -o BatchMode=yes "${STATION}" "mkdir -p ${REMOTE_HOME}/code/國考題資料夾 ${REMOTE_HOME}/logs"
+
+# 2b. 看得見的紙本。
+#
+# 官方 PDF 把整頁掃描存成 JPEG 2000，而 Chrome 的 PDF 檢視器解不開（實測 2026-09-23：
+# 畫面全白、停在「正在擷取 PDF 檔的文字…」、畫布數 0——審題者讀成「沒顯示」而且「很慢」）。
+# Adobe／Preview 開得起來，所以下載時看不出問題。修正是在建置階段把那些影像流換成 JPEG，
+# 產物放在 `10_official_pdf_browser_safe/`，伺服器偏好那一份（`review_ui/paths.py`）。
+#
+# **語料本身不在 rsync 範圍**（上面 `--exclude='國考題資料夾*'`，它由 assets 掛載提供），
+# 所以推語料不是這支腳本的事；但產物樹只跟著語料走，就沒人會記得更新它。
+# 這裡把它一起帶過去：它只增不刪，而且來源缺席時整段跳過——一隻新筆電不該因為
+# 還沒建過產物就讓部署失敗。
+DERIVED_PAPERS="國考題資料夾/10_official_pdf_browser_safe"
+if [[ -d "${DERIVED_PAPERS}" ]]; then
+  echo "  同步看得見的紙本產物…"
+  rsync -a "${DERIVED_PAPERS}" "${STATION}:qbr-review/assets/國考題資料夾/"
+  DERIVED_COUNT="$(find "${DERIVED_PAPERS}" -name '*.pdf' | wc -l | tr -d ' ')"
+  echo "  ${DERIVED_COUNT} 份瀏覽器可繪製的紙本已同步"
+else
+  echo "  （沒有 ${DERIVED_PAPERS}；先跑 qbr/scripts/build_browser_safe_papers.py --apply）"
+fi
 
 # 3. 佇列（選擇性）。crops 是佇列自帶的，所以要整棵一起來。
 #
@@ -95,6 +166,11 @@ if [[ "${DO_QUEUE}" == 1 ]]; then
   PROTECT_ARGS=()
   for name in "${EVENT_STREAMS[@]}" "${PROTECTED_EXTRA[@]}" "${PROTECTED_CONFIG[@]}"; do
     PROTECT_ARGS+=(--exclude="${name}")
+  done
+  # 目錄要排除**它自己與底下的內容**。`--exclude=manual-assets` 不夠：rsync 仍會嘗試清掉
+  # 該目錄（而它掛在容器上，刪不掉），`--exclude=manual-assets/` 才會連同內容一起放過。
+  for name in "${PROTECTED_DIRS[@]}"; do
+    PROTECT_ARGS+=("--exclude=${name}/")
   done
 
   echo "  先備份常駐機上的人工紀錄…"
@@ -130,6 +206,32 @@ REMOTE_BACKUP
     "${CATALOG}/qbr/data/review-queues/live/review-ui/" \
     "${STATION}:qbr-review/queue/review-ui/"
 
+  # 掃描的紀錄。**它在佇列根目錄，不在 `review-ui/` 底下**，所以上面的 rsync 不會帶它——
+  # 而它正是討論區「排隊中 N 題」的來源。沒有它，那一塊永遠顯示「還沒跑過掃描」，
+  # 即使掃描真的在跑（實測 2026-09-24：站上 `~/qbr-review/queue/scan_state.json` 不存在）。
+  #
+  # 它**不是人類產物**（掃描可以重跑），所以同步它是安全的。但兩個數字的意義要分清：
+  # `pending` 才是討論區顯示的排隊數；其餘的鍵是「已看過的指紋」。
+  if [[ -f "${CATALOG}/qbr/data/review-queues/live/scan_state.json" ]]; then
+    rsync -a "${CATALOG}/qbr/data/review-queues/live/scan_state.json" \
+      "${STATION}:qbr-review/queue/scan_state.json"
+    # 用 `scan_state` 自己的讀取器，不要在這裡手寫第二份 schema 解讀。
+    # 這個檔的形狀是 `{candidate_key: 指紋, ..., "pending": [...]}`，第一版用 `d.get("done")`
+    # 去數，永遠印 0——一個看起來很合理的錯數字。
+    COUNTS="$(cd "${CATALOG}/qbr" && .venv/bin/python -c '
+import sys
+sys.path.insert(0, "src")
+from qbr import scan_state
+
+root = sys.argv[1]
+state = scan_state.load_state(root)
+print(len(scan_state.pending_keys(root)), len(state) - (1 if "pending" in state else 0))
+' "${CATALOG}/qbr/data/review-queues/live" 2>/dev/null || echo '? ?')"
+    echo "  掃描紀錄已同步（排隊中 ${COUNTS%% *} 題、已看過 ${COUNTS##* } 題）"
+  else
+    echo "  （沒有 scan_state.json；討論區的排隊數會顯示「還沒跑過掃描」）"
+  fi
+
   # 同步後立刻驗：紀錄還在不在、行數有沒有變少。
   # 「rsync 成功」只證明指令跑完，不證明人類決定還在——所以量的是行數。
   AFTER="$(ssh -n -o BatchMode=yes "${STATION}" "wc -l < ${REMOTE_HOME}/queue/review-ui/question_review_events.jsonl 2>/dev/null || echo 0" | tr -d ' ')"
@@ -143,4 +245,25 @@ ssh -n -o BatchMode=yes "${STATION}" \
 # 5. 重啟（選擇性）。不重啟就不會生效——鏡射檔案不會讓跑著的容器換程式。
 if [[ "${DO_RESTART}" == 1 ]]; then
   ssh -n -o BatchMode=yes "${STATION}" "cd ${REMOTE_HOME}/code && bash deploy/qbr-review/up.sh 2>&1 | tail -8"
+
+  # 5b. **驗證跑著的容器真的用上了新的掛載。**
+  #
+  # 這一步是補一個實測過的靜默缺口（2026-09-24）：`deploy/qbr-review/compose.yaml` 早就改成
+  # 「`review-ui/` 整包 rw」（見該檔 2026-09-24 註解），但站上的容器還是舊的
+  # 「只留 `question_review_events.jsonl` 一條 rw」。檔案同步了、compose 同步了，而
+  # `docker inspect` 仍然顯示舊的四條掛載——因為**容器沒被重建**。症狀是「偏好存不住」
+  # 「原則不見了」「補圖失敗」，全都長得像程式缺陷，而根因是掛載。
+  #
+  # 所以部署的完成條件不是「指令跑完」，是「容器內的實際掛載與 compose 一致」。驗的是
+  # 三件事：`/queue/review-ui` 是 rw、五條 stream 真的寫得進去、測試不留痕跡。
+  #
+  # 驗證程式放在 `deploy/qbr-review/verify-mounts.sh`（已經被 rsync 送到站上），不是這裡的
+  # heredoc：`ssh -n` 配 heredoc 會把 stdin 關掉，而 heredoc 本身就是 stdin——兩個 heredoc
+  # 疊在一起時內層收不到任何東西，安靜地什麼都不驗（第一次寫就是這樣，輸出是空的）。
+  echo "  驗證容器掛載與實際可寫性…"
+  ssh -n -o BatchMode=yes "${STATION}" "bash ${REMOTE_HOME}/code/deploy/qbr-review/verify-mounts.sh" || {
+    RC=$?
+    echo "  部署未通過驗證（rc=${RC}）——服務在跑，但寫入路徑沒有生效。" >&2
+    exit "${RC}"
+  }
 fi

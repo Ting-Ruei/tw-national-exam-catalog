@@ -1,9 +1,8 @@
 # 新版題庫審題介面 — 常駐服務（LAN／Tailscale）
 #
 # 這份 compose 只做一件事：把**新管線**（qbr）的佇列放到瀏覽器上，讓其他裝置可以審題。
-# 它不是舊的 `deploy/ai395/compose.production.yaml`，也不連任何資料庫——原因寫在使用者
-# 可見的 `qbr/reports/two_review_stores.md`：舊的 SQL 佇列與新管線的 jsonl 佇列是兩個
-# 不相交的審核紀錄，把舊的混進來就等於讓兩邊互相污染。
+# 它不連任何資料庫；SQL/remote review paths are outside the current contract. `qbr/reports/two_review_stores.md`
+# records why the JSONL queue and any historical store must remain separate.
 #
 #     docker compose -f deploy/qbr-review/compose.yaml up -d
 #
@@ -17,8 +16,7 @@
 #    審核紀錄（`question_review_events.jsonl`）是無可取代的人類決定。把前者掛唯讀、
 #    後者留在可寫的目錄，讓「重建佇列」不可能弄壞「人的紀錄」。這不是靠自律，是靠 mount。
 #
-# 3. **埠是參數。** 8765/8766 是舊 review-ui 容器的號碼；本服務預設 8774（新管線一直在用的
-#    那個），並可用 `.env` 改。書籤與已安裝的 PWA 是契約，所以預設值刻意等於使用者既有習慣。
+# 3. **埠是參數。** 本服務預設 8774，可用 `.env` 改；不要把一個歷史 port 當成 endpoint 契約。
 
 services:
   qbr-review-ui:
@@ -39,6 +37,8 @@ services:
       # 而設了它會讓下一個讀這份檔案的人以為這兩條路線是同一條。
       ASSET_ROOT: /workspace/國考題資料夾
       REVIEW_UI_BACKEND: jsonl
+      # 補圖的家，見下方 volumes 的說明。放在佇列裡，因為那是容器唯一擁有且可寫的地方。
+      REVIEW_UI_MANUAL_ASSET_ROOT: /queue/review-ui/manual-assets
       # 佇列自己是 asset root：`build_review_queue.py` 把每個裁切圖複製進佇列，所以佇列
       # 搬到哪裡、圖就跟到哪裡，不需要 984 個來源目錄留在原地。這段是它自成一體的關鍵。
       REVIEW_UI_ADDITIONAL_ASSET_ROOTS: /queue
@@ -53,17 +53,34 @@ services:
       - "${CATALOG_ROOT:-../..}:/workspace:ro"
       # 問題 PDF 唯讀：審題時要能對照紙本，但不需要（也不該）改它。
       - "${ASSET_ROOT:-../../國考題資料夾}:/workspace/國考題資料夾:ro"
-      # 佇列本身唯讀 + 審核紀錄可寫，見上面第 2 點。`/queue` 就是佇列的**根目錄**，因為
-      # `REVIEW_UI_ADDITIONAL_ASSET_ROOTS` 收的是「能開檔的根」，而佇列裡的裁切圖參考存成
-      # `review-ui/crops/<paper>/<name>`——**相對於佇列根**，所以它搬到哪個掛載點都能解析。
-      # 這正是 `build_review_queue.py::_adopt_crops` 修掉的那個 bug：以前存的是相對於「建佇列
-      # 時的工作目錄」，在容器裡每個圖都 404。
+      # **`review-ui/` 可寫。**（2026-09-24 修正）
+      #
+      # 舊版把整個 `/queue` 掛唯讀，只留 `question_review_events.jsonl` 一條 rw。
+      # 那個決定的心智模型是「只有審核紀錄是人類產物」——而它是**錯的**，或者說，
+      # 它只對第一天成立。後來長出來的人類產物還有：
+      #   review_ui_preferences.json          你調的介面偏好
+      #   question_review_principles.jsonl    你在討論區寫的基本原則
+      #   question_repair_questions.jsonl     代理的反問與你的回答
+      #   question_correction_feedback_events.jsonl  你對修正的評分
+      #   crops/                              代理與人為了確認紙本而產生的裁圖
+      # 它們全都寫不進去，所以「偏好存不住」「原則不見了」「補圖失敗」是**同一個根因**。
+      #
+      # 現在開 `review-ui/` 整包 rw。`candidates.jsonl` 的保護**不在 mount**：
+      # server 對它**從來只有讀**（全 repo 沒有任何一條 append/write 開它的路徑），
+      # 佇列是 `build_review_queue.py` 在容器外寫的產物。舊版的唯讀掛載保護的是一個
+      # 本來就沒有寫入者的檔案，代價卻是五條真的有人寫的 stream 全部失敗。
+      # 保護沒有消失，只是回到它真正被執行的位置：**寫入者不在容器裡**。
+      #
+      # 為什麼不用「逐檔 bind」：那需要每加一條 stream 就記得改這份檔案，
+      # 而這次失敗正是因為**上一輪忘了改**。逐檔掛載的失效模式已經發生過一次。
       - "${QBR_QUEUE_DIR:-../../qbr/data/review-queues/live}:/queue:ro"
-      # 審核紀錄是唯一可寫的東西，單獨掛一個 rw 的 bind，位置在 host 的
-      # `<queue>/review-ui/question_review_events.jsonl`。Docker 的 bind 不能「同一目錄
-      # 唯讀、裡面一個檔案可寫」，所以紀錄單獨掛在它自己的路徑上（見下方 command 的
-      # --review-log），而 host 端的那個檔案就在唯讀目錄裡——由 `up.sh` 在啟動前 touch 出來。
-      - "${QBR_REVIEW_LOG:-../../qbr/data/review-queues/live/review-ui/question_review_events.jsonl}:/queue/review-ui/question_review_events.jsonl"
+      - "${QBR_QUEUE_DIR:-../../qbr/data/review-queues/live}/review-ui:/queue/review-ui"
+      # 補圖的家。`REVIEW_UI_MANUAL_ASSET_ROOT` 預設在語料裡的 `40_manual_assets`，
+      # 而語料是唯讀的——所以貼圖一律 `OSError: Read-only file system`（實測）。
+      # 這裡把它指到佇列裡一個真的可寫的目錄，並由 `up.sh` 先建好。
+      - "${QBR_QUEUE_DIR:-../../qbr/data/review-queues/live}/review-ui/manual-assets:/queue/review-ui/manual-assets"
+      # `up.sh` resolves the configured host log path; the service keeps one stable container path.
+      - "${QBR_REVIEW_LOG:-${QBR_QUEUE_DIR:-../../qbr/data/review-queues/live}/review-ui/question_review_events.jsonl}:/queue/review-ui/question_review_events.jsonl"
     # The image's ENTRYPOINT is already `python3`, so the script name is the first argument - not
     # `python3` again. Written as `python3 python3 ...` the container restarts forever with
     # `can't open file '/workspace/python3'`, which is what happened the first time this was run.

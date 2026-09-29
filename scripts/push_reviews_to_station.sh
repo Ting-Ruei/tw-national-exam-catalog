@@ -31,7 +31,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CATALOG="$(cd "${HERE}/.." && pwd)"
-STATION="${QBR_STATION:-192.168.10.70}"
+# Tailscale name by default; `QBR_STATION=192.168.10.70` pins the LAN address.
+STATION="${QBR_STATION:-timmac-studio}"
 REMOTE_DIR="/Users/tim/qbr-review/queue/review-ui"
 LOCAL_DIR="${CATALOG}/qbr/data/review-queues/live/review-ui"
 

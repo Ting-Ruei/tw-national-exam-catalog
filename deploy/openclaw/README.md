@@ -18,7 +18,7 @@ Do not mount any of the following into an agent sandbox:
 
 - the Docker or Podman socket;
 - `~/.ssh`, `~/.config`, password-manager data, or an owner browser profile;
-- the project `.env` or AI395 production environment;
+- the project `.env` or any external production environment;
 - PostgreSQL data directories or backup roots.
 
 Use a dedicated GitHub App or fine-grained identity. The routine maintainer needs
@@ -70,8 +70,8 @@ checks, for example a wrapper around:
 git status --short --branch
 git fetch --prune origin
 python3 scripts/validate_agent_governance.py
-bash scripts/ai395_catalog_runtime.sh status
-bash scripts/ai395_catalog_runtime.sh verify
+bash scripts/local_review.sh doctor
+python3 scripts/validate_agent_governance.py
 ```
 
 `git fetch` writes local refs but does not mutate GitHub code or production data.
@@ -85,8 +85,8 @@ there is no human present to clarify the target or approve an escalation.
 
 Recommended first jobs:
 
-- repository and AI395 read-only drift report;
-- `status` / `verify` health report;
+- repository and local-boundary read-only drift report;
+- local review `doctor` health report;
 - test and governance-policy report;
 - backup-age, disk-watermark, and stalled-job report after dedicated read-only
   wrappers exist.
