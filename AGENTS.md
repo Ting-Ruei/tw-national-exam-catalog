@@ -26,9 +26,9 @@ This repository catalogs Taiwan national exam PDFs, MinerU outputs, parsed quest
 <!-- project-map:data-root path="國考題資料夾" reason="official exam corpus and MinerU artifacts" -->
 <!-- project-map:data-root path="國考題資料夾_其他類型" reason="official exam corpus and MinerU artifacts" -->
 <!-- project-map:data-root path="國考題資料夾_非醫學剩餘全集" reason="official exam corpus and MinerU artifacts" -->
-- Human review events are append-only. Do not rewrite existing `question_review_events.jsonl`, `answer_review_events.jsonl`, or future AI review logs unless the user explicitly asks for a repair script.
+- Human review events are append-only: never rewrite existing `question_review_events.jsonl` or `answer_review_events.jsonl`. Under the interim QBR permission, an agent may update only its own AI result while preserving revisions and provenance; it must not modify human events.
 - If parser changes alter already-reviewed candidate content, append a per-question `reset_review` event and preserve previous notes.
-- Do not auto-accept or auto-block questions from AI output alone. AI review is advisory.
+- In the selected QBR workflow, an agent may set its own AI workflow status to `pass`, `return`, or `block` and update its own AI results. These are machine workflow states, not human accept/block decisions or formal publication approval. An agent must never impersonate a human reviewer.
 
 ## Two tracks, each with its own AGENTS.md and skill
 
@@ -49,7 +49,10 @@ Two working procedures cross those tracks and are worth having open while doing 
 | Classifying accepted formal questions into a versioned curriculum taxonomy | [`docs/skills/classify-exam-curriculum/SKILL.md`](docs/skills/classify-exam-curriculum/SKILL.md) |
 | Recovering paper structure and image/option crops from an official PDF | [`docs/skills/extract-exam-paper-structure/SKILL.md`](docs/skills/extract-exam-paper-structure/SKILL.md) |
 | Auditing candidates and producing sparse advisory repairs behind validation gates | [`docs/skills/national-exam-ai-audit/SKILL.md`](docs/skills/national-exam-ai-audit/SKILL.md) |
+|「現在站在哪裡」：做完的、沒做完的、被罵的每一件事與理由、量到的根因、明天要決策的問題|[`docs/skills/review-platform-status/SKILL.md`](docs/skills/review-platform-status/SKILL.md)|
+|「這一輪改了什麼、還搞不定的問題、明天要裁決什麼」|[`docs/skills/repair-open-items/SKILL.md`](docs/skills/repair-open-items/SKILL.md)|
 | A review-UI pane renders wrong, a dropdown moves another dropdown, a button does nothing, or the 錯題討論區 is empty / loses a question | [`docs/skills/repair-review-ui-v2/SKILL.md`](docs/skills/repair-review-ui-v2/SKILL.md) |
+| 「代理現在在做什麼」、面板顯示 0 題、指揮者分流那一欄沒有數字、迴圈該跑在哪台機器、改完的東西沒推回 192.168.10.70:8765 | [`docs/skills/operate-repair-agent-surface/SKILL.md`](docs/skills/operate-repair-agent-surface/SKILL.md) |
 
 ### `qbr/` — the build pipeline
 
@@ -110,8 +113,8 @@ and orphans are kept and counted. If a rebuild would carry 0 records while recor
 
 - The human-readable governance authority is `docs/governance/README.md`; the machine-readable companion is `governance/policy.json`.
 - New work uses a `codex/*` or `agent/*` branch and a pull request. Agents must not push new work directly to `main`, self-approve a PR, force-push `main`, or treat a merged PR as production approval.
-- Agents may act autonomously through G2 only: G0 read-only inspection, G1 branch/PR work, and G2 advisory or isolated staging work. Every G3 production mutation needs exact per-run human approval. G4 human review decisions, restore, writer changes, append-only repair, and material deletion remain owner-only.
-- Unattended jobs cannot obtain approval mid-run. They must stop after producing evidence, a report, an issue, a package, or a PR; they may not continue into G3/G4 work.
+- Agents may act autonomously through G2 only: G0 read-only inspection, G1 branch/PR work, and G2 scoped QBR AI workflow status/results or isolated staging work. Every G3 production mutation needs exact per-run human approval. G4 human review decisions, restore, writer changes, append-only repair, and material deletion remain owner-only.
+- Unattended jobs may finish their declared G0-G2 work, including permitted AI workflow updates. They must stop before G3/G4 work because no human is present to approve it.
 - Changes to governance, GitHub workflows, database schema, or production deployment require owner review through CODEOWNERS.
 - Keep agent operational evidence separate from human question-review events. An agent must never impersonate a human reviewer.
 
@@ -147,7 +150,8 @@ node scripts/test_v2_navigation.mjs review_ui/v2.html <workdir>/review-ui/candid
   實作在 `qbr/src/qbr/review_ui/`（`ai_audit`／`review_state`／`handlers`／`queue_view` 等）。
   它仍**再匯出**所有符號，因為約 50 個測試檔直接載入該路徑；詳細契約見
   [`review_ui/AGENTS.md`](review_ui/AGENTS.md)。
-- **四個入口（首頁／題目／答案／討論）是同一頁的四個模式**，不是四頁。
+- **五個入口（首頁／題目／答案／討論／原則）是同一頁的五個模式**，不是五頁。
+  2026-09-24 之前是四個：基本原則與代理的反問原本塞在討論區裡，現在是獨立的一區（`#原則`）。
 - v1（`mobile.html`、`workflow.html`）位於 `review_ui/v1-reference/`，只作 compatibility
   reference；不要從它恢復 backend、writer 或 deployment。
 - `/v2` 以 `no-store` 服務時，改檔後可由當次 local server 重新讀取。

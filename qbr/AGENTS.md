@@ -25,8 +25,9 @@ review queue 與 package；人類審核後才算完成。
 **不做什麼**（越界就是錯）：
 
 - 不寫 production runtime database，不寫 catalog 正式 PostgreSQL。
-- 不自動接受或阻擋題目。AI 一律 advisory（GOV-05），不得冒充人類審核者、
-  不得寫入人類 review event。
+- 在選定的 QBR 審題流程中，Agent 可把自己的 AI 流程狀態標為 pass、return 或 block，
+  並更新自己的 AI 結果、保留版本與來源。這不是人工 accept/block，也不是正式 package 核准；
+  Agent 不得冒充人類審核者或寫入／修改人工 review event。新模型與資料傳送範圍仍須另行核准。
 - 不下載。語料由 catalog registry 管理，本包只**讀**。
 - 不在學生流量路徑上執行任何東西。
 
@@ -84,12 +85,11 @@ src/qbr/          確定性核心 + 提示詞層呼叫（無模型時可全部�
   disputes.py        爭議：**對紙張的量測**，不是模型意見
   vision.py          圖片題描述（本地 LLM）
   verify_crops.py    裁切完整性驗證（**在框外**量墨跡，不信任解析）
-  audit_crops.py     裁切稽核
   package.py         package 建構 + registry key 的**唯一**權威
   review_queue.py    review queue 與候選列表
   generation.py      生成 router 雛形（寫題候選，advisory）
   manifests.py       manifest 讀取（相對路徑解析，不依賴 cwd）
-scripts/          33 支，全部 `--help` 可查
+scripts/          50 支，全部 `--help` 可查
   golden_path.py     **唯一權威的端到端路徑**：S0..S6 七階段、單卷
   batch_run.py       整個類科：讀 + 抽
   batch_package.py   整個類科：封裝
@@ -97,7 +97,7 @@ scripts/          33 支，全部 `--help` 可查
   crop_run_figures.py    切圖（**必須在封裝之後跑**，見下）
   measure_*.py       量測（corpus / skeleton / speed / balance）
   test_arbitration.py    仲裁測試工具（含負對照）
-  test_vision.py / audit_crops.py / verify_crops.py  圖片驗證
+  test_vision.py / verify_crops.py  圖片驗證
 tests/            pytest suite；`tests/golden/` 是固定的整卷 golden
 docs/ reports/    決策與量測報告（reports 是證據，不是規範）
 prompts/          系統提示詞，版本化（`structure_question.v1.*.md`）
@@ -251,31 +251,73 @@ cd tw-national-exam-catalog/qbr
 - 合併報告：`reports/merge_into_catalog.md`。
 
 
-## 修理代理：常駐迴圈、錯題討論區、以及「哪一種修復才可以自動套用」
+## Repair agent: current safety contract
 
-一條完整的路是四段，每一段的作者不同，混在一起就會壞：
+The repair path is deliberately split by authority:
 
+```text
+scan_for_repairs.py       confirm_dispute.py             separate, owner-approved stages
+G2 work selection  →      local page-read finding   →    content/image mutation or human decision
+scan_state.json            question_ai_findings.jsonl     never part of the scheduled daemon
 ```
-偵測（腳本，紙張的性質）→ 讀紙本（模型，advisory）→ 套用（機械，有錨）→ 人的決定
-`disputes.py`                    `confirm_dispute.py`      `apply_dispute_repairs.py`   錯題討論區
-```
 
-### 常駐迴圈 `scripts/repair_daemon.sh`（G2）
+### Daemon and explicit repair
 
-每 `INTERVAL`（預設 1800s）對「人已 block、且帶著一個**可以看紙本確認的爭議**」的那批題目，
-截圖問地端模型，寫下機械差異（advisory finding）。`WINDOW=5` 是一輪的題數。
+`scripts/repair_daemon.sh loop` is the launchd-safe G2 path: it scans and prints the read-only progress
+report. It does not call a model, edit candidates or image references, append review events, or propose
+principles. A scan/report stage failure exits nonzero so launchd can observe it.
 
-- **工作清單不是「沒有任何偵測器解釋的 block」。** 三條新爭議規則上線後，304 題全部都有偵測器，
-  於是每一輪都選不到題（實測每輪都印「本批沒有待問的 candidate_key / 累計 0 題」）。一個
-  30 分鐘迴圈一直跑卻什麼都不做，比沒有迴圈更糟——它看起來像在做事。誠實的清單是「帶著一個
-  可以看紙本確認的爭議」，那是一個**不會縮到零**的集合。
-- `--skip-confirmed` 以 `reading_sha256` 判斷「這一段讀法已經問過紙本了」，所以同一題不會每輪
-  重拍重問；文字真的被修好而改變時，它會自動重新排進來。
-- `--principles` 讀審題者在討論區寫下的基本原則（預設就是 queue 自己那一份）。
-- `--escalate`：紙本讀不到、或紙本與抽取一致但人仍然阻擋時，寫一筆 `ask` 到
-  `question_repair_questions.jsonl`，**不是**再問同一個模型一次，也不是替人做決定。
-- **它只寫 advisory finding，不寫任何 review event、不改任何題目文字，所以停在 G2。**
-  它不會自動 accept/block。
+`scripts/repair_daemon.sh repair` is a separate, human-started, one-question operation. It intersects
+pending work with the latest human block, skips only a matching reading **and matching prompt context**,
+and writes advisory findings. Its bounded local lane is not a standing authorization: every model run
+still needs the current task's explicit endpoint, data scope, and budget. It never applies a finding.
+Per-question read failures leave the item pending and make the command exit nonzero.
+
+**A human `block` rejects the machine's attempted repair.** A machine `reset_review` or withdrawal changes
+repair state; it does not erase the standing human decision. Rejection history is prompt input, so a
+new B or changed human answer/principle/figure context is new work even when the candidate text is
+unchanged. An unchanged successful read is removed from pending; an error is not.
+
+| Stage | Authority and writes |
+|---|---|
+| `scan_for_repairs.py` | G2; writes only local `scan_state.json` |
+| `confirm_dispute.py` | local model read; appends advisory `question_ai_findings.jsonl` |
+| `apply_dispute_repairs.py`, `apply_text_corrections.py` | content/review-event mutation; separate approval required |
+| `crop_run_figures.py --fix-figure-ownership` | image-reference and crop mutation; separate per-question review required |
+| `report_repair_progress.py` | read-only human-facing status |
+
+The source launchd plist is not deployment approval. Do not install it, invoke it against a station
+queue, or deploy changes from this checkout as part of a code-only repair task.
+
+### Figure directives
+
+The plain reviewer note is not a deterministic crop command. The note is considered only in the explicit
+`--human-flagged` mode. `no-figure` and `extra-crop` are the only removal labels; `wrong-region` permits
+the geometry-based recrop; `keep` leaves the existing crop in place. `unclear`, an unknown label, or a
+request/parse failure keeps the crop attached and marks it unverified. Never treat an empty measurement
+or an inference from note text as authority to remove an image.
+
+Model-proposed figure changes are not human review decisions. Do not use them to create a human
+accept/block event or mutate candidate text. Any AI workflow status must be separately supported by the
+declared QBR task and its evidence; a figure proposal alone does not establish that status.
+
+### Package source lineage
+
+Keep category and subject codes separate: the registry key carries category code at component 2 and
+subject code at component 3; `batch_package.py` passes each independently, and the golden path must not
+reuse one field for the other. Every exported question retains its official question-PDF relative path
+and SHA-256. Nonempty answers carry `answer_source_documents` with the exact `answer`/`correction`
+registry key, source-PDF path, and source hash. If both documents contribute, preserve both entries;
+the singular `answer_source_registry_key` is unset and the plural field is authoritative. The selected
+review pane reads `answer_pdf_primary_relative`; no client infers a sibling filename. Formal SQL export
+resolves these references through `exam.official_documents` and `exam.document_assets`, not question
+image assets.
+
+### Reusable repair report
+
+Use [`docs/skills/review-platform-status/SKILL.md`](../docs/skills/review-platform-status/SKILL.md) for
+the evidence-based report procedure and current-state template. Historical measurements elsewhere in
+that file are dated snapshots, not present-tense status.
 
 ### 錯題討論區（`review_ui/v2/04-area-discuss.js`）
 
@@ -305,6 +347,22 @@ cd tw-national-exam-catalog/qbr
      就是模型在改寫散文；漏掉一個被懷疑的，就是把題目重新打開、缺陷還在裡面。
      實測：`flattened-offset` 類（`C=5e-0.4t` → `C=5e⁻⁰·⁴ᵗ`）**沒有任何**被標記的位置，
      那靠讀法本身修（`extract._body_centre`），不是靠代換。
+   * **2026-09-24 補的例外：被順手修掉的「同一個字的另一種寫法」不算改散文**（`_compatibility_fold`）。
+     規則變成：標記集合必須非空、且全部被改到；**額外**被改的位置只允許
+     `unicodedata.normalize("NFKC", before) == normalize("NFKC", after)` 的配對——那是 Unicode
+     自己說「這兩個是同一字」。為什麼要開這個口：偵測器 `disputes.RADICAL_SUPPLEMENT_MEANS` 的
+     表只收 CJK Radicals Supplement（`⻑` `⻄`…），但模型照著紙本轉錄時，順手把緊鄰的**康熙部首**
+     一起寫回本字（`⽣`→`生`、`⽽`→`而`、`⼗`→`十`、`⾁`→`肉`、`⼀`→`一`、`⾯`→`面`、`⾄`→`至`、
+     `⾥`→`里`、`⼒`→`力`、`⼤`→`大`、`⾃`→`自`），那些位置**沒有任何東西標記**，於是舊規則把
+     **每一筆**判讀都拒掉。實測：`--page-read` 的可用修復 **0 → 19**（去重後 18 筆套用）。
+     這是「偵測器的表不完整」而不是「模型越界」，判準改用 Unicode 的等價關係，
+     而不是再往那張表加字（加字是同一台跑步機的另一圈）。
+     負對照仍在：沒有任何標記的散文修改、長度改變、insert/delete 一律拒絕
+     （`test_the_negative_control_an_unflagged_prose_edit_is_still_refused`）。
+- **兩次量測在同一位置講不同的話 → 整題拒絕**（`merge_substitutions`）。同一輪可能有兩個來源
+  （`dispute` 與 `page-read`）對同一個 `(field, position)` 給不同的 `to`；挑一邊就是把機器意見
+  當成事實。去重規則：依 `(field, position)` 摺疊、同值合併、**矛盾回 `None`**，`main()` 印
+  `REFUSED` 並跳過那一題（實測 `108030:311:66 q054`）。這條與上面的 NFKC 例外同時驗收。
 
 套用寫一筆 `reset_review`（帶著 `correction`），題目以「修復後待複核」回到討論區。
 **不是 `correct`**：機器不宣告任何人的判定。
@@ -323,12 +381,25 @@ cd tw-national-exam-catalog/qbr
   的字元的爭議，就寫在修好文字的正上方。修法是在伺服器疊 `correction` 時用**同一個**
   `review_queue.disputes_for_paper` 重量——只改變**什麼時候**跑，沒有第二套規則。
 
-### 量到的現況（2026-09-23）
+### 量到的現況（2026-09-24）
 
 - 卡住 269 題；其中 174 題**沒有任何爭議**（人的判斷阻擋，模型給不了答案），
   其餘為 `lost-glyph 37`、`flattened-offset 35`、`substituted-script 8`、`empty-option 7`、
   `option-shape 5`、`table-flattened 2`、`punctuation-only-option 1`。
 - 已確認的紙本判讀 49 筆，其中 **18 筆**滿足錨定規則（已全數套用），31 筆被拒。
+- **2026-09-24 的修理：出口是 0，不是沒有判讀**。常駐迴圈每輪都在寫 findings、每筆都帶 `changes`，
+  但 `--page-read` 的可用修復是 **0**——原因就是上面那條康熙部首的例外（模型順手修的字沒被標記）。
+  改成 NFKC 等價之後同一份資料量到 **19**，去重後 **18 筆套用**、**1 題拒絕**（兩次量測矛盾）。
+  套用後 `reset_review` 帶 `correction`，`parser_original` 保留原本的 `⽽`／`⻑`，
+  投影落在「修復後待複核」＝介面上的 **`AI已修改`**（2026-09-25 前叫「AI已解決」）。實測（站上畫面）：
+  物理治療師 108 年第 1 次 `AI已修改 60`、`block 0`，那一格畫出的每一列右欄都寫
+  「抽出文字（已人工修正）」。
+- **這個出口仍然要有人按**：`apply_dispute_repairs --page-read --apply` 不在 `repair_daemon.sh` 裡
+  （GOV-05 把代理留在 advisory）。要讓「AI已修改」自己長大，得先決定要不要把那個寫入步驟排進常駐迴圈
+  ——那是 owner 的決定，不是預設值。
+- 產能：`WINDOW` 5 → **60**（2026-09-24）。理由與計算見
+  [`docs/skills/operate-repair-agent-surface/SKILL.md`](../docs/skills/operate-repair-agent-surface/SKILL.md)
+  的「容量」一節。
 - **自動修復不可能吃掉全部**：`lost-glyph`／`substituted-script`／`flattened-offset` 的其餘部分
   需要重讀紙本或人。這是這條線誠實的邊界，不是待辦清單。
 

@@ -29,8 +29,8 @@ jobs:
         run: python3 scripts/validate_agent_governance.py
       - name: Compile critical Python entrypoints
         run: python3 -m py_compile scripts/serve_question_review_ui.py scripts/build_question_candidates_from_mineru.py scripts/validate_agent_governance.py
-      - name: Check production shell syntax
-        run: bash -n scripts/ai395_catalog_runtime.sh scripts/ai395_catalog_production.sh
+      - name: Check local review shell syntax
+        run: bash -n scripts/local_review.sh scripts/review_run.sh
 
   unit-tests:
     name: unit-tests
