@@ -29,7 +29,7 @@ Classify only formal, human-approved questions. Treat every AI label as advisory
      --results tmp/classification/results.jsonl
    ```
 
-7. Route `needs_human_review`, low-confidence, cross-domain, image-dependent, and unknown-label cases to a human. Do not auto-accept or auto-block from AI output alone.
+7. Route `needs_human_review`, low-confidence, cross-domain, image-dependent, and unknown-label cases to a human. This classifier does not make human accept/block decisions or set the separate QBR AI workflow status.
 
 ## Build a SQL worklist
 
@@ -75,3 +75,13 @@ To add or split a chapter:
 7. Reclassify old records only through a new advisory run; do not overwrite prior classification events.
 
 If a new subject is unrelated to these four medical-technologist subjects, add a separate taxonomy reference rather than loading unrelated labels into every prompt.
+
+<!-- project-map:belongs-to -->
+## 這一層在哪（回上層的路）
+
+> **這是本子專屬技能**：只服務這個子專案。其他子專案要用同一件事時，先確認是不是該變成全域共通技能。
+
+- 本層入口：[`../../../AGENTS.md`](../../../AGENTS.md)
+- 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
+- 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
+<!-- /project-map:belongs-to -->

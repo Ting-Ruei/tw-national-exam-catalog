@@ -10,6 +10,56 @@ description: 看懂並操作「修理代理」的進度面 —— 討論區的�
 [`run-question-review-loop`](../run-question-review-loop/SKILL.md)；
 部署本身在 [`deploy-qbr-review`](../deploy-qbr-review/SKILL.md)。
 
+## 人去哪裡審題、哪裡跟代理合作（一張圖；2026-09-29 全部量過）
+
+先講結論：**審題的主場是常駐機的 `/v2`；跟代理對話、試它讀得好不好是筆電沙盒；兩邊讀的是不同份資料。**
+
+| 面 | 位址 | 誰在用 | 讀什麼 | 寫什麼 |
+|---|---|---|---|---|
+| **站上審題介面 v2** | `http://192.168.10.70:8765/v2`（量到 200） | **人（你）** | `~/qbr-review/queue/review-ui/candidates.jsonl`（199 MB／79,090 題）、`question_ai_findings.jsonl`（707 MB，代理的判讀） | `question_review_events.jsonl`（**人為裁決，append-only**）、`question_review_principles.jsonl`（基本原則）、`question_repair_questions.jsonl`（你對代理反問的回答） |
+| **常駐機佇列目錄** | `192.168.10.70:~/qbr-review/queue/review-ui/` | 站上所有程式 | — | 代理的 `question_ai_findings.jsonl`（**mtime 停在 Sep 25 22:30：站上代理迴圈沒在跑**）、`crops/`（860 張） |
+| **筆電沙盒（代理工作台）** | `http://192.168.20.249:8790`（LAN）／`http://100.96.207.80:8790`（Tailscale）；`repair_agent_test/agent/ui/server.py`，PID **75668**（2026-09-29 換版重啟） | 人（試代理） | **筆電快照**：`qbr/data/review-queues/live/review-ui/`（candidates／events／findings／questions／principles） | 沙盒自己的流：`repair_agent_test/agent/store/agent_feedback.jsonl`（`action: ai_feedback`、`source: agent`／`designer`、`engine: occamy-6bit`）；每輪經驗 `store/lessons.jsonl` |
+| **沙盒的列表狀態** | 同一頁的「人的狀態」下拉 ＋ 每列三個 chip | 人（你） | `human_status`＝**站上 v2 的裁決**（摺 `question_review_events.jsonl`：accept／block／needs_review／reset_review…）；`judged_by_designer`＝你在沙盒按的；`judged_by_agent`＝代理自己判的 | 只讀（篩選走 `?status=`，同一個 `bridge.do_browse`，CLI／UI／代理看到同一份） |
+| **代理本體** | Pi SDK session，腦＝`occamy-6bit`（`127.0.0.1:18130`），工具＝`read_page` 等（`repair_agent_test/agent/lib/tools.mjs`） | 代理 | 佇列＋PDF（自己切圖） | 自己的 findings／判讀（**不寫**人為事件） |
+| **稽核迴圈** | LaunchAgent `com.qbr.audit-pharmacist1`（PID 37888）→ `repair_agent_test/agent/audit_pharmacist1.sh` | 代理 | 藥師(一) 99 題（帳本 `/tmp/agent_perf/audit/summary.tsv`） | `store/agent_feedback.jsonl`（28 列） |
+
+```mermaid
+flowchart LR
+  subgraph H["人（四個介入點）"]
+    h1["v2 按 A 接受／R 需審／B 封鎖／E 修字"]
+    h2["#原則：寫基本原則"]
+    h3["討論區：回答代理的反問"]
+    h4["沙盒：對話、按判讀"]
+  end
+  h1 -->|append-only| EV["question_review_events.jsonl"]
+  h2 --> PR["question_review_principles.jsonl"]
+  h3 --> RQ["question_repair_questions.jsonl"]
+  h4 -->|判讀/評分| AF["agent_feedback.jsonl（沙盒自己的流）"]
+  EV --> GATE["掃描閘門：只讀『人 block 過』的題"]
+  PR --> PROMPT["提示詞：已核准的原則"]
+  RQ --> PROMPT
+  GATE --> AG["代理：occamy-6bit 讀紙本"]
+  PROMPT --> AG
+  AG --> FND["question_ai_findings.jsonl（advisory，不寫人為事件）"]
+  FND --> PANEL["v2 面板：兩個模型不一致／指揮者分流"]
+  PANEL --> h1
+```
+
+**「訓練小模型」現在不是這張圖的一部分（誠實版）。** 目前沒有任何微調管線、沒有資料集、沒有權重更新：
+模型（occamy-6bit）**只被提示詞改變**——你的**基本原則**、你對反問的**回答**、題目的**人為註解**，
+加上掃描閘門（只讀人 `block` 過的題）與代理自己寫的經驗（`learned`）。你的 20,329 筆人為事件是
+**標籤**，但目前只被當成「這一題的狀態」用。要真的微調，需要新的 owner 決定：資料集定義與去識別、
+prompt/答案配對、訓練與評估契約、版本與 checksum、以及「微調後的模型不得直接改題或寫正式題庫」
+（charter 第 4 節）。**在那之前，「讓它變好」= 寫原則、回答反問、在 v2 按裁決。**
+
+**但 2026-09-29 量到一件事，這句話有一半是不成立的**：這張圖的 `PR --> PROMPT`／`RQ --> PROMPT` 只對
+**站上代理**與**沙盒的對話代理**（`lib/identity.mjs::principles()` 每輪讀）成立。沙盒**判讀**那條路
+（`bridge.read_page` → `confirm_dispute.transcribe(...)`）**沒有傳** `principles`／`answers`／`notes`
+（簽名有那三個參數，呼叫沒給）⇒ 你寫的原則不會出現在「它讀紙本」的那一次。而且兩條流的寫入者其實是
+機器（`source=feedback_learning`／`qbr_experience_apply`，最後一筆都在 2026-09-25 22:12／22:31），
+你自己 9/25 之後沒有再寫過——同一時間站上的 `question_review_events.jsonl` 到 9/29 12:29 還在長。
+詳細量法與待裁決見 `repair_agent_test/skills/design-repair-agent/SKILL.md` §9.9 第三輪。
+
 ## 三個階段是分開的狀態，不是一個進度條
 
 | 階段 | 做什麼 | 貴不貴 | 紀錄在哪 |
@@ -118,6 +168,31 @@ mv ~/Library/LaunchAgents/com.qbr.repair-daemon.plist \
    ~/Library/LaunchAgents-retired/com.qbr.repair-daemon.plist.retired-$(date +%Y%m%d)
 launchctl list | grep qbr || echo "（沒有 qbr job）"      # 驗：這行才是證據
 ```
+
+**⚠️ 2026-09-24 那次只做了一半（2026-09-29 量到）。** plist 有搬
+（`~/Library/LaunchAgents/com.qbr.repair-daemon.plist.retired-20260924` 在），但**原本跑著的製程沒被
+殺**：`nohup env ONCE=0 bash qbr/scripts/repair_daemon.sh`（PID 22977，父殼 22975）**又活了 6 天**，
+291 輪每輪 `rc=1`，`qbr/runs/repair_daemon-20260923-112942.log` 累計 **735 筆
+`request failed`**——因為它的每一輪都用 **`confirm_dispute.py` 的 `--model` 預設＝已 down 的
+Splash@8088**（daemon 這條路徑沒傳 `--model`），log 第一行就寫著
+`對 N 題看紙本並轉錄（incoai/Qwen3.8-27B-Splash @ http://127.0.0.1:8088）`。
+
+**「launchctl 沒有這個 job」不等於「沒有這支迴圈」**：`launchctl list | grep qbr` 只看得到 launchd
+管的；`nohup` 起來的要看 `pgrep -fl repair_daemon`。2026-09-29 換掉 `confirm_dispute.py` 的預設
+（→ `occamy-6bit`）之後同一條指令實測會**成功**（`讀不到 0`，q53／q61 都讀出不一致），也就是它會
+開始產生「永遠不會回流」的判讀（見上表那個靜默跳過的機制）→ **已 `kill 22977 47933`**，
+`pgrep -fl "repair_daemon|sleep 1800"` 空、父殼 22975 已結束。
+
+同一輪量到的**站上**現況（`ssh 192.168.10.70`）：`launchctl print gui/501/com.qbr.repair-daemon` →
+`Could not find service`；plist 在（`com.qbr.repair-daemon.station.plist`，Sep 25 16:07），
+log `~/qbr-review/logs/repair-daemon.out.log` 只有 9/25 那一輪（`ONCE=1，結束`）；站上
+`question_ai_findings.jsonl` mtime 停在 Sep 25 22:30。**站上的 UI 是好的**（`:8765/v2`）。
+plist 內容：`ONCE=1`、`LANE=dgx-qwen3.8-flash`、`ORCHESTRATE=dgx-qwen3.8-flash`、
+**`QBR_ALLOW_EXTERNAL_LLM=1`**、`QBR_LITELLM_BASE_URL=http://127.0.0.1:4000`、
+`QBR_PYTHON=/usr/bin/python3`、`QUEUE=~/qbr-review/queue`、`WINDOW=60`、`INTERVAL=600`、
+`RunAtLoad=true`、`KeepAlive=false`、`StartInterval=600`。**要復原先改這三件**：lane（應為
+`occamy-6bit`）、`ONCE`（要真的持續就跑 `ONCE=0`，或用 `StartInterval` 但別留 `ONCE=1`）、
+`QBR_ALLOW_EXTERNAL_LLM`（charter 第 6 節：目前不依賴外部節點）。
 
 `~/Library/LaunchAgents-retired/` 不在 launchd 掃描的目錄裡，所以登入也不會再被載入。
 要復原就是把檔案搬回去再 `bootstrap`（repo 裡的那份筆電 plist 同一天刪掉了——留著一份沒人載入的

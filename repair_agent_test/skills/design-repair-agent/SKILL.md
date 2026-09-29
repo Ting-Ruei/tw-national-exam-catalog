@@ -884,8 +884,8 @@ launchctl bootout   gui/$(id -u) ~/Library/LaunchAgents/com.qbr.audit-pharmacist
 ```
 
 `summary.tsv` 是**帳本**：已在裡面的 key 會跳過，所以「重跑同一份清單」就是續跑，不會重複判。
-2026-09-29 收工時的進度：**q018 up、q053 down（`C∞min` 被壓平）、q041 up、q065 up**；
-其餘 95 題由 LaunchAgent 繼續。
+2026-09-29 收工時的進度（`wc -l /tmp/agent_perf/audit/summary.tsv` → 表頭＋**13 題全 rc=0**，剩 **86 題**）：
+**q018 up、q053 down（`C∞min` 被壓平）、q041 up、q065 up** 之後由 LaunchAgent 續跑；
 
 **順帶跑掉的驗證**：換 `vision.py` 預設之後 `qbr` 全套 **783 passed / 17 skipped**（與先前同一組
 數字），另外 `describe_crop` 走新預設實測成功；`repair_agent_test` 則 47 pass / 0 fail。
@@ -928,28 +928,791 @@ https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-se
 非空的列濾掉之後，兩邊的位元組流**完全相同**（各 105,100 列、sha256 `e99d5bf683c24541`）；
 差的全是失敗重試。細節與計算指令見 `docs/skills/operate-repair-agent-surface/SKILL.md`。
 
+#### 9.9 第二輪（2026-09-29 稍晚；設計者五問：整套換／PR 去哪裡按／reread 還在用嗎／KV 要不要開大／站上哪部分沒恢復）
+
+**① 純文字線也換 occamy（設計者：整套換）— 已改，含一個只有實跑才看得到的坑。**
+
+- `qbr/src/qbr/reflow.py`：`_DEFAULT_NAME = "occamy-6bit"`；並把**硬寫死的 MTPLX 開關**
+  （`THINK_CHAT_TEMPLATE = {"enable_thinking": False}`）換成**從引擎表取**（新增 `_engine()`，
+  `think=False` 走 `engines.body_for`，與 `reread.endpoint()` 同一條路；`think=True` 不送開關）。
+  移除因此變成死碼的 `_endpoint`。
+- **為什麼不能只換一行**（負對照，同一提示詞、同一顆引擎）：
+
+  | 送法 | 秒 | completion | `reasoning_content` | 答案 |
+  |---|---|---|---|---|
+  | 引擎表的 `reasoning_effort: none` | **0.3** | 4 | **0 字** | 308（**錯**，正解 252） |
+  | 舊拼法 `chat_template_kwargs.enable_thinking=false` | 2.0 | 82 | 137 字 | 252 |
+  | 完全不送開關 | 1.9 | 82 | 137 字 | 252 |
+
+  舊拼法在 occamy 上**與不送開關完全一樣**（被接受、被忽略）→ 只換預設的話，reflow 會**靜默地繼續
+  thinking**，而它的預算是靠 thinking 關掉才成立的（模組註解記的 5,085 tokens/44 s vs 115,628/半小時）。
+- **同一張卷、兩個引擎、thinking off（各跑多次，紙本骨架當判準）**：`1152_醫事檢驗師_微生物學與臨床微生物學`（80 題／420 格）
+
+  | 引擎 | 樣本 | 秒 | completion | `admissible` | 讀出 | 與骨架同題 | 題幹異 |
+  |---|---|---|---|---|---|---|---|
+  | occamy-6bit（cap 40k） | 3 次 | 163／94／66 | 4,961（三次相同） | **true** | 80 | **80/80** | 0 |
+  | occamy-6bit（cap 40k） | 1 次 | 189 | 4,794 | false | 77 | 4/80 | 72 |
+  | mtplx-35b（模組預算 156k） | 2 次 | 85／52 | 4,955（兩次相同） | false | 80 | 67/80 | 13 |
+
+  也就是：**occamy 關掉 thinking 三次都完美（80/80），mtplx 兩次都只有 67/80**，切換有量測支持；
+  但 occamy 4 次裡有 1 次給出壞讀（77 題、同題 4/80）——而 reflow 自己的 `verify` **判為
+  `admissible=false` 抓到了**（`reflow_adaptive.py` 就是為這條升級路徑存在的）。
+- **順手把誤標的失敗分開**：引擎拒絕（`ask` 回 `request failed: …`）原本記成 `report.error="unparsed"`，
+  與「模型答了但讀不出來」同一個標籤。實測就是這個坑：KV 拒絕看起來像模型問題。現在拒絕記成
+  `request-failed` 並附 `detail`（原訊息前 300 字），另加負對照測試。
+- **實測：reflow 在 occamy 上跑不完一張 80 題卷（用模組自己的預算）。** reflow 對 420 格卷要
+  `900×80 + 200×420 = 156,000` max_tokens（`answer_budget`），occamy 的 `MAX_KV_SIZE=65536` →
+  `400 Request needs 165654 context tokens (9654 prompt + 156000 max generation), but MAX_KV_SIZE is
+  65536.`，**0.1 秒**被拒、`judge_reading --think off` 讀出 0 題。要它跑得動：把預算壓到 KV 上限內
+  （實測 cap 40,000 → 9,654＋40,000＝49,654 ≤ 65,536，讀得完）或把 `MAX_KV_SIZE` 開到 ≥166k。
+  **這一項等你裁決**（見 ④）。
+- 配套的預設一起換（`git grep -n '"splash"\|"mtplx-35b"'` 的其餘三處，都是 1 行＋理由註解）：
+  `reread.py::DEFAULT_ENGINE`、`ask_about_blocks.py` 與 `confirm_dispute.py` 的 `--model`（原本
+  `splash`，而 8088 自 2026-09-25 就是 down）、`scan_category_principles.py` 的 `--model`（原本
+  `mtplx-35b`）。**仍然指名 mtplx 的兩個地方沒有動**：`scan_pharmacist_track.sh` 三條 lane 的
+  `--model mtplx-35b`（它產出的判讀會進 review queue，換引擎＝換那條線的讀法，先量再改）、
+  `repair_daemon.sh` 的 `LANE`（那個迴圈現在每輪 rc=1，先修它的病再談換引擎）。
+- **還有一個自己造出來的坑（實測抓到）**：第一版 `_engine()` 把模組層的 `BASE_URL`（＝預設引擎的
+  位址，現在是 18130）無條件蓋上去，於是 `QBR_REFLOW_ENGINE=mtplx-35b` 只換到開關、**位址還在
+  occamy** → 送 156,000 max_tokens 給 18130、0.1 秒被 KV 上限拒。修法照 `reread.endpoint()`：
+  位址用**被選中那顆**的，只有環境變數（`QBR_REFLOW_BASE_URL`／`QBR_MODEL_BASE_URL` 等）在時才蓋。
+  已加兩條測試（預設＝occamy 且送 `reasoning_effort: none`；`QBR_REFLOW_ENGINE=mtplx-35b` 時位址與
+  開關一起換）。
+- 測試：`qbr/tests/test_engines.py::test_the_negative_control_the_default_engine_is_not_mtplx`
+  原本把預設釘成 `"splash"`，改成**「不是 mtplx-35b」＋「名字在引擎表裡」**（負對照測的是 MTPLX
+  這件事，不是「是哪一顆」）。`qbr` 全套 **786 passed / 17 skipped**（783 ＋本輪 3 個新測試）。
+- 落地的三個檔（`vision.py`／`reflow.py`／`engines.py`）**仍只存在工作樹**（見 #5 的 ⚠️）。
+
+**② 六支 PR：compare 頁面已驗，只差按下去。** 逐支 compare（base 一律
+`agent/review-ui-server-split-20260923`）匿名 `curl` 皆 **HTTP 200**（repo 公開）：
+
+```text
+https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-server-split-20260923...agent/<分支>
+```
+
+按法：開上面任一 URL → 頁面上方 compare bar 右邊的 **「Create pull request」** → 填標題／內文 →
+再按一次「Create pull request」。（沒有看到按鈕時走通用路徑：repo → **Pull requests** →
+**New pull request** → base 選 `agent/review-ui-server-split-20260923`、compare 選該支。）
+**順序**：先合第 1 支 `agent/qbr-shared-contracts-20260929`（6 個共享 commit），再合 2–6；否則同 6 個
+commit 會被審 6 次且互相衝突。標題表見上一節。
+
+**③ `reread` 還在用嗎（確認過再回答）。**
+
+- **模組還活著，而且新流程天天用**：`reread.page_extents`／`options_of`／`band_rows`／`crop_rows`／
+  `SYSTEM`／`parse`／`compare` 被 `repair_agent_test/agent/bridge.py`（沙盒讀題）、
+  `qbr/scripts/crop_run_figures.py`、`qbr/src/qbr/vision.py`、`qbr/src/qbr/ai_findings.py` 等引用。
+- **會用到那個 down 的 `splash` 預設的，只有兩支：`transcribe`（383 行）與 `reread_question`（415 行）**。
+  全 repo 掃 `transcribe(`／`reread_question`（含 `.sh`／`.mjs`／`__pycache__`）的結果：`reread.transcribe`
+  只被 `reread_question` 呼叫，而 `reread_question` **沒有任何呼叫者**，`reread.py` 也**沒有
+  `__main__` 入口**——它是 Task 21 留下的頁面回讀工具。
+- **新流程真正的讀法是 `confirm_dispute.transcribe`**：`bridge.py:609` 用 `engines.named(args.engine)`
+  把 endpoint **明確傳進去**（預設＝`BRAIN_ENGINE`），`scan_pharmacist_track.sh` 也明確 `--model`。
+  所以那個 down 的預設**不會**弄壞任何現在會跑的東西；已一併改成 `occamy-6bit`，免得日後手動跑踩雷。
+
+**④ occamy 的 KV（要開大嗎）。** 量法與結論：
+
+- **語意＝請求准入配額**（讀原始碼＋實測）：`mlx_vlm/server/generation.py::_check_configured_context_budget`
+  在**做任何事之前**檢查 `prompt_tokens + max_tokens > MAX_KV_SIZE` → `PromptTooLongError` → HTTP 400。
+  `models/cache.py:65` 只在這顆模型**沒有**自己的 `make_cache` 時才會把它變成
+  `RotatingKVCache(max_size=...)`；這顆有 → 對它而言就是配額，不是「配置多少記憶體」。
+- **現況**（`GET :18130/health`、`GET :18130/v1/settings`）：`loaded_context_size=262144`（模型自己的
+  窗口）、`configured_context_limit=65536`、`max_kv_size=65536`；`moe-offload` `enabled=false`。
+- **誰在撞它**：agent 自己的提示詞 ~39,496（歷史 log）＋我們訂的 `max_output_tokens=16384` =
+  55,880 ≤ 65,536（成功例：`prompt_tokens=31013 max_tokens=16384`）；reflow 要 156,000 → 直接拒。
+- **成本（算出來）**：hybrid 模型，40 層中 30 層 linear attention、**10 層 full attention**；
+  `head_dim=256`、`num_key_value_heads=2`、bf16 ⇒ **每個真的存在的 token ≈ 2×10×2×256×2 = 20 KiB**；
+  65,536 ≈ 1.25 GiB、131,072 ≈ 2.50 GiB、262,144 ≈ 5.00 GiB。cache 每 256 token 成長（`KVCache.step`），
+  **開大不會立刻吃記憶體**。（反證：一個 32k 提示詞的請求跑著時行程 RSS 只動 0.6 MiB
+  `29,997,312 → 29,997,920 KB`，所以「看 RSS 就知道」是錯的；真上限看 `/v1/metrics` 的
+  `peak_memory_gb`＝40.9，機器 128 GiB。）
+- **改法**：`CTX_MLX=131072 occamy restart fit6`（持久，`~/models/occamy/bin/occamy:33`），
+  或用 live knob `PATCH :18130/v1/settings {"max_kv_size":131072}`（免重啟，但 `reload_kinds:
+  ["text_generation"]` 會重載文字模型）。要讓 reflow 跑它的預算需要 ≥166k（9,654＋156,000）。
+- **建議**：agent 現在**不需要**開大；要開只有兩個理由——同時多個大 session（每個 ~55k）、
+  或讓 reflow 跑它自己的預算。這是 owner 的機器決定。
+
+**⑤ 站上 daemon 哪部分沒恢復。**
+
+- **沒恢復的是「站上掃 queue、寫 AI findings 的迴圈」**：`ssh 192.168.10.70` →
+  `launchctl print gui/501/com.qbr.repair-daemon` → `Could not find service`；plist 還在
+  （`~/Library/LaunchAgents/com.qbr.repair-daemon.station.plist`，Sep 25 16:07，6455 B）；
+  `pgrep -fl "repair_daemon|scan_for_repairs"` 無輸出；log 只有 9/25 那一輪
+  （`第 1 輪 14:19:31Z → 結束 14:36:26Z`、`ONCE=1，結束`）。站上
+  `question_ai_findings.jsonl` 的 mtime 因此停在 Sep 25 22:30。
+- **有恢復的**：站上的 Review UI v2（`:8765/v2`）仍在服務。
+- **筆電上還有一個不同的迴圈在跑而且是壞的**：`qbr/scripts/repair_daemon.sh`（PID 22977、自 Sep 23、
+  `ONCE=0`、`LANE=mtplx-35b`），第 288–290 輪全部 `rc=1`、每 1800 s 重試——站上/筆電 findings 那
+  2,891／3,096 列失敗列就是它與 Splash@8088 留下的。
+- **它現在為什麼起不來，plist 也說了**（`plistlib` 讀出來的事實）：`ProgramArguments` =
+  `/bin/bash -lc exec "/Users/tim/qbr-review/code/qbr/scripts/repair_daemon.sh" loop`；
+  `EnvironmentVariables`：`ONCE=1`（**只跑一輪就結束** → 那 9/25 的 log 就是這樣來的，看起來像「跑過了」）、
+  `LANE=dgx-qwen3.8-flash`、`ORCHESTRATE=dgx-qwen3.8-flash`、`QBR_ALLOW_EXTERNAL_LLM=1`、
+  `QBR_LITELLM_BASE_URL=http://127.0.0.1:4000`、`QBR_PYTHON=/usr/bin/python3`、
+  `QUEUE=/Users/tim/qbr-review/queue`、`WINDOW=60`、`INTERVAL=600`；`RunAtLoad=true`、
+  `KeepAlive=false`、`StartInterval=600`。
+  → 兩個地雷：**`ONCE=1`**（載入後跑一輪即結束，之後每 600 s 由 `StartInterval` 再載入一次；
+  現在 service 不在 launchd，所以連那個都沒有），以及**它被配置成走 DGX/external lane**
+  （`QBR_ALLOW_EXTERNAL_LLM=1`＋DGX 端點）——那正是站上 2,746 列失敗的來源，也和 charter
+  「目前不依賴外部 AI 節點」相衝。**不要直接把它載回去**，先決定 lane（應該是 occamy）與那兩個開關。
+- 另外確認：**findings 沒有東西要回流**（濾掉 `error` 非空後兩邊位元組流相同、各 105,100 列、
+  sha256 `e99d5bf683c24541`）；**human events 只能站上 → 筆電**（站上 20,329／筆電 20,324，站上多 5 筆
+  `reviewer: local` 的 accept）。
+
+**⑥ 筆電那支失敗迴圈的根因＝同一個預設（實測到，且已處理）。**
+
+- 它的每一輪都印 `對 5 題看紙本並轉錄（incoai/Qwen3.8-27B-Splash @ http://127.0.0.1:8088）`，然後
+  `讀不到（request failed）`×5 → rc=1；`qbr/runs/repair_daemon-20260923-112942.log` 裡累計
+  **735 筆 `request failed`**、291 輪全失敗。**根因就是 `confirm_dispute.py` 的 `--model` 預設指向
+  已 down 的 8088**（`scan_for_repairs.py` 內部呼叫它、daemon 沒傳 `--model`）。
+- **換預設後同一條指令實測**（`confirm_dispute.py --queue data/review-queues/live --limit 2
+  --pending-only --skip-confirmed --out /tmp/...`，15.6 s）：`對 2 題看紙本並轉錄（occamy-1.0-6bit-xl-mlx
+  @ http://127.0.0.1:18130）`，`不一致 2、一致 0、紙本讀不出來 0、讀不到 0`（q53 抓到上標被壓平、
+  q61 抓到 2 處）——**735 筆失敗的直接原因消失了**。
+- **但這支迴圈本來就該不在**：`docs/skills/operate-repair-agent-surface/SKILL.md` 記著 2026-09-24
+  owner 決定「筆電這支退掉」（理由是 `scan_state.json` 會被推上常駐機、而
+  `question_ai_findings.jsonl` 永不推 → 常駐機拿到「已看過」的指紋、拿不到判讀，於是**靜默跳過**）。
+  當天只 `mv` 了 plist（`com.qbr.repair-daemon.plist.retired-20260924` 在），**跑著的製程沒被殺**，
+  活了 6 天（PID 22977，`nohup env ONCE=0 bash qbr/scripts/repair_daemon.sh`，父殼 22975）。
+  而且預設換掉之後它會**開始成功**，也就是真的開始產生「永遠不會回流」的判讀 → **已停掉**
+  （`kill 22977 47933`；`pgrep -fl "repair_daemon|sleep 1800"` 空、父殼 22975 已結束）。
+  要恢復請照上面那份 SKILL 的 install 步驟，不要只 `nohup`。
+
+**⑦ 分支依賴（決定 PR 合併順序的硬事實）。** `occamy-6bit` 只存在於
+`agent/engine-endpoints-runtime-20260927`（`git show <ref>:qbr/src/qbr/engines.py | grep -c occamy`
+→ 該分支 4、`repair-agent-pi-sdk-20260928` 0、`review-ui-server-split-20260923` 0、`main` 0）。
+而 `repair-agent-pi-sdk-20260928` 已提交的 `session.mjs` 是
+`BRAIN = "occamy-6bit/occamy-1.0-6bit-xl-mlx"` ⇒ **第 6 支要有第 3 支才跑得起來**。
+所以合併順序：**① 共享契約 → ③ 引擎表 → ⑥ pi-sdk → ④②⑤**（其餘彼此無依賴）。
+本輪改的三支 script 預設也一樣：`--model occamy-6bit` 要引擎表裡有那顆才有意義。
+
+**⑧ 工作樹糾纏（「整套換」暫時落不了地的原因）。** 本輪改到的檔案未提交量：
+`qbr/src/qbr/engines.py` 210/17、`vision.py` 713/74、`reflow.py` 84/32、`reread.py` 189/49、
+`qbr/tests/test_engines.py` **117**、`qbr/tests/test_reflow.py` **457**——**後兩者含別條線的測試**，
+所以連「只 commit 三個乾淨的 script 預設」都不成立：`ask_about_blocks.py`／`confirm_dispute.py`／
+`scan_category_principles.py`（各 4/1）雖是乾淨的，但它們的 `occamy-6bit` 預設要等 ③ 的引擎表先落地。
+先前的敘述（「reread.py＋三支 script＋測試可獨立 commit」）**是錯的，以此處為準**。
+
+#### 9.9 第三輪（2026-09-29 晚；設計者四問：①我不會合併 ②PR「Some checks were not successful」 ③原則／討論區應該廢了吧 ④沙盒沒有嚴格區分＋討論能不能幫提示詞進化）
+
+**② checks 紅的根因（已量到，會改變合併順序）**
+- `python3 -m unittest discover -s tests`（CI 的 `unit-tests` 原指令）在 worktree 上實測：
+  `origin/main` → **OK**；`origin/agent/review-ui-server-split-20260923`（**五支 PR 的共同祖先**）→
+  **FAILED (failures=1, errors=19)**；`origin/agent/repair-agent-pi-sdk-20260928`（#7）→ 同上。
+- 19 個 error 是同一件事：`qbr/src/qbr/review_ui/review_state.py:60` 匯入
+  `scripts.review_feedback`（`except ModuleNotFoundError` 的**退路**分支），而 **split 分支上這個檔被刪掉了**
+  （`git cat-file -e <ref>:scripts/review_feedback.py`：main 沒有、split 沒有、shared-contracts 沒有；
+  `codex/organize-review-server-20260923`／`review-ui-isolated-20260926`／`qbr-ui-prerequisite-20260926` 有；
+  **工作樹有，且與 #12 上的版本逐字相同**，17,227 bytes，Sep 23 19:27）。
+- 第 1 個 failure 是第二個半提交：`tests/test_migration_tools.py` 在分支上期望
+  `scripts/migration_preflight.py` 的 stderr 含 "retired"，但**retired stub 只存在工作樹**（工作樹相對
+  split 是 +4／−503 行，也就是 4 行的 stub；分支上仍是 507 行原版）⇒ argparse 直接報 `--mode` required。
+- 三顆 check 的判定：#7（run `36525872407`）／#10（`36526012854`）／#8／#9／#11 全部
+  `governance=success, unit-tests=failure, qbr-tests=failure`；**#12 = 三顆全 success**。
+  ⇒ 更正第二輪「#12 關掉」：**#12 綠不是因為它對，而是因為它舊**（它仍有 `scripts/review_feedback.py` 與
+  未拆的伺服器）。它證明缺的是**一個檔**，不是設計。
+- **修法（順序因此改變）**：把工作樹的 `scripts/review_feedback.py` ＋ retired stub 補進
+  `agent/qbr-shared-contracts-20260929` → 那支 PR 先綠 → 合進 main。PR 的 check 跑在「base＋head 的合併結果」
+  上，所以 main 有了這兩個檔之後，其餘五支會在 Checks 頁按 **Re-run all jobs** 後轉綠。
+- 合併的操作（他不會）：PR 頁 → 綠色 **Merge pull request** → **Confirm merge**；checks 紅時 GitHub 會多一行
+  **Merge without waiting for requirements**（那是「我知道它紅，照合」——現在不該按，因為紅的是真缺陷）。
+  `gh auth status` 仍是 `The token in default is invalid` ⇒ 開／關 PR 我做不了（只能讀公開 API）。
+
+**③ 原則／討論區：消費者還在，寫入者早就不是他**
+- 消費者（實測）：`qbr/src/qbr/ai_findings.py` 的 `PRINCIPLES`／`ANSWERS`／`NOTES` 三段
+  （`discuss.PRINCIPLES_STREAM`／`REPAIR_QUESTIONS_STREAM`）→ 站上代理的提示詞；
+  `qbr/src/qbr/discuss.py` → 站上 v2 的「原則」「討論」兩個模式；`repair_agent_test/agent/lib/identity.mjs::principles()`
+  → **沙盒對話代理**（每輪都讀，空的話靜默變短——那個檔自己的註解記著「0 of the designer's 19 principles」）。
+- 寫入者：`question_review_principles.jsonl` 32 列、最後 `2026-09-25T22:12:23`、`source=feedback_learning`、
+  `reviewer=principle_curator`；`question_repair_questions.jsonl` 690 列、最後 `2026-09-25T22:31:31`、
+  `source=qbr_experience_apply`、`reviewer=repair_experience_apply`。**兩者都是機器寫的，不是設計者寫的。**
+- 時間線：站上 `question_review_events.jsonl` mtime **09-29 12:29**（他今天還在審）、
+  `question_ai_findings.jsonl` **09-25 22:30**、principles **09-25 22:12** ⇒ 上游（人）在動、下游（代理／原則）停了。
+- 而且**沙盒的判讀路徑不吃這三樣**：`bridge.read_page` 呼叫
+  `confirm_dispute.transcribe(png, endpoint=…, max_tokens=…, timeout=…, number=…)`——`principles`／`answers`／`notes`
+  在簽名上有、呼叫沒給。⇒ 「討論→提示詞」在沙盒裡只有**對話代理**那條線通，判讀那條線不通。
+
+**④ 沙盒嚴格區分（本輪已實作並驗收）**
+- 舊行為（他抱怨的）：`bridge.do_browse` 只收 `block`／`comment`（`'"block"' in line` 前置過濾），
+  所以他 **10,371 題已接受**、**3,938 題已重設**與沒人開過的題畫得一模一樣；UI 只有
+  「未判讀／有圖／有問題的（你說過的）」三個開關；`judged` 一個旗標把 store 裡
+  `source=agent`(27 列) 與 `source=designer`(2 列) 兩種判讀混在一起。
+- 新行為：`human_status`（未審／已接受／已封鎖／需人工確認／已審／已重設／只有註解）＋
+  `judged_by_designer`／`judged_by_agent` 分開；`--status` / `?status=` 篩選（可逗號多選）；
+  類別下拉顯示「人已審 X，未審 Y，已重設 Z；代理已判 W；有圖 V」；每列三個 chip（人／你判／代理）；
+  摺疊規則：live verdict > 撤回（`reset_review` 把裁決清掉）> 只有註解 > 未審。
+- 驗收（可重跑）：`bridge.py browse` 全庫 → 未審 **65,310**／已接受 **10,091**／已重設 **3,294**／
+  已封鎖 **386**／只有註解 **7**／需人工確認 **1**／已審 **1**，與**獨立算法**（另一支腳本直接摺 events，不 import
+  bridge）逐項相同；HTTP `/api/browse?category=藥師(一)&status=block` → **153**、`status=accept` → **4842**、
+  `status=reset` → **43**；真 Chromium 切換下拉與 chip 截圖確認（「人：已封鎖」紅底、
+  「代理：有問題」）；`repair_agent_test/agent/run_tests.sh` **47 pass／0 fail**。
+- 沙盒已重啟（新服務名 `sandbox-8790-status`，pid 75668，`0.0.0.0:8790`）。
+
+**④ 的後半「討論能不能幫提示詞進化」——機制已存在一半，缺的是人的那半**
+- 已經活的：`store/lessons.jsonl`（2,086 bytes、mtime 09-29 13:42，稽核迴圈正在寫）→
+  `identity.mjs::systemPrompt()` 的「你（或前幾輪的你）學到的事」段，依次數排序、附 `evidence`、標科目或 `[引擎]`
+  ⇒ **代理由自己判讀累積教訓、下一輪讀得到**，這就是「討論→提示詞進化」的骨架。
+- 缺的：**設計者的話沒有進入任何一條沙盒路徑**（判讀路徑連 principles 都沒傳）。最小可驗收做法：把一次討論的
+  結論寫成一筆 append-only 經驗（`source: designer`、附 candidate_key 與依據）→ 進同一個 `lessons` 投影 →
+  每輪提示詞讀它，且 UI 顯示「這一題的提示詞用了哪幾條經驗」。這需要他裁決（那是「他的話變成模型必須遵守的
+  約束」），我不自己決定。
+
+#### 9.9 第四輪（2026-09-29 晚；設計者下令「幫我修 PR」）
+
+**A. 推上去的兩支（ssh remote，push 可用；`gh` token 無效 ⇒ 開／關 PR 我做不了，只能 push）**
+
+1. `agent/qbr-ci-green-20260929` = `1c2ba31`（base＝`agent/qbr-shared-contracts-20260929`）。四個檔，
+   全部取自工作樹、全部只差「已提交的一邊」：
+   - `scripts/review_feedback.py`（**還原**；被 split 刪掉，`review_state.py:60` 還在匯入它。
+     與 #12 上已提交的版本**逐字相同**）
+   - `scripts/migration_preflight.py`（15 行 retired stub；全樹唯一引用者就是那個測試，`bg_22` 量過）
+   - `tests/test_ai395_runtime_config.py`（retirement 版：拿掉 ai395 期望、類名改 `LocalRuntimeConfigTests`）
+   - `.env.example`（loopback、`WRITE_ALLOWED=0`、無 ai395 alias）
+   ⇒ 四個檔是同一個「退役 ai395 外部 runtime」change set 的另一半（branch tip `16bd5e4` 的訊息自己就寫
+   「retire ai395」）；兩個已提交的測試原本**互相矛盾**（`test_migration_tools` 要 retired、
+   `test_ai395_runtime_config` 要那個被 retired 掉的常數），所以這四個是最小且自洽的一組。
+   **沒動**：ai395 退役線其餘 ~30 檔（`scripts/ai395_*.py`、`deploy/ai395*`、`docs/ai395-*.md`）。
+
+2. `agent/agent-verified-gate-20260928`（PR **#8**）＝ `8bedd52` → **`15d2a2f`**：`8bedd52` 提交了
+   350 行的 `tests/test_question_package_lineage.py`，**沒有提交它測的東西**
+   （`git log --all -S "def validate_source_document_lineage"` 是空的——那個函式在歷史裡從未存在）。
+   補上：
+   - `scripts/validate_question_bank_package.py`（工作樹版 ＋ 閘門修正）
+   - `scripts/export_question_bank_package_from_postgres.py`（工作樹版；+75 行，全部是 answer source lineage）
+   - 閘門修正（本輪唯一新寫的邏輯，~8 行）：`review_status` 由硬編 `!= "accepted"` 改成
+     `in ("accepted", "agent_verified")`，且 `agent_verified` 另發
+     `package_agent_verified_not_human_accepted`（warning）。測試自己的負對照
+     （`machine_verified_pending_human`／缺 status 仍被拒、`accepted` 不加警告）全過。
+
+**B. 量到的結果（worktree ＋ CI 的原指令，不是猜）**
+
+| 狀態 | unittest `discover -s tests` | pytest `qbr/tests` |
+|---|---|---|
+| 修前：`split`（五支的共同祖先） | 365 tests / 1 failure / **19 errors** | 4 collection errors |
+| 修前：`main` | OK | — |
+| 修後：`main ＋ ci-green` | **524 OK**（8 skipped） | **578 passed** |
+| 修後：`main ＋ ci-green ＋ #7 / #9 / #10 / #11` | **524 OK** 各 | 578 / 580 / 583 / 580 passed |
+| 修後：`main ＋ ci-green ＋ #8（新 head）` | **537 OK** | 578 passed |
+| 負對照：把 `scripts/review_feedback.py` 拿開 | 19 errors 回來 | 4 collection errors 回來 |
+| 五支合併**全部無衝突**（`git merge` 乾淨；公開 API 也報 `unstable`／`clean`，不是 `dirty`） | | |
+
+**C. 分支盤點（`git ls-remote` ＋ `rev-list --count` ＋ 包含矩陣）**
+
+兩個**完全不相交**的家族，做同一件事（重組審題伺服器）：
+- **家族 A（新）**：`review-ui-server-split-20260923`（89 ahead）⊆ `qbr-shared-contracts-20260929`（95）
+  ⊆ `qbr-ci-green-20260929`（96，本輪）→ 五支 feature（96–112）都含 `2a5e97c`，都在 A 上面。
+- **家族 B（舊）**：`qbr-ui-prerequisite-20260926`（#12，95 ahead，伺服器還是 10,707 行單體）
+  ⊆ `review-ui-isolated-20260926`（100，已拆、348 行、**有** `review_feedback.py`）
+  ⊆ `codex/organize-review-server-20260923`（#5，101，綠）。
+- 兩家族樹差 **27 檔**（`git diff --name-status --no-renames <B> <A>`；先前寫的「31 檔」是
+  #12 vs `agent/qbr-shared-contracts-20260929`，那是另一組比對，已在 F 更正）；
+  A 唯一缺的檔（`scripts/review_feedback.py`）已從 B 的版本還原 ⇒ B 已被吸收完，
+  其餘 27 檔逐一裁決見 **F**。
+- 已完全落地的（0 ahead，可直接刪）：`codex/review-ui-image-workflow`（31 behind）、
+  `codex/agent-governance`（29 behind）、`codex/local-review-workflow-20260906`、`codex/qbr-mainline-merge-20260919`。
+- PR 檢查狀態（公開 API，2026-09-29 晚）：**#4 ✅✅✅、#5 ✅✅✅、#12 ✅✅✅**；
+  #7／#9／#10／#11（以及 #8 剛重跑）紅——**只等 `main` 拿到 A 的修補**。
+
+**D. 給設計者的操作順序（他不會合併，也只需要按這幾下）**
+1. 開 `https://github.com/Ting-Ruei/tw-national-exam-catalog/pull/new/agent/qbr-ci-green-20260929`
+   → **Create pull request** ×2。
+2. 等 checks → 應三顆綠 → **Merge pull request** → **Confirm merge**。
+3. #7／#9／#10／#11 → Checks 頁 → **Re-run all jobs** → 應轉綠。
+4. #8：已推新 head，等 `main` 有修補後同樣 Re-run → 綠。
+5. #12 與 #5（家族 B）→ **關掉**（B 已被 A 吸收；合了會讓同一件事在 main 上出現兩份）。
+   #4／#5 綠且獨立：#4 由他決定。
+
+**E. 下一階段（他指定的）**：① 家族 A vs B 的 31 檔逐一裁決（保留／放棄）；② 架構攤開
+（面／流／檔案／誰寫誰讀）＋「誰保留誰放棄」清單；③ 建立完整審題機制（含提示詞進化的
+`source: designer` 經驗流與判讀路徑接上 principles／answers／notes——第三輪 ④ 列的兩件待裁決）。
+
+
+
+**F. 家族 A／B／工作樹 三方逐檔裁決表（2026-09-29，第二階段第一份產物）**
+
+量法：`git diff --name-status --no-renames origin/codex/organize-review-server-20260923
+origin/agent/qbr-ci-green-20260929` ＝ **27 檔**；每檔再量「工作樹 vs A」與「工作樹 vs B」的
+`git diff --numstat`，取較近者；存在與否用 `git status --porcelain --untracked-files=all` ＋ `wc -l`。
+
+⚠️ **結論先講：這是三方比對，不是兩方。** 工作樹（HEAD `1d6d1c0` ＋ 255 個未提交檔）是**最新**的那一版，
+A 與 B 都是它的**部分快照**；A 合進 main 只是把工作樹已經做完的事提交，沒有人在等 B。
+
+| 檔 | 工作樹 vs A | 工作樹 vs B | 判定 |
+|---|---|---|---|
+| `.env.example`、`docs/preserved/ai395-retirement.md`、`docs/preserved/review-feedback-agent.md`、`scripts/migration_preflight.py`、`tests/test_ai395_runtime_config.py` | **0（逐字相同）** | B 有舊版 | 工作樹＝A：這 5 檔是 A 從工作樹搬上去的，B 的是舊版 |
+| `AGENTS.md`、`docs/README.md`、`docs/ryzen-ai-max-395-migration-runbook.md`、`qbr/README.md`、`qbr/src/qbr/generation.py`、`review_ui/v2/02-area-question.js`、`tests/test_review_ui_discuss.py`、`tests/test_review_ui_returned_chip.py`、`scripts/serve_question_review_ui.py` | 近（1–25 行） | 遠（6–251 行） | 留工作樹；B 的是舊版 |
+| `qbr/ENGINE_STRATEGY.md` | 31+0− | 17+0− | 工作樹是**兩邊的超集**（`+0−` ⇒ 只增不刪）⇒ 兩邊都落後 |
+| `qbr/src/qbr/review_ui/{events,review_state,queue_view}.py`、`review_ui/v2/{01-core,04-area-discuss}.js`、`tests/test_review_ui_scope.py` | 近（84／294／319／165／91／172 行新增） | 遠（88／288／319／167／91／172 行新增，且 B 多 57／48／8／72／207／189 行） | **設計爭點** → 見 G |
+| `scripts/review_feedback.py` | 未追蹤（`??`，444 行） | 未追蹤 | 工作樹檔案 sha256 `c931db1dfefab5f1…` ＝ A 的 commit 版**逐字相同**（B 也有同一份）⇒ 這檔兩邊都有，A 已還原，無事 |
+| B 獨有 5 檔：`tests/test_review_ui_{correction_action_precedence,discuss_selection,disputed_filter,scope_refresh_lock,startup_navigation}.py` | 工作樹**沒有** | 只在 B | **B 家族唯一真正獨有的東西** → 見 H |
+
+**G. 4 個「B 有、A 與工作樹都沒有」的行為（把 B 的 7 個測試檔對工作樹跑出來的）**
+
+跑法：把 B 的 `tests/test_review_ui_scope.py` ＋ 5 個 pytest 風格檔複製成 `tests/zz_b_*.py`，
+`./qbr/.venv/bin/python -m pytest tests/zz_b_*.py -q`，跑完即刪（工作樹未被污染，`git status` 已核對）。
+結果 **32 tests：12 failed／20 passed**，12 個失敗分成 4 件事：
+
+| 行為 | B 的測試 | 對工作樹 | 判定 |
+|---|---|---|---|
+| 內容修復的 reset 要保留人的 `action`（B 要 `latest[key]["action"]=="block"` ＋ `pending_reset`） | `test_content_change_reset_preserves_decision_and_repair_bucket`、`test_jsonl_note_after_content_repair_keeps_decision_in_memory`、`test_sql_content_change_reset_preserves_human_decision` | **仍紅**（`'reset_review' != 'block'`；SQL 那個 `KeyError`） | **契約已刻意改變**：工作樹的 `events.py` 有更細的 `_is_repair_reset`（docstring 直接引用這個測試檔，並把 `codex-luna-accepted-reaudit` 列為「故意重開」），且工作樹自己的測試叫 `test_a_repair_after_the_human_block_awaits_recheck_instead_of_reading_as_blocked`（＝「需重審」而不是「已封鎖」）。**沙盒的 `human_status` 摺疊採的正是工作樹這一條**（reset 撤回裁決，`human_actions` 另記）。→ 建議不回退，但要把舊契約寫進文件，免得下次又拿 B 的測試當正解 |
+| 刷新鎖（`S.refreshing`／`S.scopeRequest`／stale-response guard／`setQuestionActionsDisabled`） | `test_scope_refresh_lock.py` 3 個（「清空 stale 列」「每條寫入路徑拒絕 refreshing 的列」「舊 scope 回應不得覆蓋新列」） | **仍紅** | **唯一像真退化的**：工作樹仍會在刷新時清 `S.rows`（`01-core.js:686`）但**沒有任何 token 守衛**（`grep refreshing｜scopeRequest` 全空）⇒ 快速切範圍時較舊的回應可能覆蓋新列，刷新中也擋不住送出決定 |
+| 討論區選取記憶（`discussSelectionFromUrl`／`discussSelectionFromStorage`／`rememberDiscussSelection`／`DISCUSS_SELECTION_STORAGE_KEY`） | `test_review_ui_discuss_selection.py` 3 個、`test_review_ui_startup_navigation.py` 1 個 | **仍紅**（`ReferenceError: discussSelectionFromUrl is not defined`） | 兩邊都沒有 ⇒ 與「站上 v2 的原則／討論模式去留」一起裁決 |
+| 校正優先序 | `test_review_ui_correction_action_precedence.py` 1 個 | **仍紅**（`legacyCorrection`：`reviewed`≠`correct`；`withdrawnReset`：`reset_review`≠`''`） | 顯示語義；要不要回退由設計者定 |
+
+**H. CI 的實質缺口（量到的，與 PR 顏色無關）**
+
+`tests/` 66 檔裡有 **5 個是 pytest 風格**（模組層 `test_*` 函式、沒有 `unittest.TestCase`）：
+`test_review_ui_{correction_action_precedence,discuss_selection,disputed_filter,scope_refresh_lock,
+startup_navigation}.py`（AST 實測：61 檔有 TestCase、5 檔只有模組層函式）。
+`python3 -m unittest discover -s tests`（CI 的 `unit-tests` job）**只收 TestCase**，`qbr-tests` job 只跑
+`qbr/tests` ⇒ **這 5 個檔從來沒有被任何 CI job 執行過**，而且它們只存在於家族 B（`main` 沒有、工作樹沒有）。
+「PR 三顆綠」因此不能證明它們存在或正確。要留它們就必須二選一：轉成 unittest，或讓 CI 對 `tests/` 也跑
+pytest（`.github/workflows/ci.yml` 屬 CODEOWNERS ⇒ 需 owner review）。
+
+**I. 第二階段第一組裁決（誰保留誰放棄）**
+
+1. ~~**刷新鎖要不要補回工作樹？** 建議補（「導覽跟隨被畫出的清單」的直接保護），但補在**工作樹**（權威），
+   不是補在分支。~~ → **已補（見 N）**：`S.scopeRequest` 世代守衛 ＋ 換範圍先清列 ＋ 兩個 unittest 測試
+   （負對照 2/2 fail）。若你不要，回一句我拆掉。
+2. **討論區選取記憶**要不要修？＝B 的 `test_review_ui_discuss_selection.py` 那一類缺陷：在討論區選了一題、
+   面板重畫之後「當下選的是哪一題」不見了。**這與兩個模式的去留無關**（原則區是設計者 2026-09-24 明確要的
+   獨立一頁：「我已為原則區你會獨立做一頁UI來管理，結果你藏在錯題討論區」，所以它不是「可以合併掉的東西」）；
+   要修就先量 `04-area-discuss.js` 現行語義再改，附負對照。
+3. **校正優先序**（`correct` vs `reviewed`、withdrawn reset 顯示空）要不要回到 B 的行為？→ **已量出兩版的差別，
+   只剩你選一個**（量法：`qbr/.venv/bin/python` 讀筆電快照 `qbr/data/review-queues/live/review-ui/question_review_events.jsonl`
+   （2026-09-29 13:48，20,329 事件／13,780 key）→ `events.load_review_events` ＋ `queue_view.review_projection`
+   組成**服務端實際送給瀏覽器的那一份 `review`**，再把兩版 `rowReviewAction` 逐字餵同一批 13,780 列）：
+
+   | 這一列的狀況 | 列數 | 工作樹畫 | B（`codex/organize-review-server-20260923`）畫 |
+   |---|---|---|---|
+   | `action=accept` ＋ 有（非撤回）correction | **560** | 已修正 | 確認正常 |
+   | `action=block` ＋ 有 correction | **74** | 已修正 | 阻擋 |
+   | `action=needs_review` ＋ 有 correction | **1** | 已修正 | 需重看 |
+   | 合計不同的列 | **635** | — | — |
+
+   分布（同一批列）：工作樹 `reset_review`(＝「AI已修改」)3,238／確認正常 9,534／已修正 648／阻擋 346／空 14；
+   B：確認正常 10,094／阻擋 420／已修正 13／需重看 1／空 14。**規則差別只有一句**：B 讓
+   `accept`／`needs_review`／`block` 先於 correction；工作樹讓 correction 先於那三個。撤回（14 列）兩版相同（空）。
+   `metadata` 傳空物件（站上的 `review_block_repair` 等只影響 `repair_event`／待複核桶，不影響 chip 的四個欄位）。
+4. **B 的 5 個 pytest 風格測試檔**：放棄（連同 #12／#5 一起關）還是搶救（轉 unittest ＋ 補 CI）？
+   **與第 3 項綁在一起**：那幾檔編碼的正是 B 的舊優先序，所以若你選工作樹那一版（635 列搬去「已修正」），
+   要搶救的不是原檔、是照工作樹規則改寫的版本；若你選 B 那一版，原本那幾檔才有意義（但仍要轉 unittest 樣式，
+   否則 CI 永遠收不到：`unittest discover -s tests` 對 pytest 風格的檔一律不執行，AST 實測 66 檔裡 5 檔如此）。
+5. **家族 A 是 carrier、不是 source**：A 相對 B 獨有的 3 檔（兩份 `docs/preserved/*`、`returned_chip` 測試）
+   工作樹**都已經有而且更新** ⇒ 合 A 進 main 不會覆蓋任何新東西。**逐檔複核（2026-09-29 晚，`git diff --name-status
+   main...agent/qbr-ci-green-20260929` 共 300+ 檔，逐一 `cmp` 工作樹）**：
+   - 重疊的檔：工作樹**多數更新**，或是有意的退役修剪（`README.md +55 −531`、`docs/ai395-* +8 −921`、
+     `docs/skills/qbr-pipeline-status +68 −1039` 等：工作樹把 ai395 那一代的內容刪掉）。
+   - **A 有、工作樹沒有的 9 檔**，全部是**工作樹這一側刻意刪掉、刪除還沒提交**（`git status` 皆 ` D`）：
+     `docs/skills/operate-local-open-models/SKILL.md`（**搬到傘層** `ai_learning_platform/skills/operate-local-open-models/SKILL.md`，
+     在工作樹外面、Sep 22，實測存在）＋ 8 個 qbr 檔 `scripts/{ask_local_model,audit_crops,compare_engines,
+     compare_local_models,consult_local_model,reflow_paper}.py`、`scripts/run_repair_loop.sh`、`src/qbr/audit_crops.py`。
+     這 8 個**都還在 HEAD**（`git cat-file -e HEAD:…` 成功）⇒ 合 A 進 main 會把它們帶回 main（不是覆蓋新東西，
+     是**復活退役檔**）；工作樹那 9 個未提交的刪除要不要一起提交，是你要決定的。
+   - A 相對 `main` 是**大合併**（main 落後整整一代）；這也是「先合 A」的理由。
+
+**J. 面（surfaces；②「把架構攤開」第一半，全部量到的）**
+
+| 面 | 位置／程序 | 狀態 |
+|---|---|---|
+| 站上審題服務 | `192.168.10.70:8765`（`lsof` 顯示由 `com.docke` PID 98634 持有 ⇒ 容器）；部署紀錄 `~/qbr-review/DEPLOYED.json`（2026-09-26T11:28Z）：`source_head 16bd5e45…`、`source_dirty_files 269`、`review_events 20322`、`served_questions 79090` | **站上跑的是「家族 A 的祖先 ＋ 269 個未提交檔」的工作樹鏡射** ⇒ A 不是替代方案，是站上的血緣 |
+| 站上資料 | `~/qbr-review/queue/review-ui` 6.8 GB（`candidates.jsonl.before-*/bak-*` **3.3 GB**、`crops/` 1.7 GB）；`assets` 2.0 GB、`backups` 8.2 GB、`code` 61 MB、`logs` 36 KB | 活動檔 5＋3：`candidates.jsonl`(199 MB, 09-26 11:52)、`question_review_events.jsonl`(14.1 MB, **09-29 12:29**＝人的裁決，活的)、`question_ai_findings.jsonl`(706 MB, 09-25 22:30)、`question_repair_questions.jsonl`(662 KB)、`question_review_principles.jsonl`(66.9 KB)、`question_correction_feedback_events.jsonl`(400 KB)、`figure_ownership.json`、`table_crops.json` |
+| 筆電沙盒 | `repair_agent_test/agent/ui/server.py`，pid 75668，`0.0.0.0:8790` | 活著（唯一該活的筆電服務） |
+| 筆電稽核迴圈 | LaunchAgent `com.qbr.audit-pharmacist1`（pid 37888）→ `repair_agent_test/agent/audit_pharmacist1.sh` → 帳本 `/tmp/agent_perf/audit/summary.tsv` | 活著 |
+| 引擎 | MTPLX `127.0.0.1:18120`（pid 5100）、`18130`（pid 1168） | 活著 |
+| 筆電 queue 快照 | `qbr/data/review-queues` **13 GB**：`live` 2.5 GB ＋ 10 個舊快照（`pre-extractorfix-20260923` 2.1 GB、`v6-20260922` 1.4 GB、`pre-flatdetect-20260922` 1.3 GB、`staging-20260921`／`pre-thirdfix`／`pre-scriptwide`／`pre-scriptdetect`／`pre-countfix` 各 1.0 GB、`pre-wrapfix`／`pre-figures`／`all-20260920` 各 185 MB） | 舊快照＝待裁決 |
+| **已放棄（本輪殺掉）** | 7 個 4–6 天、只有 `LISTEN` 沒有 `ESTABLISHED` 的殘留：`serve_question_review_ui.py` 的 pid 14503(8921)／30377(8896)／44027(8897)／53574(8891)／78076(8898)／90873(8899)，其中 **4 個的 `--review-log` 直接指向筆電快照** `qbr/data/review-queues/live/review-ui/question_review_events.jsonl`；＋ pid 4133（`python -m http.server 8791 --bind 127.0.0.1`） | 殺後只剩 8790／18120／18130（`lsof` 已核對） |
+
+**K. 流與誰寫誰讀（②第二半）**
+
+| 檔 | 誰**寫** | 誰**讀** |
+|---|---|---|
+| 站上 `question_review_events.jsonl`（人的裁決，append-only） | **只有站上 8765**（`POST /api/review` 等）；本輪前筆電另有 4 個 stray writer（已殺） | 站上 v2 投影；`scripts/pull_station_reviews.sh` → 筆電快照；沙盒 `bridge.py` 摺 `human_status`；稽核 |
+| 站上 `question_ai_findings.jsonl` | AI 稽核（站上側）；筆電曾有 stray daemon | 站上 v2、`qbr/src/qbr/ai_findings.py` |
+| 站上 `question_repair_questions.jsonl`（690 列） | `source=qbr_experience_apply` | `ai_findings.py`（ANSWERS）、`discuss.py`、沙盒 `lib/identity.mjs` |
+| 站上 `question_review_principles.jsonl`（32 列） | `source=feedback_learning`／`reviewer=principle_curator` | `ai_findings.py`（PRINCIPLES）、沙盒 `identity.mjs::principles()` |
+| 站上 `question_correction_feedback_events.jsonl` | 站上服務（`POST /api/correction-feedback`） | `ai_findings.py`（NOTES） |
+| 站上 `candidates.jsonl`（199 MB） | rebuild 管線（每次 rebuild 留一份 ~199 MB `.before-*`） | 站上服務（唯讀） |
+| 筆電快照 `qbr/data/review-queues/live/review-ui/*`（今天 13:48–13:49 更新） | `repair_agent_test/scripts/sync_from_station.sh` ＋ `scripts/pull_station_reviews.sh` | 沙盒、稽核、離線量測 |
+| 入口（`qbr/src/qbr/review_ui/handlers.py` 實測 25 個 API ＋ 8 個頁面路由） | API：`/api/{candidates,answer-candidates,group-candidates,review,answer-review,review-batch-accept,answer-review-batch,principles,principles/similar,discuss,findings,machine-activity,manual-asset,mobile-review,pipeline,preferences,queue_index,reload-candidates,reload-status,repair-question,workflow,ai-feedback,ai-learning,ai-question-audit,ai-question-audit-reset,correction-feedback,group-*}`；頁面：`/v2`、`/mobile`、`/workflow`、`/legacy`、`/file`、`/evidence-file`、`/scripts` | 同一支服務 |
+
+**L. 保留／放棄清單（②，前 4 項本輪已做，後 4 項等裁決）**
+
+已做（可逆性高，已核對）：
+1. 7 個殘留 server 已殺（J）；只剩 8790／18120／18130。
+2. `/tmp/ab` worktree ＋ 分支 `agent/ab-triage` 已刪；`agent/pr8-gate-fix` ＝ PR #8 的 head `15d2a2f0`，留作本機指標。
+3. 「兩家族差 31 檔」更正為 **27 檔**（F）。
+4. 記下 **B 家族 5 個 pytest 風格測試檔從未被 CI 收集**（H）。
+
+等裁決：
+1. 站上 `candidates.jsonl.before-*/bak-*` **3.3 GB**（10 份 199 MB 快照）留不留？筆電 `qbr/data/review-queues/` 的 **10 個舊快照共 10.5 GB** 留不留？
+2. 15 個 worktree（含 4 個 prunable、`/tmp/step0`、`/tmp/tw-national-exam-catalog-pharmacist-visual-audit`）要不要 `git worktree prune` ＋ 移除？
+3. v1 路由（`/mobile`、`/workflow`、`/legacy`）與 `review_ui/v1-reference/`：書籤與 PWA 是契約（要留）；要不要只留「能答」的最小服務、其餘封存？
+4. 筆電 `question_ai_findings.jsonl` **108,201 行／708,292,579 B** vs 站上 **107,991 行／706,253,185 B**（**＋210 行／＋2.0 MB**，stray daemon 寫的，今天 13:49 拉完之後仍在）⇒ 要不要重新對齊站上（覆蓋），還是保留差異並登記？
+
+**M.（第三項：建立完整審題機制）第一步已做：判讀路徑接上「人的經驗」，並記下用了哪些（2026-09-29 晚）**
+
+改的是沙盒的判讀器 `repair_agent_test/agent/bridge.py`（G2，本層自己的面）：
+
+1. **判讀路徑接上四個通道 ＋ 圖的事實。** 新增 `experience_for(key)`：直接呼叫**正式路徑的載入器**
+   `confirm_dispute.load_prompt_inputs(queue)`（＝ `confirm_dispute.confirm_one` 用的同一個），
+   取「已核准的基本原則」「對反問的回答」「這一題的註解」「被退過的改動」＋`ai_findings.figures_note`。
+   `read` 把它們全部傳進 `confirm_dispute.transcribe(...)`——**這是本站判讀第一次把人的話帶到模型眼前**。
+   （`--queue`／`--principles` 可覆寫，用來在別的快照上量同一件事。）
+2. **記下「這一題用了哪幾條經驗」。** `read` 的回傳新增 `review_context`：
+   `{queue, experience:{principles[], note, answers, rejected:{count,fields}, figures}, system}`
+   ——`system` 是 `transcribe_system()` 的輸出，也就是**實際送出去的那一段**（不是重拼的第二份）。
+   `feedback` 的紀錄也新增同一個 `experience`（用 `experience_summary()`，欄位全走既有正規化器
+   `latest_note`／`answers_note`，不自己走列）。
+3. **沙盒畫面**（`ui/index.html`）新增 `renderExperience()`，畫在「模型讀到什麼」之前：原則編號清單、
+   註解原文、反問與回答、被退過的欄位、圖的事實。空的經驗**不畫**（舊紀錄沒有這一欄，畫成「無」會
+   把「這一輪還沒有紀錄」講成「這一題沒有經驗」）。
+4. 順手修掉一個既有缺陷：`REPAIR_AGENT_STORE` 原本只改 `STORE_DIR`，`STORE` 是另一條獨立路徑，
+   所以**設了環境變數的測試仍然寫真的學習流**（實測：一次被導向的 smoke 讓
+   `store/agent_feedback.jsonl` 多了一行）。現在 `STORE` 由 `STORE_DIR` 推導。
+
+**量到的（都在工作樹上實測）**
+
+| 檢查 | 結果 |
+|---|---|
+| 負對照（舊行為：什麼都不傳） | `transcribe_system()` = **1,132 字**，那位審題者的註解 `in` 它 = **False** |
+| 接了之後（`read --no-image`，同一題 `moex:106100:307:22:1:question:q006`） | `system` = **2,803 字**（＋1,671），註解、被退的 `option B/C/D`、6 條原則全部在裡面 |
+| 真的一次判讀（`read`，引擎 `occamy-6bit`／`127.0.0.1:18130`） | rc=0，**2.0 s**（模型 1.5 s），`png_bytes` 26,330，`seen` 有 stem＋options，`review_context` 6 條原則＋註解＋回答＋被退 |
+| `load_prompt_inputs` 的成本 | **0.18 s**（原則 6 條、有回答 16 題、有註解 252 題、被退過 90 題） |
+| `feedback`（導向 `/tmp/smoke_store`） | 真 store **35 → 35 行**（不變），暫存 store 1 行；紀錄含 `experience` |
+| 畫面（用 node 直接驅動 `ui/index.html` 的真 script） | 標題「用了哪幾條經驗（agent）」、「基本原則 6 條（已核准）」、註解原文、被退欄位都在輸出裡；空的經驗回空字串 |
+| 誤寫的一行 | 第一次 smoke 因上面那個缺陷寫進真 store 的那一行已移除（備份 `/tmp/agent_feedback.jsonl.pre-smoke-undo`，35 → 36 → 35 行） |
+
+**還沒做的（第三項的其餘部分）**：①`source: designer` 經驗流在沙盒已有（UI `POST /api/judgement`
+→ `store/agent_feedback.jsonl`，`source: designer`；`get_question` 讀回、`identity.principles()` 讀
+站上的已核准原則）——**新接上的那一段是「站上人寫的四條通道」**，兩者現在同一條判讀路徑；
+②站上 v2 **要不要部署 N 的刷新鎖**（8765 跑的是舊 JS；部署＝`scripts/deploy_station.sh --restart`，屬對
+站上的變更，等一句話）。（原本寫的「原則／討論模式去留」是我自己的猜測，已撤回：原則區是 2026-09-24
+設計者明確要的獨立一頁，見 I.2。）
+
+**N.（F–I 的第 1 項裁決）刷新鎖：我先做了，理由與量測如下（2026-09-29 晚）**
+
+我把它從「等你裁決」變成「已做、可推翻」，因為量到它不是 A 線的刻意簡化，而是**檔案自己寫下的不變式被違反**：
+
+- `applyScope()` 的註解說「只清 `S.view` 會讓上一卷的列還畫著、還走得到……正是這一整個改動在處理的那一類缺陷」，
+  但 `loadScopeRows()` 讀完**直接寫** `S.view`／`S.verdict`／`S.notes`，沒有任何世代比對 ⇒
+  **開 A 範圍、還在讀就換 B 範圍，B 先回來、A 後回來，清單是 A 的題目而麵包屑寫 B**（＝同一類缺陷的非同步版本）。
+  另一個量到的缺口：換範圍時舊列在讀取期間仍留在 `S.rows`，畫面上寫「載入中…」但 `W`／`S` 還走得到、決定還送得出去。
+- 改法（`review_ui/v2/01-core.js`）：`S.scopeRequest` 世代號；`applyScope()`／`refreshScopeRows()` 各推進一號並傳給
+  `loadScopeRows(papers, requestId)`；`loadScopeRows()` 在**寫任何狀態之前**比對世代，比對不到就 `return false`
+  （成功路徑與 catch 路徑各一處）；`applyScope()` 在 await 前先清 `S.view`／`S.rows`。
+- 測試（`tests/test_review_ui_v2_scope.py`，**unittest 樣式、CI 收得到**）：`ScopeRequestGenerationTests` 兩個
+  ——舊世代的回應不得被接受（同時驗當前世代必須被接受，作為「守衛不是永遠回 false」的負對照）、
+  換範圍時舊列不得留在 `S.rows`／`S.view` 且世代號必須推進。
+- **負對照**：把三處守衛與清理拆掉的副本（`/tmp/negctl`，用完已刪）跑同樣兩個測試 ⇒ **2 failed／2**
+  （`staleKept=True`、`rows=1`）。修後：**6 tests OK**（該檔全部）。
+- **真頁面**（`scripts/serve_question_review_ui.py` 在本機 8931 服務**工作樹的 v2** ＋ 真快照
+  `qbr/data/review-queues/live/review-ui/candidates.jsonl`，`--review-log` 指向 `/tmp` 的暫存檔、不動真資料）：
+  ①**舊回應晚回來不得蓋畫面**：把 115 年那一發拖慢 2.5 s、50 ms 後換 100 年（快的先回來寫完畫面），
+  量到 `fetch-done(115) = t+2553 ms` 而「Y 寫完畫面」在 `t+137 ms` ⇒ 舊回應晚了 **416 ms** 回來，
+  `S.rows` 仍是 100 年那 80 列（`1001_…`）、麵包屑仍是 100 年 ⇒ 被拒絕 ✓（若沒有守衛，這裡會變成
+  清單是 115 年而麵包屑寫 100 年）。
+  ②**讀取期間沒有可走的舊列**：換到另一個有卷的範圍（`載入中…`，延遲 1.8 s），等待期間
+  `S.rows = 0`、`S.view = 0`，讀完 80 列、`location.hash` 同步；頁面 **console error 0 筆**。
+- 順手補的 harness 缺口：該檔的 `run_node` 把運算式值直接 `JSON.stringify`，所以 `(async () => …)()` 會被
+  序列化成 `{}` —— 用非同步運算式寫的測試**不會失敗，只會什麼都沒測到**（B 家族那幾個 pytest 風格測試正是這形狀）。
+  新增 `run_node_async()`：包進會 `await` 的 IIFE、把錯誤也印成 JSON，並載入 **`v2.html` 列出的全部 script**
+  （只載 `01-core.js` 會在 `scopeToHash()` 撞 `A is not defined`）。
+
+**量到的全套**：`python3 -m unittest discover -s tests` = **541 tests／1 failure**（那 1 個是
+`tests/test_local_review_evidence.py`，**未追蹤、不在 HEAD** ⇒ CI 的 checkout 不會有它；我沒碰那一條線的檔）。
+`cd qbr && .venv/bin/python -m pytest tests/ -q` = **786 passed／17 skipped**（102.5 s；另一個 CI job，我的 JS 改動不影響它）。
+`tests/test_review_ui_v2_scope.py` 單檔 6 OK。沙盒 `run_tests.sh` 47 pass（見 M）。
+
+**O. 設計者的五個回答（2026-09-29 晚）與我照著做的事**
+
+| 我問的 | 他的回答 | 我做了什麼 |
+|---|---|---|
+| ③ 校正優先序 | 「我當時的決定（accept 就是通過，block 就是阻擋）」 | `review_ui/v2/01-core.js` 的 `rowReviewAction` 改成**人的決定先問**（＝B 的順序）：`accept`／`needs_review`／`block` 早退，之後才看 `correction`；撤回的兩條路徑照舊。新增 `tests/test_review_ui_row_action.py`（8 個 unittest、CI 收得到）：三個決定各釘一次、`comment`＋correction 讀成已修正、legacy `reviewed`＋correction 讀成已修正、`is_reset_unreviewed` 最優先、撤回不讀成已修正、沒有事件讀成未看。**負對照**：把「人的決定先問」那一行拿掉的副本 ⇒ 3/8 fail（舊規則把 accept 畫成 correct）。**真資料**：13,780 列跑完，chip 分布與 B **逐格相同**（`reset_review` 3,238／accept 10,094／block 420／correct 13／needs_review 1／空 14）。 |
+| ④ 那五個 pytest 檔 | （問「哪五個」） | 五檔＝`tests/test_review_ui_{correction_action_precedence,disputed_filter,discuss_selection,scope_refresh_lock,startup_navigation}.py` 見下面清單。因為③選了 B 的順序，`correction_action_precedence` 才有意義 ⇒ 已用上面的新檔以 unittest 樣式重寫（**不必動 `ci.yml`**：`unittest discover` 自己會收）。 |
+| ② 討論區選取記憶 | 「討論區廢掉，之後的沙盒穩定後會補上這個功能」 | **不修**（B 的 `test_review_ui_discuss_selection.py` 那四條斷言不轉移）。站上 v2 的那一區要不要**現在**就從介面拿掉＝待他一句話（那會動到站上，見下）。 |
+| ⑤ 我修的那個問題要不要上站 | （問「哪個」） | 就是 **N 的刷新鎖**：換範圍時晚回來的舊題目會蓋掉新範圍的畫面（量到 416 ms）。等他回覆才部署。 |
+| L 段清垃圾 | 「清垃圾」 | 見下面 P 段（逐項列出**刪了什麼、量到多少**）。 |
+
+**五個 pytest 風格檔（B 獨有，CI 從未執行）**：`tests/test_review_ui_correction_action_precedence.py`、
+`tests/test_review_ui_disputed_filter.py`、`tests/test_review_ui_discuss_selection.py`、
+`tests/test_review_ui_scope_refresh_lock.py`、`tests/test_review_ui_startup_navigation.py`。
+它們是模組層 `def test_*()`（pytest 風格），而 `unittest discover -s tests` 只收 `TestCase`，`qbr-tests` 又只跑
+`qbr/tests` ⇒ **從來沒有被任何 CI job 執行過**。其中 `scope_refresh_lock` 的那三條已經由 N 的
+`ScopeRequestGenerationTests` 以 unittest 樣式覆蓋；`correction_action_precedence` 由 O 的新檔覆蓋；
+`discuss_selection` 依②作廢。剩下 `disputed_filter`／`startup_navigation` 兩檔的斷言還沒有人接手（未裁決）。
+
+**PR 現況（2026-09-29 晚，實測）**：設計者已合 **#14**（＝ci-green，`1c2ba31`）與 **#13**，`main` 現在有那 4 個修補；
+**#12 已關**。我對 **#7／#8／#9／#10／#11** 各做了一次「把 `main` 併進分支」（五個合併皆無衝突，`git merge-tree` 先驗），
+並推回原分支（fast-forward，非 force-push）⇒ 新的檢查已跑：**`qbr-tests` 五條全綠**，
+**`unit-tests` 五條仍紅**（`main` 自己的 push run 也紅）。已在追：本機（macOS，含 python3.13/`-S`/TZ=UTC/LC_ALL=C、
+淺層 detached clone）與 Linux 容器（python 3.11，容器內**無 git／node**）都 524 OK，
+所以懷疑是「Linux ＋ 有 git/node」才觸發的那幾條（`test_agent_governance.test_repository_boundaries_are_valid`
+需要 git；四支 node 驅動的測試需要 node）；正在用裝了 git＋node 的 Linux 容器重跑定位。
+
 #### 9.9 之後仍**待裁決**
+
+0. ~~（第三輪）把工作樹的 `scripts/review_feedback.py` ＋ retired `migration_preflight.py` 補進
+   `agent/qbr-shared-contracts-20260929`~~ → **第四輪已做**（見上 A／D）：推成 `agent/qbr-ci-green-20260929`，
+   等設計者開 PR 並合併。
 
 1. ~~換同顆後 `read_page` 的「第二意見」怎麼重新定義？~~ → 已定義（見上），如不同意再改。
 2. **v2 要不要顯示 `prompt_system`／`prompt_user`？**（沙盒已補，站上 v2 未補）
 3. ~~沙盒延遲要降到多少才算「可以繼續測試」？~~ → 已降到 0.024–0.94 s；剩下 0.94 s 那一項
    要不要再動，等你一句話（動了就會多出第二份計數實作）。
-4. ~~五支 PR 未開~~ → 已備好 6 支（含先合的共享契約分支）與標題，**只差你在 GitHub 按下去**（無可用 token）。base 一律 `agent/review-ui-server-split-20260923`。
+4. ~~五支 PR 未開~~ → **2026-09-29 05:22–05:25Z 你已開 6 支**（公開 API 讀回，`gh` 本身仍無 token）：
+   **#7** pi-sdk（112 commits／248 檔）、**#8** agent-verified-gate、**#9** export-question-page、
+   **#10** engine-endpoints-runtime、**#11** fix-option-alphabet-union（各 96／150–153）、
+   **#12** `agent/qbr-ui-prerequisite-20260926`（95／140，**這支不在原本的 6 支清單裡**）。
+   **六支的 base 都是 `main`**（不是 split），所以每支看起來都是 ~96 commits／150+ 檔。
+
+   量到的依賴（決定合併順序；`git merge-base --is-ancestor`）：
+   - 五支 feature ＋ pi-sdk **都含 `2a5e97c`**（＝`agent/qbr-shared-contracts-20260929` 的 tip，也就是那 6 個共享
+     commit 的**同一批 SHA**）⇒ 只要先把「共享契約」那包進 main，這五支的 PR 會**自動縮成自己的 1（pi-sdk 17）個 commit**，不必改 base、不必 rebase。
+   - `agent/qbr-shared-contracts-20260929` ＝ **split ＋ 6**（相對 main 95 commits、相對 split 6）⇒ 它是
+     **split 的 superset**，一支 PR 就能把 split 的內容一起帶進 main。**目前沒有它的 PR**（原本清單第 1 支）。
+   - `agent/qbr-ui-prerequisite-20260926`（#12）**不含** `2a5e97c`，且與 `qbr-shared-contracts-20260929` 的樹差
+     **31 檔（＋11803／−11156）**⇒ 它是同一件事的**早期版本**（重複實作）。**先不要合它**（合了會讓五支
+     重複／衝突），要嘛關掉、要嘛留著。
+
+   **建議順序**：① 開 `agent/qbr-shared-contracts-20260929` → `main`（superset，先合）→ ② **#10 引擎表**（`occamy-6bit` 只在它裡面，pi-sdk 的 `BRAIN` 依賴它）→ ③ **#7 pi-sdk** → ④ **#8／#9／#11** 任意序 →
+   #12 關掉或不合。（`gh` token 無效 ⇒ 這個「開 PR／關 PR」的動作我做不了，只能讀公開 API。）
+   ⚠️ **第三輪更正**：`#12` 是三顆 check **全綠**的那一支（它還留著 `scripts/review_feedback.py`）；
+   五支紅的是因為它們的共同祖先 split 把那個檔刪了。見第三輪 ②。
+   `gh auth login` 一次（或設 `GH_TOKEN`）之後我就能自己開 PR（治理 G1：可開、不可自行核准／合併）。
 5. 🆕 **「`engines.py` 預設」這句話沒有對應的程式**：`engines.py` 只有引擎表。實際的預設有四個
-   地方（`git grep -n '"mtplx-35b"'`）：`qbr/src/qbr/vision.py` 的 `_DEFAULT`（**眼睛**，送
-   `image_url` 讀頁面／裁片）、`qbr/src/qbr/reflow.py` 的 `_DEFAULT`（**純文字**重排，無圖片）、
-   `qbr/src/qbr/reread.py` 的 `DEFAULT_ENGINE`（**是 `splash`**，而 `8088` 自 2026-09-25 起是 down）、
-   `repair_daemon.sh` 的 `LANE`（`mtplx-35b`，daemon 明確指名，不受其他預設影響）。
+   地方：`qbr/src/qbr/vision.py` 的 `_DEFAULT`（**眼睛**）、`qbr/src/qbr/reflow.py` 的 `_DEFAULT`
+   （**純文字**重排）、`qbr/src/qbr/reread.py` 的 `DEFAULT_ENGINE`（原本 `splash`）、
+   `repair_daemon.sh` 的 `LANE`（`mtplx-35b`）。
 
-   已做：**`vision.py::_DEFAULT` 改成 `occamy-6bit`**（眼睛與腦同一顆；6-bit occamy 逐欄位
-   53.3% vs ornith 47.8%、上限 78.4% vs 64.9%）。安全性有兩條依據：這個模組的 thinking 開關是
-   **實測 probe** 出來的（`_thinking_forms`，不信任請求），而且它自己的預算（900／8000 tokens）
-   遠低於該部署的 65536 KV。實測：`describe_crop` 走新預設 → `BASE_URL 18130`、
-   `MODEL occamy-1.0-6bit-xl-mlx`、36 秒（與稽核同時跑）回出正確的結構化判讀。
-   **沒做**：`reflow.py` 留 `mtplx-35b`（純文字線，換成視覺模型沒有量測支持）。
+   **已做**：`vision.py`、`reflow.py`、`reread.py` ＋ 三支 script 的 `--model` 預設（`ask_about_blocks`／
+   `confirm_dispute`／`scan_category_principles`）**全部改成 `occamy-6bit`**（`reread` 那個原本指向已 down
+   的 `splash`）；`reflow` 另外把開關改成「從引擎表取」（見第二輪 ①，附負對照與 A/B）。
+   **沒動**：`scan_pharmacist_track.sh` 三條 lane 的 `--model mtplx-35b`（會進 review queue 的讀法，
+   先量再改）、`repair_daemon.sh` 的 `LANE`（那個迴圈先修病）。
 
-   ⚠️ **這一行只存在工作樹、沒有 commit**：`vision.py` 目前帶著 ~700 行未提交的改寫
-   （與 `agent/engine-endpoints-runtime-20260927` 也不相同），一起 commit 就是把別條線的工作搬過來。
-   要落地就一行：`_DEFAULT = _engines.BUILTIN_ENDPOINTS["occamy-6bit"]`（附理由註解）。
-6. 🆕 **occamy 的 KV 要不要開大？** 現在 65536（agent 的提示詞就吃掉 ~39.5k）；
-   `CTX_MLX=131072 occamy restart` 可調，代價是記憶體。客戶端已按 65536 保守設定。
+   ⚠️ **`vision.py`／`reflow.py`／`engines.py` 的改動只存在工作樹、沒有 commit**：這三個檔帶著別條線
+   未提交的改寫（`vision.py` 相對 origin 差 713 insertions／74 deletions），一起 commit 就是把別條線的
+   工作搬到本分支。**連「只 commit 乾淨的三支 script 預設」都不成立**（它們的 `occamy-6bit` 要等
+   ③ 引擎表先落地）。完整量法見 ⑧。
+6. 🆕 **occamy 的 KV 要不要開大？**（第二輪已量化）現在 65536；`loaded_context_size=262144`（模型自己的
+   窗口），每 token ≈ 20 KiB（10 層 full attention × 2 kv heads × 256 head_dim × 2 B × K/V ⇒
+   65536＝1.25 GiB、131072＝2.50 GiB、262144＝5.00 GiB），cache 每 256 token 長、**開大不會立刻吃記憶體**，
+   且 `moe-offload` 是 off（沒有「專家快取被吃掉」的副作用）。改法 `CTX_MLX=131072 occamy restart fit6`
+   或 live `PATCH :18130/v1/settings {"max_kv_size":131072}`。**需要開大的唯一硬理由**：reflow 的
+   預算是 156,000（要 ≥166k 才跑得動）；agent 自己（39.5k＋16.4k）現在不需要。
+7. 🆕 **站上的 repair daemon 要不要恢復、以什麼 lane 恢復？** plist 現在是 `ONCE=1` ＋
+   `LANE=dgx-qwen3.8-flash` ＋ `QBR_ALLOW_EXTERNAL_LLM=1`（走 DGX/external，與 charter 相衝）。
+   要恢復就得先決定：lane＝occamy？`ONCE` 拿掉？`QBR_ALLOW_EXTERNAL_LLM` 關掉？
+8. 🆕 **家族 A／B／工作樹的三方裁決（F–I）**：①~~刷新鎖要不要補回工作樹~~ → **已補（見 N）；如不要就回一句**；
+   ②~~討論區選取記憶要不要回~~ → **第五輪已答**：討論區功能廢掉、沙盒穩定後再補（見 P.3）⇒
+   `test_review_ui_discuss_selection.py` 作廢（見 P.2）；③~~校正優先序要不要回 B 的行為~~ → **已答**（5.1）：
+   人的決定先問，**已改並量到與 B 逐格相同**（見 P.1）；
+   ④B 的 5 個 pytest 風格測試檔放棄還是搶救（＋CI 要不要對 `tests/` 跑 pytest）→ **第五輪問了、他回「哪五個」**：
+   名單與處置見 P.2，剩 `disputed_filter`／`startup_navigation` 兩支未決（見 12）；
+   ⑤確認 A 是 carrier 不是 source（合 A 進 main 不會覆蓋任何新東西）。
+9. ~~🆕 **空間與快照（J–L）**：①站上 3.3 GB 的 `candidates.jsonl.before-*` 與筆電 10.5 GB 舊快照要不要留；
+   ②15 個 worktree 要不要 prune；③v1 路由要不要只留「能答」的最小服務；
+   ④筆電 `question_ai_findings.jsonl` 的 ＋210 行要不要對齊站上。~~
+   → **第五輪已答「清垃圾」並執行**（見 P.5）：①筆電 12.6 G→2.5 G、站上 6.8 G→3.4 G；②prune ＋
+   刪掉我自己開的 11 棵（別人的不動）；③④**還沒答**。
+
+10. 🆕 **站上的討論區現在就拿掉嗎？**（5.3；拿掉＝動到站上 G3 ＋ `scripts/deploy_station.sh --restart`）
+11. 🆕 **刷新鎖要不要推上站上？**（5.4；修「換範圍時舊題目晚 416 ms 回來蓋掉新畫面」）
+12. 🆕 **5.2 剩下兩個還沒接手的檔**：`tests/test_review_ui_disputed_filter.py`、
+    `tests/test_review_ui_startup_navigation.py`（要重寫成 unittest，還是放棄？）
+
+---
+
+#### 9.9 第五輪（2026-09-29 深夜；設計者答完五問，並下令「PR 還是沒通過，先把這個搞定」）
+
+設計者的原話與我的解讀（這一段是**執行紀錄**，不是問題）：
+
+|他的話|我的解讀|狀態|
+|---|---|---|
+|「5.1 我當時的決定(accept 就是通過，block 就是阻擋)」|校正的優先序＝**先問人的決定**，再問 AI 的校正|✅ 已改（見 P.1）|
+|「5.2 哪五個?」|他要五個檔名|✅ 見 P.2|
+|「5.3 討論區廢掉，之後的沙盒穩定後會補上這個功能」|**不修**討論區功能；沙盒穩定後再補|✅ 照此執行（P.3 有一個要問他的小問題）|
+|「5.4 哪個?」|他要「刷新鎖」的白話解釋|✅ 見 P.4|
+|「5.5 清垃圾」|刪掉量到的舊快照、worktree、備份|✅ 見 P.5|
+
+## P.0 PR 為什麼紅、修在哪（本輪最重要的一件事）
+
+**根因（量到的，不是猜的）**：`unit-tests` 這一顆在**每一支 PR 都紅**，而且 main 自己的 push
+run（`e3be3fa6`）也紅，job 只跑 8 秒就失敗。
+
+- 四個測試把整份 JS（v2 全部原始碼／整棵範圍樹的 JSON）用 **`node -e <script>`** 交給 node。
+- Linux 對**單一 argv 字串**有 `MAX_ARG_STRLEN` ＝ **128 KiB** 的上限；macOS 沒有。
+- 所以：**macOS 跑幾百次都綠，Ubuntu 直接 `OSError: [Errno 7] Argument list too long: '/usr/bin/node'`。**
+  這一條只有 CI 看得見。
+- 在哪裡複現：本機 Docker（`ci-like:local` ＝ `tw-national-exam-qbr-review-ui:local` ＋ `nodejs git`）。
+  同一個容器、同一棵樹，把那個檔換回舊寫法 → **1 error／38 tests**；換成新寫法 → **38 tests OK**。
+  整份 suite：修前 **524 tests／1 error**，修後 **526 tests OK (skipped=8)**。
+
+**修法（一支分支，不 push main）**：`agent/fix-node-argv-limit-20260929`（`2dd06ea`，已推上 origin）。
+
+- `tests/review_ui_source.py` 是「JS 怎麼交給 node」的**唯一解答**：`run_node_script()` 寫 `.cjs`
+  暫存檔到 repo 外再 `node <檔案>`，`run_node_expression()` 疊在上面；`args`／`cwd` 給需要小尾巴
+  （vm runner 的呼叫式）與相對檔名的呼叫者。
+- 四個 harness（`test_review_ui_scope`／`v2_scope`（含 `run_node_async`）／`rich_text`／`discuss`）全部改走它，
+  所以下一個 harness 不會在第五個地方再犯。
+- `tests/test_node_script_helper.py`：**負對照**——①>128 KiB 的 script 仍跑得動 ②交給 subprocess 的
+  每個 argv 元素都 < 128 KiB（舊寫法這一條會紅）。
+
+**五支 PR 已經帶著這個修法**（把 `agent/fix-node-argv-limit-20260929` 併進各分支後推上去，非 force）：
+
+|PR|分支|新 head|容器內整份 suite|
+|---|---|---|---|
+|#7|`agent/repair-agent-pi-sdk-20260928`|`40776ad`|**527 OK**|
+|#8|`agent/agent-verified-gate-20260928`|`70b736a`|**540 OK**|
+|#9|`agent/export-question-page-20260927`|`b702e31`|**527 OK**|
+|#10|`agent/engine-endpoints-runtime-20260927`|`82cf74a`|**527 OK**|
+|#11|`agent/fix-option-alphabet-union-20260927`|`de8a361`|**527 OK**|
+
+驗法是**真 clone**（不是 linked worktree——linked worktree 在容器裡 gitdir 指到容器外，governance
+測試會假紅）＋ `ci-like:local`。修法本身的分支另外給設計者一條 PR 連結：
+`https://github.com/Ting-Ruei/tw-national-exam-catalog/pull/new/agent/fix-node-argv-limit-20260929`。
+
+**推上去之後，GitHub 上的三顆檢查全綠（公開 API 直接讀回，2026-09-29 深夜）**：
+
+```
+#7  40776ad  governance success / unit-tests success / qbr-tests success
+#8  70b736a  governance success / unit-tests success / qbr-tests success
+#9  b702e31  governance success / unit-tests success / qbr-tests success
+#10 82cf74a  governance success / unit-tests success / qbr-tests success
+#11 de8a361  governance success / unit-tests success / qbr-tests success
+```
+
+也就是說：設計者不必先開修法那一支的 PR——**五支各自的內容已經含修法，五支都可以直接按 Merge**。
+（#5 `codex/organize-review-server-20260923` 也三顆綠，內容已被吸收 ⇒ 只剩按 Close；#12 已關。）
+
+## P.1 5.1 校正優先序＝人的決定先問（已改、已量）
+
+`review_ui/v2/01-core.js` 的 `rowReviewAction` 現在的順序：`is_reset_unreviewed` → 早退
+`accept`／`needs_review`／`block`（**人的決定**）→ `correction`（非撤回）→ `withdrawn && action==='reset_review'`
+→ `action`。
+
+- 新檔 `tests/test_review_ui_row_action.py`（8 個 unittest，`unittest discover` 收得到）。
+- **負對照**：把「人的決定先問」那一行拿掉的副本 ⇒ **3／8 fail**（舊規則把 accept 畫成 correct）。
+- **真資料**：13,780 列真 served `review` 跑 node，chip 分布＝`reset_review` 3,238／`accept` 10,094／
+  `block` 420／`correct` 13／`needs_review` 1／空 14，**與設計者版（B）逐格相同**。
+
+## P.2 5.2 那五個檔名（家族 B 獨有、CI 從未收過）
+
+1. `tests/test_review_ui_correction_action_precedence.py` → 已由 `tests/test_review_ui_row_action.py` 以 unittest 重寫（P.1）。
+2. `tests/test_review_ui_disputed_filter.py` → **尚未接手**（未裁決）。
+3. `tests/test_review_ui_discuss_selection.py` → 依 5.3 作廢。
+4. `tests/test_review_ui_scope_refresh_lock.py` → 已由 `tests/test_review_ui_v2_scope.py::ScopeRequestGenerationTests` 覆蓋（N 段的刷新鎖）。
+5. `tests/test_review_ui_startup_navigation.py` → **尚未接手**（未裁決）。
+
+（這五個是 pytest 風格的檔案，`python3 -m unittest discover -s tests` 收不到，所以它們從未在 CI 跑過。）
+
+## P.3 5.3 討論區
+
+- 功能**不修**；沙盒穩定後再把它補回（設計者原話）。
+- 要問他一句：**現在就把站上（`192.168.10.70:8765`）那一區從介面拿掉嗎？** 拿掉＝動到站上
+  （G3）＋要 `scripts/deploy_station.sh --restart`，所以我沒有自己動。
+
+## P.4 5.4「刷新鎖」是什麼（白話）
+
+場景：審題者在左邊換科系／年度，畫面會去要新的一批題目。舊的那一批如果**回得慢**，它回來時會
+把新畫面**蓋掉**——人看到的是上一個範圍的題目。量到舊回應晚了 **416 ms** 回來，就蓋上去了。
+
+「刷新鎖」＝每要一次就蓋一個**號碼牌**，只有最新那一次的答案可以被畫出來，舊的回來就丟掉。
+（程式碼：`S.scopeRequest` 世代守衛；`tests/test_review_ui_v2_scope.py::ScopeRequestGenerationTests`
+兩條測試各附負對照。）
+
+**要不要推上站上？** 這會動到站上（G3）⇒ 等他一句話。
+
+## P.5 5.5 清垃圾（清單與量到的數字）
+
+**刪掉的（筆電，本地可重建）**——合計約 **10.1 GB**：
+
+|目錄|大小|
+|---|---|
+|`qbr/data/review-queues/pre-extractorfix-20260923`|2.1 G|
+|`qbr/data/review-queues/v6-20260922`|1.4 G|
+|`qbr/data/review-queues/pre-flatdetect-20260922`|1.3 G|
+|`…/staging-20260921`、`…/pre-thirdfix`、`…/pre-scriptwide`、`…/pre-scriptdetect`、`…/pre-countfix`|各 1.0 G|
+|`…/pre-wrapfix`、`…/pre-figures`、`…/all-20260920`|各 185 M|
+
+**保留**：`qbr/data/review-queues/live`（2.5 G）＝現行快照。**已刪，量測後**：`du -sh` 從 12.6 G → **2.5 G**。
+判準（量到的，不是猜的）：沒有程式／排程指著那些目錄（只有 `qbr/reports/count_mismatch_three_causes.md`
+`repair_loop_first_run.md`／`option_continuation_fix.md` 這三份**歷史報告**把它們寫成「逐題比對用／考據」，
+那是當時的紀錄；權威佇列在站上 `192.168.10.70:~/qbr-review/queue/review-ui/`，要那份快照可重跑管線再產生）。
+
+**worktree**：`git worktree prune` 清 4 筆 prunable（`/private/tmp/qbr-head`、`qbr-head2`、
+`qbr-verify-commit`、`…-pharmacist-visual-audit`，四個目錄本來就已經不在）＋刪掉我自己開的
+`/private/tmp/m7..m11`、`/private/tmp/prev7..prev11`（含 `preview7..11` 分支）、`/tmp/fixargv`、
+`/tmp/fixclone`、`/tmp/shallow`、`/tmp/ciimage`，以及三棵 2026-09-26 的舊工作樹
+（`/tmp/tw-national-exam-catalog-{deploy-review-ui,qbr-prerequisite,review-ui-pr}-20260926`；它們的
+HEAD 都還被 remote 分支收著，未提交的只有 `scripts/test_v2_areas_browser.mjs` 的權限位）。
+**別人的不動**：`/private/tmp/a1/wt`、`g4/wt`、`step0/wt`、`d14/wt-7d4e087`、`~/.codex/worktrees/*`。
+
+**站上**：`~/qbr-review/queue/review-ui/` 從 **6.8 G → 3.4 G**。刪掉 54 個 `candidates.jsonl.before-*`／
+`.bak-*`（共 3.3 G；**留最新那一個** `before-italic-restore-20260926T115250` 當還原點）＋兩個
+`.sliver-half-20260925-172525`（沒有任何程式用到，grep 過）。那顆容器掛的是**整個目錄**
+（`/Users/tim/qbr-review/queue/review-ui -> /queue/review-ui (rw)`），刪旁邊的檔案不影響它；
+刪完 `qbr-review-ui` 仍是 **Up (healthy)**。保留 `question_review_events*.jsonl`（人工事件）、
+`question_ai_findings.jsonl`（706 MB）、`crops/`（862 個圖）—— 那些是資料，不是垃圾。
+
+## P.6 下一個 session 從這裡開始（2026-09-29 深夜；設計者說「先記錄下來，我開新 session 處理」）
+
+### 現在的一句話狀態
+
+**PR 這一件事做完了**：五支（#7–#11）在 GitHub 上三顆檢查**全綠**，等設計者按 Merge；
+程式面沒有未完成的紅燈。剩下的是**兩個要動到站上的決定**（P.6 第 2 節）與**一個未提交的工作樹**。
+
+### 1. 設計者要按的（已經不需要我再做任何事）
+
+| 按什麼 | 為什麼 |
+|---|---|
+| **Merge #7 `agent/repair-agent-pi-sdk-20260928`**（`40776ad`） | 三顆綠；含修法 |
+| **Merge #8 `agent/agent-verified-gate-20260928`**（`70b736a`） | 同上（它帶自己額外的測試，540 個全過） |
+| **Merge #9 `agent/export-question-page-20260927`**（`b702e31`） | 同上 |
+| **Merge #10 `agent/engine-endpoints-runtime-20260927`**（`82cf74a`） | 同上（**`occamy-6bit` 引擎表只在它裡面**，其它支依賴它 ⇒ 這支先合最安全） |
+| **Merge #11 `agent/fix-option-alphabet-union-20260927`**（`de8a361`） | 同上 |
+| **Close #5 `codex/organize-review-server-20260923`** | 內容已被吸收，三顆綠 |
+| （不必開）`agent/fix-node-argv-limit-20260929`（`2dd06ea`） | 修法本身；它已經在五支裡面。要留紀錄就開 PR，不合也不會有事 |
+
+**合完之後要檢查的事**：main 的 push run 應該變綠（`python3 /tmp/pr_status.py` 讀公開 API）；
+工作樹的 `1d6d1c0 ＋ 未提交` 那包，之後要與新的 main 對齊一次（下一輪的第一件事）。
+
+### 2. 兩題等設計者一句話（都會動到站上 ⇒ G3，我不自己動）
+
+1. **站上的討論區現在就拿掉嗎？**（5.3；拿掉要 `scripts/deploy_station.sh --restart`，功能日後在沙盒補）
+2. **刷新鎖要不要推上站上？**（5.4；修「換範圍時舊題目晚 416 ms 回來蓋掉新畫面」）
+
+### 3. 未提交的東西（工作樹，`/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog`）
+
+本輪動到、**尚未 commit**：
+
+- `tests/review_ui_source.py`（＋共用 runner：`run_node_script`／`run_node_expression`／`node_binary`／`NODE_ARG_MAX`）
+- `tests/test_node_script_helper.py`（**新檔**；3 條契約，含「每個 argv 元素 < 128 KiB」的負對照）
+- `tests/test_review_ui_scope.py`／`test_review_ui_v2_scope.py`（`run_node` ＋ `run_node_async`）／
+  `test_review_ui_rich_text.py`（含 vm runner 的 `args`／`cwd`）／`test_review_ui_discuss.py`
+- `review_ui/v2/01-core.js`（`rowReviewAction`＝5.1 的順序；`S.scopeRequest` 世代守衛＝刷新鎖）
+- `tests/test_review_ui_row_action.py`（**新檔**，5.1）
+- `repair_agent_test/skills/design-repair-agent/SKILL.md`（P 段＝本紀錄）
+- 已知、與本輪無關的紅：`tests/test_local_review_evidence.py`（**未追蹤、不在 HEAD**，所以 CI 看不到；
+  容器內整份 suite ＝ 552 個、只它一個失敗）
+
+### 4. 可重用的工具（下一個 session 直接用，不必重做）
+
+- `python3 /tmp/pr_status.py`：讀 PR 清單 ＋ 每個 head 的檢查（**不需要 token**）。
+- `python3 /tmp/ci_log.py`：job 步驟細節（job log 本身要 admin ⇒ 403）。
+- 容器重現 CI：image **`ci-like:local`**（＝`tw-national-exam-qbr-review-ui:local` ＋ `apt-get install nodejs git`），
+  `DOCKER_CONFIG=/tmp/dockercfg`（`config.json={}`）＋ mount 一棵**真 clone**：
+  `DOCKER_CONFIG=/tmp/dockercfg docker run --rm -v <clone>:/w -w /w --entrypoint sh ci-like:local -c 'git config --global --add safe.directory "*"; python3 -m unittest discover -s tests'`
+  （`/tmp/ciimage` 這個 build context 已經刪掉；要重建就是那兩行的 Dockerfile。）
+
+### 5. 這一輪踩到的坑（別再踩）
+
+1. **Linux 單一 argv 上限 128 KiB**（macOS 沒有）⇒ 任何「把大東西交給 node」的測試都要走
+   `review_ui_source.run_node_script`（暫存檔），不要 `node -e`。
+2. **容器裡不要用 linked worktree 跑整份 suite**：`.git` 檔指向容器外的路徑，`test_agent_governance`
+   會假紅（`git ls-files` exit 128）。要**真 clone**。
+3. 站上（`timmac-studio`）非互動 ssh 的 PATH 沒有 `docker`；用 **`/usr/local/bin/docker`**。
+4. macOS 的 **`du` 會把 APFS 克隆算成全額**（`/tmp` 那些工作樹看起來 70–128 G，實體幾乎沒多佔；
+   刪完可用空間不變，但**檔案數少了 370 萬個**）。判斷「真的省了多少」要看刪前後的 `df`。
+5. 這一台 shell 的 `rm` 對**大目錄**不可靠（`rm -rf` 回 0 但目錄還在、還會被背景化）；
+   大目錄請用 **`/bin/rm -rf`** 並給長 timeout。

@@ -27,8 +27,8 @@ Every PR must state:
 7. whether secrets, large assets, credentials, or external model data are involved;
 8. the agent/tool identity when AI assisted.
 
-A PR touching `AGENTS.md`, `governance/`, `.github/`, database schema, production
-deployment, or AI395 control scripts requires owner review through CODEOWNERS.
+A PR touching `AGENTS.md`, `governance/`, `.github/`, database schema, an external
+deployment, or a retired-runtime compatibility boundary requires owner review through CODEOWNERS.
 
 ## Merge policy
 
@@ -54,7 +54,9 @@ Before merging a parser, normalization, grouping, or candidate-building change:
 3. append per-question `reset_review` events through an approved repair/migration
    script while preserving previous state, notes, versions, and reasons;
 4. never rewrite existing human review events in place;
-5. keep AI findings advisory until a human accepts the question.
+5. keep AI findings as evidence, separate from human decisions. A scoped QBR agent may set its own
+   `pass` / `return` / `block` workflow status under G2, but that status is not a human accept/block
+   decision or formal publication approval.
 
 ## Production approval separation
 

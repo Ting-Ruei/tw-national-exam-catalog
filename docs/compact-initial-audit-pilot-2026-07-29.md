@@ -1,5 +1,7 @@
 # 四路 compact 初審 pilot（2026-07-29）
 
+> 歷史測量證據：不代表目前模型、endpoint、provider 或 deployment；目前沒有 active model route。
+
 ## 結論
 
 舊 verbose v2 不適合文字抓漏。新 `compact_initial_question_audit_v1` 已改為四個獨立通道：
