@@ -918,12 +918,22 @@ https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-se
 2. **v2 要不要顯示 `prompt_system`／`prompt_user`？**（沙盒已補，站上 v2 未補）
 3. ~~沙盒延遲要降到多少才算「可以繼續測試」？~~ → 已降到 0.024–0.94 s；剩下 0.94 s 那一項
    要不要再動，等你一句話（動了就會多出第二份計數實作）。
-4. **五支 PR 未開**（無可用 token → GitHub 網頁）；**base 用 `agent/review-ui-server-split-20260923`**。
-5. 🆕 **`engines.py` 沒有「預設腦」這種東西**：`#1` 說要改「`qbr/src/qbr/engines.py` 預設」，
-   但該檔只有引擎表。實際的預設在 `qbr/src/qbr/vision.py:80` 與 `qbr/src/qbr/reflow.py:62` 的
-   `_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]`（另有
-   `qbr/scripts/scan_category_principles.py:124 default="mtplx-35b"`、
-   `qbr/scripts/ask_about_blocks.py:204`）。**這是主線行為變更（會改變抽取用哪顆引擎），
-   要你點頭才動。**
+4. ~~五支 PR 未開~~ → 已備好 6 支（含先合的共享契約分支）與標題，**只差你在 GitHub 按下去**（無可用 token）。base 一律 `agent/review-ui-server-split-20260923`。
+5. 🆕 **「`engines.py` 預設」這句話沒有對應的程式**：`engines.py` 只有引擎表。實際的預設有四個
+   地方（`git grep -n '"mtplx-35b"'`）：`qbr/src/qbr/vision.py` 的 `_DEFAULT`（**眼睛**，送
+   `image_url` 讀頁面／裁片）、`qbr/src/qbr/reflow.py` 的 `_DEFAULT`（**純文字**重排，無圖片）、
+   `qbr/src/qbr/reread.py` 的 `DEFAULT_ENGINE`（**是 `splash`**，而 `8088` 自 2026-09-25 起是 down）、
+   `repair_daemon.sh` 的 `LANE`（`mtplx-35b`，daemon 明確指名，不受其他預設影響）。
+
+   已做：**`vision.py::_DEFAULT` 改成 `occamy-6bit`**（眼睛與腦同一顆；6-bit occamy 逐欄位
+   53.3% vs ornith 47.8%、上限 78.4% vs 64.9%）。安全性有兩條依據：這個模組的 thinking 開關是
+   **實測 probe** 出來的（`_thinking_forms`，不信任請求），而且它自己的預算（900／8000 tokens）
+   遠低於該部署的 65536 KV。實測：`describe_crop` 走新預設 → `BASE_URL 18130`、
+   `MODEL occamy-1.0-6bit-xl-mlx`、36 秒（與稽核同時跑）回出正確的結構化判讀。
+   **沒做**：`reflow.py` 留 `mtplx-35b`（純文字線，換成視覺模型沒有量測支持）。
+
+   ⚠️ **這一行只存在工作樹、沒有 commit**：`vision.py` 目前帶著 ~700 行未提交的改寫
+   （與 `agent/engine-endpoints-runtime-20260927` 也不相同），一起 commit 就是把別條線的工作搬過來。
+   要落地就一行：`_DEFAULT = _engines.BUILTIN_ENDPOINTS["occamy-6bit"]`（附理由註解）。
 6. 🆕 **occamy 的 KV 要不要開大？** 現在 65536（agent 的提示詞就吃掉 ~39.5k）；
    `CTX_MLX=131072 occamy restart` 可調，代價是記憶體。客戶端已按 65536 保守設定。
