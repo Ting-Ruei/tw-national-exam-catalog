@@ -1,10 +1,26 @@
 # repair_agent_test — agent 入口（設計／沙盒層）
 
+## 🆕 現在的狀態（2026-09-29，新 session 從這裡接手）
+
+**分支**：`agent/repair-agent-pi-sdk-20260928`，HEAD **`7033901`**（已 push，**未開 PR**）。
+**沙盒站**：`http://100.96.207.80:8790`（Tailscale，開發用）——**設計者說反應很慢，要先優化**。
+**正式主場**：`http://192.168.10.70:8765/v2`（**v2 在常駐站**；MBP 改完要 `scripts/deploy_station.sh --restart`）。
+
+**上一輪做完的**（詳見 `SKILL.md` §9.9 與 qa-log **Q42**）：
+全庫工具 `see_corpus`／`find_disputed`；不綁題對話框；JSONL 視圖（`prompt_system`／`prompt_user`／`raw`）
+真的接線；設計者 v2 紀錄顯示（q041 → 「答案沒進去」）；沙盒 `W`/`S`/`J`/`K` ＋「有問題的」過濾；**測試 43／43**。
+
+**設計者 2026-09-29 已決六項**（`SKILL.md` §9.9，**不要再問**）：
+1. **換 occamy**（腦眼同一顆）｜2. 平台白名單導出＝可以｜3. 對話框兩種＝OK
+4. **先藥師(一)（99 題有字）後藥師(二)**｜5. **A1 要合併**｜6. **v2 主場在 `192.168.10.70:8765/v2`**
+＋6b. **沙盒很慢，繼續測試前先優化**。
+
 ## ⭐ 要動工前只讀這兩份（2026-09-28）
 
 | 問題 | 開這份 |
 |---|---|
 | **自進步 Agent 要怎麼寫** | [`skills/design-repair-agent/references/pi-agent-design.md`](skills/design-repair-agent/references/pi-agent-design.md)（**底層＝Pi SDK**；為什麼不救 `repair_agent.py`；Pi `0.87.1` 實測接點；互動 UI 規格；負對照驗收表） |
+| **🆕 設計者最新的六項裁決（2026-09-29）** | [`skills/design-repair-agent/SKILL.md`](skills/design-repair-agent/SKILL.md) **§9.9** |
 | **還有什麼要做、先做哪個** | [`skills/design-repair-agent/SKILL.md`](skills/design-repair-agent/SKILL.md) **§9 是唯一權威清單**（§9.6＝設計者已下令的五件） |
 
 > ❌ **不要回頭去救 `qbr/scripts/repair_agent.py`。** 設計者一開始就指定**以 Pi 為底層**；
@@ -38,7 +54,8 @@
 | 還有什麼要決策、先做哪個 | [`skills/design-repair-agent/SKILL.md`](skills/design-repair-agent/SKILL.md) §9 |
 | **D4 向量圖缺口量到什麼** | [`skills/design-repair-agent/references/vector-figure-gap.md`](skills/design-repair-agent/references/vector-figure-gap.md)（**§8 更正**：內嵌圖「5.5%」是探針假象） |
 | **全卷 0 選項的真根因（alphabet union）** | [`skills/design-repair-agent/references/option-alphabet-union.md`](skills/design-repair-agent/references/option-alphabet-union.md) |
-| 逐字問答紀錄 | [`skills/design-repair-agent/references/qa-log.md`](skills/design-repair-agent/references/qa-log.md) |
+| **🆕 設計者最新裁決（2026-09-29）** | [`skills/design-repair-agent/SKILL.md`](skills/design-repair-agent/SKILL.md) **§9.9**（六項已決＋沙盒效能） |
+| 逐字問答紀錄（append-only） | [`skills/design-repair-agent/references/qa-log.md`](skills/design-repair-agent/references/qa-log.md)（最新：**Q42**） |
 
 **這一層的性質（待確認）：** 目前是**設計與量測層**。產物是「設計決定與量測結論」，
 不是主線程式。**要做主線的事（如修 `option_alphabet`）就開 `qbr/` 的 PR，不在這裡改**

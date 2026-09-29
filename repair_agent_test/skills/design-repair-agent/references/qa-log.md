@@ -3853,3 +3853,70 @@ store 沒改時剛好落在正確位置；一改，就走丟。**改成本模組
 4. 要不要現在開始**審藥師(二)**？還是先做**藥師(一) 99 題有字的爭議**？
 5. **A1（`question_page`）要不要合併？**（未合併 → 全庫 PDF 面板都開第 1 頁）
 6. **v2 也要顯示 `prompt_system`／`prompt_user` 嗎？**（設計者主場在 v2；本輪只補了沙盒）
+
+---
+
+## Q42 — 設計者的裁決（2026-09-29）＋ 本輪進度收尾
+
+> 協定：**這一輪只記錄，不改碼。** 設計者要開新 session 執行。
+> 原話：「接下來只把剛才做的進度以及我接下來的決策記錄下來，之後我開新的 session 來做」。
+
+### §A 設計者的六項裁決（**已決，新 session 直接執行**）
+
+| # | 裁決 | 原話 | 新 session 要做的事 |
+|---|---|---|---|
+| **1** | **換 occamy** | 「1.換 occamy」 | 腦（`ornith-1.5-mtplx-35b`）換成 `occamy-1.0-6bit`。**腦與眼同一顆**。⚠️ 這會**改變 `read_page` 的語意**（從「第二意見」變成「自己再看一次」）——舊配置的價值是**兩引擎錯只 37.8% 重疊**；換成同顆後，`read_page` 的「第二意見」意義消失，需重新定義它（是「再看一次」還是保留一顆異質引擎當對照）。**動的地方**：`lib/session.mjs` 的 `BRAIN`（env `REPAIR_AGENT_MODEL`）、`engines.py` 預設、`lib/identity.mjs` 的 `DEFAULT_ENGINE` |
+| **2** | **平台白名單從 `sanitize.ts` 導出：可以** | 「2.可以」 | 已實作（`lib/platform_view.py::load_allowlist()` 解析 `platform-app/frontend-next/lib/sanitize.ts`；檔案不在就**拋錯**，不靜默留過期清單）。**裁決只是確認這個做法**，無新工 |
+| **3** | **對話框兩種都要：OK** | 「3.OK」 | 綁題（1）與不綁題（2）**都已完成並實測**（Q40／Q41）。**無新工** |
+| **4** | **先審藥師(一)，再藥師(二)** | 「4.先一後二」 | 1. **藥師(一)**：先做 **99 題有字的爭議**（`/api/browse?category=藥師(一)&disputed=1`，334 題中 99 有 `notes`）<br>2. 之後 **藥師(二)**（4,410 題純文字）。**注意**：不是「掃描／重抽取」，是**稽核／判讀** |
+| **5** | **A1 要合併** | 「5.要」 | 合併 `agent/export-question-page-20260927`（`f282d0b`），讓 `question_page` 進主線。**合併前**：開 PR（`gh` token 無效 → GitHub 網頁）、確認 HEAD 既存不一致不擋。合併後仍需**重跑匯出**才有欄位值，否則 PDF 面板仍開第 1 頁 |
+| **6** | **v2 主場在 `192.168.10.70:8765/v2`，要在 MBP 改完才推正式站** | 「6.v2主場好像在192.168.10.70:8765/v2 所以需要在MBP改完才能推到正式站」 | **確認主場＝常駐站的 v2**（`192.168.10.70:8765/v2`），**不是**沙盒、也**不是** Tailscale。工作流：**MBP 改 → `scripts/deploy_station.sh --restart` → 瀏覽器驗證**。⚠️ 這修正了助理先前把 Tailscale（`100.96.207.80:8790`）講成對外主入口的說法——**Tailscale 是沙盒**，**正式主場是站上的 v2** |
+| **6b** | **沙盒站反應很慢** | 「6.沙盒站的反應速度很慢，如果要繼續測試則需要優化」 | **新的效能工作項**（見 §C）。繼續測試**之前**要先優化 |
+
+### §B 本輪（Q41）做了什麼 —— 收尾清單
+
+| 項目 | 狀態 | 證據 |
+|---|---|---|
+| **全庫工具** `see_corpus`／`find_disputed` | ✅ 完成 | `bridge.overview`／`bridge.disputes`；實測 79,090 題／759 爭議／313 有字；藥師(一) 334 爭議（99 有字） |
+| **不綁題對話框**（設計者「兩者都要，1先做」的第 2 種） | ✅ 完成並實測 | 標題列 `綁這一題`／`全庫` 兩顆按鈕；空 key 不再 400；`store/chat-sessions/corpus-18647b1c60e2/`；`chat.jsonl` 記 `candidate_key=None` |
+| **JSONL 視圖**（設計者「做了沒有帶入」） | ✅ 補上並真接線 | `renderAiRead` **真的呼叫**；新增 `renderPipelineFindings` 讀 `question_ai_findings.jsonl`（707 MB／108,181 行）的 `prompt_system`／`prompt_user`／`raw`／`usage` |
+| **設計者 v2 紀錄** | ✅ 顯示 | `renderHumanEvents`；q041 顯示「**答案沒進去**」（以前只顯示「人動過 2 次」）。列表加「有問題的（你說過的）」過濾，每列印出他的 `notes` |
+| **沙盒 v2 手感** | ✅ 補上 | `W`/`S` 走**被畫出的清單**；`J`/`K` 判（空 reason 不寫、判完自動跳下一題） |
+| **測試** | ✅ 43／43 | 38 → 43；負對照**全部實測 FAIL**（見 §D） |
+| **Commit／push** | ✅ | 分支 `agent/repair-agent-pi-sdk-20260928`，最新 `7033901`。**未開 PR** |
+
+### §C 🆕 沙盒站效能（設計者指定要優化）
+
+**這是新工作項，未動工。** 目前已知的慢點（**尚未量測，只是程式碼觀察**，動工前要先量）：
+
+| 觀察 | 位置 | 猜測 |
+|---|---|---|
+| 全庫工具每次呼叫都**單趟掃 199 MB** | `bridge.do_overview`／`do_disputes`／`do_browse`／`do_find` | 0.3 s／趟 是**單趟**；但一輪對話可能呼叫 2–3 次 |
+| `ai_findings()` 每次請求**子字串掃 707 MB** | `bridge.ai_findings` | 只為一題卻掃全檔 |
+| `prior_judgements`／`human_events` 同樣**單趟掃全檔** | `bridge.py` | 每開一題都跑 |
+| `/api/question` 一次跑 **4+ 趟全檔掃描** | `ui/server.py::question_payload` | 可合成**一趟** |
+| 對話 SSE 每次 `ensure()` **重啟 node** | `ui/server.py::Chat.ensure` | 只在 crash 後才該重啟 |
+
+**先量再改**（本案紀律）：動工第一件事是**量 `/api/question` 與一次對話的實際秒數**，並建立**負對照**（證明優化前後讀到**同一份資料**，不是少讀）。
+
+### §D 負對照清單（本輪全部實測 FAIL ＝ 檢查真的會咬）
+
+| 負對照 | 目標 |
+|---|---|
+| 拿掉 `${renderAiRead}`／`${renderPipelineFindings}` | raw view 真的渲染 |
+| bridge 回 `ai_findings: []` | 欄位真的離開磁碟 |
+| `see_corpus` 改名／`disputes` 的 `notes` 填空 | 全庫工具真的有內容 |
+| server 恢復 `chat needs a key` | 不綁題真的到得了 |
+| 拿掉 `--disputed` 過濾 | 設計者真的找得到他點過的題 |
+| 拿掉 `${renderHumanEvents}`／把 `notes` 讀成 `reason` | v2 紀錄真的顯示 |
+
+### §E 待裁決（累積，**新 session 開頭先看這裡**）
+
+1. ~~腦換 occamy~~ → **已決 #1**。殘留問題：**換同顆後 `read_page` 的「第二意見」要怎麼重新定義？**
+2. ~~平台白名單導出~~ → **已決 #2**（確認）
+3. ~~對話框兩種~~ → **已決 #3**（完成）
+4. ~~先審哪科~~ → **已決 #4＝先藥師(一)（99 題有字）後藥師(二)**
+5. ~~A1 合併~~ → **已決 #5＝要合併**（開 PR → 網頁合併 → 重跑匯出）
+6. **v2 要不要顯示 `prompt_system`／`prompt_user`？**（設計者主場在站上的 v2；沙盒已補，v2 未補）——**仍待裁決**
+7. 🆕 **沙盒站的效能要到什麼程度才算「可以繼續測試」？**（延遲上限？）
+8. **未開的五支 PR**（`gh` token 無效，需 GitHub 網頁）：`agent/fix-option-alphabet-union-20260927`、`agent/engine-endpoints-runtime-20260927`、`agent/export-question-page-20260927`、`agent/agent-verified-gate-20260928`、`agent/repair-agent-pi-sdk-20260928`

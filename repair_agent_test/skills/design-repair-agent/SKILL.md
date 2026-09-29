@@ -9,6 +9,7 @@ description: 在動工前讀這份。修理代理（**以 Pi SDK 為底層**、P
 
 | 你想知道 | 翻到 |
 |---|---|
+| **🆕 設計者最新裁決（2026-09-29）＋新 session 要做的** | **§9.9（先看這裡）**；逐字在 [`references/qa-log.md`](references/qa-log.md) **Q42** |
 | **現在還剩什麼要決策、我該先做什麼** | **§9（唯一權威清單，含建議順序）** |
 | 剛才那些實驗量到什麼 | [`references/`](references/) 的實測報告（見下方對照表） |
 | 逐字問答（你的每一句話與我的回覆） | [`references/qa-log.md`](references/qa-log.md)（append-only） |
@@ -781,3 +782,41 @@ occamy-6bit／47 題／90 欄位：
 | **Jev 的開源替代品（Q10）** | [`references/jev-open-source-alternatives.md`](references/jev-open-source-alternatives.md)（**Jev 是 TypeSafe 的封閉服務**；我實測 **Jev-Style 0.8B = 80%** vs Laya 45%；**最值得＝零訓練 wrapper**；**9 個 awesome-* 是 SEO spam**；venv `~/models/venvs/jevstyleenv`） |
 | **D4 向量圖缺口實測（Q11）** | [`references/vector-figure-gap.md`](references/vector-figure-gap.md)（**向量圖 1.3%**；九個標記案例含四個負對照；**我兩次量錯都是負對照抓到**；⚠️ **§8 更正**：內嵌圖「5.5%」是探針假象） |
 | **逐字問答紀錄** | [`references/qa-log.md`](references/qa-log.md)（append-only） |
+
+---
+
+### 9.9 🆕 設計者 2026-09-29 裁決（**已決，新 session 直接執行**）
+
+> **這是目前最新的一組決定。新 session 開頭先看這一節。**
+> 逐字與完整推論見 [`references/qa-log.md`](references/qa-log.md) **Q42**。
+> 設計者原話：「接下來只把剛才做的進度以及我接下來的決策記錄下來，之後我開新的 session 來做」。
+
+| # | 裁決 | 做什麼 |
+|---|---|---|
+| **1** | **換 occamy**（腦與眼同一顆） | 把 `BRAIN` 從 `ornith-1.5-mtplx-35b` 換成 `occamy-1.0-6bit`。**動**：`agent/lib/session.mjs` 的 `BRAIN`／`agent/lib/identity.mjs` 的 `DEFAULT_ENGINE`／`qbr/src/qbr/engines.py` 預設。⚠️ **副作用要處理**：換同顆後 `read_page` 的「**第二意見**」語意消失（舊價值＝兩引擎錯只 **37.8%** 重疊）→ **必須重新定義 `read_page`**（是「再看一次」還是保留一顆異質引擎當對照）。**這是 #1 唯一還沒定論的部分。** |
+| **2** | **平台白名單從 `sanitize.ts` 導出：可以** | 已實作（`lib/platform_view.py::load_allowlist()`），**確認即可，無新工** |
+| **3** | **對話框兩種都要：OK** | 已完成（綁題＋全庫），**無新工** |
+| **4** | **先審藥師(一)，再藥師(二)** | ① **藥師(一)** 先做 **99 題有字的爭議**（334 題中 99 有 `notes`）；② 之後 **藥師(二)**（4,410 題）。**是稽核／判讀，不是重抽取** |
+| **5** | **A1 要合併** | 合併 `agent/export-question-page-20260927`（`f282d0b`）。**步驟**：GitHub 網頁開 PR（`gh` token 無效）→ 合併 → **重跑匯出**才有 `question_page` 值（否則 PDF 面板仍開第 1 頁） |
+| **6** | **v2 主場＝`192.168.10.70:8765/v2`（常駐站），MBP 改完推正式站** | 工作流：**MBP 改 → `scripts/deploy_station.sh --restart` → 瀏覽器驗證**。**更正**：先前把 Tailscale（`100.96.207.80:8790`）講成主入口是錯的——**那是沙盒**；**正式主場是站上的 v2** |
+| **6b** | **沙盒站反應很慢，要繼續測試需先優化** | **新工作項**（見下方） |
+
+#### 6b 沙盒效能（設計者指定；**動工前先量**）
+
+| 疑似慢點 | 位置 |
+|---|---|
+| `overview`／`disputes`／`browse`／`find` 每次**單趟掃 199 MB** | `bridge.do_*` |
+| `ai_findings()` 每次請求**子字串掃 707 MB** | `bridge.ai_findings` |
+| `prior_judgements`／`human_events` 每開一題**各掃全檔** | `bridge.py` |
+| `/api/question` 一次跑 **4+ 趟全檔掃描** | `ui/server.py::question_payload` |
+| 對話每次 `ensure()` **可能重啟 node** | `ui/server.py::Chat.ensure` |
+
+**紀律**：**先量**（`/api/question` 與一次對話的實際秒數），**再改**；**每個優化都要有負對照**
+（證明優化前後讀到**同一份資料**，不是少讀）。
+
+#### 9.9 之後仍**待裁決**
+
+1. **換同顆後 `read_page` 的「第二意見」怎麼重新定義？**（#1 的殘留）
+2. **v2 要不要顯示 `prompt_system`／`prompt_user`？**（沙盒已補，站上 v2 未補）
+3. **沙盒延遲要降到多少才算「可以繼續測試」？**
+4. **五支 PR 未開**（`gh` token 無效 → GitHub 網頁）：`agent/fix-option-alphabet-union-20260927`、`agent/engine-endpoints-runtime-20260927`、`agent/export-question-page-20260927`、`agent/agent-verified-gate-20260928`、`agent/repair-agent-pi-sdk-20260928`

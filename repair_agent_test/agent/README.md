@@ -33,9 +33,19 @@ cd "/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/repair
 http://100.96.207.80:8790/
 ```
 
-**設計者是用 Tailscale 連進來的**，所以對外的網址是 `100.96.207.80:8790`（Tailscale 位址），
+**設計者是用 Tailscale 連進來的**，所以這個沙盒的網址是 `100.96.207.80:8790`（Tailscale 位址），
 不是 LAN 的 `192.168.20.249`，也不是 `127.0.0.1`。三個都可以用來自己測（它們回同一個 server，
 因為它監聽 `*:8790`），但**給設計者的網址一定要用 Tailscale 那個**。
+
+> ⚠️ **這是沙盒，不是主場。** 設計者的**正式審題主場在常駐站的 v2**：
+> `http://192.168.10.70:8765/v2`。他 2026-09-29 明講：「**6.v2主場好像在 192.168.10.70:8765/v2
+> 所以需要在 MBP 改完才能推到正式站**」。所以**任何要給設計者用的改動，改在 MBP、再
+> `scripts/deploy_station.sh --restart` 推上去**——只改沙盒，他看不到。
+
+> 🐌 **沙盒現在反應很慢**（設計者 2026-09-29：「如果要繼續測試則需要優化」）。
+> 已知熱點（見 `bridge.py`：`do_overview`／`do_disputes`／`do_browse`／`do_find` 與
+> `ai_findings`／`prior_judgements`／`human_events` 每次都**單趟掃全檔**，
+> `question_ai_findings.jsonl` 是 **707 MB**）。**動工前先量**，且每個優化都要有負對照。
 
 `100.96.207.80` 是這台筆電的 Tailscale IP（`ifconfig` 裡的 `utun` 介面）；LAN 位址用
 `ipconfig getifaddr en0` 查。兩者都會變，只有「**用設計者連得到的那個位址**」是規則。
@@ -112,7 +122,7 @@ system prompt  : 7758 chars built → 25800 chars in session (the agent's own)
 | 找某個字 | 搜尋欄打題幹裡的字（例：`葡萄球菌`）按 Enter |
 | 知道 key | 貼進 `candidate_key` 欄，按「讀這一題」 |
 | **上下切換／直接判** | `W` 上一題、`S` 下一題；`J`＝沒問題、`K`＝有問題（判完自動跳下一題）。走的是**畫面上那份清單**——包含打開「有問題的」過濾時 |
-| 直接給別人看 | 開 `http://100.96.207.80:8790/?key=<candidate_key>`（**Tailscale 位址**；設計者走 Tailscale，不是 LAN、更不是 `127.0.0.1`） |
+| 直接給別人看 | 開 `http://100.96.207.80:8790/?key=<candidate_key>`（**沙盒的 Tailscale 位址**；設計者走 Tailscale，不是 LAN、更不是 `127.0.0.1`）。**正式主場是站上的 v2：`http://192.168.10.70:8765/v2`** |
 
 **為什麼要有列表**：只給一個 `candidate_key` 輸入框的介面，只有建它的人能用（設計者
 2026-09-28：「我不可能記得 key，應該要有候選列表」）。下拉選單的每一項都直接顯示
