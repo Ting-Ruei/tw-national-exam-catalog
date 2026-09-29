@@ -9,13 +9,12 @@ supports.
 Ground truth exists for every item (the paper visibly continues), so the answers can be scored, and
 the model is given text both engines produced rather than being asked to read the page itself.
 
-Measured 2026-09-21, 10 cases from 8 sampled papers:
-    qwen3.8-flash-next (DGX 8888)   10/10, and the recovered text matched ground truth verbatim
-                                     apart from whitespace inserted around Latin terms
-    ornith-1.5-mtplx-35b (18120)    10/10, same text, 2.4-11.2 s/question vs 1.1-2.9 s
+Measured against local engines only. Re-run the small battery for the current task before
+using a result as a decision.
 
 Usage:
-    .venv/bin/python scripts/ask_option_continuation.py --engine flash --papers 8 --limit 10
+    .venv/bin/python scripts/ask_option_continuation.py --engine splash --papers 8 --limit 10
+    .venv/bin/python scripts/ask_option_continuation.py --engine dgx-flash --papers 8 --limit 10
 """
 """The closed question about a picture: does the printed option continue past where we stopped?
 
@@ -28,7 +27,7 @@ Ground truth exists for every item here (the paper visibly continues), so an ans
 """
 import sys, os, json, argparse, urllib.request, time
 sys.path.insert(0,"src")
-from qbr import extract, repair, paths
+from qbr import extract, repair, paths, engines
 
 ROOT=paths.repo_root()
 ROOTS=["國考題資料夾","國考題資料夾_非醫學剩餘全集","國考題資料夾_其他類型"]
@@ -61,18 +60,28 @@ PROMPT = """你看到的是同一份考卷的兩個抽取程式對第 {q} 題選
 漏掉：...
 """
 
-def ask(url, model, prompt, key, budget=2000, timeout=180, splash=False):
-    body={"model":model,"messages":[{"role":"user","content":prompt}],
-          "max_tokens":budget,"temperature":0}
-    if not splash: body["reasoning_effort"]="none"
-    req=urllib.request.Request(url.rstrip("/")+"/chat/completions",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type":"application/json","Authorization":"Bearer "+key})
-    t=time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        d=json.load(r)
-    c=d["choices"][0]["message"]
-    return (c.get("content") or ""), d.get("usage") or {}, time.time()-t
+def ask(endpoint, prompt, budget=2000, timeout=180, splash=False):
+    """One call through the **shared** request builder.
+
+    The request used to be built here, with a hard-coded URL and a `splash` flag choosing which
+    spelling of "stop thinking" to send. That is the exact shape `qbr.engines` exists to prevent: the
+    wrong spelling is accepted with HTTP 200 and silently ignored, so a copy that drifts costs 4.7x
+    the latency with no error to catch. `engines.body_for` applies the engine's own switch, so the
+    flag is gone and the endpoint carries its spelling - which also means repointing this at the DGX
+    Spark is a `--engine` choice, not an edit.
+
+    `splash` is kept only so existing call sites do not break; it is no longer read.
+    """
+    body = engines.body_for(endpoint, [{"role": "user", "content": prompt}], max_tokens=budget)
+    request = urllib.request.Request(
+        engines.endpoint_url(endpoint["url"]), data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + endpoint.get("key", "")})
+    t = time.time()
+    with urllib.request.urlopen(request, timeout=timeout) as r:
+        d = json.load(r)
+    c = d["choices"][0]["message"]
+    return (c.get("content") or ""), d.get("usage") or {}, time.time() - t
 
 def parse(text):
     verdict=None; dropped=None
@@ -86,9 +95,10 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--papers",type=int,default=6)
     ap.add_argument("--seed",type=int,default=7)
-    ap.add_argument("--engine",default="flash")
+    ap.add_argument("--engine", choices=sorted(engines.endpoints()), default="splash")
     ap.add_argument("--limit",type=int,default=8)
     a=ap.parse_args()
+    endpoint=engines.named(a.engine)
     Q=json.load(open("data/review-queues/live/review-ui/queue_index.json",encoding="utf-8"))
     import random; random.seed(a.seed)
     sample=random.sample(Q["per_paper"],a.papers)
@@ -116,9 +126,7 @@ def main():
                           "dropped":item["dropped"],"ta":ta,"tb":tb,"ra":ra,"rb":rb})
         if len(cases)>=a.limit: break
     print("cases:",len(cases))
-    if a.engine=="flash": url,model,key,sp="http://192.168.10.90:8888/v1","qwen3.8-flash-next","mtplx",False
-    elif a.engine=="ornith": url,model,key,sp="http://127.0.0.1:18120/v1","ornith-1.5-mtplx-35b","mtplx",False
-    else: url,model,key,sp="http://127.0.0.1:8088/v1","incoai/Qwen3.8-27B-Splash","",True
+    print("engine: %s (%s)" % (a.engine, endpoint["url"]))
     ok=0; ans=[]
     for i,c in enumerate(cases):
         # show each reading around the option, so the model sees the disagreement not the whole page
@@ -131,7 +139,7 @@ def main():
             return "\n".join(out)[:1400]
         pr=PROMPT.format(q=c["q"],k=c["k"],rows_a=around(c["ta"],c["q"],c["k"]),
                          rows_b=around(c["tb"],c["q"],c["k"]),shipped=c["shipped"])
-        try: content,usage,dt=ask(url,model,pr,key)
+        try: content,usage,dt=ask(endpoint,pr)
         except Exception as e: content="ERROR %r"%e; usage={}; dt=0
         v,d=parse(content)
         hit = (v=="是")

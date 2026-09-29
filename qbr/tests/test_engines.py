@@ -144,8 +144,8 @@ def test_the_negative_control_a_retyped_table_would_contain_the_switch():
 def test_a_port_remains_a_parameter_not_a_literal_in_the_request_builder():
     # "A port is a parameter" - the builder must take the URL from the endpoint it is given, so
     # pointing this at another host is a matter of the environment and not of editing the code.
-    moved = {**engines.ENDPOINTS["splash"], "url": "http://192.168.10.90:9999"}
-    assert engines.endpoint_url(moved["url"]).startswith("http://192.168.10.90:9999/v1/")
+    moved = {**engines.ENDPOINTS["splash"], "url": "http://127.0.0.1:8999"}
+    assert engines.endpoint_url(moved["url"]).startswith("http://127.0.0.1:8999/v1/")
     body = engines.body_for(moved, [{"role": "user", "content": "x"}], max_tokens=10)
     assert body["model"] == engines.ENDPOINTS["splash"]["name"]
 
@@ -178,3 +178,108 @@ def test_the_negative_control_the_default_engine_is_not_mtplx():
     match = re.search(r'QBR_REREAD_ENGINE",\s*"([^"]+)"', source)
     assert match, "reread no longer names a default engine"
     assert match.group(1) == "splash"
+
+
+# ------------------------------------------------------------------ the address is a runtime parameter
+
+def test_an_engine_can_be_repointed_at_another_host_without_a_restart():
+    # This is the whole point of `endpoints()` existing rather than the module-level dict alone: a
+    # resident loop must be able to be pointed at a different engine while it is running, because the
+    # alternative is "edit the file and restart", which is what the hard-coded table forced.
+    previous = os.environ.get("QBR_ENGINE_MTPLX_35B_URL")
+    os.environ["QBR_ENGINE_MTPLX_35B_URL"] = "http://10.9.9.9:1234"
+    try:
+        assert engines.named("mtplx-35b")["url"] == "http://10.9.9.9:1234"
+    finally:
+        if previous is None:
+            os.environ.pop("QBR_ENGINE_MTPLX_35B_URL", None)
+        else:
+            os.environ["QBR_ENGINE_MTPLX_35B_URL"] = previous
+    # And the control: with the variable gone the built-in address is back, so the assertion above is
+    # about the variable and not about the table having been permanently changed.
+    assert engines.named("mtplx-35b")["url"] == engines.BUILTIN_ENDPOINTS["mtplx-35b"]["url"]
+
+
+def test_the_negative_control_the_module_level_table_does_not_see_a_late_variable():
+    # Negative control for the test above: the *frozen* `ENDPOINTS` really does NOT pick up a variable
+    # set after import, which is the defect `endpoints()` fixes. If this ever starts passing, the
+    # distinction between frozen and live has been lost and the test above is vacuous.
+    previous = os.environ.get("QBR_ENGINE_MTPLX_35B_URL")
+    os.environ["QBR_ENGINE_MTPLX_35B_URL"] = "http://10.9.9.9:1234"
+    try:
+        assert engines.ENDPOINTS["mtplx-35b"]["url"] != "http://10.9.9.9:1234"
+        engines.reload()
+        assert engines.ENDPOINTS["mtplx-35b"]["url"] == "http://10.9.9.9:1234"
+    finally:
+        if previous is None:
+            os.environ.pop("QBR_ENGINE_MTPLX_35B_URL", None)
+        else:
+            os.environ["QBR_ENGINE_MTPLX_35B_URL"] = previous
+        engines.reload()
+
+
+def test_an_overrides_file_moves_engines_and_an_unknown_name_is_refused():
+    import json
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "endpoints.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"occamy-6bit": {"url": "http://10.0.0.5:1234"}}, handle)
+    previous = os.environ.get("QBR_ENDPOINTS_FILE")
+    os.environ["QBR_ENDPOINTS_FILE"] = path
+    try:
+        assert engines.named("occamy-6bit")["url"] == "http://10.0.0.5:1234"
+        # An unknown engine name in the file is a typo that would otherwise be silently ignored (the
+        # file's whole content would appear to have been applied while nothing was). It raises.
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"splsh": {"url": "http://x"}}, handle)
+        try:
+            engines.endpoints()
+        except KeyError as exc:
+            assert "splsh" in str(exc)
+        else:
+            raise AssertionError("a mistyped engine name in the overrides file was accepted")
+    finally:
+        if previous is None:
+            os.environ.pop("QBR_ENDPOINTS_FILE", None)
+        else:
+            os.environ["QBR_ENDPOINTS_FILE"] = previous
+
+
+def test_the_thinking_switch_is_not_overridable_by_the_environment():
+    # The address may be repointed by an operator; the spellings may not. A wrong spelling is accepted
+    # with HTTP 200 and silently ignored, so letting the environment choose it is how a "thinking off"
+    # run keeps thinking. This is the negative control on the whole overrides feature: the feature
+    # moves three fields and refuses a fourth.
+    import json
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "endpoints.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"splash": {"url": "http://10.0.0.5:1234", "reasoning": "high",
+                              "thinking": {"chat_template_kwargs": {"enable_thinking": True}}}},
+                  handle)
+    previous = os.environ.get("QBR_ENDPOINTS_FILE")
+    os.environ["QBR_ENDPOINTS_FILE"] = path
+    try:
+        moved = engines.named("splash")
+        assert moved["url"] == "http://10.0.0.5:1234"        # the address moved
+        assert moved["reasoning"] == "none"                  # the switch did not
+        assert "thinking" not in moved                       # and neither did the other spelling
+    finally:
+        if previous is None:
+            os.environ.pop("QBR_ENDPOINTS_FILE", None)
+        else:
+            os.environ["QBR_ENDPOINTS_FILE"] = previous
+
+
+def test_no_endpoint_literal_survives_outside_the_one_table():
+    # The failure mode is a *second copy* of an address: `vision.py` and `reflow.py` each carried
+    # `http://127.0.0.1:18120`, so pointing a run at another host left two modules still talking to
+    # the old one. This test fails on the old arrangement and passes on the new one. The negative
+    # control is the literal itself, which is checked to exist in the table (so "not in the module"
+    # is a statement with content).
+    assert engines.BUILTIN_ENDPOINTS["mtplx-35b"]["url"] == "http://127.0.0.1:18120"
+    for name in ("vision.py", "reflow.py", "reread.py"):
+        source = open(os.path.join(PKG, "src", "qbr", name), encoding="utf-8").read()
+        code = "\n".join(line for line in source.splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert "127.0.0.1:18120" not in code, "%s still carries a second copy of the MTPLX address" % name

@@ -54,12 +54,16 @@ import urllib.request
 from . import canon, extract, repair
 
 # --- the endpoint ------------------------------------------------------------------------
-# A local engine on this machine, never a service: the address is in the environment because
-# the architecture is meant to be machine-independent. `AI395` is switched off and is not
-# referred to anywhere in this module.
-BASE_URL = os.environ.get("QBR_MODEL_BASE_URL", "http://127.0.0.1:18120")
-API_KEY = os.environ.get("QBR_MODEL_API_KEY", "mtplx")
-MODEL = os.environ.get("QBR_MODEL_NAME", "ornith-1.5-mtplx-35b")
+# The address, model and key come from the **one engine table** (`qbr.engines`) rather than a second
+# literal. Two copies of "which host answers" is two things that can point at different hosts; the
+# `QBR_MODEL_*` names are kept because every existing run command uses them.
+from . import engines as _engines  # noqa: E402  (module-level, one import, no cycle)
+
+_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]
+BASE_URL = os.environ.get("QBR_REFLOW_BASE_URL") or os.environ.get("QBR_MODEL_BASE_URL") or _DEFAULT["url"]
+API_KEY = (os.environ.get("QBR_REFLOW_API_KEY") or os.environ.get("QBR_MODEL_API_KEY")
+           or _DEFAULT.get("key", ""))
+MODEL = os.environ.get("QBR_REFLOW_MODEL") or os.environ.get("QBR_MODEL_NAME") or _DEFAULT["name"]
 
 # A reasoning model spends most of its budget thinking before it answers, and the thinking is
 # charged to `max_tokens`. Measured on this engine: a one-question verdict spent 630 reasoning
