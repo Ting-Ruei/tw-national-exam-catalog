@@ -403,6 +403,30 @@ function renderAnswer(question) {
     ｜題號頁：${esc(question.page ?? "未匯出（A1 之後才有）")}</div>`;
 }
 
+/**
+ * What the designer already did to this question **in v2**.
+ *
+ * His complaint (2026-09-28): 「我原本在 v2 審核過的大量題目也沒有紀錄」. The events were always in
+ * the view (`human_events`) but the page only printed a count — the count said he had touched a
+ * question and hid the sentence that said *what* he found, which is the part worth keeping.
+ *
+ * These are **read-only**: they come from `question_review_events.jsonl`, which only he writes.
+ * The `notes` field is the one with text; `reason` is empty on every human event.
+ */
+function renderHumanEvents(rows) {
+  const said = (rows || []).filter((row) => row && row.action);
+  if (!said.length) return '<p class="empty-note">你在 v2 沒有動過這一題。</p>';
+  const label = { accept: "沒問題", block: "有問題", comment: "註解", correct: "修正",
+                  needs_review: "待複查", reviewed: "看過" };
+  // Newest first: the latest thing he said is the one still worth answering.
+  return [...said].reverse().map((row) => `<div class="said designer">
+    <div class="who">設計者（v2）· ${esc(row.created_at || row.at || "")}
+      <span class="tag ${row.action === "block" ? "bad" : row.action === "accept" ? "ok" : ""}">
+        ${esc(label[row.action] || row.action)}</span></div>
+    <div>${row.notes ? esc(row.notes) : '<span class="empty-note">（沒寫字）</span>'}</div>
+  </div>`).join("");
+}
+
 function renderSaid(rows) {
   if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
   return rows.map((row) => {
@@ -600,7 +624,10 @@ function renderQuestion(question) {
              ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
-    <details open><summary>這個題目已有的判讀</summary>${renderSaid(question.judgements)}</details>
+    <details open><summary>你在 v2 對這一題做過什麼（人工審核紀錄，唯讀）</summary>
+      ${renderHumanEvents(question.human_events)}</details>
+    <details open><summary>這個沙盒的判讀（你／agent 寫進 agent_feedback.jsonl）</summary>
+      ${renderSaid(question.judgements)}</details>
     <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
       <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
         這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、

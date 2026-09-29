@@ -1236,3 +1236,36 @@ test("the bridge does not count an empty question_number as a valid search", () 
   assert.match(server, /number=int\(raw_number\) if raw_number\.strip\(\)\.isdigit\(\) else None/,
     "an absent number must stay None");
 });
+
+/**
+ * The designer's own v2 history is shown where he is looking, not just counted.
+ *
+ * He said「我原本在 v2 審核過的大量題目也沒有紀錄」. The events were in the payload all along, but the
+ * page printed only 「人動過 N 次」 — which says he touched a question and hides what he found. The
+ * sentence is the part worth keeping, and it is in `notes` (`reason` is empty on every human event).
+ */
+test("the designer's v2 decisions and his own words are shown on the question", async () => {
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /function renderHumanEvents\(/, "there is a renderer for the human events");
+  assert.match(html, /\$\{renderHumanEvents\(question\.human_events\)\}/,
+    "and it is actually called from the question body — not merely defined");
+  assert.match(html, /row\.notes \? esc\(row\.notes\)/,
+    "it draws the person's sentence, the field that carries text");
+
+  // Measured on the real stream: a question the designer blocked with a reason still carries it.
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { stdout } = await run(PATHS.PYTHON,
+    [PATHS.BRIDGE, "disputes", "--limit", "200"],
+    { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  const rows = JSON.parse(stdout).disputes || [];
+  const key = (rows.find((row) => (row.notes || "").trim()) || {}).candidate_key;
+  assert.ok(key, "a dispute with text must exist to test against");
+  const { stdout: q } = await run(PATHS.PYTHON, [PATHS.BRIDGE, "question", "--key", key],
+                                  { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  const view = JSON.parse(q);
+  assert.ok((view.human_events || []).length, `the view carries the human events (${key})`);
+  const withNote = view.human_events.find((row) => (row.notes || "").trim());
+  assert.ok(withNote, "and at least one carries the designer's sentence");
+});
