@@ -1,31 +1,33 @@
 from __future__ import annotations
 
-import unittest
+import subprocess
 from pathlib import Path
+import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class Ai395ProductionDeploymentTests(unittest.TestCase):
-    def test_production_compose_has_no_runtime_dependency_install(self) -> None:
-        compose = (ROOT / "deploy" / "ai395" / "compose.production.yaml").read_text(encoding="utf-8")
-        self.assertNotIn("pip install", compose)
-        self.assertIn("${REVIEW_UI_BASIC_AUTH_USERNAME:-}", compose)
-        self.assertIn("${REVIEW_UI_BASIC_AUTH_PASSWORD:-}", compose)
-        self.assertIn("REVIEW_UI_READ_ONLY", compose)
-        self.assertIn("REVIEW_UI_ALLOW_PROJECT_FILES", compose)
-        self.assertIn("127.0.0.1:${POSTGRES_PORT", compose)
-        self.assertIn(":/workspace:ro", compose)
-        self.assertIn(":/assets:ro", compose)
-        self.assertIn(":/assets/40_manual_assets:rw", compose)
+class RetiredDeploymentTests(unittest.TestCase):
+    def test_retired_production_helper_fails_closed(self) -> None:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "ai395_catalog_production.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("retired", result.stderr.lower())
 
-    def test_production_helper_requires_explicit_restore_and_cutover_gates(self) -> None:
-        helper = (ROOT / "scripts" / "ai395_catalog_production.sh").read_text(encoding="utf-8")
-        self.assertIn("CATALOG_PRODUCTION_RESTORE_APPROVED", helper)
-        self.assertIn("CATALOG_CUTOVER_APPROVED", helper)
-        self.assertIn("ready_for_promotion", helper)
-        self.assertIn("mismatches", (ROOT / "scripts" / "build_migration_asset_manifest.py").read_text())
+    def test_retired_runtime_helper_fails_closed(self) -> None:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "ai395_catalog_runtime.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("retired", result.stderr.lower())
 
 
 if __name__ == "__main__":

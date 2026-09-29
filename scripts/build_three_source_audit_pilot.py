@@ -35,6 +35,10 @@ QUESTION_MARKER = re.compile(r"^\s*(\d{1,3})(?:\s*[\.．、]\s*|\s+)")
 MAX_REMOTE_ASSET_BYTES = 25 * 1024 * 1024
 
 
+class ResumeCacheMismatch(RuntimeError):
+    """A prior case artifact cannot be safely reused in this output directory."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
@@ -47,6 +51,16 @@ def parse_args() -> argparse.Namespace:
             or "http://127.0.0.1:8875"
         ),
         help="Read-only Review UI URL (default: CATALOG_RUNTIME_UI_URL, then REVIEW_PRIMARY_UI_URL)",
+    )
+    parser.add_argument(
+        "--candidate-jsonl",
+        type=Path,
+        help="Offline immutable candidate JSONL; requires --asset-root and disables ReviewUI/network access",
+    )
+    parser.add_argument(
+        "--asset-root",
+        type=Path,
+        help="Trusted root for relative PDFs and image assets in offline mode",
     )
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--render-dpi", type=int, default=180)
@@ -72,6 +86,14 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(compact_json(value).encode("utf-8")).hexdigest()
 
 
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def fetch_candidate(
     base_url: str,
     candidate_key: str,
@@ -94,7 +116,7 @@ def fetch_candidate(
     return exact[0]
 
 
-def local_path(value: str | None) -> Path | None:
+def local_path(value: str | None, trusted_root: Path | None = None) -> Path | None:
     if not value:
         return None
     text = str(value)
@@ -104,13 +126,17 @@ def local_path(value: str | None) -> Path | None:
             direct = path.resolve()
         except OSError:
             return None
-        roots = (PROJECT_ROOT.resolve(), ASSET_ROOT.resolve())
+        roots = tuple(root.resolve() for root in (trusted_root, PROJECT_ROOT, ASSET_ROOT) if root)
         if any(direct == root or root in direct.parents for root in roots):
             return direct
+        if trusted_root is not None:
+            return None
         parts = path.parts
         if "tw-national-exam-catalog" in parts:
             index = len(parts) - 1 - parts[::-1].index("tw-national-exam-catalog")
             path = PROJECT_ROOT.joinpath(*parts[index + 1 :])
+    elif trusted_root is not None:
+        path = trusted_root / text
     elif text.startswith("國考題資料夾/"):
         path = PROJECT_ROOT / text
     elif re.match(r"^\d+_", text):
@@ -121,7 +147,7 @@ def local_path(value: str | None) -> Path | None:
         resolved = path.resolve()
     except OSError:
         return None
-    roots = (PROJECT_ROOT.resolve(), ASSET_ROOT.resolve())
+    roots = tuple(root.resolve() for root in (trusted_root, PROJECT_ROOT, ASSET_ROOT) if root)
     if not any(resolved == root or root in resolved.parents for root in roots):
         return None
     return resolved
@@ -148,6 +174,28 @@ def candidate_content(candidate: dict[str, Any], *, original: bool) -> dict[str,
         "group_ref": source.get("group_ref"),
         "group_sequence_no": source.get("group_sequence_no"),
     }
+
+
+def content_fingerprint(candidate: dict[str, Any]) -> str:
+    """Hash only the exact stem and ordered option key/text content."""
+
+    content = {
+        "stem": str(candidate.get("stem") or ""),
+        "options": [
+            {
+                "key": str(option.get("key") or ""),
+                "text": str(option.get("text") or ""),
+            }
+            if isinstance(option, dict)
+            else {"key": "", "text": str(option)}
+            for option in (candidate.get("options") or [])
+        ],
+    }
+    return hashlib.sha256(compact_json(content).encode("utf-8")).hexdigest()
+
+
+def builder_sha256() -> str:
+    return file_hash(Path(__file__).resolve())
 
 
 def split_question_segment(text: str, question_number: int) -> str:
@@ -198,10 +246,26 @@ def _page_question_starts(page: Any) -> list[tuple[int, int, dict[str, Any]]]:
     lines = grouped_lines(words)
     starts: list[tuple[int, int, dict[str, Any]]] = []
     for line_index, line in enumerate(lines):
-        match = QUESTION_MARKER.match(str(line["text"]))
-        if match:
+        line_text = str(line["text"])
+        match = QUESTION_MARKER.match(line_text)
+        if match and _looks_like_question_start(line_text, match):
             starts.append((line_index, int(match.group(1)), line))
     return starts
+
+
+def _looks_like_question_start(line: str, match: re.Match[str]) -> bool:
+    """Reject PDF text-layer subscript/footnote numerals as question starts."""
+
+    remainder = line[match.end() :].strip()
+    if not remainder or re.fullmatch(r"[\d\s]+", remainder):
+        return False
+    # Header text such as ``115 年第二次...`` matches the permissive
+    # whitespace form but is not a question marker.  Numbered questions may
+    # still use the whitespace form (``44 下列...``), so only reject the
+    # unmistakable exam-header shape here.
+    if re.match(r"^年(?:度|第)?", remainder) and "考試" in remainder:
+        return False
+    return True
 
 
 def locate_question_regions(pdf: Path, question_number: int, stem: str) -> list[dict[str, Any]]:
@@ -227,7 +291,7 @@ def locate_question_regions(pdf: Path, question_number: int, stem: str) -> list[
                     "bbox": [0.0, 0.0, float(page.width), float(page.height)],
                     "page_width": float(page.width),
                     "page_height": float(page.height),
-                    "method": "stem_anchor_page",
+                    "method": "full_page_uncertain",
                 }
             starts = _page_question_starts(page)
             for start_pos, (_line_index, number, line) in enumerate(starts):
@@ -368,6 +432,7 @@ def fetch_remote_asset(
     cache_dir: Path,
     timeout: float,
     cache: dict[str, Path | None],
+    asset_root: Path | None = None,
 ) -> Path | None:
     """Resolve a Review UI asset locally without mutating the source data tree."""
 
@@ -376,10 +441,13 @@ def fetch_remote_asset(
         return None
     if reference in cache:
         return cache[reference]
-    local = local_path(reference)
+    local = local_path(reference, asset_root)
     if local and local.is_file():
         cache[reference] = local
         return local
+    if asset_root is not None:
+        cache[reference] = None
+        return None
     suffix = Path(urllib.parse.urlparse(reference).path).suffix.lower()
     if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
         suffix = ".bin"
@@ -413,6 +481,7 @@ def asset_path(
     cache_dir: Path,
     timeout: float,
     cache: dict[str, Path | None],
+    asset_root: Path | None = None,
 ) -> Path | None:
     if not isinstance(value, dict):
         return None
@@ -423,6 +492,7 @@ def asset_path(
         cache_dir=cache_dir,
         timeout=timeout,
         cache=cache,
+        asset_root=asset_root,
     )
 
 
@@ -433,6 +503,7 @@ def walk_asset_values(
     cache_dir: Path,
     timeout: float,
     cache: dict[str, Path | None],
+    asset_root: Path | None = None,
 ) -> list[tuple[str, Path]]:
     found: list[tuple[str, Path]] = []
     seen: set[Path] = set()
@@ -440,7 +511,7 @@ def walk_asset_values(
         if not isinstance(option, dict) or not isinstance(option.get("image"), dict):
             continue
         path = asset_path(
-            option["image"], base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache
+            option["image"], base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache, asset_root=asset_root
         )
         if path and path.is_file() and path not in seen:
             found.append((f"CURRENT_OPTION_{option.get('key')}", path))
@@ -448,13 +519,13 @@ def walk_asset_values(
     for index, asset in enumerate(candidate.get("image_refs") or [], start=1):
         if not isinstance(asset, dict):
             continue
-        path = asset_path(asset, base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache)
+        path = asset_path(asset, base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache, asset_root=asset_root)
         if path and path.is_file() and path not in seen:
             found.append((f"CURRENT_STEM_{index}", path))
             seen.add(path)
     stem_image = candidate.get("stem_image")
     if isinstance(stem_image, dict):
-        path = asset_path(stem_image, base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache)
+        path = asset_path(stem_image, base_url=base_url, cache_dir=cache_dir, timeout=timeout, cache=cache, asset_root=asset_root)
         if path and path.is_file() and path not in seen:
             found.append(("CURRENT_STEM_IMAGE", path))
             seen.add(path)
@@ -468,6 +539,7 @@ def old_asset_values(
     cache_dir: Path,
     timeout: float,
     cache: dict[str, Path | None],
+    asset_root: Path | None = None,
 ) -> list[tuple[str, Path]]:
     text_parts = [str((candidate.get("review") or {}).get("notes") or "")]
     for option in candidate.get("options") or []:
@@ -483,6 +555,7 @@ def old_asset_values(
             cache_dir=cache_dir,
             timeout=timeout,
             cache=cache,
+            asset_root=asset_root,
         )
         if path and path.is_file() and path not in seen:
             found.append((f"OLD_MINERU_{len(found) + 1}", path))
@@ -569,20 +642,25 @@ def build_case(
     base_url: str,
     timeout: float,
     dpi: int,
+    asset_root: Path | None = None,
 ) -> dict[str, Any]:
-    pdf = local_path(official_pdf_reference(candidate))
+    pdf = local_path(official_pdf_reference(candidate), asset_root)
     if not pdf or not pdf.is_file():
         raise FileNotFoundError(
             f"official PDF is unavailable for {candidate['candidate_key']}: {official_pdf_reference(candidate)}"
         )
     if pdf not in pdf_cache:
-        digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
+        digest = file_hash(pdf)
         reference_dir = output_dir / "pdf-reference" / digest[:16]
         manifest_path = reference_dir / "manifest.json"
-        if manifest_path.exists():
+        if manifest_path.exists() and (reference_dir / "pages.jsonl").is_file():
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("source_pdf_sha256") != digest:
+                manifest = build_reference(pdf, reference_dir)
         else:
             manifest = build_reference(pdf, reference_dir)
+        if manifest.get("source_pdf_sha256") != digest:
+            raise RuntimeError(f"PDF reference cache hash mismatch for {pdf}")
         pdf_cache[pdf] = (manifest, reference_rows(Path(manifest["output"]["pages_jsonl"])))
     reference_manifest, pages = pdf_cache[pdf]
     qn = int(candidate.get("question_number") or 0)
@@ -628,6 +706,7 @@ def build_case(
         cache_dir=asset_cache_dir,
         timeout=timeout,
         cache=asset_cache,
+        asset_root=asset_root,
     )
     old_assets = old_asset_values(
         candidate,
@@ -635,6 +714,7 @@ def build_case(
         cache_dir=asset_cache_dir,
         timeout=timeout,
         cache=asset_cache,
+        asset_root=asset_root,
     )
     contact_items = [
         (f"OFFICIAL_PDF_REGION_{index + 1}_P{location['page']}", crop)
@@ -653,6 +733,7 @@ def build_case(
         "advisory_only": True,
         "case_id": case["id"],
         "candidate_key": candidate["candidate_key"],
+        "content_fingerprint": content_fingerprint(effective),
         "lane": case.get("lane"),
         "exam": {
             "category": (candidate.get("metadata") or {}).get("normalized_category_name"),
@@ -680,9 +761,9 @@ def build_case(
             "question_text_by_engine": engine_segments,
         },
         "visual_evidence": {
-            "official_question_crop": str(crops[0].resolve()),
-            "official_question_crops": [str(crop.resolve()) for crop in crops],
-            "contact_sheet": str(contact_sheet.resolve()),
+            "official_question_crop": str(crops[0].relative_to(output_dir)),
+            "official_question_crops": [str(crop.relative_to(output_dir)) for crop in crops],
+            "contact_sheet": str(contact_sheet.relative_to(output_dir)),
             "current_asset_count": len(current_assets),
             "old_mineru_asset_count": len(old_assets),
             "contact_labels": [label for label, _path in contact_items],
@@ -699,8 +780,72 @@ def build_case(
     return packet
 
 
+def load_offline_candidates(path: Path, cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Load exact candidate keys once from the caller-supplied immutable JSONL."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict) or not row.get("candidate_key"):
+            raise RuntimeError(f"candidate JSONL line {line_number} has no candidate_key")
+        key = str(row["candidate_key"])
+        if key in rows:
+            raise RuntimeError(f"candidate JSONL contains duplicate candidate_key: {key}")
+        rows[key] = row
+    selected = {str(case.get("candidate_key") or "") for case in cases}
+    return {key: rows[key] for key in selected if key in rows}
+
+
+def resume_packet(
+    case: dict[str, Any],
+    candidate: dict[str, Any],
+    output_dir: Path,
+    asset_root: Path | None,
+    input_identity: dict[str, Any],
+    current_builder_sha256: str,
+) -> dict[str, Any] | None:
+    case_dir = output_dir / "cases" / str(case["id"])
+    packet_path = case_dir / "blind-packet.json"
+    state_path = case_dir / "case-manifest.json"
+    if not packet_path.is_file() or not state_path.is_file():
+        return None
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    pdf = local_path(official_pdf_reference(candidate), asset_root)
+    if not pdf or not pdf.is_file():
+        return None
+    cache_mismatch = (
+        state.get("builder_sha256") != current_builder_sha256
+        or state.get("input_identity") != input_identity
+        or state.get("candidate_hash") != stable_hash(candidate)
+        or state.get("pdf_sha256") != file_hash(pdf)
+        or state.get("packet_sha256") != file_hash(packet_path)
+    )
+    if cache_mismatch:
+        raise ResumeCacheMismatch(
+            f"resume cache for {case['id']} is stale (builder, inputs, PDF, or packet hash mismatch); "
+            "use a new --output-dir to preserve this run as a baseline"
+        )
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if packet.get("case_id") != case["id"] or packet.get("candidate_key") != candidate.get("candidate_key"):
+        return None
+    if packet.get("content_fingerprint") != content_fingerprint(candidate_content(candidate, original=False)):
+        raise ResumeCacheMismatch(
+            f"resume cache for {case['id']} has no current content_fingerprint; "
+            "use a new --output-dir to preserve this run as a baseline"
+        )
+    return packet
+
+
 def main() -> int:
     args = parse_args()
+    if bool(args.candidate_jsonl) != bool(args.asset_root):
+        raise SystemExit("--candidate-jsonl and --asset-root must be supplied together for offline mode")
+    offline = args.candidate_jsonl is not None
+    asset_root = args.asset_root.resolve() if args.asset_root else None
+    if asset_root is not None and not asset_root.is_dir():
+        raise SystemExit(f"asset root is not a directory: {asset_root}")
     spec = json.loads(args.spec.read_text(encoding="utf-8"))
     cases = spec.get("cases") or []
     if not cases:
@@ -710,58 +855,122 @@ def main() -> int:
     snapshots: list[dict[str, Any]] = []
     if args.resume and snapshot_path.exists():
         snapshots = [json.loads(line) for line in snapshot_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    by_key = {str(row.get("candidate_key") or ""): row for row in snapshots}
-    missing: list[tuple[dict[str, Any], str, str]] = []
-    for case in cases:
-        key = str(case.get("candidate_key") or "")
-        if not key:
-            raise RuntimeError(f"case has no candidate_key: {case}")
-        if key not in by_key:
-            category_scope = str(case.get("category_scope") or "")
-            if not category_scope:
-                prefix = str(case.get("id") or "").split("_", 1)[0]
-                category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
-            missing.append((case, key, category_scope))
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(missing)))) as executor:
-        futures = {
-            executor.submit(fetch_candidate, args.base_url, key, args.timeout, category_scope): (case, key)
-            for case, key, category_scope in missing
-        }
-        for future in as_completed(futures):
-            case, key = futures[future]
-            by_key[key] = future.result()
-            print(f"fetched {case['id']}: {key}", flush=True)
-    snapshots = [by_key[str(case["candidate_key"])] for case in cases]
-    write_jsonl(snapshot_path, snapshots)
+    by_key = {} if offline else {str(row.get("candidate_key") or ""): row for row in snapshots}
+    lookup_errors: dict[str, str] = {}
+    if offline:
+        by_key.update(load_offline_candidates(args.candidate_jsonl, cases))
+    else:
+        missing: list[tuple[dict[str, Any], str, str]] = []
+        for case in cases:
+            key = str(case.get("candidate_key") or "")
+            if not key:
+                lookup_errors[str(case.get("id") or "unknown")] = "case has no candidate_key"
+                continue
+            if key not in by_key:
+                category_scope = str(case.get("category_scope") or "")
+                if not category_scope:
+                    prefix = str(case.get("id") or "").split("_", 1)[0]
+                    category_scope = "__pharmacist_track__" if prefix == "pharmacy" else "醫事檢驗師"
+                missing.append((case, key, category_scope))
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(missing)))) as executor:
+            futures = {
+                executor.submit(fetch_candidate, args.base_url, key, args.timeout, category_scope): (case, key)
+                for case, key, category_scope in missing
+            }
+            for future in as_completed(futures):
+                case, key = futures[future]
+                try:
+                    by_key[key] = future.result()
+                    print(f"fetched {case['id']}: {key}", flush=True)
+                except Exception as exc:
+                    lookup_errors[str(case["id"])] = f"{type(exc).__name__}: {exc}"
+    snapshots = [by_key[key] for case in cases if (key := str(case.get("candidate_key") or "")) in by_key]
 
     pdf_cache: dict[Path, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
     asset_cache: dict[str, Path | None] = {}
-    packets = [
-        build_case(
-            case,
-            candidate,
-            args.output_dir,
-            pdf_cache,
-            asset_cache,
-            args.base_url,
-            args.timeout,
-            args.render_dpi,
-        )
-        for case, candidate in zip(cases, snapshots)
-    ]
-    holdouts = [holdout(candidate, case) for case, candidate in zip(cases, snapshots)]
+    packets: list[dict[str, Any]] = []
+    holdouts: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+    current_builder_sha256 = builder_sha256()
+    input_identity = {
+        "spec_sha256": stable_hash(spec),
+        "candidate_jsonl_sha256": file_hash(args.candidate_jsonl) if offline else None,
+        "asset_root": str(asset_root) if asset_root else None,
+        "render_dpi": args.render_dpi,
+    }
+    for case in cases:
+        case_id = str(case.get("id") or "unknown")
+        key = str(case.get("candidate_key") or "")
+        candidate = by_key.get(key)
+        if case_id in lookup_errors:
+            message = lookup_errors[case_id]
+            errors.append({"case_id": case_id, "candidate_key": key, "error": message})
+            coverage.append({"case_id": case_id, "candidate_key": key, "status": "error", "error": message})
+            print(f"case {case_id}: error", flush=True)
+            continue
+        if not candidate:
+            message = "candidate_key was not found exactly in candidate JSONL" if offline else "candidate was unavailable"
+            errors.append({"case_id": case_id, "candidate_key": key, "error": message})
+            coverage.append({"case_id": case_id, "candidate_key": key, "status": "error", "error": message})
+            print(f"case {case_id}: error", flush=True)
+            continue
+        try:
+            packet = (
+                resume_packet(case, candidate, args.output_dir, asset_root, input_identity, current_builder_sha256)
+                if args.resume else None
+            )
+            resumed = packet is not None
+            if packet is None:
+                packet = build_case(
+                    case, candidate, args.output_dir, pdf_cache, asset_cache,
+                    args.base_url, args.timeout, args.render_dpi, asset_root,
+                )
+                pdf = local_path(official_pdf_reference(candidate), asset_root)
+                packet_path = args.output_dir / "cases" / case_id / "blind-packet.json"
+                write_json(
+                    args.output_dir / "cases" / case_id / "case-manifest.json",
+                    {
+                        "case_id": case_id,
+                        "candidate_key": key,
+                        "candidate_hash": stable_hash(candidate),
+                        "pdf_sha256": file_hash(pdf) if pdf else None,
+                        "packet_sha256": file_hash(packet_path),
+                        "builder_sha256": current_builder_sha256,
+                        "input_identity": input_identity,
+                    },
+                )
+            packets.append(packet)
+            holdouts.append(holdout(candidate, case))
+            coverage.append({"case_id": case_id, "candidate_key": key, "status": "packet"})
+            print(f"case {case_id}: {'resumed' if resumed else 'built'}", flush=True)
+        except ResumeCacheMismatch:
+            raise
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            errors.append({"case_id": case_id, "candidate_key": key, "error": message})
+            coverage.append({"case_id": case_id, "candidate_key": key, "status": "error", "error": message})
+            print(f"case {case_id}: error", flush=True)
+    write_jsonl(snapshot_path, snapshots)
     write_jsonl(args.output_dir / "blind-packets.jsonl", packets)
     write_jsonl(args.output_dir / "human-ai-holdout.jsonl", holdouts)
+    write_jsonl(args.output_dir / "error-ledger.jsonl", errors)
     lane_counts: dict[str, int] = defaultdict(int)
     for packet in packets:
         lane_counts[str(packet.get("lane") or "unknown")] += 1
     manifest = {
         "schema_version": "national_exam_three_source_pilot_manifest_v1",
         "advisory_only": True,
-        "base_url": args.base_url,
+        "input_mode": "offline" if offline else "review_ui",
+        "base_url": None if offline else args.base_url,
+        "asset_root": str(asset_root) if asset_root else None,
         "spec": str(args.spec.resolve()),
         "spec_hash": stable_hash(spec),
-        "case_count": len(packets),
+        "candidate_jsonl_sha256": file_hash(args.candidate_jsonl) if offline else None,
+        "case_count": len(cases),
+        "packet_count": len(packets),
+        "error_count": len(errors),
+        "coverage": coverage,
         "lane_counts": dict(sorted(lane_counts.items())),
         "candidate_snapshot_hash": stable_hash(snapshots),
         "pdf_count": len(pdf_cache),
@@ -769,6 +978,7 @@ def main() -> int:
             "blind_packets": str((args.output_dir / "blind-packets.jsonl").resolve()),
             "holdout": str((args.output_dir / "human-ai-holdout.jsonl").resolve()),
             "mac_studio_snapshot": str(snapshot_path.resolve()),
+            "error_ledger": str((args.output_dir / "error-ledger.jsonl").resolve()),
         },
         "safety": {
             "writes_review_events": False,
@@ -778,7 +988,19 @@ def main() -> int:
         },
     }
     write_json(args.output_dir / "manifest.json", manifest)
-    print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "output_dir": str(args.output_dir.resolve()),
+                "case_count": len(cases),
+                "packet_count": len(packets),
+                "error_count": len(errors),
+                "input_mode": manifest["input_mode"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

@@ -18,7 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterator
 
-from ai395_source_adapter import ContractError, validate_manifests
+from review_source_adapter import ContractError, validate_manifests
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -286,7 +286,7 @@ def normalize_scope(source_manifest: Path, mineru_manifest: Path, output_dir: Pa
     write_json(mineru_output, mineru_payload)
 
     report = {
-        "schema_version": "ai395-vision-png-normalization-v1",
+        "schema_version": "review-vision-png-normalization-v1",
         "conversion_version": CONVERSION_VERSION,
         "source_manifest": str(source_manifest),
         "mineru_manifest": str(mineru_manifest),

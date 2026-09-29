@@ -19,9 +19,9 @@ class AI395ThreeSourceSpecTests(unittest.TestCase):
     def test_build_spec_selects_only_requested_anomaly_tags(self) -> None:
         result = module.build_spec(
             [
-                {"candidate_key": "q1", "metadata": {"ai395_scope_tags": ["notation"]}},
-                {"candidate_key": "q2", "metadata": {"ai395_scope_tags": ["clean"]}},
-                {"candidate_key": "q3", "metadata": {"ai395_scope_tags": ["visual_missing", "answer_special"]}},
+                {"candidate_key": "q1", "metadata": {"review_scope_tags": ["notation"]}},
+                {"candidate_key": "q2", "metadata": {"review_scope_tags": ["clean"]}},
+                {"candidate_key": "q3", "metadata": {"review_scope_tags": ["visual_missing", "answer_special"]}},
             ],
             scope_id="pilot",
             tags={"notation", "visual_missing"},

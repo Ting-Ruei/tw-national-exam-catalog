@@ -1,0 +1,2 @@
+# Provider adapters are not active in the current deterministic audit path.
+# A future task must select and validate a new local transport explicitly.

@@ -59,7 +59,7 @@ class NormalizeVisionAssetsTests(unittest.TestCase):
             source_manifest.write_text(
                 json.dumps(
                     {
-                        "manifest_version": "ai395-source-manifest-v1",
+                        "manifest_version": "review-source-manifest-v1",
                         "fixture_id": "real:test",
                         "source_artifacts": [{
                             "artifact_id": "source-artifact",
@@ -79,7 +79,7 @@ class NormalizeVisionAssetsTests(unittest.TestCase):
             mineru_manifest.write_text(
                 json.dumps(
                     {
-                        "manifest_version": "ai395-mineru-manifest-v1",
+                        "manifest_version": "review-mineru-manifest-v1",
                         "mineru_run_id": "test-mineru",
                         "source_artifact_id": "source-artifact",
                         "status": "existing_artifact",

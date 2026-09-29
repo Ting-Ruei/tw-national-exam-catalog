@@ -31,7 +31,8 @@ ENGINE_FAMILIES = {
     "pdftotext_layout": "poppler",
     "pdftotext_raw": "poppler",
     "pypdf": "pypdf",
-    "pdfplumber": "pdfplumber",
+    "pdfplumber": "pdfminer.six",
+    "pdfminer": "pdfminer.six",
 }
 DEFAULT_BIN_CANDIDATES = {
     "pdfinfo": (
@@ -450,7 +451,7 @@ def build_reference(
             "pdftotext_layout": {"family": "poppler", "available": bool(text_bin)},
             "pdftotext_raw": {"family": "poppler", "available": bool(text_bin)},
             "pypdf": {"family": "pypdf", "version": pypdf_version, "available": bool(pypdf_pages or not pypdf_error)},
-            "pdfplumber": {"family": "pdfplumber", "version": plumber_version, "available": bool(plumber_pages or not plumber_error)},
+            "pdfplumber": {"family": "pdfminer.six", "version": plumber_version, "available": bool(plumber_pages or not plumber_error)},
         },
         "engine_errors": engine_errors,
         "page_status_counts": dict(Counter(str(row["consensus"]["status"]) for row in page_rows)),
