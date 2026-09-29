@@ -42,18 +42,25 @@ import unicodedata
 import urllib.error
 import urllib.request
 
-from . import engines, vision
+from . import ai_findings, engines, reflow, vision
 
-#: Where the transcription model lives. It defaults to the **Splash** endpoint, because that is the
-#: engine the rest of the AI pass uses - and because pointing this module at an engine whose
-#: off-switch it did not know about was a real bug: `transcribe` used to send MTPLX's
-#: `chat_template_kwargs.enable_thinking`, which Splash accepts with HTTP 200 and ignores. Measured
-#: on 8088: 31.5s with 612 characters of reasoning, against 6.7s and none with the right spelling.
-#: The spelling now lives with the engine (`qbr.engines`), so it cannot be sent to the wrong one.
+#: Where the transcription model lives. It defaults to **Occamy**, the engine the rest of the AI
+#: pass now uses (designer's ruling, 2026-09-29: 「之後要換就整套換」) - and because pointing this
+#: module at an engine whose off-switch it did not know about was a real bug: `transcribe` used to
+#: send MTPLX's `chat_template_kwargs.enable_thinking`, which Splash accepts with HTTP 200 and
+#: ignores. Measured on 8088: 31.5s with 612 characters of reasoning, against 6.7s and none with the
+#: right spelling. The spelling now lives with the engine (`qbr.engines`), so it cannot be sent to
+#: the wrong one.
+#:
+#: Splash was the old default and its endpoint has been down since 2026-09-25 (measured: connection
+#: refused on 8088). Nothing in the pipeline reaches the model through `transcribe` or
+#: `reread_question` - the live page reading is `confirm_dispute.transcribe`, which is handed an
+#: endpoint by its caller - so the old value broke nothing that runs today; it was a landmine for a
+#: manual `reread_question` call.
 #:
 #: `QBR_REREAD_*` overrides the *engine* (name and URL), not just the URL, so a caller can point
-#: this at MTPLX without the request keeping a Splash-shaped switch.
-DEFAULT_ENGINE = os.environ.get("QBR_REREAD_ENGINE", "splash")
+#: this at another engine without the request keeping an Occamy-shaped switch.
+DEFAULT_ENGINE = os.environ.get("QBR_REREAD_ENGINE", "occamy-6bit")
 
 
 def engine_name() -> str:
@@ -87,25 +94,34 @@ def endpoint():
 #: The one instruction that matters is "do not correct what you see". A model that silently fixes a
 #: typo makes this whole exercise worthless, because the disagreement being looked for is exactly
 #: the place where the reading and the page differ.
+#:
+#: Rules 3 and 5 are the shared blocks from `ai_findings`, interpolated rather than written again:
+#: the same two rules are sent by `vision.DISPUTE_SYSTEM`, and a second copy here would be a second
+#: rule that nothing keeps in step. Rule 3 used to ask for the opposite - Unicode sub/superscript
+#: characters and no markup at all - which cannot spell a subscript capital (`GABAA` became
+#: `GABA` + `U+2090`) while the bank's own convention is markup (6,540 rows of `candidates.jsonl`
+#: against 55 with Unicode characters).
 SYSTEM = (
     "你是一個 OCR 工具，不是審查員。\n"
     "使用者給你一張考卷題目的截圖，你要逐字轉錄，**不要**解釋、**不要**解題、"
     "**不要**修正任何你認為是錯的字或格式。\n"
     "只輸出一個 JSON：{\"stem\":\"題幹\",\"options\":{\"A\":\"...\",\"B\":\"...\","
-    "\"C\":\"...\",\"D\":\"...\"}}\n"
+    "\"C\":\"...\",\"D\":\"...\"}}"
+    "（題幹本身是表格時多一個欄位：{\"table_lines\":[\"表格的其中一行\"]}）\n"
     "\n"
     "規則：\n"
     "1. stem 不含題號，從題號後面開始。若題幹裡有表格，把表格的文字依序寫進去。\n"
     "2. options 的值只寫標記後面的內容，不要含「A.」。\n"
-    "3. 輸出**純文字**，不要用 LaTeX 或任何標記法。上標寫成一般符號（ₚ 不是 _p，"
-    "⁻ᵏᵗ 不是 ^{-kt}）。\n"
+    "3. " + ai_findings.SUBSCRIPT_MARKUP_RULE + "\n"
     "4. 看不清楚的字寫 ▢，不要猜。\n"
-    "5. 即使是明顯的錯字也要照原樣轉錄。\n"
+    "5. " + ai_findings.TABLE_LINES_RULE + "\n"
+    "6. 即使是明顯的錯字也要照原樣轉錄。\n"
+    "7. " + ai_findings.ITALIC_MARKUP_RULE + "\n"
 )
 
 #: What the model writes when it ignores rule 3. Folding these rather than rejecting the answer
 #: keeps a correct transcription usable: measured on 20 questions, the model's only deviation from
-#: plain text was LaTeX for the offsets, and each one was correct in content.
+#: the instructed spelling was LaTeX for the offsets, and each one was correct in content.
 _LATEX_SUP = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷",
               "8": "⁸", "9": "⁹", "-": "⁻", "+": "⁺", "n": "ⁿ", "i": "ⁱ"}
 _LATEX_SUB = {"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇",
@@ -203,6 +219,80 @@ def compare(pipeline, seen):
     return report
 
 
+def question_starts(kept_rows, *, max_number=250):
+    """`(ordered_rows, {number: row index})` — where each question's number row sits.
+
+    The rule is **not written here**. `reflow.skeleton` already reads a paper's question numbers
+    with rules that were each measured against a paper that broke them (the first cell of a question
+    is the leftmost cell on its visual line, 99.995% of 76,120 questions; a number is accepted in
+    reading order, expecting the next one; a cell at the body margin) and the *whole* pipeline is
+    built on its answer: `item["number"]` in the reading, the candidate row's `question_number`, the
+    `qNNN` crop names. This function hands that same answer to the crop.
+
+    **That is the defect this ends.** Two rulers described the same paper and disagreed: the
+    skeleton accepts a number cell by its text alone (a cell that is nothing but digits *is* a
+    question number - `line_table` says so in its `number` hint), while the crop ruler demanded
+    `NN.`/`NN、` in the same cell. Measured on `1011_醫事檢驗師_微生物學及臨床微生物學`: the page
+    prints the number as its own cell - **80 bare number cells, 80 of them the leftmost cell on
+    their visual line, 0 dotted** - so the skeleton numbered all 80 questions while the crop ruler
+    found **0**, and every question on that paper was read as `no-rows` (measured in the
+    2026-09-25T05:58Z round: **44 of 46 reads, 95.7%**, 37 of them `lost-glyph`). The model never saw
+    a picture of those questions; the person saw 「紙本讀不到」.
+
+    Three sources, in this order, so the answer can only ever find **more** than before:
+
+      1. the skeleton's own starts (the authority above);
+      2. the `NN.`/`NN、` form the previous version matched, kept verbatim - it is what answers for a
+         paper whose numbering does not begin at 1 or is missing a number early, where the skeleton
+         refuses to name any question;
+      3. a cell whose `number` hint is set *and* which is the leftmost on its visual line - the same
+         guard the skeleton uses, from `reflow.leftmost_cells`. It is the last resort because the
+         hint alone cannot tell a question number from a table's own `100` (that measurement is in
+         `reflow.skeleton`'s docstring), and neither can the leftmost test on a page whose body is
+         one narrow column.
+    """
+    ordered = sorted(kept_rows, key=lambda row: (int(row.get("page") or 0),
+                                                 float(row.get("y0") or 0.0)))
+    starts = {}
+    table = None
+    try:
+        # `line_table` is given the rows in reading order and numbers them from 1, so a cell id
+        # minus one is an index into `ordered`.
+        table = reflow.line_table(ordered)
+        reading = reflow.skeleton(table)
+        for number, entry in (reading.get("questions") or {}).items():
+            stem = list((entry or {}).get("stem") or ())
+            if stem and 1 <= int(number) <= max_number:
+                starts[int(number)] = int(stem[0]) - 1
+    except Exception:
+        # A paper the skeleton cannot describe must still be croppable: the two fallbacks below are
+        # the previous behaviour exactly.
+        table, starts = None, {}
+    # 這一條刻意保留成**無條件跑**（不是「骨架找不到才跑」）。量過的理由有兩個：它對骨架已經命名的
+    # 號碼不生效（`number not in starts`），而且骨架自己的規則也收 `234.8）` 這種折行（實測：把它
+    # 插在 q1 之後，`reflow.skeleton` 會給出 `question-234`）——所以「骨架比較嚴」不是事實，用它當
+    # 閘門的規則會是一條量不到差別、卻讓這一支比現在更嚴的規則。`band_rows` 只會被問骨架命名過的
+    # 號碼，多出來的條目問不到，留著它只是讓「不比以前差」成立。
+    head = re.compile(r"^[ \t]*(\d{1,3})[ \t]*[.、．]")
+    for index, row in enumerate(ordered):
+        match = head.match((row.get("text") or "").strip())
+        if not match:
+            continue
+        number = int(match.group(1))
+        if 1 <= number <= max_number and number not in starts:
+            starts[number] = index
+    if table is not None:
+        leftmost = reflow.leftmost_cells(table)
+        for line_id, text, hint in table:
+            stripped = (text or "").strip()
+            if (hint or "") != "number" or not stripped.isdigit() or line_id not in leftmost:
+                continue
+            number = int(stripped)
+            if 1 <= number <= max_number and number not in starts:
+                starts[number] = line_id - 1
+    return ordered, starts
+
+
 def band_rows(kept_rows, number, *, max_number=250):
     """The rows a question owns: its own number down to the next number, across page breaks.
 
@@ -210,42 +300,78 @@ def band_rows(kept_rows, number, *, max_number=250):
     whole. Measured on Q49 of `1081_藥師(一)_藥劑學`: the stem ends on page 7, its table sits at the
     top of page 8, and the options are below the table - a crop that stopped at the page break would
     have shown a question with no data in it.
+
+    Which row carries a question's number is decided by `question_starts` (the paper's own skeleton,
+    with the two fallbacks that keep this from being stricter than it was).
     """
-    ordered = sorted(kept_rows, key=lambda row: (int(row.get("page") or 0),
-                                                 float(row.get("y0") or 0.0)))
-    head = re.compile(r"^[ \t]*(\d{1,3})[ \t]*[.、．]")
-    start = None
-    for index, row in enumerate(ordered):
-        match = head.match((row.get("text") or "").strip())
-        if match and int(match.group(1)) == number:
-            start = index
-            break
+    ordered, starts = question_starts(kept_rows, max_number=max_number)
+    try:
+        wanted = int(number)
+    except (TypeError, ValueError):
+        return []
+    start = starts.get(wanted)
     if start is None:
         return []
     end = len(ordered)
-    for index in range(start + 1, len(ordered)):
-        match = head.match((ordered[index].get("text") or "").strip())
-        if match and 1 <= int(match.group(1)) <= max_number and int(match.group(1)) != number:
-            end = index
-            break
+    for value in starts.values():
+        if start < value < end:
+            end = value
     return ordered[start:end]
 
 
-def crop_rows(pdf_path, rows, *, dpi=vision.DEFAULT_DPI, margin=vision.MARGIN, gap=8):
-    """One PNG for a question, one page's region at a time, stitched top to bottom."""
+def page_extents(rows, boxes=()):
+    """Per page, the region a question's band actually covers: `{page: [x0, y0, x1, y1]}`.
+
+    **The rows alone are not the question.** A question whose options are pictures has almost no
+    text where the pictures are: the markers `B.`/`C.`/`D.` were extracted as narrow rows (x 39.2 to
+    50.3 on page 9 of `1152_藥師(一)_藥學(一)`) while the pictures beside them reach x 158.4 and run
+    y 34.6 to 537.1. A crop built from the rows' own bounding box is therefore an 11-point-wide
+    sliver that shows the labels and **none of the pictures** - measured on that paper, the vision
+    model reported options B/C/D as blank white space and answered `▢` ("cannot read") for them,
+    which is the reading that then gets proposed as a "repair" (127 such changes in the stream, 96 of
+    them with an empty extraction side).
+
+    So the region is the rows **unioned with the question's own picture boxes** (the row's
+    `image_refs`: step ⑤ measured them, and they carry `page` + `box`). Only this question's boxes
+    are taken, so a crop cannot inherit a neighbour's picture by this route. A page carrying one of
+    these boxes but none of the band's rows contributes **the box alone**, never that page's text.
+    """
+    extents = {}
+    for row in rows:
+        page = int(row.get("page") or 0)
+        x0, y0 = float(row.get("x0") or 0.0), float(row.get("y0") or 0.0)
+        x1 = float(row.get("x1") or row.get("x0") or 0.0)
+        y1 = float(row.get("y1") or row.get("y0") or 0.0)
+        current = extents.get(page)
+        extents[page] = [min(current[0], x0), min(current[1], y0),
+                         max(current[2], x1), max(current[3], y1)] if current else [x0, y0, x1, y1]
+    for entry in boxes or ():
+        if not isinstance(entry, dict):
+            continue
+        box = entry.get("box")
+        page = int(entry.get("page") or 0)
+        if not box or page <= 0 or len(box) != 4:
+            continue
+        x0, y0, x1, y1 = (float(value) for value in box)
+        current = extents.get(page)
+        extents[page] = [min(current[0], x0), min(current[1], y0),
+                         max(current[2], x1), max(current[3], y1)] if current else [x0, y0, x1, y1]
+    return extents
+
+
+def crop_rows(pdf_path, rows, *, dpi=vision.DEFAULT_DPI, margin=vision.MARGIN, gap=8, boxes=()):
+    """One PNG for a question, one page's region at a time, stitched top to bottom.
+
+    `boxes` are the question's own picture boxes (see `page_extents`); omitting them is the old
+    behaviour, kept as the default because a caller with no picture evidence has nothing to add.
+    """
     from PIL import Image
 
-    by_page = {}
-    for row in rows:
-        by_page.setdefault(int(row.get("page") or 0), []).append(row)
     pieces = []
-    for page in sorted(by_page):
-        page_rows = by_page[page]
-        x0 = min(float(row.get("x0") or 0.0) for row in page_rows)
-        x1 = max(float(row.get("x1") or row.get("x0") or 0.0) for row in page_rows)
-        y0 = min(float(row.get("y0") or 0.0) for row in page_rows)
-        y1 = max(float(row.get("y1") or row.get("y0") or 0.0) for row in page_rows)
-        png = vision.crop_region(pdf_path, page, [x0, y0, x1, y1], dpi=dpi, margin=margin)
+    for page, box in sorted(page_extents(rows, boxes).items()):
+        if page <= 0:
+            continue
+        png = vision.crop_region(pdf_path, page, box, dpi=dpi, margin=margin)
         pieces.append(Image.open(io.BytesIO(png)).convert("RGB"))
     if not pieces:
         return b""

@@ -173,11 +173,15 @@ def test_reread_can_be_pointed_at_the_other_engine_without_keeping_the_wrong_swi
 
 def test_the_negative_control_the_default_engine_is_not_mtplx():
     # Negative control: if the default were still MTPLX the test above would pass for the wrong
-    # reason (the switch would match without any engine selection happening).
+    # reason (the switch would match without any engine selection happening). The control is about
+    # MTPLX, so it is written as "not MTPLX" and not as "equal to whichever engine is the default
+    # today" - the default moved to Occamy on 2026-09-29 (designer's ruling) and the control has to
+    # keep testing the same property across that kind of change.
     source = open(os.path.join(PKG, "src", "qbr", "reread.py"), encoding="utf-8").read()
     match = re.search(r'QBR_REREAD_ENGINE",\s*"([^"]+)"', source)
     assert match, "reread no longer names a default engine"
-    assert match.group(1) == "splash"
+    assert match.group(1) != "mtplx-35b"
+    assert engines.named(match.group(1)), "the default names an engine the table does not hold"
 
 
 # ------------------------------------------------------------------ the address is a runtime parameter

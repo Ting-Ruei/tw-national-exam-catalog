@@ -175,21 +175,53 @@ def build_question(item, *, meta, answer, registry_key, answer_source, flags,
     stem = item.get("stem") or ""
     options = item.get("options") or {}
     labels = list(answer or [])
+    # The answer's provenance as documents, not just a role string: which sheets (and which sha256
+    # of them) stand behind the key. A reviewer who doubts a key can open the exact bytes that
+    # produced it; `answer_source` alone says only "the answer sheet", not which copy.
+    source_roles = set(str(answer_source or "").split("+"))
+    source_documents = []
+    for source_role, registry_role, path_field, hash_field in (
+        ("answer", "answer", "answer_pdf", "answer_pdf_sha256"),
+        ("corrected", "correction", "corrected_pdf", "corrected_pdf_sha256"),
+    ):
+        if source_role not in source_roles:
+            continue
+        source_documents.append({
+            "role": registry_role,
+            "registry_key": "%s:%s" % (paper_key(registry_key), registry_role),
+            "pdf_relative": relative_asset(meta.get(path_field)),
+            "sha256": meta.get(hash_field),
+        })
+    primary_source = next(
+        (source for source in source_documents if source["role"] == "correction"),
+        source_documents[0] if source_documents else None,
+    )
+    source_keys = [source["registry_key"] for source in source_documents]
     metadata = {
         "adapter_version": ADAPTER_VERSION,
+        "answer_role_primary": primary_source["role"] if primary_source else None,
         "answer_authority_source": answer_source,
+        "answer_pdf_primary_relative": primary_source["pdf_relative"] if primary_source else None,
+        "answer_pdf_relative": relative_asset(meta.get("answer_pdf")),
+        "answer_pdf_sha256": meta.get("answer_pdf_sha256"),
+        "answer_source_documents": source_documents,
+        "answer_source_registry_key": source_keys[0] if len(source_keys) == 1 else None,
+        "answer_source_registry_keys": source_keys,
         "canonical_subject_name": meta["subject_name"],
         "category_code": meta.get("category_code"),
+        "corrected_answer_pdf_relative": relative_asset(meta.get("corrected_pdf")),
+        "corrected_answer_pdf_sha256": meta.get("corrected_pdf_sha256"),
         "exam_code": meta.get("exam_code"),
         "exam_ordinal": str(meta.get("exam_number")),
         "external_question_key": question_key(registry_key, number),
-        "external_registry_key": registry_key + ":question",
+        # Paper key, not the raw key: a role double-suffix (`...:question:question`) is a key in no
+        # table and no manifest — the identity a human decision is filed under.
+        "external_registry_key": paper_key(registry_key) + ":question",
         "external_schema_version": EXTERNAL_SCHEMA_VERSION,
         "external_source": EXTERNAL_SOURCE,
         "parser_version": ADAPTER_VERSION,
         "question_pdf_relative": relative_asset(meta.get("question_pdf")),
-        "answer_pdf_relative": relative_asset(meta.get("answer_pdf")),
-        "corrected_answer_pdf_relative": relative_asset(meta.get("corrected_pdf")),
+        "question_pdf_sha256": meta.get("question_pdf_sha256"),
         "question_set": str(meta.get("question_set") or 1),
         "review_status": review_status or REVIEW_STATUS_MACHINE_ONLY,
         "source_content_hash": content_hash(stem, options, labels),
@@ -333,5 +365,20 @@ def build_package(questions, *, meta, registry_key, package_version, output_dir,
         "provenance": dict(provenance or {}, registry_key=registry_key,
                            review_status=review_status or REVIEW_STATUS_MACHINE_ONLY),
     }
+    # The content hash binds every data file and every packaged asset into one value (validator
+    # `scripts/validate_question_bank_package.py:package_content_sha256_mismatch`). Empty-string on
+    # the manifest side is not "unchecked" — the validator reads it as a mismatch, so a package
+    # whose producer skipped this field ships with a built-in error.
+    asset_root = package_dir / "assets"
+    asset_files = sorted(p for p in asset_root.rglob("*") if p.is_file()) if asset_root.exists() else []
+    manifest["package_content_sha256"] = sha256_text(json.dumps(
+        {
+            "questions": manifest["files"]["questions"]["sha256"],
+            "subjects": manifest["files"]["subjects"]["sha256"],
+            "groups": manifest["files"]["groups"]["sha256"],
+            "asset_manifest": manifest["files"]["asset_manifest"]["sha256"],
+            "asset_files": [sha256_file(path) for path in asset_files],
+        },
+        ensure_ascii=False, sort_keys=True))
     _write_json(package_dir / "manifest.json", manifest)
     return manifest

@@ -26,6 +26,7 @@ V2 = ROOT / "review_ui" / "v2.html"
 CORE = ROOT / "review_ui" / "v2" / "01-core.js"
 QUESTION = ROOT / "review_ui" / "v2" / "02-area-question.js"
 AREAS = ROOT / "review_ui" / "v2" / "03-areas.js"
+ANSWER = ROOT / "review_ui" / "v2" / "03-area-answer.js"
 
 
 def rich_text_source() -> str:
@@ -95,7 +96,10 @@ class RichTextTests(unittest.TestCase):
     #: preview. Missing any one of them is the reported bug half-fixed.
     def test_the_question_area_renders_the_paper_markup_as_markup(self):
         source = QUESTION.read_text(encoding="utf-8")
-        for pattern in (r'\$\{richText\(candidate\.stem', r'\$\{richText\(option\.text\)\}',
+        # 2026-09-29：題幹先抽進 `stem`（表格截圖要看切點），所以斷言跟著 `richText(stem` 走——
+        # 同一個呼叫，只是變數先落地；`esc(stem` 仍是禁止的舊寫法。
+        for pattern in (r'richText\(stem\.slice\(0, split\)\)', r'richText\(stem \|\|',
+                        r'\$\{richText\(option\.text\)\}',
                         r'\$\{richText\(shared\)\}'):
             self.assertRegex(source, pattern)
         # The negative control: the old spelling must be gone, or the fix can pass while the bug ships.
@@ -103,7 +107,8 @@ class RichTextTests(unittest.TestCase):
         self.assertNotRegex(source, r'\$\{esc\(option\.text\)\}')
 
     def test_the_answer_sheet_renders_the_paper_markup_as_markup(self):
-        source = AREAS.read_text(encoding="utf-8")
+        # 2026-09-29：答案區拆出自己的檔（`03-area-answer.js`），斷言跟著檔案走。
+        source = ANSWER.read_text(encoding="utf-8")
         self.assertRegex(source, r'\$\{richText\(stem\)\}')
         self.assertRegex(source, r'\$\{richText\(String\(o\.text')
         self.assertNotRegex(source, r'\$\{esc\(stem\)\}')

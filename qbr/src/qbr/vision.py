@@ -2,7 +2,7 @@
 """When the text is not enough: render the page, cut the region out, and let the model look.
 
 A text reading of these papers is not always a complete reading, and the incompleteness is not
-uniform, so it cannot be answered by a rule. The two cases that matter:
+uniform, so it cannot be answered by a rule. The three cases that matter:
 
     a figure      the question refers to a curve, a spectrum, a structure or an electro-
                   phoretogram, and the text layer holds only the axis labels and stray digits.
@@ -11,8 +11,16 @@ uniform, so it cannot be answered by a rule. The two cases that matter:
                   renders as a box, a formula whose structure does not come through, a cell that
                   could be an option or could be content. Here the crop is what settles it,
                   because the page shows the character and the text layer cannot.
+    a table       the body is a table printed as text, so what comes out is one run-on string whose
+                  columns no longer line up and whose rows cannot be told apart. The characters are
+                  all present and the *structure* is gone, which no crop of a character can restore -
+                  the crop has to be of the table itself (`quoted_lines_region`).
 
-Both are answered the same way: render the page at a resolution high enough to read, cut out the
+The first two are triggered by a measurement of the page. The third cannot be: whether a run of
+printed lines **is** a table is meaning, so the reading says so and quotes the table's own lines, and
+the code locates them. See the block above `quoted_lines_region`.
+
+All three are answered the same way: render the page at a resolution high enough to read, cut out the
 region in question, and ask a model that can see. The answer is recorded beside the question and
 is never applied by itself - a crop is evidence for a person, and the reviewer decides. That is
 the same governance position as the text side (`GOV-05`), and it is also the only position that
@@ -31,7 +39,7 @@ import os
 import urllib.error
 import urllib.request
 
-from . import extract
+from . import ai_findings, canon, extract
 
 # 200 dpi is the resolution a person reads these papers at. The text of a question is set in
 # 11 pt, so 200 dpi renders it at about 30 px tall - enough for a vision model to read a
@@ -60,13 +68,22 @@ MARGIN = 6.0            # points of margin around a crop, so a character is not 
 # separate them because a subscript is small in both directions while a rule is long and flat.
 MIN_FIGURE_HEIGHT = 24.0
 
-# The address, model and key come from the **one engine table** (`qbr.engines`) rather than a second
-# literal, so pointing a run at another host cannot leave this module talking to the old one. The
-# legacy `QBR_MODEL_*` names still win, so every existing run command keeps working; `QBR_VISION_*`
-# is the same thing spelled for this module.
+# The address, model and key are the **one table's** values for the default visual engine, not a
+# second copy of them. A second copy is a second thing that can point somewhere else than
+# `engines.ENDPOINTS` does, and "the module was imported before the environment changed" is exactly
+# how this module once kept talking to `18120` after a run was pointed at another host.
+#
+# The legacy `QBR_MODEL_*` names still win, so every existing run command keeps working; `QBR_VISION_*`
+# is the same thing spelled for this module when a caller wants to point it somewhere else.
 from . import engines as _engines  # noqa: E402  (module-level, one import, no cycle)
 
-_DEFAULT = _engines.BUILTIN_ENDPOINTS["mtplx-35b"]
+# The eye is the same engine as the agent's brain since the designer's ruling of 2026-09-29
+# (「腦與眼同一顆」), and the measured reason is the reading itself: on the 2026-09-29 sample, 6-bit
+# occamy was field-exact on 53.3% of fields against 4-bit ornith's 47.8% (ceiling 78.4% vs 64.9%,
+# `a2.1-vision-ceiling.md`). Two things make the swap safe for this module: the thinking switch is
+# **probed** by `_thinking_forms` rather than assumed, and this module's budgets (900 / 8000 tokens)
+# sit far inside the deployment's 65536-token KV.
+_DEFAULT = _engines.BUILTIN_ENDPOINTS["occamy-6bit"]
 BASE_URL = (os.environ.get("QBR_VISION_BASE_URL") or os.environ.get("QBR_MODEL_BASE_URL")
             or _DEFAULT["url"])
 API_KEY = (os.environ.get("QBR_VISION_API_KEY") or os.environ.get("QBR_MODEL_API_KEY")
@@ -75,10 +92,10 @@ MODEL = (os.environ.get("QBR_VISION_MODEL") or os.environ.get("QBR_MODEL_NAME")
          or _DEFAULT["name"])
 
 # HOW TO TURN REASONING OFF IS NOT THE SAME QUESTION ON EVERY ENGINE, AND THE WRONG SPELLING IS
-# SILENT. Measured on three servers with the same model family:
+# SILENT. The local engines use different controls:
 #
 #   MTPLX (`18120`, `18121`)  -> `chat_template_kwargs.enable_thinking=False`
-#   vLLM  (`192.168.10.90:8888`) -> that spelling *and* top-level `reasoning_effort: "none"`
+#   local vLLM / Splash       -> `reasoning_effort: "none"`
 #   mlx-vlm (`127.0.0.1:8082`) -> ONLY top-level `enable_thinking`; `chat_template_kwargs` is
 #                                 accepted, returns HTTP 200, and changes nothing at all
 #
@@ -174,12 +191,15 @@ FIGURE_SYSTEM = """你看的是一份台灣國家考試題目卷的局部截圖�
 
 不要回答題目的正確答案。不要推測看不到的內容。看不清楚就放進 uncertain。"""
 
-DISPUTE_SYSTEM = """你看的是一份台灣國家考試題目卷的局部截圖。系統從這份 PDF 抽出文字時，
+DISPUTE_SYSTEM = (
+    """你看的是一份台灣國家考試題目卷的局部截圖。系統從這份 PDF 抽出文字時，
 有一個地方不確定，需要你直接看圖確認。
 
 規則：
 - 只描述你**真的看到**的字元，逐字照抄。
-- 上下標要標明：寫成 H₂PO₄⁻ 這樣的形式。
+- """
+    + ai_findings.SUBSCRIPT_MARKUP_RULE + "\n- " + ai_findings.ITALIC_MARKUP_RULE +
+    """
 - 看不清楚就說看不清楚，**不要猜**。猜錯比空白更糟。
 
 只輸出這個 JSON，不要有其他文字：
@@ -190,6 +210,7 @@ DISPUTE_SYSTEM = """你看的是一份台灣國家考試題目卷的局部截圖
   "reason": "若 resolved 為 false，說明為什麼看不清楚",
   "confidence": 0.0 到 1.0
 }"""
+)
 
 
 def _image_message(png_bytes, question):
@@ -240,7 +261,7 @@ def _thinking_forms():
       * mlx-vlm (`8082`) obeys top-level `enable_thinking`; `chat_template_kwargs` is accepted with
         HTTP 200 and does nothing. Measured: with the flag, `9.11 和 9.9` gives 272 characters of
         reasoning and the right answer; without it, no reasoning and the wrong answer.
-      * MTPLX (`18120`) and vLLM (`8888`) are the other way round.
+      * MTPLX (`18120`) and local vLLM / Splash are the other way round.
 
     The probe question is arithmetic-with-a-trap rather than a friendly sentence, because a form can
     only be shown to be *off* by removing reasoning that was there. Probing with a question that
@@ -639,24 +660,26 @@ def figure_questions(items, rows, images=(), *, alphabet=(), min_image_height=MI
 
     `items` are the reading's items, `rows` the extracted cells they refer to, `images` the native
     image objects from `extract.extract_images_a`. A question is returned only when something on
-    the page was *measured* to be there - an embedded image overlapping it, or option markers with
-    no text - so a question that merely mentions 圖 is not returned, and a question with a
-    photograph is not missed because its stem stayed silent.
+    the page was *measured* to be there - an embedded image **it owns**, or option markers with no
+    text - so a question that merely mentions 圖 is not returned, and a question with a photograph
+    is not missed because its stem stayed silent.
 
-    The box is the union of the question's rows widened to include any embedded image it overlaps,
+    The box is the union of the question's rows widened to include the embedded images it owns,
     because the picture usually sits beside or below the text that refers to it and a crop of the
     text alone would cut out the very thing being asked about.
+
+    A picture belongs to **exactly one** question, and which one is decided here rather than by each
+    question's own overlap test - two overlap tests that both pass are two filings of one picture.
     """
     by_page = {}
-    for box in picture_boxes(images, min_image_height=min_image_height):
-        by_page.setdefault(int(box[0]), []).append(box[1])
+    for page, box in picture_boxes(images, min_image_height=min_image_height):
+        by_page.setdefault(int(page), []).append(box)
 
     numbered = list(enumerate(rows, start=1))
     rows_by_id = dict(numbered)
-    # Where each question starts, per page: the top of the cell carrying its number. A question owns
-    # the page from its own number down to the next question's number, and this map draws that
-    # boundary. Built from the number cell alone, so a continuation page contributes only the
-    # questions that actually *begin* there.
+    # Where each question starts: the top of the cell carrying its number, per page. This is what
+    # the last option's band is bounded by (`next_start`, below), so it is built from the number cell
+    # alone and a continuation page contributes only the questions that actually *begin* there.
     starts_on_page = {}
     for item in items:
         # The cell carrying the question number, which the paper states as the first stem cell.
@@ -680,20 +703,117 @@ def figure_questions(items, rows, images=(), *, alphabet=(), min_image_height=MI
     # has to be a position in the document, not a y on a page.
     every_start = sorted((int(page), float(y)) for page, values in starts_on_page.items()
                          for y in values)
-    found = []
-    page_x = {}
-    for row in rows:
-        page = int(row["page"])
-        x0, x1 = float(row["x0"]), float(row["x1"])
-        was = page_x.get(page)
-        page_x[page] = (min(was[0], x0), max(was[1], x1)) if was else (x0, x1)
-    for page, boxes in by_page.items():
-        for box in boxes:
-            was = page_x.get(page)
-            page_x[page] = (min(was[0], box[0]), max(was[1], box[2])) if was else (box[0], box[2])
-    found = []
+    # The cells of every item, read once: the band below is per question per page and so is the loop
+    # that crops, and both read the same rows.
+    cells_by_item = []
     for item in items:
-        cells = [row for number, row in numbered if number in set(cell_ids_of(item))]
+        wanted = set(cell_ids_of(item))
+        cells_by_item.append([row for number, row in numbered if number in wanted])
+
+    # **One owner per picture.** A picture object belongs to the *page*, and a page is not a
+    # question. While a question could claim any picture its band overlapped, two questions claimed a
+    # straddling picture at once, and a paper that prints a picture **above** its question's number
+    # had that picture claimed by the question above: the band ran from a question's own number down
+    # to the *next* question's number, so it reached over the gap and took a picture that belongs to
+    # the question below, which never overlapped it at all. The owner's screen is the measurement
+    # (2026-09-25): 「有些題目的圖片沒有截圖正確，有些題目沒有圖片但是卻截別題的來貼上」, and the
+    # ownership pass the same day found 844 of 3,263 crops reaching outside their own question's rows.
+    #
+    # So every picture is given to exactly one question *before* anything is cropped, and a question
+    # earns `embedded-image` by owning a picture rather than by overlapping one. The band a picture is
+    # measured against is the vertical extent of a question's **own rows on that page** - the same
+    # ruler the ownership pass clips a crop to (`crop_run_figures.band_extents`, measured by
+    # `reread.band_rows`), and not the slice down to the next question's number, which is what reached
+    # over the gap. `_figure_owner` holds the rule and the measurements behind it.
+    #
+    # A page that continues a question cannot know where that question's content begins: the rest of
+    # the previous page's option is above this page's first cell, and its picture is set above its
+    # marker. Measured on question 80 of `1112_藥師(一)_藥理學與藥物化學`: `A.` is the last thing on
+    # page 18 and its chemical structure is the first thing on page 19, y=29-223, while `B.` `C.` `D.`
+    # start at y=232. On a continuation page the band therefore starts at the top of the page, and
+    # everything down to the question's own last row there belongs to that question.
+    #
+    # The band is the question's own rows **except** when its options are pictures, and that
+    # exception is measured, not a preference for the old rule. A question whose options are images
+    # carries no option text at all, so its own rows are its stem alone while its four pictures are
+    # laid out under it in a grid that reaches down to the next question's number. Measured on
+    # question 40 of `1021_中醫師_中醫基礎醫學(二)(包括中醫方劑學、中醫藥物學)` page 4: its stem is
+    # the only row (y=237-249), its options are `(A)` y=259-407 and `(B)` y=259-407 with `(C)`
+    # y=444-575 and `(D)` y=445-567 - mineru's own captions for the four pictures - and question 41's
+    # number is at y=586.8. The row band alone hands `(C)`/`(D)` to question 41, which is the
+    # 「截別題的圖」 the owner reported, so for these questions the band is the old territory from the
+    # question's own number down to the next question's number. Measured read-only over the live
+    # queue's 3,296 figure crops 2026-09-25: of the 88 pictures the row band alone would move, 13 are
+    # these and 75 sit under a question whose options *do* carry text.
+    #
+    # The extension is void when the next question's own stem asks for a figure (`_names_a_figure`),
+    # because there the picture is what its stem is talking about. It is voided rather than stopped
+    # at the picture's top edge: that edge lands exactly on the question's row bottom, and the
+    # `FIGURE_ADJACENCY` test would claim it right back (0 pt below counts as adjacent).
+    stem_texts = [_stem_text(item, rows_by_id) for item in items]
+    # 每一頁上「哪一個題號是從哪一個 y 開始」：延伸要問下一個題號那一題的題幹，而它的帶狀在這一圈
+    # 還沒被建出來，所以先在這裡一次算完（同一個 `min(y0)` 定義）。
+    start_owner = {}
+    for index, cells in enumerate(cells_by_item):
+        if not cells:
+            continue
+        first = min(int(row["page"]) for row in cells)
+        starts_here = [float(row["y0"]) for row in cells if int(row["page"]) == first]
+        start_owner.setdefault(first, {})[min(starts_here)] = index
+    bands_by_page = {}
+    for index, cells in enumerate(cells_by_item):
+        if not cells:
+            continue
+        # "Its options are pictures": no option text anywhere, whether the cells are missing
+        # altogether (the four pictures carry the labels inside the image) or are blank markers.
+        pictured_options = not any(body.strip() for body in option_texts(items[index]))
+        first_page = min(int(row["page"]) for row in cells)
+        rows_by_page = {}
+        for row in cells:
+            rows_by_page.setdefault(int(row["page"]), []).append(row)
+        for page, page_cells in rows_by_page.items():
+            bottom = max(float(row["y1"]) for row in page_cells)
+            top = 0.0 if page != first_page else min(float(row["y0"]) for row in page_cells)
+            if pictured_options:
+                limit = _next_start(starts_on_page.get(page, ()), bottom)
+                # 下一個題號那一題如果自己的題幹說要看圖（「下圖」這種），延伸就不能伸過那個間隔：
+                # 間隔裡那張圖是**它**題幹要的圖。站上實測（2026-09-25，唯讀）：`moex:107100:305:11`
+                # q65 沒有任何選項 cell，帶狀因此接到 q66 的題號 y=524.2，把 q66 題幹寫的「下圖化合物」
+                # 兩張圖（y 484.6-520.9、491.8-518.8）整組收走；`moex:106020:305:11` q65/q66 同一個
+                # 形狀。停在「上一張圖的上緣」不夠：那個上緣正好落在列底，`FIGURE_ADJACENCY` 的相鄰判定
+                # 會把它再收回來（0pt 的間隔算相鄰）。所以這一條是「延伸不生效」，交給距離判定。
+                if _names_a_figure(stem_texts[start_owner[page][limit]]
+                                   if limit in start_owner.get(page, {}) else ""):
+                    limit = bottom
+                bottom = max(bottom, limit)
+            bands_by_page.setdefault(page, []).append((index, top, bottom))
+    # The page a question's single entry is built on: the page carrying its tallest block of own
+    # rows, ties to the earlier page - the same measure `_better` chooses with. A question has one
+    # entry (`figure_questions` emits one per question), so a picture handed to a question whose
+    # entry is built on another page leaves every crop. The option-grid guard reads this.
+    entry_pages = []
+    for cells in cells_by_item:
+        pages_of_cells = {}
+        for row in cells or ():
+            pages_of_cells.setdefault(int(row["page"]), []).append(row)
+        entry_pages.append(None if not pages_of_cells else min(
+            sorted(pages_of_cells),
+            key=lambda page: (-_box_height(_box_of(pages_of_cells[page])), page)))
+    owned = {}
+    for page, boxes in by_page.items():
+        bands = bands_by_page.get(page) or ()
+        for box in boxes:
+            owner = _figure_owner(box, bands)
+            grid = _option_grid_owner(box, bands, items, stem_texts, page, entry_pages)
+            if grid is not None:
+                # 上一題的選項圖格（見 `_option_grid_owner`）：留在上面那一題。
+                owner = grid
+            if owner is not None:
+                owned.setdefault((owner, page), []).append(box)
+
+    found = []
+    for index, item in enumerate(items):
+        cells = cells_by_item[index]
         if not cells:
             continue
         # Grouped by page before anything is measured, because a box is a rectangle on *one* page
@@ -733,36 +853,25 @@ def figure_questions(items, rows, images=(), *, alphabet=(), min_image_height=MI
             # belongs to the question, because the question started on an earlier page.
             if page != first_page:
                 box = (box[0], 0.0, box[2], box[3])
-            # The band this question owns on this page: from its top down to the next question's
-            # number on the same page, or to the foot of the page when it is the last one there.
+            # The pictures this question **owns** on this page, decided once above: a picture appears
+            # in one question's crop and in no other's. Only *pictures* count, not the fragments a
+            # plot is emitted as: `by_page` is built by `picture_boxes`, which joins scan-line strips
+            # and drops what the height floor rejects, so a cluster of 1-5 pt marks is not in it. The
+            # raw list is still needed for `fragment_boxes` below, which is the one caller that wants
+            # the marks.
             #
-            # The band spans the whole body *width*, and that is not a convenience. A question owns
-            # a horizontal slice of the page; its pictures are laid out in that slice, and they do
-            # not line up with the text above them. Measured on question 68 of
-            # `1042_藥師_藥理學與藥物化學`, which asks for the major metabolite of tolmetin and
-            # prints three chemical structures under its options: the marker `D.` ends at x=262.5,
-            # the first structure spans x=49.1-298.8, and the next two start at x=49.6 - one tenth
-            # of a point outside the markers. Matching pictures against the *text's* rectangle took
-            # the first structure and dropped the other two, and the crop ended at y=263.2 while
-            # the third structure ran to y=367.9. That is the truncation a reader sees as a
-            # structure sliced through the middle, and it is the worst kind of error here because
-            # the crop still looks like a picture.
-            #
-            # The x range is measured from everything printed on the page - cells and pictures -
-            # rather than set to the page box, so nothing is claimed from a margin that holds no
-            # content at all. Measured over 4,633 pages of 429 papers: exactly one page carries two
-            # question numbers within 20 pt of each other, so a page's rows belong to one column
-            # and a slice of that page belongs to one question.
-            band_x0, band_x1 = page_x.get(page, (box[0], box[2]))
-            band = (band_x0, box[1], band_x1,
-                    _next_start(starts_on_page.get(page, ()), box[1]))
+            # The box is the union of the question's rows and the picture's *own* box, because the
+            # picture is not lined up with the text above it and is often wider than it. Measured on
+            # question 68 of `1042_藥師_藥理學與藥物化學`, which asks for the major metabolite of
+            # tolmetin and prints three chemical structures under its options: the marker `D.` ends
+            # at x=262.5, the first structure spans x=49.1-298.8, and the next two start at x=49.6 -
+            # one tenth of a point outside the markers. Matching pictures against the *text's*
+            # rectangle took the first structure and dropped the other two, and the crop ended at
+            # y=263.2 while the third structure ran to y=367.9. That is the truncation a reader sees
+            # as a structure sliced through the middle, and it is the worst kind of error here
+            # because the crop still looks like a picture.
             reasons = []
-            # Only *pictures* count, not the fragments a plot is emitted as: `by_page` is built by
-            # `picture_boxes`, which joins scan-line strips and drops what the height floor rejects,
-            # so a cluster of 1-5 pt marks is not in it. The raw list is still needed for
-            # `fragment_boxes` below, which is the one caller that wants the marks.
-            images_here = [candidate for candidate in by_page.get(page, [])
-                           if _overlap(band, candidate) > 0]
+            images_here = owned.get((index, page), ())
             if images_here:
                 reasons.append("embedded-image")
                 for candidate in images_here:
@@ -1215,25 +1324,178 @@ def _same_picture(kept, item, *, join=3.0, width_tolerance=0.5):
 
 
 def _next_start(starts, top, *, tolerance=1.0):
-    """The y of the next question that begins below `top` on this page, or the foot of the page.
+    """The first question start below `top` on that page, or the foot of the page when there is none.
 
-    A question owns everything between its own number and the next question's number, which is how
-    the paper reads and how a picture printed under a stem belongs to that stem. Measured on
-    question 68 of `1152_醫事檢驗師_微生物學與臨床微生物學(包括細菌與黴菌)`: the stem ends at
-    y=627, two photographs - the lesion and the KOH smear it names as 圖1 and 圖2 - sit at
-    y=629-812, and the four options print at the head of the next page. No cell of the question
-    touches a picture, so an overlap test found nothing and the question came back with no figure
-    at all, while its own text refers to two. The pictures are not beside the text; they are
-    *after* it, and the band is the only thing that says so.
-
-    The tolerance keeps a question from being read as its own successor: the number cell's top is
-    exactly `top`, and a strict comparison already excludes it, but cells that share a top to
-    within a rounding error should not count as a new question either.
+    `starts` is the y of every question that **begins** on the page, so a question that continues
+    onto it from an earlier page is not in the list. Used only to close the band of a question whose
+    options are pictures: its own rows are its stem, and its pictures reach down to the next
+    question's number.
     """
     for value in starts:
         if value > top + tolerance:
             return value
     return float("inf")
+
+
+#: How far below a question's own last row a picture may start and still be that question's.
+#: Measured on the live queue 2026-09-25, question 68 of `100030:102:0106`: its own row is
+#: y=305.1-317.3 and its three option pictures start at y=318.1 - 0.8 pt below it - while the next
+#: question's row begins at y=383.1, so a rule that only measures the distance to the two bands
+#: hands them to the question below. It is measurement noise, not adjacency: the same paper's
+#: `106020:305:11` question 65 has a picture 53 pt below its own rows and 40.6 pt above the next
+#: question's, which is a gap and not a hair. 1.0 pt is the tolerance this file already uses for
+#: sub-line spacing (`_next_start`), and 2 pt keeps a line's worth of slack around it.
+FIGURE_ADJACENCY = 2.0
+
+
+def _band_distance(point, band):
+    """How far a y lies outside a band `(item, top, bottom)`, or 0.0 when it is inside it."""
+    _item, top, bottom = band
+    return max(0.0, top - point, point - bottom)
+
+
+#: 題幹自己說「看圖」的字樣。出現這些字，這一題的圖就是它自己的，不是下面那一題的。量到的兩個樣本都
+#: 是「下圖」：`moex:106020:305:11` q66「為增加下圖化合物的抗精神病活性…」、
+#: `moex:107100:305:11` q66「下列何者為下圖化合物排出人體外的最主要型態？」。要放寬請連同
+#: `_option_grid_owner` 的三個條件一起量，不要只加字。
+FIGURE_CUES = ("下圖", "上圖", "附圖", "如圖")
+
+#: 選項 cell 只有標記本身（`A.` `B.` `C.` `D.`）就代表這一題的選項是圖。量到的樣本：
+#: `moex:108100:305:33` q53「…下列何者最能清楚及正確顯示該藥之血漿中藥物濃度對時間之關係？
+#: A. B. C. D.」——四個選項是圖，讀文裡只有標記。
+_MARKER_CHARS = set("ABCDabcd.、()（）:：. ")
+
+
+def _marker_only(body):
+    """`A.` / `(B)` / `C、`：有標記、沒有內容的選項 cell。"""
+    return not any(ch.isalnum() and ch not in _MARKER_CHARS for ch in (body or ""))
+
+
+def _names_a_figure(text):
+    """題幹提到圖嗎：`下圖`/`上圖`/`附圖`/`如圖`，或 `圖1` / `圖 1` 這種編號。"""
+    text = text or ""
+    if any(cue in text for cue in FIGURE_CUES):
+        return True
+    for position, char in enumerate(text):
+        if char == "圖" and position + 1 < len(text):
+            following = text[position + 1:position + 3].strip()[:1]
+            if following.isdigit() or following in "一二三四五六七八九十":
+                return True
+    return False
+
+
+def _stem_text(item, rows_by_id):
+    """這一題的題幹文字，從讀文裡拿；`stem` 本身就是字串時直接用。"""
+    raw = item.get("stem")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    ids = (item.get("cells") or {}).get("stem") or ()
+    return " ".join((rows_by_id[cell].get("text") or "") for cell in ids if cell in rows_by_id)
+
+
+def _option_grid_owner(box, bands, items, stem_texts, page, entry_pages):
+    """上一個題目的選項圖格，或 `None`：這張圖是不是「壓在下一題題號上面的四張選項圖」。
+
+    三個條件都讀自紙本，不是讀自解析結果（樣本在 `FIGURE_CUES` 與 `_marker_only` 的註解裡）：
+
+    1. 整張圖落在**上一題自己的列**與**下一題自己的列**之間的間隔裡——它印在上一題的文字之後、
+       下一題的題號之前，所以只有讀兩邊的文字才知道它是誰的；
+    2. 下一題的題幹沒有提到圖：`moex:108100:305:33` q54 問二室模式的斜率、`moex:100030:102:0106`
+       q69 問推荐哪一種坐墊，都沒有提到圖；
+    3. 上一題的選項 cell 沒有內容，只有標記：`moex:108100:305:33` q53 的讀文是 `… A. B. C. D.`，
+       `moex:100030:102:0106` q68 連選項 cell 都沒有，四張手部副木圖就是它的選項；
+    4. **上一題自己的那張裁圖就蓋在這一頁上**（`_better` 挑的那一頁＝圖所在的那一頁）。每一題只有
+       一張裁圖，交給一張裁圖在別頁的題目，這張圖就從每一張裁圖裡消失——站上 2026-09-25 唯讀實測
+       三個案例：`moex:113020:305:11` q61 p14、`moex:113090:305:11` q63 p14、
+       `moex:114090:305:0401` q79 p21，三張圖都在這一條件成立時才會不見。
+
+    三個都成立時這張圖留在**上一題**：它是那張題幹底下的選項圖格，判給下一題就是題庫上說的
+    「沒圖卻貼別題的圖」。站上唯讀實測（2026-09-25）：會動的 12 張 picture-option 圖裡有 4 張是這個
+    形狀；站上 3,296 張圖裡另外 8 張的上一題**有**文字選項，那 8 張判給下面那一題。這條守門規則只會
+    讓圖「留在上面」，所以它只可能讓動的圖更少，不會多。
+    """
+    if not bands or not items:
+        return None
+    top = float(box[1])
+    bottom = float(box[3])
+    upper = lower = None
+    for band in bands:
+        if float(band[2]) <= top and (upper is None or float(band[2]) > float(upper[2])):
+            upper = band
+        if float(band[1]) >= bottom and (lower is None or float(band[1]) < float(lower[1])):
+            lower = band
+    if upper is None or lower is None:
+        return None
+    if _names_a_figure(stem_texts[lower[0]] if lower[0] < len(stem_texts) else ""):
+        return None
+    if any(not _marker_only(body) for body in option_texts(items[upper[0]])):
+        return None
+    if upper[0] < len(entry_pages) and entry_pages[upper[0]] != page:
+        return None                                     # 上面那一題的裁圖在別頁：這張圖誰都收不到
+    return upper[0]
+
+
+def _figure_owner(box, bands):
+    """The one question a picture belongs to, or `None` when no question has rows on its page.
+
+    `bands` is every question that has cells on the picture's page, each as `(item index, top,
+    bottom)`: the vertical extent of that question's **own rows**, which is the ruler the ownership
+    pass cuts a crop to (`crop_run_figures.band_extents`, measured with `reread.band_rows`) - except
+    for a question whose options are pictures, whose band is its whole territory down to the next
+    question's number (`figure_questions` builds it). Only the vertical axis decides, because a
+    page's rows belong to one column: measured over 4,633 pages of 429 papers, exactly one page
+    carries two question numbers within 20 pt of each other, and the widest empty band inside a
+    page's content is 0.0 pt.
+
+    The rule, in order:
+
+    1. the band the picture's **centre** falls in owns it, and that is the case that was wrong
+       before: a picture printed above a question's number sits in the gap *below* the previous
+       question's own rows (whose text is complete without it), so it belongs to the question below
+       it - while the band that used to decide this ran from a question's number down to the *next*
+       question's number, reached over that gap, and gave the picture to a question that has no
+       figure of its own. The exception is the other way round and is measured: when the question
+       above has **no option text** its pictures *are* its options, so the band is its whole
+       territory and the pictures stay with it (question 40 of `1021_中醫師_中醫基礎醫學(二)`, whose
+       `(A)`-`(D)` grid sits at y=259-575 under a stem that is its only row);
+    2. when that ties - the centre landing exactly on the boundary between two bands, which is what
+       a picture overlapping two questions by an equal amount does - or when the centre falls
+       outside every band, the band the picture's **top edge** is inside owns it: that is the
+       question the picture is printed *from*, its text hanging over the top of the picture;
+    3. when the top edge is in no band either, the **nearest** band to that centre owns it. A
+       picture printed after a question's text and before the next question's number is still that
+       question's picture, measured on question 68 of
+       `1152_醫事檢驗師_微生物學與臨床微生物學(包括細菌與黴菌)`: the stem ends at y=627, the two
+       photographs it names as 圖1 and 圖2 sit at y=629-812, and no cell of the question touches
+       either - the pictures are not beside the text, they are *after* it. The question above wins a
+       tie, because the picture was printed after that question's text.
+
+    One picture, one question - 67 of the live queue's 3,867 pictures were claimed by two questions at
+    once - and the caller crops it there and nowhere else: measured on the live queue 2026-09-25, 844
+    of 3,263 crops reached outside their own question's rows, and the reviewer saw a question with no
+    figure of its own carrying the next question's (「有些題目沒有圖片但是卻截別題的來貼上」).
+    """
+    if not bands:
+        return None
+    centre = (float(box[1]) + float(box[3])) / 2.0
+    top = float(box[1])
+
+    def rank(band):
+        if _band_distance(centre, band) <= 0.0:
+            # The centre is in this band. A second band holding it too is a tie at the boundary, and
+            # there the band holding the top edge is the question the picture is printed from.
+            return (0, 0 if _band_distance(top, band) <= 0.0 else 1)
+        # The top edge is inside this band, or a hair below its last row: that question's text ends
+        # at that row and the picture is printed straight under it, which is a sub-line gap and not a
+        # gap (`FIGURE_ADJACENCY`, 0.8 pt measured). No fourth rank - the inside test is read with
+        # the same tolerance the rest of this file uses.
+        if _band_distance(top, band) <= 0.0 or 0.0 <= top - band[2] <= FIGURE_ADJACENCY:
+            return (1, 0)
+        return (2, _band_distance(centre, band))
+
+    # The upper band first on a tie (`band[1]`), then reading order (`band[0]`), so the answer never
+    # depends on the order the pages happen to be walked in.
+    return min(bands, key=lambda band: (rank(band), band[1], band[0]))[0]
 
 
 def _box_height(box):
@@ -1351,6 +1613,373 @@ def fragment_boxes(images, band):
         return []
     return [(min(b[0] for b in inside), min(b[1] for b in inside),
              max(b[2] for b in inside), max(b[3] for b in inside))]
+
+
+# --- the table a reading reported --------------------------------------------------------------
+# This crop is triggered by a **reading**, and that inverts everything above it. `figure_questions`
+# measures the page - an embedded image object, option markers with nothing printed after them -
+# because a figure's presence is a fact about the print form. A table is not a fact of that kind:
+# whether a run of printed lines is a table, a column heading or a wrapped sentence is *meaning*, and
+# this project's rule is that meaning is read and never detected (`qbr/AGENTS.md`: 凡是「讀出文字的
+# 意義」都是提示詞). The measurement proposed for it instead - "three or more consecutive lines with
+# two or more aligned columns" - is the rule→script→new-problem treadmill the owner refused on
+# 2026-09-24 («你一直擴充腳本又會overfitting»).
+#
+# It is also why a flattened table carries no crop today. `moex:115020:305:0403:1:question:q065`
+# prints a four-line table as text: the question holds no image object, its options are not empty, and
+# no cluster of fragments covers it - so `reasons` stays empty and `figure_questions` never adds the
+# entry. The table's pixels are on the page and nothing ever asked for them.
+#
+# So the reading decides and locates, and the code does the one thing a script can do exactly: the
+# reading quotes the table's own lines verbatim (`ai_findings.TABLE_LINES_RULE`), and
+# `quoted_lines_region` finds those lines among the page's **measured** lines and returns the band
+# they cover. There is no density test, no column-alignment test and no minimum width below - the
+# input is a list of printed lines, the output is where they are.
+#
+# A reading and the page it read are two cuts of the same text, and they can disagree about where
+# the cuts fall and in what order the pieces were printed. Both disagreements are *comparison*
+# problems rather than locating ones, and both were measured on the site trial (2026-09-24), on the
+# 2 of 5 table questions that came back `not-found`:
+#
+#   the reading splits a row  `moex:106100:305:33:1:question:q070` is one of them: the reading
+#                             reported the table as nine entries - three headings, and then `CYP2D6`,
+#                             `10`, `1` and `CYP3A4`, `100`, `50` - while the paper prints those last
+#                             six as the two rows `CYP2D6  10  1` and `CYP3A4  100  50`. Compared entry
+#                             by entry, `containment('CYP2D6', 'CYP2D6 10 1')` is 1.0 while the reverse
+#                             is 0.31, so the entry is *not found* and the table the reading had just
+#                             described got no crop. `moex:107020:307:33:1:question:q036` is the same
+#                             shape (`Antihistamine 50 mg`, `Directly compressible la`,
+#                             `Magnesium stearate 10 mg`...).
+#   the paper splits a line  on the same paper, the same table's rightmost column heading is printed
+#                             over two lines - `Michaelis-Menten常數(KM)，` and `mg/L` - placed
+#                             *around* the line carrying the other two columns' headings, so one
+#                             entry of the reading is two lines of the page, and the two are not
+#                             neighbours on the page.
+#   the two disagree on order the same paper prints those three header lines in another order than
+#                             the reading quoted them in, so an entry of the reading need not be
+#                             printed after the entry before it.
+#
+# The correction is inside the comparison and never a loosening of it. Consecutive entries of the
+# reading may be taken together (separated by a space, the way a printed row separates its columns)
+# and compared with **one** measured line; one entry may be spelled by **several** measured lines,
+# taken in the order the page printed them and each of them a piece of the entry the page can
+# confirm; and the entries need not reach their rows in the order the reading quoted them. Nothing
+# about the page is inferred from any of it: the reading remains the authority on what the table is
+# and which lines it holds, the entries joined are the reading's own, the rows taken are rows the
+# quoted line is a *piece* of, and every claim is confirmed by the same two-way `canon.AGREE` floor a
+# single entry has always been held to.
+#
+# What is *not* compared away is where the crop ends. The rows claimed must be one contiguous run of
+# the page's measured lines with every row of the run claimed by some entry, so a crop cannot grow
+# over a line the reading never quoted - and the reading-order chain this replaces could, because a
+# chain of increasing rows was free to skip a row between two of its steps. A reading whose entries
+# do not *all* find their rows is still reported rather than cut: all of this is a way to compare two
+# texts, never a way to guess a row back into place, and the controls in
+# `tests/test_vision_table_crop.py` hold it to that by feeding it a row with one digit changed.
+
+def within_band(lines, band):
+    """The measured lines that fall inside the rows a question owns.
+
+    `band` is the question's own rows - `reread.band_rows` over the extracted cells, the same
+    measurement the dispute pass crops from - and this selects the page's whole printed lines
+    (`extract.extract_lines_a`) lying in that vertical range. *Lines* are the search space rather
+    than cells because a printed table row **is** a line: the extraction splits it into cells at its
+    column gaps, and a row the reading quotes as `錠劑  口服  100  40` is those four cells joined
+    again, matching no single cell.
+
+    A line belongs to the band when its own middle is inside the band's vertical extent on that page,
+    which needs no tolerance: the band's extent is the first and last row the question owns, and a
+    line half in and half out of that would be a different question's line.
+    """
+    extent = {}
+    for row in band or ():
+        page = int(row.get("page") or 0)
+        top, bottom = float(row.get("y0") or 0.0), float(row.get("y1") or 0.0)
+        was = extent.get(page)
+        extent[page] = (min(was[0], top), max(was[1], bottom)) if was else (top, bottom)
+    out = []
+    for row in lines or ():
+        rng = extent.get(int(row.get("page") or 0))
+        if not rng:
+            continue
+        middle = (float(row.get("y0") or 0.0) + float(row.get("y1") or 0.0)) / 2.0
+        if rng[0] <= middle <= rng[1]:
+            out.append(row)
+    return out
+
+
+def _same_printed_line(quoted, measured):
+    """Whether a line the reading quoted and a line the page printed are the same text.
+
+    `canon.comparable` is the reduction this project compares any two texts in, and
+    `canon.containment` the measure for the case where one text is a *piece* of the other - here the
+    paper's line, which the extraction may have joined to a neighbouring column or to the option
+    marker beside it. `canon.AGREE` is the boundary `canon._similar` already uses to call two readings
+    of a stem the same text, and it is required in **both** directions, because a table's rows are
+    short: a single character the extraction mangled (the printed `·` stored as the full-width `．` in
+    `AUC (μg·h/mL)`) is one character out of twenty and clears it, while a two-character quoted line
+    found inside a paragraph's line also scores high and would bind the crop to the wrong region.
+    A row that does not clear it on both sides is *not found*, and a table that is not found is
+    reported rather than cut.
+
+    Both sides are the texts as the caller holds them, which are normally already reduced by
+    `canon.comparable` - `_measured_lines` reduces the page's lines once for the whole search rather
+    than once per comparison. `canon.containment` applies the reduction either way, so a caller may
+    pass the texts raw.
+
+    This test is always one text against one measured text, and the measured side is one printed line
+    or, for a line the paper split, the several it was printed as, joined in reading order. A reading
+    that reports a printed row's cells as separate entries is met by joining a run of its entries
+    *before* the test - see `quoted_lines_region` - never by loosening the test itself.
+    """
+    if not quoted or not measured:
+        return False
+    if quoted == measured:
+        return True
+    return (canon.containment(quoted, measured) >= canon.AGREE
+            and canon.containment(measured, quoted) >= canon.AGREE)
+
+
+def _measured_lines(ordered):
+    """The page's measured lines in reading order, each with the canonical text it is compared in.
+
+    Reduced once rather than once per comparison: the placement below compares every run of the
+    reading's entries against the measured lines, and the reduction is the expensive half of that.
+    """
+    return [(position, row, canon.comparable(row.get("text") or ""))
+            for position, row in enumerate(ordered)]
+
+
+def _can_agree(a, b):
+    """Whether two canonical texts are close enough in length for the measure to reach `AGREE`.
+
+    Necessary, not sufficient, and a consequence of the measure rather than a tolerance of its own:
+    each side needs matching blocks covering `canon.AGREE` of its own length, and no block can be
+    longer than the *shorter* of the two texts, so a pair whose lengths differ by more than that
+    cannot agree however it reads. The test is the measure's own division (`short / long` against
+    `AGREE`, in the same rounding), so it can only refuse a pair the measure would refuse too.
+
+    It is here to keep the search cheap: a split grows by a row with every step and a cut of the
+    quoted line is tried end by end, so most pairs are nowhere near each other's length, and two
+    lengths cost nothing beside a sequence match.
+    """
+    short, long = (len(a), len(b)) if len(a) <= len(b) else (len(b), len(a))
+    return bool(long) and short / long >= canon.AGREE
+
+
+def _claims(text, measured):
+    """The sets of measured rows whose printed lines together are `text`, fewest rows first.
+
+    One printed row is the common case, and the only one for a reading that quotes the table as the
+    paper prints it. Several rows are the case measured on the site trial of 2026-09-24
+    (`moex:106100:305:33:1:question:q070`): the paper prints the rightmost column's heading over two
+    lines, placed *around* the line carrying the other two columns' headings, so the one line the
+    reading quoted (`Michaelis-Menten常數(K<sub>M</sub>)，mg/L`) is the page's first and third header
+    lines - and those two rows are not neighbours on the page.
+
+    A set of rows is that line only when the line can be **cut** into one piece per row, in reading
+    order, each row agreeing with its own piece under `_same_printed_line`. So every character the
+    reading quoted belongs to exactly one row of the set, which is what keeps an agreement per row
+    instead of an agreement over the lot: on the control in `tests/test_vision_table_crop.py`, one
+    digit of a quoted row changed (`TabletOral10099` against the printed `TabletOral10040`) is *not*
+    absorbed by the `SolutionOral10050` printed beside it, where comparing the two joined strings
+    would have accepted it at 0.93 - the second row's length had paid for the first row's wrong
+    digit. Only a row that is a piece of the quoted line can be taken at all (`canon.containment` at
+    the same floor everything else here uses), and fewest rows first keeps a single-row match
+    preferred over a split of the same text, so a reading that already places entry by entry is
+    placed exactly as it was.
+    """
+    a = canon.comparable(text)
+    if not a:
+        return []
+    pieces = [(position, row, piece) for position, row, piece in measured
+              if piece and canon.containment(piece, a) >= canon.AGREE]
+    found = {}
+
+    def walk(index, taken, start):
+        if taken and start == len(a):
+            found[tuple(position for position, _row in taken)] = taken
+            return
+        for stop in range(index, len(pieces)):
+            position, row, piece = pieces[stop]
+            for end in range(start + 1, len(a) + 1):
+                text = canon.comparable(a[start:end])
+                if text and _can_agree(text, piece) and _same_printed_line(text, piece):
+                    walk(stop + 1, taken + ((position, row),), end)
+
+    walk(0, (), 0)
+    return sorted(found.values(),
+                  key=lambda claim: (len(claim), [position for position, _row in claim]))
+
+
+def _run_claims(wanted, measured):
+    """`claims(start, stop)`: the row sets the reading's run `wanted[start:stop]` is the text of.
+
+    A cache rather than a table computed up front: the placement asks for a handful of runs when the
+    reading quotes one printed row per entry, which is the common case, and each answer is reused
+    across the placements that reach that run from different rows. Its lifetime is one
+    `quoted_lines_region` call, which is what the placement and the complaint share.
+    """
+    runs = {}
+
+    def claims(start, stop):
+        key = (start, stop)
+        if key not in runs:
+            runs[key] = _claims(" ".join(wanted[start:stop]), measured)
+        return runs[key]
+
+    return claims
+
+
+def _is_one_run(positions):
+    """Whether these reading-order positions are one contiguous run of the page's measured lines.
+
+    The property that replaces reading order, and the reason it is not a weakening of it: reading
+    order was a guard on how far a crop *reaches*, and it guarded that only by accident - a chain of
+    strictly increasing rows may skip any number of rows between two of its steps, so a reading that
+    quotes two rows with a third printed between them was cut *over* that third row. Requiring the
+    claimed rows to be one run refuses exactly that, and the run's edges are the outermost claimed
+    rows by construction, so what the crop covers is what the reading named.
+    """
+    ordered = sorted(positions)
+    return bool(ordered) and all(later == earlier + 1
+                                 for earlier, later in zip(ordered, ordered[1:]))
+
+
+def _reading_chain(wanted, claims):
+    """The rows the reading's entries tile, or `(None, index)` and where the placement stalled.
+
+    `wanted` are the reading's own entries and `claims` the row sets a run of them is the text of
+    (`_run_claims`). The entries are consumed in the order the reading gave them and no row may be
+    taken twice, so every row of the block the reading named is claimed by exactly one run of them.
+
+    A run of consecutive entries may be placed against one row - the reading is free to report one
+    printed row's cells as separate entries - or, for a line the paper split, against several rows
+    (`_claims`). Runs are tried shortest first and only where a shorter one does not place, so a join
+    or a split is a repair for an entry that is not one printed row on its own and never a licence to
+    regroup a reading that already places entry by entry. A placement is only accepted when the
+    *whole* reading places, so a run that covers one row but strands the next three is not accepted
+    either.
+
+    **The rows are not required to be in the order the reading quoted them.** The reading and the
+    page are two cuts of the same text and they can disagree about the order of the pieces: measured
+    on `moex:106100:305:33:1:question:q070`, the reading quoted `代謝酵素`,
+    `最大排除速率(V<sub>max</sub>)，mg/h`, `Michaelis-Menten常數(K<sub>M</sub>)，mg/L` while the paper
+    printed `Michaelis-Menten常數(KM)，`, then `代謝酵素  最大排除速率(Vₘₐₓ)，mg/h`, then `mg/L` -
+    the reading's third heading is the page's first and third lines, printed *around* the reading's
+    first two. What replaces the order is the shape of the block (`_is_one_run`): the claimed rows
+    must be one contiguous run of the page's lines, so a crop cannot cover a line no entry claimed.
+    """
+    memo = {}
+
+    def place(index, used):
+        if (index, used) in memo:
+            return memo[(index, used)]
+        chain, stalled = None, index
+        for stop in range(index + 1, len(wanted) + 1):
+            for taken in claims(index, stop):
+                positions = [position for position, _row in taken]
+                if any(position in used for position in positions):
+                    continue
+                if stop == len(wanted):
+                    if not _is_one_run(list(used) + positions):
+                        continue
+                    chain, stalled = [taken], index
+                    break
+                rest, deeper = place(stop, used | set(positions))
+                if rest is not None:
+                    chain, stalled = [taken] + rest, index
+                    break
+                stalled = max(stalled, deeper)     # the first entry the preferred run stranded
+            if chain is not None:
+                break
+        memo[index, used] = (chain, stalled)
+        return chain, stalled
+
+    return place(0, frozenset())
+
+
+def _entries_not_on_the_page(wanted, claims):
+    """The reading's entries that no run of consecutive entries, joined, is a line the page printed.
+
+    Reported instead of the stall when the placement fails: an entry the page does not print at all
+    is a reading that was wrong about the text, and an entry that is printed but cannot be placed in
+    the block the others claim is a reading whose lines are not one run of the page's - the two are
+    different complaints and the person reading the report needs to know which one they have.
+    """
+    placed = [False] * len(wanted)
+    for start in range(len(wanted)):
+        for stop in range(start + 1, len(wanted) + 1):
+            if claims(start, stop):
+                for index in range(start, stop):
+                    placed[index] = True
+    return [wanted[index] for index, found in enumerate(placed) if not found]
+
+
+def _inside_any(row, boxes, *, tolerance=2.0):
+    """Whether a measured line lies inside one of `boxes`, the test `figure_region` applies."""
+    if not boxes:
+        return False
+    x0, y0 = float(row.get("x0") or 0.0), float(row.get("y0") or 0.0)
+    x1, y1 = float(row.get("x1") or x0), float(row.get("y1") or y0)
+    return any(x0 >= ox0 - tolerance and y0 >= oy0 - tolerance
+               and x1 <= ox1 + tolerance and y1 <= oy1 + tolerance
+               for ox0, oy0, ox1, oy1 in boxes)
+
+
+def quoted_lines_region(lines, quoted, *, exclude=()):
+    """The band the lines a reading quoted cover, per page, or `({}, complaint)`.
+
+    `lines` are the page's measured printed lines (the caller has already restricted them to the
+    question's own band with `within_band`), `quoted` the reading's verbatim strings, and `exclude`
+    the boxes whose lines are left out - the option pictures' boxes, the same parameter
+    `figure_region` takes, so that a quoted line belonging to an option is not cut twice.
+
+    Every quoted line must be found, and the crop is the measured lines the reading's entries claim -
+    no more and no fewer. What the reading and the page may disagree about is where the cuts fall and
+    in what order the pieces were printed, so a run of consecutive entries may be *joined* and
+    compared with one measured line (a reading that reports a printed row's cells as separate
+    entries: `CYP2D6` / `10` / `1` for the row `CYP2D6  10  1`), one entry may be spelled by several
+    measured lines taken in reading order (the paper wrapping one quoted line over two lines, which
+    is `q070`'s header), and the entries need not reach their rows in the order the reading quoted
+    them (the same paper prints the header's three lines in another order). All of it stays inside
+    the comparison: the entries joined are the reading's, the rows taken are rows the quoted line is
+    a *piece* of, and every claim is confirmed by exactly the test a single entry has always been
+    held to - so the band returned is still a union of measured lines and no line is *added* to it.
+
+    What stops a crop from reaching further is the shape of the block: the claimed rows must be one
+    contiguous run of the page's measured lines, every row of it claimed by some entry and every
+    entry claiming one of them. A crop that shows the wrong question is the worst error available
+    here, because it still looks like a picture of a table, and a line no entry quoted is exactly how
+    one would come about - so it is refused rather than cut.
+    """
+    wanted = [str(line).strip() for line in quoted or () if str(line or "").strip()]
+    if len(wanted) < 2:
+        # No table to cut: the rule defines one as a heading row *and* data rows, so a single quoted
+        # line is a line of text and there is no region that could honestly be called the table.
+        return {}, "not-a-table:%d-line" % len(wanted)
+    ordered = sorted(lines or (), key=lambda row: (int(row.get("page") or 0),
+                                                   float(row.get("y0") or 0.0),
+                                                   float(row.get("x0") or 0.0)))
+    claims = _run_claims(wanted, _measured_lines(ordered))
+    chain, stalled = _reading_chain(wanted, claims)
+    if chain is None:
+        missing = _entries_not_on_the_page(wanted, claims)
+        if missing:
+            return {}, "not-found:" + "｜".join(line[:24] for line in missing[:3])
+        return {}, "not-a-block:%d" % (stalled + 1)
+    kept = [row for taken in chain for _position, row in taken if not _inside_any(row, exclude)]
+    if not kept:
+        return {}, "excluded"
+    bands = {}
+    for row in kept:
+        page = int(row.get("page") or 0)
+        box = (float(row.get("x0") or 0.0), float(row.get("y0") or 0.0),
+               float(row.get("x1") or 0.0), float(row.get("y1") or 0.0))
+        was = bands.get(page)
+        bands[page] = ((min(was[0], box[0]), min(was[1], box[1]),
+                        max(was[2], box[2]), max(was[3], box[3])) if was else box)
+    return bands, ""
 
 
 def figure_region(entry, *, exclude=()):

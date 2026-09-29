@@ -155,6 +155,7 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         "official_subject_name": question.get("official_subject_name"),
         "parser_status": _quality_status(gate, number),
         "parser_version": metadata.get("parser_version"),
+        "question_page": metadata.get("question_page"),
         "question_pdf_relative": metadata.get("question_pdf_relative"),
         "question_pdf_sha256": metadata.get("question_pdf_sha256"),
         "review_status": metadata.get("review_status"),

@@ -11,9 +11,6 @@ family:
                                       (`reasoning_effort` is accepted and ignored)
     vLLM / Splash (`8088`)       -> `reasoning_effort: "none"`
                                       (`chat_template_kwargs` is accepted and **ignored**)
-    DGX Spark vLLM (`timsdgx:8888`) -> `reasoning_effort: "none"`
-    occamy mlx (`18130`)         -> `reasoning_effort: "none"` (the top-level `enable_thinking`
-                                      also works; `chat_template_kwargs` is accepted and ignored)
     mlx-vlm (`8082`)             -> top-level `enable_thinking` only
 
 The Splash line was measured directly, three times on the same question:
@@ -50,11 +47,11 @@ import urllib.request
 #: because sending both is how the ignored one hides.
 #:
 #: **Every address is a parameter, and the parameters are read at call time, not frozen at import.**
-#: `endpoints()` rebuilds the table, so a long-running orchestrator can be pointed at another host
-#: without a restart and two processes can use different engines in the same second. The old shape -
-#: a literal dict built once from `os.environ` at import - is why "point this at the DGX" required
-#: editing code: the module-level dict could not be changed after import, and every caller
-#: (`reread`, the scripts, the tests) held a reference to the frozen copy.
+#: `ENDPOINTS` is rebuilt by `reload()` and by `endpoints()`, so a long-running orchestrator can be
+#: pointed at another host without a restart and two processes can use different engines in the same
+#: second. The old shape - a literal dict built once from `os.environ` at import - is why "point this
+#: at the DGX" required editing code: the module-level dict could not be changed after import, and
+#: every caller (`reread`, the scripts, the tests) held a reference to the frozen copy.
 #:
 #: Overrides, in increasing precedence:
 #:   1. `BUILTIN_ENDPOINTS` below
@@ -76,16 +73,28 @@ BUILTIN_ENDPOINTS = {
     "mtplx-35b": {"url": "http://127.0.0.1:18120",
                   "name": "ornith-1.5-mtplx-35b", "key": "mtplx",
                   "thinking": {"chat_template_kwargs": {"enable_thinking": False}}},
-    # occamy 6bit (mlx, vision). Measured 2026-09-27: `reasoning_effort: none` -> 3.0s/rc=0; the
-    # top-level `enable_thinking: false` also works; `chat_template_kwargs` is accepted and IGNORED
+    # occamy 6bit (mlx, vision). Measured 2026-09-27: `reasoning_effort: none` -> 3.0s/rc=0; the top
+    # -level `enable_thinking: false` also works; `chat_template_kwargs` is accepted and IGNORED
     # (6.2s/rc=1449, the same as no switch at all).
+    #
+    # The context is a **launcher** setting, not a property of the weights: this deployment runs with
+    # `MAX_KV_SIZE=$CTX_MLX` (`~/models/occamy/bin/occamy:91`, default 65536) and refuses any request
+    # whose `prompt + max_tokens` exceeds it. Measured 2026-09-29 with the repair agent as the client:
+    # `400 {"detail":"Request needs 72264 context tokens (39496 prompt + 32768 max generation), but
+    # MAX_KV_SIZE is 65536."}` — a client that asks for the usual 32768 output while sending a
+    # ~40k-token agent prompt gets a 400 with no body of its own. Both usable numbers are therefore
+    # recorded here, because guessing them per caller is how the same 400 comes back from three places.
+    # Raising the server's context is `CTX_MLX=<n> occamy restart`, an operator decision.
     "occamy-6bit": {"url": "http://127.0.0.1:18130",
-                    "name": "occamy-1.0-6bit-xl-mlx", "key": "", "reasoning": "none"},
+                    "name": "occamy-1.0-6bit-xl-mlx", "key": "", "reasoning": "none",
+                    "context_window": 65536, "max_output_tokens": 16384},
     # DGX Spark (Tailscale `timsdgx`). The designer authorised calling it when extra tokens are
     # needed; it is reached over Tailscale, not the LAN address, so it works from any host on the
     # tailnet. Not the default: an experiment must name it.
-    "dgx-flash": {"url": "http://timsdgx:8888", "name": "qwen3.8-flash-next",
-                  "key": "dgx-spark-local", "reasoning": "none"},
+    "dgx-flash": {"url": os.environ.get("QBR_DGX_BASE_URL", "http://timsdgx:8888"),
+                  "name": os.environ.get("QBR_DGX_MODEL", "qwen3.8-flash-next"),
+                  "key": os.environ.get("QBR_DGX_API_KEY", "dgx-spark-local"),
+                  "reasoning": "none"},
 }
 
 #: Legacy per-engine variables, kept so every existing run command keeps working unchanged.
@@ -102,12 +111,7 @@ def _engine_env_prefix(name: str) -> str:
 
 
 def _overrides() -> dict:
-    """`{"<name>": {"url"|"name"|"key": value}}` from the overrides file and the environment.
-
-    Only the three fields that describe *where* the engine is may be overridden. The thinking switch
-    is a measured property and is deliberately not in the list, so a mistyped switch cannot be
-    introduced by an environment variable.
-    """
+    """`{"<name>": {"url"|"name"|"key": value}}` from the file and the environment."""
     out: dict = {}
     path = os.environ.get("QBR_ENDPOINTS_FILE", "").strip()
     if path:
@@ -164,6 +168,35 @@ def reload() -> dict:
 ENDPOINTS = endpoints()
 
 
+
+def external_egress_allowed() -> bool:
+    """Whether a call to an off-network provider is permitted right now.
+
+    `QBR_ALLOW_EXTERNAL_LLM=1` is the switch, and the default is **off**. The default matters more
+    than the feature: a resident loop that starts sending question content to a third party because
+    someone once exported a variable in a shell that has since closed is a data-boundary change
+    nobody approved. Off by default means enabling it is a deliberate act, and disabling it is one.
+    """
+    return os.environ.get("QBR_ALLOW_EXTERNAL_LLM", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def egress_refusal(endpoint) -> str:
+    """Why this endpoint may not be called, or `""` when it may.
+
+    Returns a sentence rather than raising, because the caller's job is to *degrade* — fall back to
+    the local engine and say so in the record — not to stop the loop. An orchestrator that cannot be
+    reached must not take the resident repair loop down with it.
+    """
+    if not endpoint.get("external"):
+        return ""
+    if not external_egress_allowed():
+        return ("%s 是外部 provider，而 QBR_ALLOW_EXTERNAL_LLM 沒有設為 1："
+                "題目內容不會離開內網（charter 第 6 節）。" % endpoint.get("name"))
+    if not endpoint.get("key"):
+        return ("%s 需要 API key，但環境變數沒有值；不送未認證的請求。" % endpoint.get("name"))
+    return ""
+
+
 def endpoint_url(base: str) -> str:
     base = base.rstrip("/")
     if not base.endswith("/v1"):
@@ -195,7 +228,16 @@ def ask(messages, *, endpoint, max_tokens, timeout, temperature=0):
     The raw response is returned unparsed because the callers disagree about what to do with it: the
     finding pass parses it into a verdict, the transcription pass reads `content` as text. Parsing
     here would make one of those two the owner of the schema.
+
+    **The egress gate lives here, not in the callers.** Every request to any engine passes through
+    this function, so this is the only place where "did question content leave the network" can be
+    answered for certain. A check in the orchestrator would be a check that the *next* caller could
+    forget; a check here is one the platform cannot route around. The refusal returns `None` rather
+    than raising, because the caller's correct response is to fall back to the local engine.
     """
+    refusal = egress_refusal(endpoint)
+    if refusal:
+        return None, 0.0
     request = urllib.request.Request(
         endpoint_url(endpoint["url"]),
         data=json.dumps(body_for(endpoint, messages, max_tokens=max_tokens,
@@ -206,8 +248,51 @@ def ask(messages, *, endpoint, max_tokens, timeout, temperature=0):
     try:
         raw = json.loads(urllib.request.urlopen(request, timeout=timeout).read().decode())
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        _audit_egress(endpoint, messages, None, time.time() - started, str(exc))
         return None, time.time() - started
+    _audit_egress(endpoint, messages, raw, time.time() - started, "")
     return raw, time.time() - started
+
+
+def _audit_egress(endpoint, messages, raw, seconds, error):
+    """Record what actually left the network, for endpoints that are external.
+
+    Charter §8 requires a manifest of 「來源版本、checksum、執行者、時間與結果報告」 for a run that
+    crosses a boundary, and `external_llm_calls.jsonl` is that manifest for this one. It records the
+    **size** of what was sent and the prompt's shape, never the prompt text itself — the audit stream
+    is not a second copy of the corpus, and charter §8 also says logs must not carry question content.
+
+    Local engines are not logged: they do not cross a boundary, and logging them would bury the
+    handful of entries that matter under a hundred thousand that do not. An external call that never
+    happens (gate closed) produces no entry either — there was no egress to audit.
+    """
+    if not endpoint.get("external"):
+        return
+    stream = os.environ.get("QBR_EXTERNAL_AUDIT_LOG", "")
+    if not stream:
+        return
+    payload = json.dumps(messages, ensure_ascii=False)
+    usage = (raw or {}).get("usage") or {}
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "model": endpoint.get("name"),
+        "url": endpoint.get("url"),
+        "prompt_bytes": len(payload.encode("utf-8")),
+        "prompt_messages": len(messages),
+        "completion_tokens": usage.get("completion_tokens"),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "seconds": round(seconds, 3),
+        "ok": raw is not None,
+        "error": error or None,
+    }
+    try:
+        os.makedirs(os.path.dirname(stream), exist_ok=True)
+        with open(stream, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        # An audit that cannot be written must not take the call down; the loop's job is repairing
+        # questions. But it is also not silent: the caller sees the failure in the round's output.
+        pass
 
 
 def content_of(raw) -> str:

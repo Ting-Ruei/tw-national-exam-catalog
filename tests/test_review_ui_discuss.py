@@ -267,12 +267,20 @@ class DiscussNoteTests(unittest.TestCase):
         cls.js = script_of(cls.html)
 
     def test_the_note_sits_above_the_principles(self):
-        """註解要在「基本原則」**上面**：先說這題，再說從它歸納出來的通則。"""
+        """註解要在「基本原則」**上面**：先說這題，再說從它歸納出來的通則。
+
+        2026-09-29：原則與反問**搬去獨立的原則區頁**（`03-area-principles.js`，owner 2026-09-24
+        要求的獨立一頁；設計者 2026-09-29 裁決討論區功能廢掉、沙盒穩定後補回）。所以這條契約
+        跟著搬：討論區的註解是中心面板**最後一項**（在答案列之前畫完）；原則區的中心面板以
+        原則開頭（原則先於反問）。
+        """
         body = function_body(self.js, "discussCenterHtml")
         note_at = body.index("discussNoteHtml(")
-        principles_at = body.index("discussPrinciplesHtml(")
-        self.assertLess(note_at, principles_at,
-                        "註解必須畫在基本原則之前（使用者的順序要求）")
+        self.assertGreater(note_at, 0)
+        # 討論區不再畫原則（畫兩次是這一輪要移除的缺陷本身）。
+        self.assertNotIn("rinciple", body)
+        pbody = function_body(self.js, "principleCenterHtml")
+        self.assertIn("principlePrinciplesHtml()", pbody[:100])
 
     def test_the_note_is_a_comment_not_a_verdict(self):
         """存的是 `comment` 事件——與題目區的「只加註記」同一種。
@@ -331,18 +339,20 @@ class DiscussButtonWiringTests(unittest.TestCase):
         html_body = "\n".join(
             function_body(self.js, name) for name in
             ("discussCenterHtml", "discussCropHtml", "discussNoteHtml", "discussOriginalHtml",
-             "discussFontHtml", "discussPrinciplesHtml", "discussQuestionsHtml"))
+             "discussFontHtml", "principlePrinciplesHtml", "principleQuestionsHtml"))
         drawn = set(re.findall(r'id="(d[A-Za-z]+)"', html_body))
         self.assertGreater(len(drawn), 10, f"抓到的 id 太少（{sorted(drawn)}），探針可能壞了")
-        # 所有會被「用」的地方：綁定與儲存函式。
+        # 所有會被「用」的地方：綁定與儲存函式（原則區的綁定在 `bindPrinciples`／`addPrinciple`）。
         used = "\n".join(
             function_body(self.js, name) for name in
             ("bindDiscuss", "bindDiscussCrop", "saveDiscussCrop", "saveDiscussNote",
              "saveDiscuss", "resetDiscuss", "focusDiscuss", "setDiscussFont", "readDiscussCrop",
-             "restoreDiscussCropPreview"))
+             "restoreDiscussCropPreview", "bindPrinciples", "addPrinciple",
+             "answerRepairQuestion"))
         # 這幾個是**容器**，不是控制項：它們只把子元素分組（`discussCase` 是吃字級變數的範圍，
-        # `discussSide`／`dCropPlace` 是排版用的包裝）。它們本身不該被按、也不該被讀值。
-        containers = {"discussCase", "discussSide", "dCropPlace"}
+        # `discussSide`／`dCropPlace` 是排版用的包裝）。`dpHint` 是新增原則時的說明文字
+        #（這條會記成哪一題），讀值的是 `dpNew`，不是它。
+        containers = {"discussCase", "discussSide", "dCropPlace", "dpHint"}
         unbound = sorted(i for i in drawn if i not in used and i not in containers)
         self.assertEqual([], unbound,
                          f"這些控制項畫出來了但沒有任何地方用它：{unbound}")

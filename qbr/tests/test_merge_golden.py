@@ -38,7 +38,7 @@ PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
 sys.path.insert(0, os.path.join(PKG, "scripts"))
 
-from qbr import answer_sheets, package  # noqa: E402
+from qbr import answer_sheets, package, review_queue  # noqa: E402
 
 GOLDEN = os.path.join(HERE, "golden", "golden_1152_medtech_biochem_candidates.jsonl")
 
@@ -132,6 +132,55 @@ def test_a_role_suffix_is_not_appended_twice():
     assert package.paper_key("moex:115090:308:0504:1:answer") == "moex:115090:308:0504:1"
     assert package.paper_key("moex:115090:308:0504:1") == "moex:115090:308:0504:1"
 
+
+
+def test_package_and_review_candidate_preserve_authoritative_answer_sources():
+    paper_key = "moex:115090:308:0504:1"
+    meta = {
+        "year": 115,
+        "exam_number": 2,
+        "category_name": "醫事檢驗師",
+        "subject_name": "生物化學與臨床生化學",
+        "category_code": "308",
+        "subject_code": "0504",
+        "question_set": "1",
+        "question_pdf": "/fixture/國考題資料夾/115/question.pdf",
+        "question_pdf_sha256": "c" * 64,
+        "answer_pdf": "/fixture/國考題資料夾/115/answer.pdf",
+        "answer_pdf_sha256": "a" * 64,
+        "corrected_pdf": "/fixture/國考題資料夾/115/correction.pdf",
+        "corrected_pdf_sha256": "b" * 64,
+    }
+    cases = (
+        ("answer", [paper_key + ":answer"], "國考題資料夾/115/answer.pdf"),
+        ("corrected", [paper_key + ":correction"],
+         "國考題資料夾/115/correction.pdf"),
+        ("answer+corrected", [paper_key + ":answer", paper_key + ":correction"],
+         "國考題資料夾/115/correction.pdf"),
+    )
+    for authority, expected_keys, expected_primary_pdf in cases:
+        question = package.build_question(
+            {"number": 7, "stem": "stem", "options": {"A": "option"}},
+            meta=meta,
+            answer=["A"],
+            registry_key=paper_key + ":answer",
+            answer_source=authority,
+            flags=[],
+        )
+        candidate = review_queue.candidate_from_question(question, gate={})
+        assert question["source_question_key"] == paper_key + ":question:q007"
+        assert question["metadata"]["external_registry_key"] == paper_key + ":question"
+        assert candidate["answer_source_registry_keys"] == expected_keys
+        assert candidate["answer_source_registry_key"] == (
+            expected_keys[0] if len(expected_keys) == 1 else None
+        )
+        assert candidate["metadata"]["answer_pdf_primary_relative"] == expected_primary_pdf
+        assert [source["registry_key"] for source in
+                candidate["metadata"]["answer_source_documents"]] == expected_keys
+        assert [source["role"] for source in
+                candidate["metadata"]["answer_source_documents"]] == [
+                    key.rsplit(":", 1)[-1] for key in expected_keys
+                ]
 
 def test_a_partial_registry_hit_still_reaches_the_correction_sheet():
     """註冊表只給了 question/answer 時，更正答案卷仍要從目錄找到。
