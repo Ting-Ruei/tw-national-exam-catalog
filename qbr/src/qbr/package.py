@@ -41,6 +41,25 @@ SUPPORTED_QUESTION_TYPES = ("single_choice", "single", "multiple", "truefalse", 
 # and a reader of the manifest does not have to infer it from a date.
 REVIEW_STATUS_MACHINE_ONLY = "machine_verified_pending_human"
 
+# A record the reviewing agent has checked on the paper and found clean, with multiple lines of
+# evidence agreeing. It is **not** `accepted` and must never be written as `accepted`:
+# `accepted` is a human decision and the governance floor (AGENTS.md: an agent must never
+# impersonate a human reviewer). This state exists so an agent's clean result can be delivered
+# without either mislabelling it as human review or leaving it indistinguishable from the
+# untouched backlog.
+REVIEW_STATUS_AGENT_VERIFIED = "agent_verified"
+
+# What the platform's importer will accept as "fit to deliver". Ordered weakest to strongest;
+# the distinction is preserved in the data, so a later reader can always tell which one it was.
+DELIVERABLE_REVIEW_STATUSES = (
+    REVIEW_STATUS_MACHINE_ONLY,
+    REVIEW_STATUS_AGENT_VERIFIED,
+    "accepted",
+)
+
+# Statuses that mean a person looked at the record. Only a person may write these.
+HUMAN_REVIEW_STATUSES = ("accepted",)
+
 
 def sha256_text(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()

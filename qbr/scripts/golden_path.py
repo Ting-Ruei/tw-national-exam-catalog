@@ -579,6 +579,38 @@ def stage_records(parsed, gate, table, sheets, meta, registry_key, review_status
 
 # --------------------------------------------------------------------------- S6 verify
 
+def classify_validator_issues(report):
+    """Split a validator report into (structural findings, governance findings).
+
+    Pulled out of `stage_verify` so it can be tested without a package on disk: this
+    classification decides whether a run *failed* or merely has an unmet prerequisite, and
+    getting it wrong is silent in both directions — a missed structural break is hidden, or an
+    unreviewed package gets blamed for a defect that never happened.
+
+    An issue whose **only** unmet field is the review-status marker is a governance gap. Anything
+    else is a defect in what was built. The marker is matched by prefix: its exact wording changed
+    once (when the agent-verified status was added), and an exact match would have reclassified
+    every unreviewed package as a build defect.
+    """
+    review_marker_prefix = "metadata.review_status"
+    structural, governance = [], []
+    for issue in report.get("issues") or []:
+        if issue.get("severity") != "error":
+            continue
+        for example in issue.get("examples") or [{}]:
+            missing = example.get("missing") or []
+            if missing and all(str(item).startswith(review_marker_prefix) for item in missing):
+                finding = {"code": issue.get("code"), "count": issue.get("count")}
+                if finding not in governance:
+                    governance.append(finding)
+            else:
+                finding = {"code": issue.get("code"), "count": issue.get("count"),
+                           "missing": missing[:5]}
+                if finding not in structural:
+                    structural.append(finding)
+    return structural, governance
+
+
 def stage_verify(package_dir, platform_app, db_container, review_status):
     """Run the platform's own validators against the package.
 
@@ -590,10 +622,8 @@ def stage_verify(package_dir, platform_app, db_container, review_status):
     results = {}
 
     # A validator that refuses the package *because no human has reviewed it* is reporting a
-    # governance gap, not a defect in what was built. The two are told apart, because a
-    # pipeline that reads them alike will either hide a real break or grow a workaround that
-    # certifies machine output as human-reviewed.
-    review_marker = 'metadata.review_status=accepted'
+    # governance gap, not a defect in what was built. `classify_validator_issues` below does the
+    # telling apart; the two must never be read alike.
     # Found, not counted to: `dirname(dirname(PKG)) + "tw-national-exam-catalog"` pointed outside
     # the repository in a standalone clone, where the validator would simply never run and the
     # gate would silently pass. A gate that cannot find its validator must not look satisfied.
@@ -607,23 +637,7 @@ def stage_verify(package_dir, platform_app, db_container, review_status):
             report = json.loads(proc.stdout or "{}")
         except json.JSONDecodeError:
             report = {}
-        structural, governance = [], []
-        for issue in report.get("issues") or []:
-            if issue.get("severity") != "error":
-                continue
-            for example in issue.get("examples") or [{}]:
-                missing = example.get("missing") or []
-                # An issue whose *only* unmet field is the human-review marker is a
-                # governance gap. Anything else is a defect in what was built.
-                if missing and all(item == review_marker for item in missing):
-                    finding = {"code": issue.get("code"), "count": issue.get("count")}
-                    if finding not in governance:
-                        governance.append(finding)
-                else:
-                    finding = {"code": issue.get("code"), "count": issue.get("count"),
-                               "missing": missing[:5]}
-                    if finding not in structural:
-                        structural.append(finding)
+        structural, governance = classify_validator_issues(report)
         results["catalog_package_validator"] = {
             "exit_code": proc.returncode,
             "review_status": review_status,
@@ -838,7 +852,7 @@ def run_stages(args):
                              "records, so the catalog validator refuses the package. This is "
                              "a governance gap to be decided, not a build defect."),
                      "decides": "REV-04 / REL-01 / GOV-05"}
-                ] if args.review_status != "accepted" else []
+                ] if args.review_status not in package.DELIVERABLE_REVIEW_STATUSES else []
                 manifest["stages"][stage] = {
                     "status": "failed" if failures else "passed", "detail": detail}
                 if failures:
@@ -940,8 +954,9 @@ def main(argv=None):
     parser.add_argument("--db-container", default="exam_repat_dev_db")
     parser.add_argument("--review-status", default=package.REVIEW_STATUS_MACHINE_ONLY,
                         help="metadata.review_status written into the package. The catalog "
-                             "validator only accepts 'accepted', which only a human review "
-                             "may produce (GOV-05); the default therefore does not claim it.")
+                             "validator accepts 'agent_verified' (an agent checked it on the "
+                             "paper) and 'accepted' (a human decided). The default claims "
+                             "neither (GOV-05).")
     parser.add_argument("--emit-candidates", action="store_true", default=True,
                         help="also write review-ui/candidates.jsonl for the Review UI")
     parser.add_argument("--no-emit-candidates", dest="emit_candidates", action="store_false")
