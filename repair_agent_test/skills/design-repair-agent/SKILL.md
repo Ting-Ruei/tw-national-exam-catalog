@@ -857,14 +857,45 @@ cache 在 `store/index/`，失效條件 `(size, mtime_ns, ino)`，未命中一�
 `questions_of_paper` 索引 vs `REPAIR_AGENT_NO_INDEX=1` 串流 `same rows deep: True`。
 剩下的 0.94 s 是 `do_browse` 仍要 `json.loads` 79,090 列，**刻意不動**。
 
-**#4 藥師(一) 99 題清單 — 已算出，稽核未跑。** 筆電 queue 上 334 題 disputed／99 題有 notes，
-清單 `/tmp/agent_perf/pharmacist1_notes_keys.txt`（每行一 key）。
+**#4 藥師(一) 99 題清單 — 已算出，稽核已在跑（背景，約 2 分鐘／題）。** 筆電 queue 上 334 題
+disputed／99 題有 notes，清單 `repair_agent_test/agent/pharmacist1_notes_keys.txt`。跑法與痕跡：
+
+```sh
+repair_agent_test/agent/audit_pharmacist1.sh <keys-file> <out-dir>   # 背景：nohup ... &
+tail -f <out-dir>/run.log            # 每題一行
+cat <out-dir>/summary.tsv            # key / rc / 秒數 / 這次多了幾行判讀
+```
+
+結果落在沙盒自己的流：`repair_agent_test/agent/store/agent_feedback.jsonl`（`action: ai_feedback`、
+`source: agent`、`engine: occamy-6bit`），**不碰** `question_review_events.jsonl`。
+
+**兩個只有實際跑才會踩到的坑**（都留在腳本註解裡）：macOS 沒有 `timeout` 這個執行檔
+（互動 shell 的 builtin 不算），在分離的迴圈裡叫它 → 98 題全部 rc=127／0 秒，看起來像
+「模型拒答 98 題」；改用 watchdog subshell 則會留下 `sleep 900`，第一題跑完後卡 15 分鐘。
+現在用 `perl -e 'alarm shift; exec @ARGV' 900`。
+
+**沙盒介面（改完要重啟，且真的在畫面上看過）**：`/api/browse?category=藥師(一)` 回 5,040 列
+（0.46 s）、勾「有問題的（你說過的）」篩出 **334** 列並印出設計者當初寫的那句話
+（`human_event_keys()` 那條路徑）、點一列會載入題目與 PDF；**新開的綁題對話在 session 檔裡
+seed 出現 1 次**，agent 真的去 `read` 重切的圖並回答這一題（修好之前它會回「你沒給 candidate_key」）。
+介面 console 0 錯誤。
 
 **#5 五支 PR — 仍然開不了（無 token），而且 base 要用對。** `gh auth status` → token invalid、
 keychain 與 env 都沒有。**比較基準是 `agent/review-ui-server-split-20260923`（PR #5 的來源分支），
 不是 `main`**：5 支都含它為祖先、彼此不互相包含，相對 `main` 各是 96–104 commits／150–244 檔，
-相對 split 分支只有 7 個（`repair-agent-pi-sdk` 是 15 個）。
-`https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-server-split-20260923...<branch>`
+相對 split 分支只有 7 個（`repair-agent-pi-sdk` 是 16 個）。逐支 compare：
+
+| 分支 | compare（base = split 分支） | 增量（`git rev-list --count <base>..origin/<b>`） |
+|---|---|---|
+| `agent/fix-option-alphabet-union-20260927` | `...compare/agent/review-ui-server-split-20260923...agent/fix-option-alphabet-union-20260927` | 7 |
+| `agent/engine-endpoints-runtime-20260927` | 同上換分支名 | 7 |
+| `agent/export-question-page-20260927` | 同上 | 7（**#5 裁決要合併的那支**） |
+| `agent/agent-verified-gate-20260928` | 同上 | 7 |
+| `agent/repair-agent-pi-sdk-20260928` | 同上 | 16（本輪又 +1，含這份文件） |
+
+`https://github.com/Ting-Ruei/tw-national-exam-catalog/` ＋ 上表後半段。開 PR 的順序：先讓 PR #5
+（split 分支）進去，再把這 5 支改成對 `main`；在那之前對 `main` 開 PR 會把整條 split 分支的
+96–104 commits 一起帶進來。
 
 **站上 findings 的 200 行差異＝不要推。** 筆電多出的 200 行全是
 `model: incoai/Qwen3.8-27B-Splash`、`endpoint http://127.0.0.1:8088`（該端點 down）的
