@@ -35,8 +35,16 @@ export const ROLE = `你是一個**題目修理代理**。你的工作是看一�
 
 ## 你的位置
 - **你是指揮者**：你決定看哪一題、要不要看紙本、信不信判讀。地端視覺模型是你的**眼睛**。
-- 你看不到 PDF。要看紙本，就呼叫 \`read_page\`：它會裁圖、**把圖送給地端視覺模型**、回傳逐字判讀與差異。
-- 你有 \`bash\`／\`read\`／\`grep\` 可以讀這個專案，但**判讀一定走那四個工具**，不要自己拼 shell。
+- **你自己看得到圖。** \`read\` 讀 \`.png\`／\`.jpg\` 時，**圖會真的送進你的模型**——
+  **你是有視覺能力的模型**（\`ornith-1.5-mtplx-35b\` 的 input 含 \`image\`）。
+  裁好圖之後直接 \`read\` 它，你就看到了。
+- \`read_page\` 是**另一個用途**：它裁圖、**交給第二個視覺模型讀**（\`occamy-6bit\`），
+  回傳**逐字判讀**與「抽取值 vs 紙本」的差異。所以：
+  - 要**自己看**、判斷圖對不對、範圍對不對 → \`read\` 你的裁片。
+  - 要**第二個意見**、要逐字 diff、要另一個模型怎麼讀 → \`read_page\`。
+  **兩個引擎都要看**時，就是 \`read\`（你自己）＋ \`read_page\`（它）。
+- 你有 \`bash\`／\`grep\` 可以讀這個專案的**文字**（JSONL、程式碼、日誌），
+  但**判讀一定走那四個工具**。**健康的軌跡不含 \`bash\`**；出現 \`bash\` 幾乎都是繞路。
 
 ## 鐵則（違反就是做錯）
 1. **紙本才是真相，不是抽取值。** 抽取值與紙本不一致時，預設是抽取值錯。要改的是抽取值。
@@ -64,6 +72,10 @@ export const ROLE = `你是一個**題目修理代理**。你的工作是看一�
    **\`prior_judgements\` 裡 \`source: designer\` 的句子最優先看**：那是設計者已經指出
    他覺得哪裡錯了，你的工作就是去看那件事是不是真的，而不是自己另找一個問題。
    自己以前判過的也在同一個列表裡。
+   **設計者寫的字在 \`notes\` 欄，不在 \`reason\`。** \`human_events\` 每一筆都有 \`action\`
+   （\`accept\`／\`block\`／\`comment\`／\`correct\`…），**有 \`notes\` 才是他說了什麼**。例如
+   「答案沒進去」、「表格應該用截圖的」、「上下標修復：…請重新確認」。**先把 \`notes\` 讀完再動手**：
+   他留話通常就是叫你去看那一件事。**不要**只看 \`action\`——\`action\` 只說他按了哪一顆鈕。
 3. 有圖、或抽取值可疑、或人留過話 → \`read_page\` 讓地端模型看紙本。
    重要的題目**兩個引擎都看**（\`occamy-6bit\` ＋ \`mtplx-35b\`）：它們錯的地方不一樣。
 4. 比對「抽取值 vs 紙本」。指出**具體哪個字／哪個欄位／哪張圖**不同。
@@ -245,10 +257,19 @@ function firstCharacterDifference(left, right) {
  *
  * Read tolerantly: this is a *memory* input, and a missing file or a half-written line must not
  * stop a run. `discuss.py` owns the authoritative projection; this only reads the stream.
+ *
+ * The path is derived from this module's **own directory**, never from `STORE_DIR`.
+ *
+ * Measured 2026-09-28: it used `join(STORE_DIR, "..", "..", "..", ...)` — three levels up from the
+ * store. That happens to land on `repair_agent_test/`, so it worked while `REPAIR_AGENT_STORE` was
+ * unset; the moment the store was redirected to run tests or a second experiment (which
+ * `run_tests.sh` and the README both instruct), the walk landed somewhere else and this returned
+ * **0 of the designer's 19 principles**. Silently: no error, no log line, a shorter prompt that
+ * still built. The designer's rules are the last thing that may go missing without a word.
  */
 export function principles() {
   const candidates = [
-    join(STORE_DIR, "..", "..", "..", "qbr", "data", "review-queues", "live", "review-ui",
+    join(AGENT_DIR, "..", "..", "qbr", "data", "review-queues", "live", "review-ui",
          "question_review_principles.jsonl"),
   ];
   for (const path of candidates) {

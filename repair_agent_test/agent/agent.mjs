@@ -16,80 +16,16 @@
  *               Two tables would be exactly the "two places that can disagree" the charter bans.
  */
 
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import { systemPrompt, remember, STORE_DIR, LOG_PATH } from "./lib/identity.mjs";
-import { toolsFor, PATHS } from "./lib/tools.mjs";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { STORE_DIR, LOG_PATH } from "./lib/identity.mjs";
+import { PATHS } from "./lib/tools.mjs";
+import { buildSession, BRAIN } from "./lib/session.mjs";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
-const run = promisify(execFile);
 // `fileURLToPath`, not `URL.pathname`: this checkout's path contains a space, and `pathname`
 // leaves it as `%20`, which turns a valid interpreter into ENOENT.
 const HERE = fileURLToPath(new URL(".", import.meta.url)).replace(/\/$/, "");
-
-/**
- * The brain. A separate decision from the eyes: `read_page` is always a local vision engine,
- * while this is whichever model does the planning. Default is the local 35B MoE so the agent is
- * self-contained; `REPAIR_AGENT_MODEL=llm-share/deepseek-v4.1-flash` switches it to the cloud
- * model the designer approved for this stage (D3: exam questions are public data).
- */
-const BRAIN = process.env.REPAIR_AGENT_MODEL || "ornith-mtplx/ornith-1.5-mtplx-35b";
-
-/**
- * Build the Pi provider record from `engines.py`, not from a hand-written copy.
- *
- * This is the one place the "two tables" risk lives, so it is a call into the pipeline's own
- * module. If someone repoints `QBR_ENGINE_MTPLX_35B_URL`, the agent follows on the next run
- * without an edit here — which is the whole reason the endpoints were made runtime-settable
- * (branch `agent/engine-endpoints-runtime-20260927`).
- */
-const PYTHON_CMD = process.env.QBR_PYTHON || `${HERE}/../../qbr/.venv/bin/python`;
-
-async function localProviders() {
-  const script = `
-import json, sys
-sys.path.insert(0, r"${HERE}/../../qbr/src")
-from qbr import engines
-out = {}
-for name, record in engines.endpoints().items():
-    out[name] = {"url": record["url"], "model": record["name"], "key": record.get("key", ""),
-                 "reasoning": bool(record.get("reasoning") or record.get("thinking"))}
-print(json.dumps(out))
-`;
-  const { stdout } = await run(PYTHON_CMD, ["-c", script], { timeout: 60_000 });
-  return JSON.parse(stdout);
-}
-
-function providerConfig(name, record) {
-  return {
-    name,
-    baseUrl: record.url.replace(/\/$/, "") + "/v1",
-    api: "openai-completions",
-    apiKey: record.key || "local-no-auth",
-    authHeader: Boolean(record.key),
-    compat: {
-      supportsStore: false,
-      maxTokensField: "max_tokens",
-      // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
-      // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
-      ...(record.reasoning ? {} : { thinkingFormat: "qwen-chat-template" }),
-    },
-    models: [
-      {
-        id: record.model,
-        name: `${record.model} (local)`,
-        reasoning: record.reasoning,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 32768,
-      },
-    ],
-  };
-}
 
 function log(record) {
   mkdirSync(STORE_DIR, { recursive: true });
@@ -104,8 +40,16 @@ function log(record) {
  * question, *which* engine, and *whether* a diff was found — the reading itself lives in the
  * tool result the model saw and in the crop on disk.
  */
-function summarize(payload) {
-  if (!payload || typeof payload !== "object") return undefined;
+function summarize(details, content) {
+  // An image read arrives in `content` as a part list. Name the parts before anything else, because
+  // that is the only trace that the model actually received a picture.
+  const parts = Array.isArray(content)
+    ? content.map((part) => part?.type || typeof part)
+    : undefined;
+  const payload = details;
+  if (!payload || typeof payload !== "object") {
+    return parts ? { content_parts: parts } : undefined;
+  }
   // `error` first and always: a failed tool whose log line says only `{"ok":false}` is a log that
   // costs a re-run to interpret. The reason is the one field that must survive into the record.
   if (payload.error) {
@@ -115,6 +59,22 @@ function summarize(payload) {
                 "count", "boxes_supplied", "rows"].filter((k) => payload[k] !== undefined);
   const out = {};
   for (const key of keys) out[key] = payload[key];
+  // A tool whose details do not contain any of the named keys must **not** log as `{}`.
+  //
+  // Measured 2026-09-28: `read` returned a picture (a real, working result) and the log line said
+  // `-> {}` for all four calls. That `{}` was read as "the read failed", which produced a wrong
+  // conclusion — 「read 讀不到圖」 — and a prompt sentence that told the agent not to try. The
+  // picture had worked the whole time; the log had lost it.
+  //
+  // So: name what kind of payload it was, and how big. Never an empty object for a success.
+  if (parts) out.content_parts = parts.slice(0, 8);
+  if (!Object.keys(out).length) {
+    if (typeof payload.text === "string") {
+      out.text_chars = payload.text.length;
+    } else {
+      out.shape = Object.keys(payload).slice(0, 8);
+    }
+  }
   if (payload.diff) {
     out.stem_differs = Boolean(payload.diff.stem_differs);
     out.option_differs = Object.keys(payload.diff.option_differs || {});
@@ -134,80 +94,37 @@ async function main() {
     return 2;
   }
 
-  const modelRuntime = await ModelRuntime.create();
-  for (const [name, record] of Object.entries(await localProviders())) {
-    modelRuntime.registerProvider(name, providerConfig(name, record));
+  // One builder, shared with the chat box (`lib/session.mjs`). This file must not build its own —
+  // a second construction site is a second place a prompt fix can be applied to only one of.
+  let built;
+  try {
+    built = await buildSession({ sessionManager: SessionManager.create(HERE) });
+  } catch (error) {
+    console.error(error.message);
+    return error.code === "MODEL_NOT_FOUND" ? 3 : 1;
   }
-
-  const [provider, id] = BRAIN.split("/");
-  const model = modelRuntime.getModel(provider, id);
-  if (!model) {
-    // Not a fallback. Using a different model silently would make every number from this run
-    // unattributable to a model — and the project's whole point is that its numbers are auditable.
-    const available = (await modelRuntime.getAvailable()).map((m) => `${m.provider}/${m.id}`);
-    console.error(`找不到模型 ${BRAIN}。可用：\n  ${available.join("\n  ") || "(無)"}`);
-    return 3;
-  }
-
-  // The system prompt is built once and also recorded, so the record and the send agree.
-  const prompt = systemPrompt();
-
-  const resourceLoader = new DefaultResourceLoader({
-    // The repository root, not `agent/`. `read`, `grep` and `find` resolve their paths against
-    // this cwd, and every path this agent is handed is repository-root-relative
-    // (`qbr/data/review-queues/...`). Running from `agent/` made those reads fail — measured
-    // 2026-09-28: four `read` calls on the option crops returned errors, the model concluded the
-    // files were missing, and it ran four `find` and five `bash` calls (including `find /`) to
-    // locate pictures that were exactly where the tool had told it they were. The run still
-    // answered correctly, which is why the wrong cwd survived: the damage showed up only as a
-    // long tool trace, never as a wrong conclusion.
-    cwd: PATHS.CATALOG,
-    // `agentDir` is required by the loader (passing undefined crashes inside its own path
-    // resolution). `getAgentDir()` is Pi's own answer, so the agent reads the same auth/models
-    // store the CLI does instead of a second convention invented here.
-    agentDir: process.env.PI_AGENT_DIR || getAgentDir(),
-    // Discovery of this repo's own skills/extensions is off: a repair run must be reproducible,
-    // and "which extensions happened to be installed" is not part of the experiment.
-    noExtensions: true,
-    noSkills: true,
-  });
-  await resourceLoader.reload();
-
-  // Names must be listed here: `tools` is an **allowlist** ("only the listed tool names are
-  // enabled"), and omitting the custom names silently leaves them inactive — the agent then
-  // reaches for `bash` and calls bridge.py by hand, which works but loses the named audit trail.
-  const customTools = toolsFor(Type);
-  const builtin = ["read", "grep", "find", "ls", "bash"];
-
-  const { session } = await createAgentSession({
-    cwd: PATHS.CATALOG,
-    modelRuntime,
-    model,
-    thinkingLevel: process.env.REPAIR_AGENT_THINKING || "medium",
-    resourceLoader,
-    // No edit/write: this agent produces findings, not edits — applying a fix is a different,
-    // more constrained step.
-    tools: [...builtin, ...customTools.map((tool) => tool.name)],
-    customTools,
-    // Persistent by construction: the designer asked for an agent that gets smarter, and a
-    // memory that disappears with the process cannot be smarter than its last run.
-    sessionManager: SessionManager.create(HERE),
-    sessionStartEvent: { reason: "startup" },
-  });
+  const { session, model, prompt } = built;
 
   log({ event: "session_start", brain: BRAIN, system_prompt: prompt, task,
         tools: session.getActiveToolNames() });
 
   if (probe) {
+    // `session.systemPrompt` is what the model will actually be given. Printing `prompt.length`
+    // alone was how this agent shipped for a day with `systemPrompt()` computed, logged, and never
+    // passed to the session — every line said 7,504 chars while the model read Pi's coding-assistant
+    // prompt. The two numbers are printed side by side so they cannot diverge silently again.
+    const actual = session.systemPrompt || "";
+    const wired = actual.includes("題目修理代理");
     console.log("brain          :", `${model.provider}/${model.id}`);
     console.log("thinking       :", session.thinkingLevel);
     console.log("tools          :", session.getActiveToolNames().join(", "));
     console.log("store          :", STORE_DIR);
-    console.log("system prompt  :", prompt.length, "chars");
+    console.log("system prompt  :", prompt.length, "chars built →", actual.length, "chars in session",
+                wired ? "(the agent's own)" : "⚠ NOT THE AGENT'S — the session has Pi's default");
     console.log("--- prompt ---");
-    console.log(prompt);
+    console.log(actual);
     session.dispose();
-    return 0;
+    return wired ? 0 : 4;
   }
 
   session.subscribe((event) => {
@@ -226,9 +143,16 @@ async function main() {
       console.error(`\n[tool] ${event.toolName}`);
     }
     if (event.type === "tool_execution_end") {
-      const payload = event.result?.details;
+      // **Both** halves of the result, not just `details`.
+      //
+      // Measured 2026-09-28: built-in tools put their output in `result.content` (an array of parts,
+      // where an image read is `[{type:'text'},{type:'image',data:'iVBOR...'}]`), while this project's
+      // custom tools put theirs in `result.details`. Reading only `details` logged every successful
+      // `read` as `{}` — which is how a working image read was mistaken for a failure.
+      const content = event.result?.content;
+      const details = event.result?.details;
       log({ event: "tool_result", tool: event.toolName, ok: !event.isError,
-            summary: summarize(payload) });
+            summary: summarize(details, content) });
     }
     if (event.type === "agent_settled") {
       log({ event: "agent_settled" });
@@ -240,14 +164,27 @@ async function main() {
     if (interactive) {
       const readline = await import("node:readline/promises");
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      for (;;) {
-        const line = (await rl.question("\n> ")).trim();
-        if (!line) continue;
-        if (line === "/quit" || line === "/exit") break;
-        await session.prompt(line);
-        process.stdout.write("\n");
+      try {
+        for (;;) {
+          // `rl.question` throws `ERR_USE_AFTER_CLOSE` when stdin ends (piped input, Ctrl-D) —
+          // measured 2026-09-28: `printf "/quit" | node agent.mjs --interactive` crashed *after*
+          // answering, so a scripted conversation could never be read to the end. `close` is the
+          // normal end of input, not an error.
+          let line;
+          try {
+            line = (await rl.question("\n> ")).trim();
+          } catch (error) {
+            if (error?.code === "ERR_USE_AFTER_CLOSE") break;
+            throw error;
+          }
+          if (!line) continue;
+          if (line === "/quit" || line === "/exit") break;
+          await session.prompt(line);
+          process.stdout.write("\n");
+        }
+      } finally {
+        rl.close();
       }
-      rl.close();
     }
     console.log();
   } finally {

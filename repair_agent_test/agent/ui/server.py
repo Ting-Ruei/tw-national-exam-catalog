@@ -39,6 +39,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import subprocess
 
 HERE = Path(__file__).resolve().parent
 AGENT_DIR = HERE.parent
@@ -59,9 +60,25 @@ _spec.loader.exec_module(bridge)
 
 from qbr.review_ui.paths import content_type_of, safe_file_path  # noqa: E402
 
+# The queue root must be an allowed asset root, or `/file` refuses every figure and PDF crop.
+#
+# This is not a new idea: it is the **station's own contract**. The v2 service runs with
+# `REVIEW_UI_ADDITIONAL_ASSET_ROOTS: /queue` and mounts the live queue at `/queue`
+# (`deploy/qbr-review/compose.yaml`), which is what makes `review-ui/crops/...` resolvable there.
+# Measured 2026-09-28: without it, `safe_file_path` maps a crop to
+# `國考題資料夾/review-ui/crops/...` (which does not exist) and `/file` answers **404** — the crops
+# were on disk, the pipeline had cut them correctly, and the page showed none of them.
+#
+# Set with `setdefault` so a deployment that already sets it (the station does) keeps its own value;
+# one contract, two places it can be configured, and the station wins where it is deployed.
+os.environ.setdefault("REVIEW_UI_ADDITIONAL_ASSET_ROOTS", bridge.QUEUE_ROOT)
+
 STORE = Path(bridge.STORE)
+RATINGS = bridge.JUDGEMENT_RATINGS
 STORE_DIR = Path(bridge.STORE_DIR)
 LESSONS = STORE_DIR / "lessons.jsonl"
+# The agent's own trace, written by `agent.mjs`. Read-only here: this server never writes it.
+LOG = STORE_DIR / "agent.log.jsonl"
 CROPS = STORE_DIR / "crops"
 
 _write_lock = threading.Lock()
@@ -94,6 +111,30 @@ def judgements_for(key: str) -> list[dict]:
 
 def lessons_for(key: str) -> list[dict]:
     return [row for row in _read_jsonl(LESSONS) if row.get("key") == key]
+
+
+def trace_for(key: str) -> list[dict]:
+    """The agent's tool calls that named this question, in order.
+
+    This is the honest answer to「AI 實際上讀到／產生什麼」for a judgement already made: the
+    feedback record keeps only the conclusion (`reason`), so a reviewer who wants to argue with the
+    reading has to see **what the agent did** — which tool, with what arguments, returning what.
+
+    Read from `store/agent.log.jsonl`, which is append-only and written by `agent.mjs`. A call is
+    matched by the question key appearing in its arguments *or* its recorded summary, because
+    `read`/`read_page` name the crop or the key and `crop_question` names the `--out` path — matching
+    on `candidate_key` alone would drop exactly the calls that produced the picture.
+
+    Deliberately **not** summarised here: the log's `summarize()` already decided what to keep (a
+    lossy step, and one that once lost an image), and this returns the stored line so the reviewer
+    reads what was recorded rather than a third rendering of it.
+    """
+    rows = []
+    for row in _read_jsonl(LOG):
+        blob = json.dumps(row, ensure_ascii=False)
+        if key in blob:
+            rows.append(row)
+    return rows
 
 
 def append_judgement(record: dict) -> dict:
@@ -139,7 +180,142 @@ def question_payload(key: str) -> dict:
         view["crop_png"] = str(candidates[-1])
     view["judgements"] = judgements_for(key)
     view["lessons"] = lessons_for(key)
+    view["trace"] = trace_for(key)
     return view
+
+
+# The A2 run artifacts. `HERE` is `agent/ui`, so the sandbox is two levels up.
+A2_RUNS = Path(bridge.SANDBOX) / "a2" / "runs"
+
+
+def a2_runs() -> list[dict]:
+    """The comparison pages and run files that already exist, newest first.
+
+    Listed from the directory rather than hard-coded: a run is produced by a script, and a list of
+    known names would silently omit the next one.
+    """
+    if not A2_RUNS.is_dir():
+        return []
+    out = []
+    for path in sorted(A2_RUNS.iterdir(), reverse=True):
+        if path.suffix.lower() not in (".html", ".jsonl"):
+            continue
+        out.append({
+            "name": path.name,
+            "kind": "頁面" if path.suffix.lower() == ".html" else "執行記錄",
+            "bytes": path.stat().st_size,
+            "url": "/a2?name=%s" % path.name,
+        })
+    return out
+
+
+# --- the chat box ------------------------------------------------------------------------
+#
+# The session lives in a **Node process** (`ui/chat.mjs`), not in this server. That is not a
+# preference: a Pi session is a JavaScript object (it holds the conversation, its compaction and its
+# model client), and Python cannot own one. So this process keeps exactly one child and speaks
+# JSON-per-line to it; the child keeps one session per question.
+#
+# If the child dies, its sessions die with it. That is stated plainly rather than papered over with a
+# restart-and-pretend: a restarted child answers as a stranger, and a conversation that silently
+# became a new conversation is worse than one that says so.
+class Chat:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.process: subprocess.Popen | None = None
+
+    def ensure(self) -> subprocess.Popen:
+        if self.process is None or self.process.poll() is not None:
+            self.process = subprocess.Popen(
+                ["node", str(HERE / "chat.mjs")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=str(CATALOG), text=True, bufsize=1,
+                env={**os.environ, "REPAIR_AGENT_STORE": str(STORE_DIR)},
+            )
+        return self.process
+
+    def send(self, message: dict) -> None:
+        with self.lock:
+            process = self.ensure()
+            process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+
+    def stream(self, message: dict):
+        """Send one message and yield the child's lines until its turn ends.
+
+        The lock is held for the whole turn, and that is deliberate: two designers typing at once
+        would interleave two answers into one stream, and the delta text cannot be told apart. One
+        conversation at a time is a limit this UI accepts rather than hides.
+
+        The child is a **single** process for all questions, and it answers with the request's own
+        `id` on every line, so an in-flight turn for q042 cannot be mistaken for one about q068.
+        """
+        with self.lock:
+            process = self.ensure()
+            process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+            assert process.stdout is not None
+            for line in process.stdout:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield event
+                # `done` and `error` are the two ends of a turn; `ready`/`pong` are not answers.
+                if event.get("event") in ("done", "error"):
+                    return
+
+
+CHAT = Chat()
+
+
+def a2_page() -> str:
+    """The index of A2 artifacts, generated from the directory."""
+    runs = a2_runs()
+    if not runs:
+        body = "<p>a2/runs 裡還沒有產物。</p>"
+    else:
+        body = "<ul>" + "".join(
+            '<li><a href="%s">%s</a> <span class="k">%s · %s KB</span></li>'
+            % (row["url"], row["name"], row["kind"], max(1, row["bytes"] // 1024))
+            for row in runs) + "</ul>"
+    return (
+        "<!doctype html><html lang=\"zh-Hant\"><meta charset=\"utf-8\">"
+        "<title>A2 執行產物</title>"
+        "<style>body{font:15px/1.7 -apple-system,'PingFang TC',sans-serif;margin:24px 32px;"
+        "background:#faf9f7;color:#23201c}h1{font-size:19px}"
+        "a{color:#1b5e20}.k{color:#8a8275;font-size:12.5px}"
+        "li{margin:6px 0}</style>"
+        "<h1>A2 執行產物</h1>"
+        "<p>這些是 <code>a2/</code> 產出的模型比對頁與執行記錄。<b>它們是靜態頁，原本只能雙擊開啟</b>"
+        "（<code>build_compare_page.py</code> 自己的說明就寫了 <em>opens by double-click with no "
+        "server</em>），所以之前在 UI 裡看不到——<b>不是壞掉，是從來沒接上</b>。"
+        "這裡照原檔直接服務，不重新渲染：頁面內嵌了它那一次的 run，重畫就會多出第二份版本。</p>"
+        + body + '<p><a href="/">← 回判讀介面</a></p></html>'
+    )
+
+
+def chat_turns(key: str) -> list[dict]:
+    """The conversation transcript for one question, oldest first.
+
+    The **file** is the source, not the live child's memory: after a crash or a restart the
+    transcript is what survived, and showing the child's in-memory view would show a conversation
+    that no longer exists anywhere else.
+    """
+    path = STORE_DIR / "chat.jsonl"
+    if not path.is_file() or not key:
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("candidate_key") == key:
+            out.append(row)
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -169,8 +345,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif parsed.path == "/api/search":
                 self._search(query)
+            elif parsed.path == "/api/browse":
+                self._browse(query)
             elif parsed.path == "/api/question":
                 self._question(query)
+            elif parsed.path == "/a2":
+                # The A2 comparison pages exist but were never served by anything — they are built
+                # as static files that open by double-click (`build_compare_page.py` says so in its
+                # own docstring). The designer went looking for them in the UI and found nothing
+                # (2026-09-28: 「昨天在 a2/run 看到的多重比較為甚麼沒有顯示出來」), because "not
+                # linked anywhere" and "does not exist" look the same from a browser.
+                #
+                # This serves the file **as built**, with no re-rendering: the page embeds its run,
+                # and re-rendering it here would create a second version of a scored record.
+                self._a2(query)
+            elif parsed.path == "/api/a2":
+                self._json({"runs": a2_runs()})
+            elif parsed.path == "/api/chat":
+                # The conversation so far, read from the append-only transcript. A page reload must
+                # not lose the conversation, and the transcript is the record of it either way.
+                key = (query.get("key") or [""])[0]
+                self._json({"turns": chat_turns(key)})
             elif parsed.path == "/api/queue":
                 self._queue(query)
             elif parsed.path == "/file":
@@ -183,6 +378,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(error)}, 404)
         except Exception as error:  # noqa: BLE001 - the UI must show why, not die
             self._json({"error": "%s: %s" % (type(error).__name__, error)}, 500)
+
+    def _a2(self, query: dict) -> None:
+        """Serve one A2 artifact by name, refusing anything outside `a2/runs`."""
+        name = (query.get("name") or [""])[0]
+        if not name:
+            self._send(200, (a2_page() ).encode("utf-8"), "text/html; charset=utf-8")
+            return
+        # `name` comes from the URL, so it is resolved and then **checked to be inside** the runs
+        # directory. `..%2f` in a query string is otherwise a file read of the whole disk.
+        path = (A2_RUNS / name).resolve()
+        if not str(path).startswith(str(A2_RUNS.resolve()) + os.sep) or not path.is_file():
+            self._json({"error": "no such A2 run: %s" % name}, 404)
+            return
+        if path.suffix.lower() == ".html":
+            self._send(200, path.read_bytes(), "text/html; charset=utf-8")
+        else:
+            self._send(200, path.read_bytes(), "application/x-ndjson; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -203,11 +415,58 @@ class Handler(BaseHTTPRequestHandler):
                     "scope": "question",
                     "question_number": payload.get("question_number"),
                 }
+                if record["rating"] not in RATINGS:
+                    self._json({"error": "rating must be one of %s" % ", ".join(RATINGS)}, 400)
+                    return
                 self._json({"appended": append_judgement(record), "store": str(STORE)})
+            elif parsed.path == "/api/chat/ask":
+                self._chat_ask(payload)
+            elif parsed.path == "/api/chat/stop":
+                CHAT.send({"id": payload.get("id") or "stop", "op": "stop"})
+                self._json({"ok": True})
             else:
                 self._json({"error": "not found: %s" % parsed.path}, 404)
         except ValueError as error:
             self._json({"error": str(error)}, 400)
+
+    def _chat_ask(self, payload: dict) -> None:
+        """Stream one chat turn back as Server-Sent Events.
+
+        SSE rather than one JSON blob because the answer arrives token by token and the designer is
+        watching it arrive — a 60-second wait with a blank box is indistinguishable from a hang. The
+        same subscription that logs the agent's tool calls is what feeds this, so what streams here
+        is what the agent is actually doing, not a progress animation.
+
+        Headers are chosen for a stream that must not be buffered: `no-store` and `X-Accel-Buffering`
+        (the station fronts this with a proxy, and a buffered SSE stream arrives all at once at the
+        end — which is exactly the blank box again).
+        """
+        key = payload.get("key")
+        if not key:
+            self._json({"error": "chat needs a key: the session is bound to one question"}, 400)
+            return
+        message = {
+            "id": payload.get("id") or "chat",
+            "op": "ask",
+            "key": key,
+            "text": payload.get("text") or "",
+            "reset": bool(payload.get("reset")),
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            for event in CHAT.stream(message):
+                self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                self.wfile.flush()
+        except Exception as error:  # noqa: BLE001 - the designer must see why the box stopped
+            self.wfile.write(("data: " + json.dumps(
+                {"event": "error", "error": "%s: %s" % (type(error).__name__, error)},
+                ensure_ascii=False) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
 
     # -- endpoints ---------------------------------------------------------------------------
     def _search(self, query: dict) -> None:
@@ -223,6 +482,21 @@ class Handler(BaseHTTPRequestHandler):
             limit=int((query.get("limit") or ["40"])[0] or 40),
         )
         self._json(bridge.do_find(args))
+
+    def _browse(self, query: dict) -> None:
+        """The candidate list. Without this the UI is unusable by anyone but its author.
+
+        Delegated to `bridge.do_browse` so the browser, the agent and the CLI see one list — a
+        second query written here would be a second answer to 「哪些題還沒看」.
+        """
+        args = argparse.Namespace(
+            category=(query.get("category") or [""])[0],
+            unjudged=(query.get("unjudged") or ["0"])[0] in ("1", "true"),
+            with_figures=(query.get("with_figures") or ["0"])[0] in ("1", "true"),
+            offset=int((query.get("offset") or ["0"])[0] or 0),
+            limit=int((query.get("limit") or ["0"])[0] or 0),
+        )
+        self._json(bridge.do_browse(args))
 
     def _question(self, query: dict) -> None:
         key = (query.get("key") or [""])[0]

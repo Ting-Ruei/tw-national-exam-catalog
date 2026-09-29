@@ -3094,3 +3094,676 @@ Q33 的修正做完後重跑，**答案對了**，但工具軌跡是：`get_ques
 > 錯誤只出現在**中間步驟**（少一塊的裁片、繞路的 `find /`、被覆蓋的 dict 鍵），
 > 而**最終答案照樣產出**。審一個 agent 不能只看它答了什麼，要看**它怎麼答的**。
 > `store/agent.log.jsonl` 的工具軌跡就是為此存在的——**健康的軌跡沒有 `bash`。**
+
+---
+
+## Q35 — 設計者回饋：UI 不能只有 key、結論要三個按鈕、以及我要對話框
+
+**設計者（2026-09-28，原文）**：
+
+> 畫面有了，但是沒有題目，我不可能記得 key，應該要有候選列表，下面的結論只有沒問題跟有問題，
+> 我認為做成三個按鈕就好，沒問題、有問題、暫存，我的判讀比較像是註解，等一下可以用用看，
+> 但如果及時調適我需要對話框
+
+以及更早的同一輪：
+
+> 你要開 0.0.0.0 不然我的電腦看不到，我先看得到在跟你討論
+
+### 1. `--host 0.0.0.0`（已修）
+
+`ui/server.py` 的 `--host` 預設是 `127.0.0.1`，那只監聽筆電自己的 loopback。
+**症狀不是壞掉，是「連不上」**——給了網址、頁面打不開。已在 README 記為不能省的參數，
+並用 `lsof -nP -iTCP:8790 -sTCP:LISTEN` 確認 `*:8790`。
+
+### 2. 候選列表（已做）
+
+只給 `candidate_key` 輸入框的介面，**只有建它的人能用**。新增 `bridge.py` 的 `browse` 子命令
+＋ `/api/browse` ＋ 左欄常駐列表：
+
+- 第一個呼叫回**科目地圖**：每個科目的 `total`／`judged`／`with_figures`。
+  「我做到哪了」不必另外查。
+- 選科目後回到題目列，每列有題號、**已判狀態**、有圖數、科目、題幹兩行。
+- 篩選：**未判讀**、**有圖**。
+- **判完一題列表會自己重讀**（不是只更新中間那題），否則明天會再判同一題。
+
+**量測**：全庫 79,090 題掃一遍 **0.3 秒**（199 MB，單次、先子字串預篩再 `json.loads`）。
+所以**不需要索引或快取**——快取是第二份會過期的語料。
+
+### 3. 三個按鈕（已做）
+
+設計者的判讀「**比較像是註解**」。被迫在 up/down 之間選，等於要在「說不真確的話」與
+「什麼都不說」之間選。
+
+| 按鈕 | rating | 意思 |
+|---|---|---|
+| 沒問題 | `up` | 抽取值與紙本一致 |
+| 有問題 | `down` | 有具體差異 |
+| **暫存** | **`hold`** | **留著這句話，我還没判斷** |
+
+**`hold` 不是第三種評分，是「先記下、不算判決」**，但 agent 讀得到（同一條流）。
+
+**界線（實作紀律）**：
+
+- `JUDGEMENT_RATINGS = ("up","down","hold")` **只在 `bridge.py` 宣告一次**；
+  `server.py` 用 `bridge.JUDGEMENT_RATINGS`，**不寫第二份**（兩個清單＝兩個可以不一致的地方）。
+- **正式評分沒有放寬**：`review_ui/constants.py` 的 `AI_FEEDBACK_RATINGS` 仍是 `{"up","down"}`。
+  把 `hold` 推進正式流是**換目的地、不是換格式**，是一個要另外被審的決定。
+- 三個測試守著它，各附負對照：
+  - 把 `hold` 從 `JUDGEMENT_RATINGS` 拿掉 → `three dispositions` **FAIL**。
+  - 把 `hold` 偷加進 `AI_FEEDBACK_RATINGS` → `three dispositions` **FAIL**。
+  - `badvalue` POST → **400**（實測，不是推論）。
+
+### 4. 對話框（**還沒做，設計者已明確要求**）
+
+設計者第八輪要的是「設計者與指導者模型的 UI 對話」；我建的是**留言簿**（非同步：
+你寫一句、agent 下一輪讀到），**不是對話框**（你在裡面問、它當場回）。
+
+**設計者原話：「但如果及時調適我需要對話框」**——也就是他要在**同一頁**即時往返。
+
+**這需要新的後端能力**，因為現在的流程是「一輪＝一個行程、跑完就結束」：
+
+| 需要 | Pi SDK 有 | 現狀 |
+|---|---|---|
+| 保持 session 開著 | `SessionManager` 是持久化的；`agent.mjs --interactive` 已有 readline 迴圈 | ✅ 有 |
+| 從 HTTP 送一句給進行中的 session | SDK 有 `prompt()`／`steer()`／`followUp()`／`abort()` | ❌ **還沒接** |
+| 把 `text_delta` 串回瀏覽器 | `session.subscribe()` 有 `message_update`／`text_delta` | ❌ **還沒接** |
+
+也就是說：**底層能力 Pi 都有，缺的是「HTTP ⇄ 長跑 session」這一層**。
+（SDK 也講明：串流中送 `prompt()` 必須說明是 `steer` 還是 `followUp`，不接受猜。）
+
+**待設計者回答**：對話框要**綁在當前那一題**（討論這題怎麼判）還是**不受題目限制**
+（討論「這一類題你剛剛是怎麼判的」）？兩者後端形狀不同。
+
+### 5. 同時更正一個錯（我自己造成的）
+
+我之前說「改題目是 G3、工具不給」——**錯的**。查 `docs/governance/README.md`：
+
+- **G3** ＝ deploy、production migration、advisory import、publish/import apply。
+  **「改題目文字」不在這張表上。**
+- **G2**（可自主）已含 **parser／rule proposal** 與 **更新 agent 自己的結果**。
+- 而且**機器已經在改題目**：站上 `repair_italic_markup` 6,785、`repair_dispute_apply` 677、
+  `repair_experience_apply` 248，來自 `apply_dispute_repairs.py`，三道護欄＝
+  **人 block 過 ＋ 第二引擎 `TRUST` ＋ 量測對齊**。
+
+**教訓**：我把「我的建議（先判讀再改）」講成了「治理規定」，並在 README 留下錯誤描述。
+**建議與規定必須分開講**——這是這次回饋裡唯一一個我自己造成的錯。
+
+---
+
+## Q36 — 設計者第二次回饋：捲軸、看不到題目（`answer.map` 崩潰）
+
+**設計者（2026-09-28，原文）**：
+
+> 我現在滑鼠滾輪要下滑才能看到框與按鈕，能不能從左邊縮進來，然後可以常駐在底部
+> 另外我還是沒有辦法看到任何題目，它顯示(question.answer || []).map is not a function
+
+### 1. 三個真正的缺陷
+
+#### (a) `answer` 是**字串**，不是陣列——每一題都崩潰
+
+全庫 79,090 題實測：**`answer` 100% 是 `str`**。UI 寫
+`new Set((question.answer || []).map(...))`，`"" || []` → `[]` 沒事，
+但只要 `answer` 有值（**幾乎每一題**）就是 `"B".map` → **TypeError**。
+
+**為什麼症狀是「看不到題目」而不是「報錯」**：`loadQuestion` 的 `try` 只包了 `api()`，
+`renderQuestion()` 在 `try` 外面拋出 → **fetch 成功、渲染失敗、面板保留原本的 placeholder**。
+設計者看到空白，沒有錯誤訊息。
+
+**修法**：
+- `bridge.question_view` 新增三個欄位，**借用管線自己的正規化器**（不是新寫一個）：
+  - `answer_display` ← `ai_findings.answer_of(question)`（既有、有測試、docstring 已記錄三個陷阱）
+  - `answer_keys` ← `answer_payload.accepted_values`（**綠字用機器的那份清單**）
+  - `answer_is_void` ← `answer_payload.is_special_correction`
+- UI 改讀 `answer_keys`；`renderQuestion` 的錯誤改成**在畫面上報出來**（含 key）。
+
+**三個形狀（實測，走真的 server）**：
+
+| `answer` | `answer_display` | `answer_keys` |
+|---|---|---|
+| `B` | `B` | `['B']` |
+| `送分` | `送分（這一題不計分／全部給分；選項 A、B、C、D 都算對，這不是有四個答案）` | `['A','B','C','D']` |
+| `B或BC或C` | `B或BC或C（更正答案：這幾個選項**任一**都算對，不是要同時選）` | `['B','C']` |
+
+**為什麼不自己 parse**：`ai_findings.answer_of` 的 docstring 記了量到的代價——
+第一個 corpus sweep 的 28 筆 `ANSWER_DISAGREES` 有 **15 筆是提示詞的錯、不是紙本的錯**
+（題目被送分，模型正確指出單選題不可能有四個答案，於是報告了一個不存在的缺陷）。
+**這是「正確答案是什麼」的第二個答案**，而那是本專案唯一不能有兩份的東西。
+
+1,205 題不是單一字母：**1,161 題送分**、**44+ 題帶 `或`**（全庫 769 題帶 `或`）。
+
+#### (b) 選項有 111 題是裸值不是 dict
+
+`options` 是 `list[dict]`（78,979 題）／`list`（111 題）。UI 直接讀 `option.key`，
+裸值會靜默變成空字串。已加正規化（`typeof option === "object"` 判斷），
+因為**渲染是全部或全不**——一行炸掉會讓整題消失。
+
+#### (c) 【我自己造成】測試用的 `REPAIR_AGENT_STORE` 洩漏進 server
+
+用 `export REPAIR_AGENT_STORE=/tmp/x && ... & nohup python ui/server.py` 啟動，
+**server 繼承了那個之後被刪掉的臨時目錄**。症狀：q042 的 `crop_png` 回 `None`，
+但裁片一直在磁碟上——**看起來像裁切 bug，實際是環境變數**。
+
+**這是本輪最該記的教訓**：我用 `ps -Eww` 才看到 server 帶著 `REPAIR_AGENT_STORE=/tmp/fin-87176`。
+**修法**：新增 `run_tests.sh`，把 `REPAIR_AGENT_STORE` **只 scope 給測試行程**，
+並在啟動 server 時用 `env -u REPAIR_AGENT_STORE`。
+
+### 2. 版面：判讀區常駐底部
+
+`#write` 原本在 `main` 之後（一般文件流），要滑過整個題目＋PDF 才看得到按鈕。
+改成 **`position: fixed; bottom: 0`**（不是 `sticky`：sticky 仍然跟著文件捲動），
+`body` 加 `padding-bottom: var(--footer-h)`、`#list-wrap` 與 `#pdf-frame` 的高度
+扣掉 footer 高度，所以**列表與 PDF 也不會被 footer 蓋住**。
+
+### 3. 測試（新增 3 個，共 21 個，全過）
+
+- `the answer reaches the UI as a string plus letters, for all three shapes`
+  —— 用**真的 `bridge.py`** 驅動三個案例（字母／送分／或）。
+- `the UI never iterates the answer, and options may be bare values`
+  —— 負對照就是**當初崩潰的那一行**：`(question.answer || []).map` 不得存在。
+- `the bridge does not reimplement the answer's meaning`
+  —— 必須 delegate `ai_findings.answer_of`；`is_special_correction`／`accepted_values`
+  **不得**出現在該函式的可執行行裡（否則就是把 `answer_of` 的邏輯抄回來）。
+
+**負對照實測，兩者都 FAIL**：
+- 把 UI 改回 `(question.answer || [])` → `the UI never iterates the answer` **FAIL**
+- 把 `bridge` 的 `answer_of` 換成 `str(question.get("answer"))` → `the bridge does not reimplement` **FAIL**
+
+### 4. 教訓
+
+> **「畫面是空的」與「沒有資料」是兩件事，而前者必須自己說出原因。**
+> 這次的 fetch **成功**、資料**完整**、渲染**拋錯**——三件事都對，結果是空白頁。
+> 一個把所有渲染都包在 `try` 裡的 UI，會把 TypeError 變成「這題不存在」。
+> **錯誤要在它發生的地方現形。**
+
+> **第二條：測試的環境變數會沿著 shell 傳染給服務。**
+> `export` 之後在同一行啟動的背景服務全部繼承它。
+> 我的測試隔離（用臨時 store）**把服務弄壞了**，而症狀偽裝成一個無關的 bug（裁片消失）。
+
+---
+
+## Q37 — 進度記錄 ＋ 設計者第三輪：這是不是重複造車？截圖為什麼沒了？
+
+**設計者（2026-09-28，原文）**：
+
+> 目前UI介面好了，先記錄一下進度。下一個問題，這就是一個新的審題介面，但我過去審過很多，
+> 而我現在想要訓練自我進步與修復題目的Agent，但這個畫面像是重複造車，請問與Agent的互動怎麼做，
+> 而且過去很多管線的截圖是對的，但在這裡完全沒有截圖（因為題目本身有圖），請提出修正方法
+
+### A. 進度（截至 2026-09-28）
+
+| 項目 | 狀態 | 證據 |
+|---|---|---|
+| Pi SDK agent（`agent.mjs` ＋ 6 工具） | ✅ 可跑 | 軌跡 `get_question → read → record_judgement`，零 `bash` |
+| 學習迴路閉合 | ✅ | 機械式 `lessonsFromDiff` ＋ `remember_lesson`；跨行程實測 |
+| 判讀介面（`ui/`） | ✅ | 一次一題、右側 PDF、判讀寫檔 |
+| **候選列表**（不用記 key） | ✅ | `/api/browse`；科目地圖 ＋ 已判狀態 |
+| **三個按鈕**（沒問題／有問題／暫存） | ✅ | `hold` 只在沙盒，正式 rating 未放寬 |
+| **判讀區常駐底部** | ✅ | `position: fixed`；`--footer-h` |
+| **選項圖**（含圖題的關鍵） | ✅ | Q37 §C |
+| 契約測試 | ✅ **24 個** | `./run_tests.sh` |
+| 對話框 | ❌ **未做** | 設計者已明確要求 |
+| 把 agent 判讀接進 v2 | ❌ **未做** | 見 §B |
+
+**⚠️ 對外網址是 Tailscale**：`http://100.96.207.80:8790/`
+（設計者走 Tailscale，**不是 LAN 的 `192.168.20.249`**，更不是 `127.0.0.1`）。
+server 監聽 `*:8790`，所以三個位址都通，但**給設計者的只給 Tailscale 那個**。
+
+### B.「重複造車」— 這個問題問對了，而且答案不是我原本以為的
+
+**量到的事實**：
+
+| 東西 | v2 有沒有 | 我的沙盒 UI |
+|---|---|---|
+| AI 判讀面板（verdict／哪裡／怎麼修／機械 diff／帶入修正鈕／停手護欄） | ✅ **`qbr_ai_finding`**（`02-area-question.js` 5 處） | ❌ 只顯示句字 |
+| 選項圖綁定（`asset_role`＋`option_key`） | ✅ `optionCropHtml` | ✅ **本輪才補**（照抄 v2 的規則） |
+| 錯題討論區（三欄、留言、紙本） | ✅ `04-area-discuss.js` | ❌ |
+| 原則區 | ✅ `03-area-principles.js` | ❌ |
+| **agent 的判讀讓 v2 看到** | — | ❌ **v2 讀 `question_ai_findings.jsonl`，我的 agent 寫 `agent_feedback.jsonl`** |
+
+`grep agent_feedback qbr/ review_ui/` → **空的**。也就是說：
+**我的 agent 寫的每一個判讀，v2 一筆都看不到。**
+
+**所以「重複造車」的真正形狀不是「又蓋了一個畫面」，而是「agent 沒有接在設計者已經在的那個畫面上」。**
+設計者已經審過 12,556 筆（`local`），他在 v2 裡。我的 agent 在另一個檔裡。
+
+**這正好也回答了 §D 的第四個 bug。**
+
+### C. 截圖（設計者：「過去很多管線的截圖是對的，但在這裡完全沒有」）
+
+**兩個獨立的原因，都量過**：
+
+#### 因一：`question_view` 把 `asset_role`／`option_key` 丟掉了
+
+v2 用這兩欄把一張裁片綁到它的選項列
+（`review_ui/v2/02-area-question.js::optionCropHtml`）：
+
+```js
+ref.asset_role === 'option-image' && ref.option_key === option.key
+```
+
+我的 `figure_asset_path` ＋ `question_view` **只傳了 9 個欄位**，`asset_role` 與 `option_key`
+不在裡面 → **UI 無法把圖放進選項**。
+
+**全庫量測**：`option-image` **1,320** 筆、`figure-crop` **3,209** 筆、有圖題 **3,471 題**。
+
+q042（四個化學結構式、四個選項文字全是 `""`）：修前四個空白列，**完全無法審**。
+
+#### 因二：`/file` 拒絕服務裁片路徑（回 **404**）
+
+`safe_file_path` 把 `review-ui/crops/...` 映到
+`國考題資料夾/review-ui/crops/...`——**那個目錄不存在**。
+
+**正解不是我發明的，是站上 v2 自己的契約**：
+`deploy/qbr-review/compose.yaml` 設 `REVIEW_UI_ADDITIONAL_ASSET_ROOTS: /queue`
+（queue root），那正是讓 `review-ui/crops/...` 可解析的東西。
+
+修法：`server.py` 加 `os.environ.setdefault("REVIEW_UI_ADDITIONAL_ASSET_ROOTS", bridge.QUEUE_ROOT)`
+——**用 `setdefault`**，站上已設的值優先（一份契約、兩個地方可設，部署處贏）。
+
+實測（Tailscale 位址）：四個選項圖全部 **HTTP 200**（12,730／12,867／12,718／16,724 bytes）。
+
+### D. 我順手抓到的第四個 bug：**設計者的註解，agent 讀到了卻沒被告訴要讀**
+
+- 人工事件 **20,324** 筆（`accept` 11,239／`block` 1,145／`comment` 102／`correct` 67…）。
+- 文字欄位是 **`notes`**，不是 `reason`（我一開始查 `reason`，得到「全部空白」的**錯結論**）。
+- `human_events` 把整列帶回來，所以 `notes` **有到 agent 手上**；
+  但 `lib/identity.mjs` 的 `grep notes` → **0 筆**。**提示詞從沒叫它讀。**
+- 人寫的 `block`／`comment` **1,247 筆，其中 313 筆有文字**（平均 25 字，最長 155）。
+  例：`答案沒進去`、`Ae-αt＋Be-βt 並沒有改到`、`表格應該用截圖的`。
+
+**這一條比截圖嚴重**：那是設計者自己的判斷，是這個 agent 最該學的東西，而它躺在 agent 讀得到
+但沒被告訴要看的地方。
+
+### E. 待設計者裁決
+
+1. **agent 的判讀要寫進 v2 讀的 `question_ai_findings.jsonl` 嗎？**（＝「接上既有管線」，
+   設計者第八輪的 **B 案**）。若接，設計者在 v2 裡就看得到 agent 的判讀，不必開第二個分頁。
+2. **對話框綁不綁當前那一題？**（影響後端形狀）
+3. 本輪的 4 個 bug 修法要不要我繼續往「取代 v2 的缺口」走，而不是往「補完沙盒 UI」走？
+
+---
+
+## Q38 — 設計者裁決（1 對／2 不懂／3 對）＋「Agent 是怎麼執行的，我該怎麼跟它互動」
+
+**設計者（2026-09-28，原文）**：
+
+> 1. 對 2.我不懂你在說什麼 3.對 然後順便告訴我Agent是怎麼執行的，我該怎麼跟它互動
+
+**裁決收下**：① agent 判讀寫進 v2 讀的 `question_ai_findings.jsonl`（B 案）→ 開工；
+③ 往「補 v2 的缺口、讓 agent 出現在設計者已經在的畫面」走 → 開工。
+② 我看不懂自己在問什麼——見 §B（我把它問成一個只有我知道答案的問題，那是我的錯）。
+
+### A. 🔴🔴 這一輪最重要的發現：**agent 從來沒有拿到它自己的提示詞**
+
+設計者問「Agent 是怎麼執行的」，我一邊示範一邊量，抓到這個：
+
+```
+$ node agent.mjs --interactive
+> 用一句話說你是誰、你的工作是什麼
+我是一個編碼助理，專門在這個「台灣國考題資料庫」專案裡…
+```
+
+**它自稱「編碼助理」。** 它不該知道「編碼助理」這個詞——那是 Pi 內建的預設提示詞。
+
+**量測**（建一個真 session，問它實際持有什麼）：
+
+| | 字元數 |
+|---|---|
+| `systemPrompt()` 算出來的 | 7,504 |
+| **session 真正收到的** | **30,452（Pi 的 "expert coding assistant"）** |
+| 「題目修理代理」在不在裡面 | **false** |
+
+**根因**：`createAgentSession({...})` 的參數**沒有 `systemPrompt`**。
+`DefaultResourceLoader` 有收這個欄位（`resource-loader.d.ts:82`），`agent.mjs` 沒傳。
+
+**為什麼活了這麼久**：`--probe` 印的是 `prompt.length`（算出來的那個），
+不是 `session.systemPrompt`（真的送出去的那個）。**畫面 100% 正常，兩個數字從來沒被並排看過。**
+
+**這件事的嚴重性**：五條鐵則全部沒進 model 的 context——
+包括「**絕對不可以寫人工審核紀錄**」和「**`rating` 只回答抽取值與紙本一不一致**」。
+**這個專案整個治理設計的核心，從來沒有出現在模型眼前。**
+
+而且它解釋了過去所有「它為什麼不聽話」：
+- 它去找 `bash`／用 `read` 讀檔 → 因為它是 coding assistant，那是它的本能
+- Q33 那次「它去推理化學」→ 因為沒有一條鐵則叫它「只看格式」
+- 它自稱編碼助理 → 因為它**就是**
+
+**修法**：`resourceLoader` 加 `systemPrompt: prompt`。**修完實測**：它自稱
+「我是題目修理代理：專門檢查國家考試題目的文字抽取是否準確…而不評判答案對不對」。
+
+**`--probe` 改法**（讓它不可能再無聲無息）：
+```
+system prompt  : 8011 chars built → 25800 chars in session (the agent's own)
+```
+兩數字不一致就 **非零退出**。左邊是算的、右邊是**session 真的拿到的**。
+
+### B. 我問的第 2 題是壞問題（設計者的「我不懂你在說什麼」是對的）
+
+我問「對話框要綁當前那一題還是不要綁」。**這是把我的實作選項丟給設計者選。**
+設計者要的是「**跟 agent 講話**」，不是替我決定 session 的生命週期。**這是我的錯。**
+
+**改成正確的問題**：設計者要的對話框，**內容**是什麼形狀？
+- 他是不是要在某一題上邊看邊問（「這一題 B 選項的圖你覺得對不對」）？
+- 還是像跟人講話一樣，想到什麼問什麼（「藥師(二)那批你掃到哪」）？
+
+**兩者我可以都做**，但先做哪個取決於他真正想做的事——那只有他知道。
+**我不該把後端形狀（session 綁題／不綁題）拿出來問。**
+
+### C. Agent 到底是什麼、怎麼跑（設計者要的教學）
+
+**它不是一個常駐程式。它是一個「每次被叫起來的指揮者」。**
+
+```
+node agent.mjs "<一句話>"        # 做事
+node agent.mjs --interactive     # 對話模式（連續問，它記得前面）
+node agent.mjs --probe           # 自我檢查：只建 session、不動題、印出它真的拿到的提示詞
+```
+
+**一次執行的流程**：
+
+| 步驟 | 發生什麼 | 在哪 |
+|---|---|---|
+| 1 | 讀題目（文字抽取、圖的清單、人留過的話） | `get_question` |
+| 2 | **看紙本** → 裁圖 → **把圖送給地端視覺模型** → 逐字判讀＋diff | `read_page` |
+| 3 | 寫下結論與依據 | `record_judgement` → `store/agent_feedback.jsonl` |
+| 4 | （可選）記一句會再發生的觀察 | `remember_lesson` → `store/lessons.jsonl` |
+| 5 | 下一次啟動時，第 4 步那句話**自動出現在它的提示詞裡** | `systemPrompt()` |
+
+**它的大腦是地端 35B MoE**（`ornith-1.5-mtplx-35b`，port 18120），
+**它的眼睛是地端視覺模型**（`occamy-1.0-6bit`，port 18130）。兩個都在地端。
+換大腦：`REPAIR_AGENT_MODEL="occamy-6bit/occamy-1.0-6bit-XL-mlx" node agent.mjs "…"`。
+
+**健康的軌跡**：`get_question → read_page → record_judgement`，
+**`bash` 0 次、`read` 0 次**。實測 q042：**修前 9 個呼叫（4 個白做的 `read`＋1 個 `bash`）→ 修後 4 個**。
+
+### D. 這一輪另外抓到的 4 個 bug（全都不會讓答案變錯，所以都活了下來）
+
+| # | Bug | 症狀 | 為什麼檢查抓不到 |
+|---|---|---|---|
+| 1 | **提示詞沒送進去** | 自稱編碼助理；`bash`／`read` 亂跑 | `--probe` 只印「算出來」的長度 |
+| 2 | **`crop` 說圖不存在** | 裁了 134,227 bytes，回 `png: null` → 它跑去找圖（4×`read`＋`bash ls`） | `rows`／`bytes` 都正確 |
+| 3 | **提示詞沒說它看不到圖** | 拿 `read`（文字工具）去讀 `.png` | 它最後還是答對了 |
+| 4 | **設計者的 19 條原則會消失** | 換 `REPAIR_AGENT_STORE`（README 教你做的事）→ `principles()` 回 **0 條** | 沒有錯誤、提示詞還是建得起來 |
+| 5 | **設計者的 `notes` 沒人叫它讀** | `human_events` 帶回整列，但提示詞 0 次提到 `notes` | 它有到 agent 手上 |
+
+**#4 的路徑算錯**：`principles()` 用 `join(STORE_DIR, "..","..","..", ...)` 往上走三層。
+store 沒改時剛好落在正確位置；一改，就走丟。**改成本模組自己的目錄**（`AGENT_DIR`）→ 19 條都在。
+
+**#5 的欄位搞錯**：我一開始查 `reason`，得到「全部空白」的**錯結論**。
+文字在 **`notes`**。人寫的 `block`／`comment` 1,247 筆中有 **313 筆有文字**。
+
+### E. 測試：21 → **29 個**，每個都有負對照
+
+| 新測試 | 負對照（改回去必須 FAIL） |
+|---|---|
+| session 拿到的是 agent 自己的提示詞 | 拿掉 `systemPrompt:` → **FAIL** ✅ |
+| `crop` 講得出檔名 | 回報 `args.out` → 靜默失敗 ✅ |
+| 提示詞說它看不到圖 | — |
+| 提示詞每一節都到齊、且有序 | 未跳脫反引號截斷 → 缺節 ✅ |
+| 設計者原則撐得過 store 轉向 | 改回 `STORE_DIR` → **2 FAIL** ✅ |
+| 選項圖綁 `option_key`（不按順序猜） | 拿掉 `asset_role`／`option_key` → **FAIL** ✅ |
+| `/file` 服務 queue 相對路徑 | 拿掉那行 `setdefault` → **FAIL** ✅ |
+
+### F. 待設計者回答（把 B 問對）
+
+**你想跟它講話，是為了什麼？**
+1. **看到某一題時想問它**（「這題 B 的圖你覺得對不對」「你剛才為什麼判 down」）
+2. **不綁題、像跟人講話**（「藥師(二)掃到哪了」「幫我看下一個科目」）
+3. 兩者都要，但**先做哪個**？
+
+**你回這個我就能動工**——這次問的是「你要做什麼」，不是「我的後端要長什麼樣」。
+
+---
+
+## Q39 — 設計者裁決：兩者都要（1 先做）＋ 三個新要求 ＋ **我自己造成的一個錯**
+
+**設計者（2026-09-28，原文）**：
+
+> 先記錄這次改了什麼bug，避免之後又錯，我們要越來越好 然後 3 兩者都要，1先做
+> 另外我想知道的是為什麼大腦跟眼睛是兩套模型，應該用同一種，
+> 另外昨天在a2/run 看到的多重比較為甚麼沒有顯示出來
+> 應該說UI給我看到的重點應該是
+> (1)這題在考題平台會是以什麼方是被我看到，所以斜體、上下標都應該是直接呈現出來（我不應該看到<sup>這種東西）
+> (2)但是你可以顯示JSONL實際上記錄到什麼，或是AI實際上讀到/產生什麼，這是我要跟AI對話所需之到的樣子
+> (3)如果圖截得不對之前是在下面加comment但是效率不彰，因此我才提出要能即時對話，
+>    並且讓指揮者AI知道需求之後，反過來調整做事者MoE模型的提示詞或是格式化產出
+
+**裁決收下**：對話框**兩者都做、先做「綁題」（1）**。
+
+### A. 🔴 我自己造成的一個錯：我說「agent 看不到圖」，**那是錯的**
+
+**我做了什麼**：Q38 的軌跡裡有四次 `read` 讀 `.png`，日誌記成 `-> {}`。我從 `{}` 推論
+「`read` 是文字工具，讀圖只會得到空的」，**於是加了一句提示詞告訴 agent 它看不到圖**。
+
+**兩個部分都錯**：
+
+1. **`read` 讀 PNG 真的會把圖送進模型。** 實測（真 session，讀 q042 裁片）：
+   `isError: false`，`content = [{"type":"text"},{"type":"image","data":"iVBORw0KGgo…"}]`。
+   `ornith-1.5-mtplx-35b` 的 `input` 含 `image`——**它本來就會看圖**。
+   實測它看 q042 裁片：「圖裡有 **4 個化學結構式**…A 含 phosphorothioate…B 嗎啉環 PMO…C 肽核酸 PNA…D 2′-O-修飾＋PS」。
+2. **`{}` 是我自己的日誌漏掉的。** `summarize()` 只讀 `result.details`，
+   而內建工具（`read`）把輸出放在 **`result.content`**。圖有送到，**是我的日誌把它弄丟了**。
+
+**為什麼這個錯比原本的「非 bug」嚴重**：我加的那句話**拿掉了一個能用的能力**，
+把每一次判讀都逼去繞第二個模型。而且我犯的正是本專案的第一條紀律：
+**「不可以把規則建立在解析器的輸出上」**——我用日誌（解析器的輸出）去斷定工具的行為，
+**於是日誌和檢查互相確認**。
+
+**修法（三處）**：
+- 提示詞改成「**你自己看得到圖**」：`read` 裁片＝自己看；`read_page`＝第二個引擎的逐字判讀。
+  **兩個引擎都看** ＝ `read`（自己）＋ `read_page`（occamy）。
+- `tool_execution_end` 現在**同時**讀 `result.content` 與 `result.details`。
+- `summarize()` 對任何成功結果都**必須說出它是什麼形狀**，永不回 `{}`。
+
+**新日誌實測**：`read → {"content_parts": ["text","image"]}`。**圖的送達變成看得見的事實。**
+
+### B. 為什麼大腦跟眼睛是兩套模型？→ **設計者問對了，兩個都可以用同一個**
+
+**量到的事實**：
+
+| | 大腦 `ornith-1.5-mtplx-35b`（18120） | 眼睛 `occamy-1.0-6bit`（18130） |
+|---|---|---|
+| `input` | **`["text","image"]`** | `["text","image"]` |
+| 能不能看圖 | **能**（實測答對「4 個結構式」並逐一描述） | 能 |
+| 看圖準確率（A2.1） | 47.8% | **53.3%** |
+| 不可達欄位 | 35.8% | 35.8% |
+| 多改次數（愈少愈好） | **8** | 9–10 |
+
+**所以「兩套」不是架構上的必然，是我沿用了 `read_page` 的舊設計。** 設計者是對的。
+
+**但 A2.1 也量到一件重要的事**：兩個模型錯的地方**只有 37.8% 重疊**——
+所以「兩個都看」比「選一個」有價值。**這跟「同一個模型當大腦又當眼睛」不衝突**：
+同一個模型可以用**兩次**（自己看一次、再當第二意見看一次），或用不同提示詞看兩次。
+
+**待決**：要不要讓 `read_page` 預設也用 `ornith`（＝大腦自己），
+把 `occamy` 留給「第二意見」（它看圖準確率較高但較愛亂改）？
+**這一題我不自己定**——它會改變 `read_page` 的語意。
+
+### C. 「a2/run 的多重比較為什麼沒顯示出來」
+
+**它們存在，但從來沒有被服務。** `a2/runs/` 裡有 **10 個產物**：
+
+| 檔案 | 大小 | 是什麼 |
+|---|---|---|
+| `20260928T1242-three-models.html` | 218 KB | **三模型比對頁**（設計者說的那個） |
+| `20260928T1440-text-vs-vision.html` | 283 KB | 文字 vs 視覺 |
+| `20260928T1620-ablation-repeat3.jsonl` | 505 KB | prompt ablation（重跑 3 次） |
+| `20260928T1700-ablation-cue.jsonl` | 510 KB | cue 實驗 |
+| ＋ 6 個 vision/no-image jsonl | | A2.1 的負對照 |
+
+**根因**：`build_compare_page.py` 的 docstring 自己寫得很清楚——
+
+> This writes a **static** page with the run embedded, so it opens by double-click with no server.
+
+**它是「雙擊開啟」的靜態頁，沒有任何 server 服務它。** 所以 UI 上看不到，**不是壞掉，是從來沒接上**。
+（設計者「為什麼沒顯示出來」——因為它設計成不顯示在任何 UI 裡。）
+
+**修法（本輪一起做）**：`ui/server.py` 加 `/a2` 端點列出 `a2/runs/*.html`，
+在 UI 加一個連結。**不重寫比較頁**——它已經照三個業界結論做好了。
+
+### D. UI 該給設計者看到什麼（設計者的三點，我記下來了）
+
+**(1) 考題平台會怎麼呈現 → 就照那樣呈現。** 這是**具體的契約，不是風格偏好**：
+
+| 平台怎麼做 | 出處 |
+|---|---|
+| `safeHtml()` → DOMPurify，`ALLOWED_TAGS` **含 `sup`／`sub`／`em`／`strong`** | `platform-app/frontend-next/lib/sanitize.ts:5-6` |
+| 再包 `.study-prose`，CSS 把 `sup`／`sub` 縮成 `0.78em` | `app/globals.css:357-360` |
+| `dangerouslySetInnerHTML={{__html: safeHtml(q.stem)}}` | `components/question/QuestionCard.tsx`、`OptionList.tsx` |
+
+→ **我的 UI 用 `esc()` 把所有東西當純文字印出來，所以設計者看到 `<sup>`。
+這是我的 UI 錯了**，不是資料錯了。**要抄平台的 `safeHtml` 契約。**
+**但**：`safeHtml` 是 TS ＋ DOMPurify（前端套件），我的 UI 是 stdlib——**要一個等價的 Python 版本**，
+而且**必須與平台同一份白名單**（兩個白名單就是兩個會不一致的地方）。
+
+**(2) 但要能切換看「JSONL 實際記了什麼」／「AI 實際讀到什麼」。**
+→ 兩個模式：**「平台視圖」（渲染後）／「原始視圖」（JSONL 原樣 ＋ AI 的 prompt／回應）**。
+這正是設計者要跟 AI 對話所需要的東西。
+
+**(3) 圖截錯 → 即時對話 → 指揮者改做事者的提示詞。** 這是整個專案的目的：
+**comment 是異步、一題一次、效率不彰；對話是同步的，而且能改變未來的行為。**
+
+### E. 測試：29 → **30 個**
+
+| 新測試 | 負對照 |
+|---|---|
+| `read` 真的把圖附上（實測 `content` 有 `image` part） | 把「你看不到圖」加回去 → **FAIL** ✅ |
+| 成功的工具結果永不記成 `{}`（且要傳 `content`） | `summarize` 回 `{}` → **FAIL** ✅ |
+| （刪除） | 我那個建立在錯誤結論上的測試**已刪掉** |
+
+### F. 待設計者裁決
+
+1. **`read_page` 預設引擎要不要改成 `ornith`（＝大腦自己）？**
+   `occamy` 看圖較準（53.3% vs 47.8%）但較愛亂改（9–10 vs 8）。這一題會改變 `read_page` 的語意。
+2. **「平台視圖」的 HTML 白名單**：我打算從平台的 `sanitize.ts` **導出**同一份清單
+   （而不是抄一份 Python 的），可以嗎？
+
+---
+
+## Q40（設計者 2026-09-28 晚）：對話框「兩者都要，1 先做」＋腦與眼為何兩顆模型＋a2 為何沒顯示＋平台視圖
+
+設計者原話：
+1. **先記錄這次修好的 bug**，免得再犯（「我們要越來越好」）。
+2. **「3 兩者都要，1先做」**——對話框兩種都要，先做綁題那一種。
+3. **為什麼腦跟眼是兩顆不同模型？**它們應該同一種。（腦＝`ornith-1.5-mtplx-35b`；眼＝`occamy-1.0-6bit`）
+4. **昨天在 a2/run 看到的多重比較為什麼沒有顯示出來？**
+5. **UI 要求**：
+   - (1) 這題在**考題平台**會怎麼被看到：斜體、上下標**直接呈現**（不該看到字面 `<sup>`）。
+   - (2) 但也可以顯示 **JSONL 實際記錄到什麼／AI 實際讀到、產生什麼**——這是跟 AI 對話所需。
+   - (3) 圖截錯時以前只能在下面加 comment，**效率不彰**；所以要**即時對話**，
+     讓指揮者 AI 學到要求，再回頭去調做事 MoE 模型的提示詞／輸出格式。
+
+### A. 設計者的第 3 問：腦與眼為什麼是兩顆？——**他問對了**
+
+| | 模型 | 看圖 | A2.1 實測 |
+|---|---|---|---|
+| 眼（`read_page` 預設） | `occamy-1.0-6bit` | 是 | **53.3%** 整體、reachable **78.4%**、改動 9–10 處 |
+| 腦 | `ornith-1.5-mtplx-35b` | **也有**（`input: ["text","image"]`） | 47.8% 整體、reachable 64.9%、改動 **8** 處 |
+
+**兩顆是歷史選擇，不是必須。** `ornith` 本身有視覺（Pi 的 provider 已宣告 `input: ["text","image"]`），
+所以「同一顆模型又當腦又當眼」技術上可行。
+
+保留兩顆的**唯一理由**是它們的錯誤只有 **37.8% 重疊**——「兩個獨立引擎都看過」比「同一顆看兩次」強，
+這正是專案「兩引擎一致才是驗收」那條信念。
+
+**但這是設計者的決定，不是我的**：把 `read_page` 預設改成 `ornith` 會改變 `read_page` 的語意
+（從「第二意見」變成「自己再看一次」）。**待裁決**（同 Q39 第 1 點）。
+
+### B. 設計者的第 4 問：a2 為什麼沒顯示——**不是壞掉，是從來沒接上**
+
+`a2/runs/` 有 **10 個產物**（`20260928T1242-three-models.html` 218KB、
+`20260928T1440-text-vs-vision.html` 283KB、數個 ablation JSONL）。
+
+根因：`a2/build_compare_page.py` **刻意**產出**靜態頁**，自己的 docstring 就寫了
+> opens by double-click with no server
+
+→ **從來沒有任何 UI 服務它**。從瀏覽器看，「沒連上」與「不存在」長得一模一樣。
+
+**修法（不重寫那個頁面）**：`ui/server.py` 加 `/a2`（列出 `a2/runs/*`）與 `/a2?name=...`（照原檔服務），
+`ui/index.html` 標題列加 `A2 執行產物` 連結。**不重新渲染**——頁面內嵌了它那一次的 run，
+重畫就會多出第二份版本。
+
+**路徑安全**：`?name=` 來自 URL，先 `resolve()` 再檢查 `startswith(A2_RUNS)`；
+否則 `../` 就是整顆硬碟的檔案讀取。
+
+### C. 設計者的第 5(1)(2) 問：兩個視圖
+
+**平台視圖**：新增 `agent/lib/platform_view.py`——**Python 版的平台 `safeHtml`**。
+- **白名單從平台原始碼讀出來**（`platform-app/frontend-next/lib/sanitize.ts` 的 `ALLOWED_TAGS`／
+  `ALLOWED_ATTR`），**不抄一份**：抄一份就是「兩個可以不一致的地方」。
+  檔案不在就**拋錯**，不靜默留一份過期清單。
+- 依平台同一順序重現 `normalizeScientificMarkup`（希臘字母對應、`$...$` 內才轉 `_x`／`^x`）。
+- `sanitize()` 嚴格白名單；`as_platform_html()` 給渲染、`plain_text()` 給 diff／log。
+- **CSS 也對齊平台**：`.study sup, .study sub { font-size: .78em; line-height: 0 }`
+  （`platform-app/frontend-next/app/globals.css:357`）。不對齊的話「看起來像平台」只是宣稱，不是檢查。
+
+**實測**：q010 題幹原樣 `GABA<sub>B</sub>受體致效劑…` → 平台視圖同一字串但**渲染成 GABA_B**。
+
+**原始視圖**（`<details>` 內）：
+- 題目欄位**原樣 JSON**（`stem`／`options`／`answer`／`answer_payload`）；
+- **模型實際讀到什麼**：`read_page` 的 `seen`／`diff`／`reason`；
+- **agent 做了什麼**：`store/agent.log.jsonl` 的工具軌跡（`→ tool args`／`← tool result`），
+  並直接標示**軌跡健康（沒有 bash）**或**含 N 次 bash——通常是繞路**。
+
+設計者原話對應：「你可以顯示 JSONL 實際上記錄到什麼，或是 AI 實際上讀到／產生什麼，
+這是我要跟 AI 對話所需之到的樣子」。
+
+### D. 設計者的第 2 問：對話框——**綁題優先**
+
+新增 `agent/ui/chat.mjs`：**一個 Pi session 綁一個題號**，用 JSON-lines 與 Python server 講話。
+
+| 決定 | 為什麼 |
+|---|---|
+| **一個題號一個 session** | 綁題。q042 的對話不會漏進 q068（負對照實測：q042 教「紫色大象」，q068 問暗號→答「不知道」） |
+| **一個目錄一個 session**（key 的 sha256 前 12 碼＋可讀後綴如 `q042-9c7a4037a146`） | 讓 `continueRecent` 找到「這一題」的那一個；純 hash 的目錄沒人審得了 |
+| **`SessionManager.continueRecent(cwd, sessionDir)`** | **兩個參數，第一個是 cwd** |
+| `chat.jsonl` 與 `agent_feedback.jsonl` **分開** | 對話不是評分。混在一起會讓 ratings 表塞滿「什麼都沒評」的句子 |
+| 設計者的話**先寫再答** | 答到一半崩潰也要留下他打的字。弄丟他的輸入比弄丟回覆嚴重 |
+| SSE（`fetch`＋`ReadableStream`，不是 `EventSource`） | `EventSource` 只能 GET；題幹／設計者的句子太長，不該塞 query string |
+| **seed 直接給 figure 的絕對路徑** | 實測：只給 metadata → 開場 `bash ls`（失敗）＋`find`；給了路徑 → **4 個 `read`、0 個 `bash`** |
+
+**實測（Tailscale `100.96.207.80:8790`）**：
+- SSE 真的串流：`delta` 逐字、`tool`／`tool_result` 逐個、`done 15.4s`。
+- 「你看得到這題的四張選項圖嗎？」→ **4 個 `read`，每個 `content_parts: ["text","image"]`**，
+  回答「A、B、C、D 各一張完整的化學結構式，共 4 個結構」。
+- **重啟測試**：新行程問「暗號是什麼」→ 答「**藍色犀牛**」＝**restart 是延續，不是新對話**。
+
+### E. 這次修好的 bug（設計者第 1 問，免得再犯）
+
+| # | bug | 症狀 | 根因 | 修法 |
+|---|---|---|---|---|
+| 1 | `systemPrompt` 沒傳進 `DefaultResourceLoader` | 自稱「編碼助理」；五條鐵則從未進模型 | `CreateAgentSessionOptions` **沒有** `systemPrompt` 欄位 | 傳進 `DefaultResourceLoader({systemPrompt})`；`--probe` 並排印「built → in session」 |
+| 2 | `crop` 回 `png: null` | 明明裁了 134KB，模型以為沒圖→4×`read`＋`bash ls` | `do_crop` 回 `args.out`（未給時為 `None`） | 回報真的寫出的檔名 |
+| 3 | `principles()` 由 `STORE_DIR` 推導 | 換 `REPAIR_AGENT_STORE` → **0/19 條**（靜默） | 路徑 `join(STORE_DIR, "..","..","..")` | 改用 `AGENT_DIR` |
+| 4 | 提示詞沒叫它讀 `notes` | 設計者寫的字（在 `notes`，不是 `reason`）沒人看 | `grep notes identity.mjs` = 0 | ROLE 步驟 2 補「設計者寫的字在 `notes` 欄」 |
+| 5 | ROLE 未跳脫反引號 | template literal 提早結束 | backtick 要寫 `` \` `` | 測試用**結構檢查**（七個 `##` 節有序），不是數 backtick |
+| 6 | `--interactive` 的 `ERR_USE_AFTER_CLOSE` | `printf '/quit' \| node agent.mjs -i` 答完就崩 | stdin EOF | try/catch `ERR_USE_AFTER_CLOSE` → break |
+| 7 | **我自己犯的**：把「read 讀不到圖」寫進提示詞 | **拿掉一個能用的能力** | `{}` 是**我的 logger** 有損（只讀 `details`），不是 read 失敗 | `summarize(details, content)`；提示詞改「**你自己看得到圖**」 |
+| 8 | `question_view` 丟掉 `asset_role`／`option_key` | 四個選項圖渲染成四列空白 | v2 用 `asset_role=='option-image'` ＋ `option_key` 綁定 | 補欄位；UI 照抄 v2 `optionCropHtml` 規則 |
+| 9 | `/file` 拒絕 queue 相對路徑 | 裁片在磁碟上、正確，但頁面 0 張 | 缺 `REVIEW_UI_ADDITIONAL_ASSET_ROOTS` | `setdefault(bridge.QUEUE_ROOT)`（站上優先） |
+| 10 | **`chat.mjs` 的 stdin `end` 殺掉進行中的回合** | 餵檔案時只見 `ready`，像當掉 | `end` 在 setup 完成前就到了 | **同步** `inflight` 計數，不是 `current` |
+
+**第 10 個的教訓**：`current` 要等 session 建好（數秒）才設；`end` 早就到了。
+**用「非同步狀態」當忙碌旗標，就會輸給競態。**
+
+### F. 測試：30 → **36 個**，負對照全部實測 FAIL
+
+| 新測試 | 負對照（實測） |
+|---|---|
+| 平台視圖用平台清單，且清單**來自平台原始碼** | UI 改回 `esc` → **FAIL** ✅；白名單改硬寫一份 → **FAIL** ✅ |
+| A2 產物可服務、`/a2` 路徑逃逸被擋 | 拿掉 `startswith` 檢查 → **FAIL** ✅ |
+| 對話綁題、兩端都記 | session key 改成共用 `_` → **FAIL** ✅；設計者的話改到答完才寫 → **FAIL** ✅ |
+| seed 給絕對路徑 | 只給 `relative_path` → **FAIL** ✅ |
+| session 落在 store 內、重啟延續 | 改回單一參數 `SessionManager` → **FAIL** ✅ |
+
+**負對照 A 第一次沒 FAIL**：舊檢查是 `/sessions\.get\(\)/`，對 `sessions.get("_")` **通過**。
+→ 檢查改成**看形狀**（所有 `sessions.set/has/get` 的第一個參數都必須是 `key`）。
+**「負對照沒 FAIL 的檢查，甚麼都證明不了」——這次是我自己踩到。**
+
+### G. 待設計者裁決（累積）
+
+1. `read_page` 預設引擎要不要改成 `ornith`（＝腦自己）？[Q39 + 本輪]
+2. 「平台視圖」白名單從平台 `sanitize.ts` **導出**（不是抄一份 Python 清單），可以嗎？[Q39]
+3. 對話框第二種（**不綁題**）什麼時候做？設計者說「兩者都要，1 先做」——**1 已完成**，等指示做 2。
+4. 要不要現在開始掃**藥師(二)**（4,309 題純文字）？
+5. A1（`question_page`）要不要合併？（未合併 → 全庫 79,090 題 PDF 面板都開第 1 頁）

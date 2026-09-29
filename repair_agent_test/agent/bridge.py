@@ -40,6 +40,14 @@ for path in (os.path.join(QBR, "src"), os.path.join(QBR, "scripts")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+# `lib/` holds this sandbox's own helpers — `platform_view` renders a question the way the platform
+# will, reading the platform's allowlist from its source. Imported by path so the bridge can be run
+# from any directory (it is invoked as a subprocess by `lib/tools.mjs`).
+if os.path.join(HERE, "lib") not in sys.path:
+    sys.path.insert(0, os.path.join(HERE, "lib"))
+
+import platform_view  # noqa: E402
+
 # `image_refs[].path` is relative to the **live queue root** — `review-ui/crops/...` — which is the
 # parent of the directory holding `candidates.jsonl`, not that directory itself. Measured: joining
 # against `QUEUE` gives `.../review-ui/review-ui/crops/...` and matches nothing.
@@ -50,6 +58,23 @@ STORE = os.path.join(SANDBOX, "agent", "store", "agent_feedback.jsonl")
 # `REPAIR_AGENT_STORE` redirects the whole sandbox store, for tests. Nothing else should set it.
 STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.dirname(STORE)
 DEFAULT_ENGINE = "occamy-6bit"
+
+# The three dispositions the designer can write, and the agent can write.
+#
+# `up` / `down` are the production ratings (`review_ui.constants.AI_FEEDBACK_RATINGS`).
+# **`hold` is the sandbox's third one, and it is not a rating**: it means "keep this note, I am not
+# deciding yet". It exists because the designer's judgement is usually an *annotation* — a sentence
+# about where the problem is — and forcing that into up/down made him choose between saying
+# something untrue and saying nothing (designer, 2026-09-28).
+#
+# Declared here, not in `server.py`, because both the bridge CLI and the UI server write this
+# stream; two lists of allowed values is two places they can disagree.
+#
+# Promoting `hold` into production is a **change of destination, not of format** — the same promise
+# the record shape makes below. It costs one entry in `AI_FEEDBACK_RATINGS`, and that entry is
+# deliberately not added yet: production ratings feed a reviewed pipeline, and widening it is a
+# separate, reviewed decision.
+JUDGEMENT_RATINGS = ("up", "down", "hold")
 
 
 class QuestionNotFound(LookupError):
@@ -160,6 +185,46 @@ def prior_judgements(key: str) -> list:
     return out
 
 
+def question_answer_display(question: dict) -> str:
+    """The answer as a reader should see it, via the pipeline's own normaliser.
+
+    Delegation, not reimplementation. `ai_findings.answer_of` is the function that already knows
+    the three traps: a **voided** question (`送分`) whose `accepted_values` is every option and
+    which must not be shown as four answers; a **correction** answer (`B或C`); and the ordinary
+    letter. Its docstring records the measured cost of getting this wrong on the model's side
+    (15 of 28 `ANSWER_DISAGREES` findings were the prompt's fault, not the paper's).
+
+    Falls back only if the import is unavailable, because a UI that shows nothing is worse than one
+    that shows the raw string — but the fallback is deliberately the *stored* string, which is
+    already the sheet's own wording, never an attempt to parse it here.
+    """
+    try:
+        from qbr import ai_findings
+    except Exception:  # noqa: BLE001 - the UI must still render without the pipeline
+        return str(question.get("answer") or "")
+    return ai_findings.answer_of(question) or str(question.get("answer") or "")
+
+
+def question_answer_keys(question: dict) -> list:
+    """The option letters to highlight.
+
+    `answer_payload.accepted_values` is the machine's list and the authority for this: it is a
+    real list on all 79,090 questions (measured), it holds both letters for `B或C`, and for a
+    voided question it holds every option — which is correct, since all of them score. Using the
+    parsed *display* string instead would highlight nothing for `送分`, and the green mark is the
+    one thing the reader checks first.
+    """
+    payload = question.get("answer_payload") or {}
+    accepted = payload.get("accepted_values")
+    if isinstance(accepted, list):
+        values = [str(value).strip().upper() for value in accepted if str(value).strip()]
+        if values:
+            return values
+    # No payload (older queue builds): fall back to the letters present in the stored answer. This
+    # is a fallback for one shape, not a second parser for the normal case.
+    return [ch for ch in str(question.get("answer") or "").upper() if ch in "ABCD"]
+
+
 def figure_asset_path(ref: dict) -> str | None:
     """Where this question's own crop file actually is, or `None` if it is not on disk.
 
@@ -209,8 +274,45 @@ def question_view(question: dict) -> dict:
         "stem_image": question.get("stem_image"),
         "subitem_legend": question.get("subitem_legend"),
         "options": question.get("options") or [],
+        # **How the platform will show this question to a learner.**
+        #
+        # The designer's requirement (2026-09-28): 「這題在考題平台會是以什麼方式被我看到，
+        # 所以斜體、上下標都應該是直接呈現出來（我不應該看到 <sup> 這種東西）」.
+        #
+        # `stem`/`options` above are the storage form. These are the **rendered** form, produced by
+        # `lib/platform_view.py`, which reads the platform's own allowlist out of
+        # `platform-app/frontend-next/lib/sanitize.ts` rather than keeping a copy. A reviewer has to
+        # see the question that ships; showing `<sub>` is showing the storage format, which is why
+        # the rendered pair is carried alongside rather than replacing the raw one — the raw one is
+        # what the machine actually recorded, and the designer asked for both views.
+        "stem_html": platform_view.as_platform_html(question.get("stem")),
+        "shared_stem_html": platform_view.as_platform_html(question.get("shared_stem")),
+        "options_html": [
+            {
+                "key": option.get("key") if isinstance(option, dict) else None,
+                "text_html": platform_view.as_platform_html(
+                    option.get("text") if isinstance(option, dict) else option),
+            }
+            for option in (question.get("options") or [])
+        ],
         "answer": question.get("answer"),
         "answer_payload": question.get("answer_payload"),
+        # The answer as a person reads it, plus the letters to highlight, both computed by the
+        # pipeline's own tested normaliser.
+        #
+        # `answer` alone is a **string** on every one of the 79,090 questions (measured
+        # 2026-09-28: 100% `str`), and it is not always a letter — 1,205 carry `送分`, `B或C`,
+        # `A或B或C或D`. A UI that treats it as a list throws on every question, which is exactly
+        # what happened («(question.answer || []).map is not a function» → the page showed no
+        # question at all). `ai_findings.answer_of` already documents all three traps and is
+        # covered by tests, so it is called rather than reimplemented: a second parser here would
+        # be a second answer to「正確答案是什麼」, which is the one thing this project cannot have
+        # two of.
+        "answer_display": question_answer_display(question),
+        # `accepted_values` is the machine's list and is what decides which option letters go
+        # green. For a voided question it is every option, which is the truth: all of them score.
+        "answer_keys": question_answer_keys(question),
+        "answer_is_void": bool((question.get("answer_payload") or {}).get("is_special_correction")),
         "losses": {
             "lost_glyphs": question.get("lost_glyphs"),
             "lost_glyph_note": question.get("lost_glyph_note"),
@@ -227,6 +329,19 @@ def question_view(question: dict) -> dict:
                 "clipped": ref.get("clipped"),
                 "ownership_note": ref.get("ownership_note"),
                 "exists": ref.get("exists"),
+                # **What this asset is, and which option it belongs to.** v2 binds a crop to an
+                # option row with `asset_role == 'option-image'` + `option_key`
+                # (`review_ui/v2/02-area-question.js::optionCropHtml`), and this view used to drop
+                # both fields — so the UI could not place a picture in its option and an
+                # image-only question (four chemical structures, empty option text) rendered as
+                # four blank rows. That is the designer's report: 「過去很多管線的截圖是對的，
+                # 但在這裡完全沒有截圖（因為題目本身有圖）」. Measured 2026-09-28: 1,320 refs carry
+                # `option-image`, 3,209 carry `figure-crop`.
+                "asset_role": ref.get("asset_role"),
+                "option_key": ref.get("option_key"),
+                "placement": ref.get("placement"),
+                "ownership": ref.get("ownership"),
+                "source": ref.get("source"),
                 # The resolved path, so a reader opens the file instead of searching for it.
                 # `path` keeps the key the pipeline already uses; `relative_path` is what the
                 # queue recorded, kept because it is stable across machines and the absolute one
@@ -289,11 +404,24 @@ def do_crop(args) -> dict:
     import confirm_dispute
 
     question = load_question(args.key)
+    # `--out` is optional, so the file has to be named here when it is absent.
+    #
+    # It used to be reported as `"png": args.out`, i.e. `None` on the normal call. The crop really
+    # happened (134,227 bytes for q042) and the payload said `png: null`, so the model read that as
+    # "no picture exists" and went looking for one — measured 2026-09-28: four `read` calls on the
+    # option PNGs plus a `bash ls`, all returning nothing useful, in a trace that otherwise looked
+    # healthy. `do_read` already named its default this way; `do_crop` did not, and the difference
+    # was invisible because `rows`/`bytes` were correct.
+    out_png = args.out or os.path.join(
+        STORE_DIR, "crops",
+        "%s_q%03d.png" % (os.path.basename(pdf_path_of(question)).replace(".pdf", ""),
+                          question.get("question_number") or 0),
+    )
     png, rows, error = confirm_dispute.crop_for(
         pdf_path_of(question),
         question.get("question_number"),
         dpi=args.dpi,
-        out_png=args.out,
+        out_png=out_png,
         boxes=figure_boxes(question),
     )
     if png is None:
@@ -303,7 +431,7 @@ def do_crop(args) -> dict:
         "question_number": question.get("question_number"),
         "rows": rows,
         "bytes": len(png),
-        "png": args.out,
+        "png": out_png,
         "boxes_supplied": len(figure_boxes(question)),
     }
 
@@ -420,6 +548,86 @@ def do_question(args) -> dict:
     return view
 
 
+def do_browse(args) -> dict:
+    """List categories and their questions, so no key has to be remembered.
+
+    The designer's complaint (2026-09-28): 「我不可能記得 key，應該要有候選列表」. A UI whose only
+    way in is a `candidate_key` text box is a UI that can only be used by whoever just built it.
+
+    Reading the corpus is cheap and measured: a full 199 MB pass over all 79,090 questions takes
+    **0.3 s** (single pass, substring pre-filter before `json.loads`), so this does not need an
+    index or a cache — and a cache would be a second copy of the corpus that can be stale.
+
+    Each question carries the two things the designer needs to choose one: what the machine said
+    (`quality_status`) and whether anyone has already judged it (`judged`). Without `judged` the
+    list cannot answer 「我做到哪了」, and the same questions get re-read every session.
+    """
+    if not os.path.exists(CANDIDATES):
+        _die("candidates.jsonl not found at %s; run scripts/sync_from_station.sh first" % CANDIDATES)
+
+    judgments = {}
+    if os.path.exists(STORE):
+        with open(STORE, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                key = row.get("candidate_key")
+                if key:
+                    judgments[key] = row.get("rating")
+
+    by_category = {}
+    with open(CANDIDATES, encoding="utf-8") as handle:
+        for line in handle:
+            if args.category and args.category not in line:
+                continue
+            row = json.loads(line)
+            metadata = row.get("metadata") or {}
+            category = metadata.get("official_category_name") or "(未分類)"
+            if args.category and args.category not in category:
+                continue
+            key = row.get("candidate_key")
+            entry = {
+                "candidate_key": key,
+                "question_number": row.get("question_number"),
+                "subject": metadata.get("normalized_subject_name"),
+                "year": metadata.get("year"),
+                "exam_ordinal": metadata.get("exam_ordinal"),
+                "quality_status": row.get("quality_status"),
+                "figures": len(row.get("image_refs") or []),
+                "judged": judgments.get(key),
+                "stem": (row.get("stem") or "")[:70],
+            }
+            by_category.setdefault(category, []).append(entry)
+
+    if not args.category:
+        # The first call is the map: which categories exist, how big, how much is left. Sorted by
+        # size so the biggest unfinished pile is the first thing visible.
+        return {
+            "categories": [
+                {"category": name,
+                 "total": len(rows),
+                 "judged": sum(1 for row in rows if row.get("judged")),
+                 "with_figures": sum(1 for row in rows if row.get("figures"))}
+                for name, rows in sorted(by_category.items(), key=lambda kv: -len(kv[1]))
+            ],
+        }
+
+    rows = []
+    for name in by_category:
+        rows.extend(by_category[name])
+    rows.sort(key=lambda r: (str(r.get("subject") or ""), r.get("year") or 0,
+                             r.get("question_number") or 0))
+    if args.unjudged:
+        rows = [row for row in rows if not row.get("judged")]
+    if args.with_figures:
+        rows = [row for row in rows if row.get("figures")]
+    total = len(rows)
+    rows = rows[args.offset:args.offset + args.limit] if args.limit else rows[args.offset:]
+    return {"category": args.category, "total": total, "offset": args.offset, "questions": rows}
+
+
 def do_find(args) -> dict:
     """Find questions by subject / number / text, so no key is ever invented.
 
@@ -487,6 +695,14 @@ def main() -> int:
     p_question.add_argument("--with-paper", action="store_true", help="also list the rest of the paper")
     p_question.set_defaults(func=do_question)
 
+    p_browse = sub.add_parser("browse", help="list categories, or a category's questions")
+    p_browse.add_argument("--category", default="", help="category substring; omit to list categories")
+    p_browse.add_argument("--unjudged", action="store_true", help="only questions nobody has judged")
+    p_browse.add_argument("--with-figures", action="store_true", help="only questions that have a figure")
+    p_browse.add_argument("--offset", type=int, default=0)
+    p_browse.add_argument("--limit", type=int, default=0, help="0 = all")
+    p_browse.set_defaults(func=do_browse)
+
     p_find = sub.add_parser("find", help="find questions by subject / number / text")
     p_find.add_argument("--subject", default="", help="substring of the category or subject name")
     p_find.add_argument("--number", type=int, default=None, help="question number")
@@ -513,7 +729,7 @@ def main() -> int:
 
     p_feedback = sub.add_parser("feedback", help="append a judgement to the learning store")
     common(p_feedback)
-    p_feedback.add_argument("--rating", required=True, choices=("up", "down"))
+    p_feedback.add_argument("--rating", required=True, choices=JUDGEMENT_RATINGS)
     p_feedback.add_argument("--reason", default="")
     p_feedback.add_argument("--audit-scope", default="question",
                             choices=("question", "group", "visual", "answer"))
