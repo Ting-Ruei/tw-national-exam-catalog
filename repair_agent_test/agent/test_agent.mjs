@@ -955,7 +955,10 @@ test("the chat is bound to one question, and both ends of a turn are recorded", 
 
   // The designer's turn lands in the transcript before the model is asked, so his words survive an
   // error in the answer. The order is the contract, so it is the order that is asserted.
-  const designerAt = source.indexOf('remember({ candidate_key: key, role: "designer"');
+  // `key || null` and not `key`: the **unbound** conversation records `null`, so a reader of the
+  // file can tell a corpus-level sentence from a question-bound one. That is also why this looks for
+  // the shape rather than one exact spelling.
+  const designerAt = source.search(/remember\(\{ candidate_key: key \|\| null, role: "designer"/);
   const promptAt = source.indexOf("await session.prompt(text)");
   assert.ok(designerAt > 0 && promptAt > 0, "both the record and the prompt must be here");
   assert.ok(designerAt < promptAt,
@@ -1027,4 +1030,209 @@ test("the chat session persists inside the store and is continued on restart", (
   // And the seed must not be re-sent to a restored session, or the question enters the conversation twice.
   assert.match(source, /getEntries\(\)\.length > 0/, "restoration is detected from the session's own entries");
   assert.match(source, /seeded: restored/, "and a restored session is treated as already opened");
+});
+
+/**
+ * Every field the raw view needs is really rendered, and the prompt really reaches the page.
+ *
+ * This test exists because the previous version of this check **passed while the feature was dead**:
+ * it looked for the string `renderAiRead` in the file, and the function was defined but never
+ * called, so nothing was drawn. The designer found it, not the test — 「目前看起來還是沒有，
+ * 請問是沒有做還是做了沒有帶入」.
+ *
+ * So this drives the real entry: it renders the question with the page's own functions and asserts
+ * on the **output**. A defined-but-uncalled function produces nothing, and that is the case the old
+ * check could not see.
+ */
+test("the raw view really renders, and the model's own prompt reaches the page", () => {
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+
+  // This test exists because the previous check **passed while the feature was dead**: it looked for
+  // the string `renderAiRead` in the file, and the function was defined but never called, so the
+  // page drew nothing. The designer found it, not the test — 「目前看起來還是沒有，請問是沒有做
+  // 還是做了沒有帶入」. So this runs the real functions and asserts on their **output**.
+  const helpers = ["esc", "platformHtml", "renderPipelineFindings", "renderAiRead", "renderTrace"];
+  const parts = [];
+  for (const name of helpers) {
+    const at = scripts.indexOf(`function ${name}(`);
+    assert.ok(at >= 0, `${name} must exist in the page`);
+    // The next **top-level** declaration — `async function` counts, and the first version of this
+    // slice did not allow for it, so it ran past the end of `renderPipelineFindings` and swallowed
+    // `loadQuestion` (which is `async` and uses `$`, an undefined name outside a browser).
+    const rest = scripts.slice(at + 1);
+    const next = rest.search(/\n(?:async )?function [A-Za-z_$]/);
+    parts.push(next >= 0 ? scripts.slice(at, at + 1 + next) : scripts.slice(at));
+  }
+
+  const question = {
+    judgements: [],
+    ai_findings: [{
+      model: "ornith-1.5-mtplx-35b", created_at: "2026-09-21T22:32:41", seconds: 1.0,
+      prompt_system: "SYSTEM-MARKER", prompt_user: "USER-MARKER",
+      finding: { verdict: "OK", where: "WHERE-MARKER", fix: "FIX-MARKER" },
+      raw: "RAW-MARKER", usage: { prompt_tokens: 849 },
+    }],
+    trace: [
+      { event: "tool_call", tool: "read", args: { path: "q042_option_A.png" } },
+      { event: "tool_result", tool: "read", ok: true, summary: { content_parts: ["text", "image"] } },
+    ],
+  };
+  const source = `${parts.join("\n")}\nreturn { pipeline: renderPipelineFindings(question.ai_findings), read: renderAiRead(question) };`;
+
+  // `renderPipelineFindings`/`renderAiRead` return strings, so no DOM is needed at all — which is the
+  // point: a function that builds a string can be measured without a browser, and that is what makes
+  // "it renders" a check instead of a claim.
+  const result = new Function("question", source)(question);
+
+  for (const marker of ["SYSTEM-MARKER", "USER-MARKER", "WHERE-MARKER", "RAW-MARKER"]) {
+    assert.ok(result.pipeline.includes(marker),
+      `${marker} must reach the page — the prompt and the raw output are the evidence, not the conclusion`);
+  }
+  assert.ok(result.read.includes("content_parts"),
+    "the agent's tool trace must render, including the image part");
+  assert.ok(result.read.includes("q042_option_A.png"), "and the arguments it was called with");
+
+  // Negative control: the raw view must actually be **placed** in the question body, or the functions
+  // are as dead as they were when this test was written. This is the check the old one lacked.
+  assert.match(html, /\$\{renderPipelineFindings\(question\.ai_findings\)\}/,
+    "renderPipelineFindings must be called from the rendered question body");
+  assert.match(html, /\$\{renderAiRead\(question\)\}/,
+    "renderAiRead must be called from the rendered question body");
+});
+
+/**
+ * The pipeline's finding records are carried into the view, so the raw view has something to show.
+ *
+ * The render test above drives the renderer with a synthetic record, so it cannot notice the bridge
+ * dropping the field. This is the other half: the real `question_ai_findings.jsonl` is read, and a
+ * record known to be there is found. Without both halves, "the prompt reaches the page" is testable
+ * while "the prompt ever leaves the disk" is not.
+ */
+test("the pipeline's AI findings are read from its stream and reach the view", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const key = "moex:108030:305:33:1:question:q014";
+  const { stdout } = await run(PATHS.PYTHON, [PATHS.BRIDGE, "question", "--key", key],
+                               { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  const view = JSON.parse(stdout);
+  const rows = view.ai_findings || [];
+  assert.ok(rows.length, `the stream must yield this question's records (${key})`);
+  const row = rows[0];
+  assert.ok(row.prompt_system && row.prompt_system.length > 50,
+    "the prompt the model was given must be carried — it is what 'what the AI was shown' means");
+  assert.ok(row.prompt_user && row.prompt_user.includes("題號"),
+    "and the user prompt, which holds the question's own text");
+  assert.ok(row.finding && row.finding.where, "and the parsed answer");
+  assert.ok(row.model, "and which model said it");
+
+  // The bridge must also be the one that reads it, not the UI guessing from another file.
+  const source = readFileSync(new URL("./bridge.py", import.meta.url), "utf8");
+  assert.match(source, /question_ai_findings\.jsonl/, "the bridge names the stream it reads");
+  assert.match(source, /"ai_findings": ai_findings\(/, "and puts it in the view");
+});
+
+/**
+ * The agent has a **corpus view**, because the designer caught it asking for a key it already had.
+ *
+ * Verbatim (2026-09-28): 「目前的Agent無法看到全局」, with the transcript where it answered 「我需要
+ * 更多資訊才能回答這個問題——目前這則對話還沒有指定哪一道題」. It was right: every tool it had took a
+ * key, so a question about the whole corpus was unanswerable. `see_corpus` and `find_disputed` are
+ * the missing end — and the second is the workflow the designer named: 「我想針對 block 的題目跟你
+ * 進行對話」.
+ */
+test("the agent can look at the whole corpus, not only one question", async () => {
+  const source = readFileSync(new URL("./lib/tools.mjs", import.meta.url), "utf8");
+  assert.match(source, /name: "see_corpus"/, "there is a corpus-level tool");
+  assert.match(source, /name: "find_disputed"/, "and one for the designer's own disputes");
+
+  // The tools must be backed by the bridge, not by a second reading of the candidate file here.
+  assert.match(source, /callBridge\(\["overview"\]/, "see_corpus calls the bridge");
+  assert.match(source, /callBridge\(\["disputes"/, "find_disputed calls the bridge");
+
+  // Measured, not assumed: the bridge answers, and the designer's own words come back.
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { stdout } = await run(PATHS.PYTHON, [PATHS.BRIDGE, "disputes", "--limit", "3"],
+                               { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  const disputes = JSON.parse(stdout);
+  assert.ok(disputes.count > 0, "the designer's disputes must be countable");
+  assert.ok(disputes.with_notes > 0, "and some must carry his sentence");
+  const withNote = disputes.disputes.find((row) => (row.notes || "").trim());
+  assert.ok(withNote, "the list must include a row with notes");
+  assert.ok(withNote.candidate_key, "each dispute must carry a key, so the agent can go straight to it");
+  // `notes`, not `reason`: every human event has an empty `reason`, so a reader that looked there
+  // would report "nobody wrote anything" — the exact false negative measured 2026-09-28.
+  assert.notEqual(withNote.notes, undefined, "the person's sentence is the `notes` field");
+});
+
+/**
+ * The **unbound** conversation — the second of the two the designer asked for.
+ *
+ * He said「3 兩者都要，1先做」and only the bound one was built. The bound one cannot answer a
+ * corpus question at all, because its shape is "here is one question"; the unbound one is what makes
+ * `see_corpus` reachable from the box, and without it the agent's correct answer to a corpus question
+ * is「我需要更多資訊」. This checks the wiring in both directions: the seed that tells the model it
+ * may start from nothing, and the null key that keeps it a different session.
+ */
+test("there is an unbound conversation, and it is not the bound one's session", () => {
+  const chat = readFileSync(new URL("./ui/chat.mjs", import.meta.url), "utf8");
+  // The seed for a keyless turn must send the model to the corpus tools.
+  assert.match(chat, /if \(!key\) \{/, "a keyless turn has its own opening context");
+  assert.match(chat, /see_corpus/, "and is told the corpus tool exists");
+  assert.match(chat, /不要因為沒有指定題目就回答「我需要更多資訊」/,
+    "and is told not to ask for a key — that answer is the reported symptom");
+  // The unbound session is keyed distinctly, so it neither inherits a question's context nor leaks.
+  assert.match(chat, /const source = key \|\| "__corpus__";/,
+    "the unbound session gets its own hash input");
+  assert.match(chat, /const readable = key \?/, "and its own directory name");
+
+  // The server must accept a missing key rather than answer 400: with the old `if not key:
+  // error`, corpus mode could not be reached from the browser at all.
+  const server = readFileSync(new URL("./ui/server.py", import.meta.url), "utf8");
+  assert.match(server, /key = payload\.get\("key"\) or ""/,
+    "the ask endpoint treats a missing key as unbound, not as an error");
+  assert.doesNotMatch(server, /chat needs a key/,
+    "and no longer refuses it");
+
+  // And the transcript of the unbound conversation must be readable back — `null` and `""` are the
+  // same conversation, and the old `if not key: return []` made it invisible after a reload.
+  const turns = readFileSync(new URL("./ui/server.py", import.meta.url), "utf8");
+  assert.match(turns, /wanted = key or None/, "the transcript reader normalises the unbound key");
+});
+
+/**
+ * The designer reaches the questions he flagged by clicking, not by remembering keys.
+ *
+ * His complaint: 「我原本在 v2 審核過的大量題目也沒有紀錄，我想要針對 block 的題目跟你進行對話」.
+ * The list must carry his flag and his own sentence, and the walk must stay on the filtered list
+ * (the v2 rule already measured: a filter narrows what is drawn, not what is walked).
+ */
+test("the designer's disputes are reachable from the list, with his own words", () => {
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="only-disputed"/, "there is a filter for the questions he flagged");
+  assert.match(html, /query\.set\("disputed", "1"\)/, "and it is passed to the query");
+  assert.match(html, /你說過/, "the row shows that he flagged it");
+  // The note is what he actually wrote, drawn in the list, so he can pick by it.
+  assert.match(html, /const note = q\.notes \?/, "his sentence is drawn on the row");
+
+  const bridge = readFileSync(new URL("./bridge.py", import.meta.url), "utf8");
+  assert.match(bridge, /p_browse\.add_argument\("--disputed"/, "the bridge takes the filter");
+  assert.match(bridge, /rows = \[row for row in rows if row\.get\("disputed"\)\]/,
+    "and applies it to what is walked, not to what is drawn");
+
+  // `W`/`S` walk the drawn list. The index is taken from `listRows`, which is what was rendered —
+  // walking the category while a filter is on is the defect v2 already paid for.
+  assert.match(html, /function go\(step\)/, "there is a walker");
+  assert.match(html, /listRows\.findIndex/, "and it walks the drawn list");
+  assert.match(html, /document\.addEventListener\("keydown"/, "bound to the keyboard");
+});
+
+test("the bridge does not count an empty question_number as a valid search", () => {
+  const server = readFileSync(new URL("./ui/server.py", import.meta.url), "utf8");
+  // Kept from an earlier fix: `number=0` silently matches nothing and reads as an empty corpus.
+  assert.match(server, /number=int\(raw_number\) if raw_number\.strip\(\)\.isdigit\(\) else None/,
+    "an absent number must stay None");
 });

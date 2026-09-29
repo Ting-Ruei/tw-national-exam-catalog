@@ -72,6 +72,8 @@
               text-overflow: ellipsis; white-space: nowrap; }
   .row .snip { color: #444; font-size: 12px; line-height: 1.35; margin-top: 2px;
                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .row .note { font-size: 12px; color: #7a5c1e; background: #fff8e6; border-left: 2px solid #f0d999;
+               padding: 2px 6px; margin-top: 4px; }
   .judged { font-size: 11px; padding: 0 5px; border-radius: 3px; font-weight: 600; }
   .judged.up { background: #e6f6ea; color: var(--ok); }
   .judged.down { background: #fdecea; color: var(--bad); }
@@ -162,6 +164,10 @@
                border-radius: 6px; resize: vertical; }
   #chat-log .chat-tool { font: 12px/1.5 ui-monospace, Menlo, monospace; color: #1b5e20; }
   #chat-log .chat-tool.bad { color: var(--bad); }
+  .finding { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
+  .finding .fh { font-weight: 600; font-size: 13px; }
+  .finding .fq { font-size: 13px; margin: 4px 0; }
+  .finding summary { cursor: pointer; font-size: 13px; color: var(--accent); }
   .warn { background: #fff8e6; border: 1px solid #f0d999; padding: 9px 11px;
           border-radius: 6px; font-size: 13px; }
   /* three dispositions, not two: the middle one is an annotation, not a verdict */
@@ -193,6 +199,7 @@
       <select id="category"><option value="">載入中…</option></select>
       <label><input type="checkbox" id="only-unjudged">未判讀</label>
       <label><input type="checkbox" id="only-figures">有圖</label>
+      <label><input type="checkbox" id="only-disputed" title="設計者曾標記為有問題（block／comment）">有問題的（你說過的）</label>
     </div>
     <div id="cat-count">—</div>
     <div id="list"></div>
@@ -212,7 +219,12 @@
   </div>
 
   <div class="pane" id="chat-pane">
-    <h2>跟 agent 對話（綁這一題）</h2>
+    <h2>跟 agent 對話
+      <span class="chat-modes">
+        <button id="chat-mode-question" class="on" title="對話綁在左邊選到的題目上">綁這一題</button>
+        <button id="chat-mode-corpus" title="不綁題：從整個題庫的角度討論，它可以自己找題">全庫</button>
+      </span>
+    </h2>
     <p class="empty-note" id="chat-note">點一題就會開一個綁在這一題的對話。
       這裡是跟它講話的地方：看到圖切錯了、字掉了，直接跟它說，它會邊說邊用工具去看，
       你就能看著它去調。</p>
@@ -488,10 +500,16 @@ function renderList(rows, total) {
     const judged = q.judged
       ? `<span class="judged ${esc(q.judged)}">${esc(JUDGED_LABEL[q.judged] || q.judged)}</span>` : "";
     const figures = q.figures ? `<span class="tag">圖 ${q.figures}</span>` : "";
+    // The designer's own flag, and his own words. He said the sandbox made his earlier review
+    // invisible (「我原本在 v2 審核過的大量題目也沒有紀錄」); a list that shows what he wrote is the
+    // smallest thing that makes it visible again.
+    const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
+    const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
     return `<div class="row" data-key="${esc(q.candidate_key)}">
-      <div class="top"><span class="no">q${esc(q.question_number)}</span>${judged}${figures}</div>
+      <div class="top"><span class="no">q${esc(q.question_number)}</span>${judged}${disputed}${figures}</div>
       <div class="sub">${esc(q.subject || "")} ${esc(q.year || "")}</div>
       <div class="snip">${esc(q.stem || "")}</div>
+      ${note}
     </div>`;
   }).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>';
   highlightCurrent();
@@ -516,6 +534,37 @@ async function loadCategories() {
   }
 }
 
+/**
+ * Walk the list with the left hand, the way v2 does.
+ *
+ * The designer's complaint (2026-09-28): 「審題的 reviewUI/v2 我可以快速的上下切換跟 A 或 B，
+ * 但你現在做的這個切換題目有點困難」. `W`/`S` walk whatever the list is **drawing** — including
+ * when the 「有問題的」 filter is on — because a filter narrows what is drawn, not what is walked
+ * (the v2 defect this project already measured: pressing `S` on a filtered list jumped to another
+ * paper). `J`/`K` judge, so a decision is one keystroke like v2's `A`/`B`.
+ */
+function go(step) {
+  if (!listRows.length) return;
+  const at = listRows.findIndex((row) => row.candidate_key === current?.candidate_key);
+  const next = at < 0 ? 0 : Math.min(listRows.length - 1, Math.max(0, at + step));
+  const row = listRows[next];
+  if (!row) return;
+  $("key").value = row.candidate_key;
+  loadQuestion();
+}
+
+function judgeKey(rating) {
+  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
+  if (!$("reason").value.trim()) {
+    // Do not silently write an empty reason: the reason is what the agent learns from, and a
+    // judgement with no basis is a data point that teaches nothing (the server refuses it too).
+    $("reason").focus();
+    $("save-status").textContent = "請先寫下判讀依據，再按判斷鍵。";
+    return;
+  }
+  save(rating).then(() => go(1));
+}
+
 async function loadList() {
   const category = $("category").value;
   if (!category) { $("list").innerHTML = ""; $("cat-count").textContent = "—"; return; }
@@ -523,6 +572,7 @@ async function loadList() {
   const query = new URLSearchParams({ category });
   if ($("only-unjudged").checked) query.set("unjudged", "1");
   if ($("only-figures").checked) query.set("with_figures", "1");
+  if ($("only-disputed").checked) query.set("disputed", "1");
   try {
     const data = await api("/api/browse?" + query);
     renderList(data.questions || [], data.total || 0);
@@ -551,6 +601,21 @@ function renderQuestion(question) {
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
     <details open><summary>這個題目已有的判讀</summary>${renderSaid(question.judgements)}</details>
+    <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
+      <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
+        這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、
+        以及 agent 的工具軌跡。兩者不同時，不同在哪裡就是判讀的對象。</p>
+      <h3>題目欄位（JSONL 原樣）</h3>
+      <pre class="raw">${esc(JSON.stringify({
+        stem: question.stem, shared_stem: question.shared_stem,
+        options: question.options, answer: question.answer,
+        answer_payload: question.answer_payload,
+      }, null, 2))}</pre>
+      <h3>模型看到的提示詞與讀到的內容（agent 自己跑的）</h3>
+      ${renderAiRead(question)}
+      <h3>管線的 AI 判讀（question_ai_findings.jsonl，707MB／108,181 筆）</h3>
+      ${renderPipelineFindings(question.ai_findings)}
+    </details>
     ${(question.lessons || []).length ? `<details><summary>這一題記下的教訓</summary>
       <ul>${question.lessons.map((l) => `<li>${esc(l.text)}（已見 ${l.count || 1} 次）</li>`).join("")}</ul>
     </details>` : ""}
@@ -572,7 +637,9 @@ function renderQuestion(question) {
   // The conversation is bound to this question, so switching question switches conversation —
   // and the transcript is read back from the file rather than from the child's memory, so a
   // page reload or a server restart does not lose it.
-  openChatFor(question.candidate_key);
+  // In corpus mode a loaded question must **not** steal the conversation: the whole point of that
+  // mode is to keep talking about the corpus while browsing questions.
+  if (chatMode === "question") openChatFor(question.candidate_key);
 }
 
 // -- the chat box -------------------------------------------------------------------------
@@ -588,7 +655,54 @@ function renderQuestion(question) {
 //      enough that a query string is the wrong place for it.
 let chatKey = null;
 let chatStreaming = false;
+// Which kind of conversation the box is in. The designer asked for both (「3 兩者都要，1先做」) and
+// named why the second matters: 「目前的Agent無法看到全局」. In `question` mode the box is bound the
+// moment a question is loaded; in `corpus` mode it is bound to nothing, and the agent starts from
+// `see_corpus`／`find_disputed` instead of asking for a key it was never given.
+let chatMode = "question";
 
+function setChatMode(mode) {
+  if (chatStreaming) { $("chat-status").textContent = "它還在回答，先等它說完再切。"; return; }
+  chatMode = mode;
+  $("chat-mode-question").classList.toggle("on", mode === "question");
+  $("chat-mode-corpus").classList.toggle("on", mode === "corpus");
+  if (mode === "corpus") {
+    // `null` is the unbound key, all the way down: chat.mjs keeps one session per key and the
+    // unbound session is keyed by `null`, so this tab and the next visit reach the same one.
+    chatKey = null;
+    $("chat-note").textContent = "這一則對話沒有綁定任何一題——你可以問它整個題庫的狀況，"
+      + "它會自己去看、自己挑一題深入。";
+    openChatFor("");
+  }
+}
+
+async function openChatFor(key) {
+  // Loaded only when a question is in hand or the box is in corpus mode. The old `if (!key) return`
+  // silently made the unbound transcript unreachable — the same shape as a chat box that forgets.
+  if (!key && chatMode !== "corpus") return;
+  chatKey = key || null;
+  $("chat-log").innerHTML = "";
+  $("chat-status").textContent = "讀取對話紀錄…";
+  try {
+    const data = await api("/api/chat?key=" + encodeURIComponent(key || ""));
+    const empty = chatMode === "corpus"
+      ? "還沒說話。這是整個題庫的對話——你可以問它「現在題庫整體是什麼狀況」、"
+        + "「哪幾題是我說過有問題的」，它會自己去找。"
+      : "還沒說話。這是這一題專屬的對話——直接問它。";
+    $("chat-log").innerHTML = (data.turns || []).map((t) => chatTurn(t, false)).join("")
+      || `<p class="empty-note">${empty}</p>`;
+    $("chat-status").textContent = (data.turns || []).length
+      ? `已有 ${data.turns.length} 則對話（存在 chat.jsonl）` : "";
+  } catch (error) {
+    $("chat-status").textContent = "讀對話紀錄失敗：" + error.message;
+  }
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+}
+
+/*
+ * One turn drawn from the transcript — the same shape for a reloaded turn and a live one, so the
+ * conversation does not change appearance when the process is restarted.
+ */
 function chatTurn(turn, live) {
   const who = turn.role === "designer" ? "你" : "agent";
   const body = turn.text ? esc(turn.text) : '<span class="empty-note">…</span>';
@@ -597,22 +711,6 @@ function chatTurn(turn, live) {
     <div class="body">${body}</div></div>`;
 }
 
-async function openChatFor(key) {
-  if (!key) return;
-  chatKey = key;
-  $("chat-log").innerHTML = "";
-  $("chat-status").textContent = "讀取對話紀錄…";
-  try {
-    const data = await api("/api/chat?key=" + encodeURIComponent(key));
-    $("chat-log").innerHTML = (data.turns || []).map((t) => chatTurn(t, false)).join("")
-      || '<p class="empty-note">還沒說話。這是這一題專屬的對話——直接問它。</p>';
-    $("chat-status").textContent = (data.turns || []).length
-      ? `這題已有 ${data.turns.length} 則對話（存在 chat.jsonl）` : "";
-  } catch (error) {
-    $("chat-status").textContent = "讀對話紀錄失敗：" + error.message;
-  }
-  $("chat-log").scrollTop = $("chat-log").scrollHeight;
-}
 
 /**
  * Send one designer turn and render the answer as it arrives.
@@ -625,10 +723,13 @@ async function openChatFor(key) {
 async function sendChat() {
   const text = $("chat-text").value.trim();
   if (!text) { $("chat-status").textContent = "先寫你要說什麼。"; return; }
-  if (!chatKey) { $("chat-status").textContent = "先載入一題——對話是綁在題目上的。"; return; }
+  if (!chatKey && chatMode !== "corpus") {
+    $("chat-status").textContent = "先載入一題，或切到「全庫」模式，才能說話。";
+    return;
+  }
   if (chatStreaming) { $("chat-status").textContent = "它還在回答，等它說完或按「停」。"; return; }
 
-  const key = chatKey;
+  const key = chatKey;  // null in corpus mode, and the server treats null as the unbound session
   $("chat-text").value = "";
   chatStreaming = true;
   $("chat-send").disabled = true;
@@ -710,6 +811,42 @@ async function stopChat() {
 }
 
 // -- actions ------------------------------------------------------------------------------
+/**
+ * What the pipeline's repair loop actually asked a model and what it produced.
+ *
+ * This is the record the designer kept asking for: 「我可以看到 jsonl 讓 AI 看到或是產生的內容
+ * 到底是什麼，才有比較的依據」. It is the only place the **prompt** and the **raw completion** are
+ * stored — v2 shows only the parsed verdict, and a verdict is a conclusion, so there is nothing in
+ * either console to compare it against.
+ *
+ * All of a question's readings are shown, oldest first, because the loop runs a question again when
+ * a repair comes back — one reading has nothing to compare with.
+ */
+function renderPipelineFindings(rows) {
+  const list = rows || [];
+  if (!list.length) {
+    return '<p class="empty-note">這一題沒有管線的 AI 判讀紀錄（`question_ai_findings.jsonl`）。'
+      + '通常是還沒被標記為有問題，所以迴圈沒跑過它。</p>';
+  }
+  return list.map((row, index) => {
+    const f = row.finding || {};
+    const usage = row.usage || {};
+    return `<div class="finding">
+      <div class="fh">第 ${index + 1} 次 · ${esc(row.model || '?')} · ${esc(row.created_at || '')}
+        · ${esc((row.seconds ?? '?') + 's')} · ${esc(f.verdict || '?')}
+        ${row.error ? `<span class="tag bad">錯誤：${esc(row.error)}</span>` : ''}</div>
+      <div class="fq"><b>模型回答（解析後）：</b>
+        where＝${esc(f.where || '')}<br>fix＝${esc(f.fix || '')}</div>
+      <details><summary>模型收到的提示詞（system）</summary>
+        <pre class="raw">${esc(row.prompt_system || '（未記錄）')}</pre></details>
+      <details><summary>模型收到的提示詞（user，含題目原文）</summary>
+        <pre class="raw">${esc(row.prompt_user || '（未記錄）')}</pre></details>
+      <details><summary>模型原始輸出（raw）＋用量</summary>
+        <pre class="raw">${esc(row.raw || '（未記錄；這一筆是解析後的 finding）')}\n\n${esc(JSON.stringify(usage, null, 2))}</pre></details>
+    </div>`;
+  }).join('');
+}
+
 async function loadQuestion() {
   const key = $("key").value.trim();
   if (!key) return;
@@ -787,6 +924,8 @@ $("find").addEventListener("click", search);
 $("btn-up").addEventListener("click", () => save("up"));
 $("btn-down").addEventListener("click", () => save("down"));
 $("btn-hold").addEventListener("click", () => save("hold"));
+$("chat-mode-question").addEventListener("click", () => setChatMode("question"));
+$("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-stop").addEventListener("click", stopChat);
 // Enter sends; Shift+Enter writes a newline. A designer's sentence about a question is often more
@@ -797,8 +936,26 @@ $("chat-text").addEventListener("keydown", (event) => {
 $("category").addEventListener("change", loadList);
 $("only-unjudged").addEventListener("change", loadList);
 $("only-figures").addEventListener("change", loadList);
+$("only-disputed").addEventListener("change", loadList);
 $("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loadQuestion(); });
 $("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+
+/**
+ * Left-hand keys, mirroring v2: `W`/`S` walk, `J`/`K` judge.
+ *
+ * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the 判讀框,
+ * and the sandbox has that box focused most of the time. `J`/`K` leave the letters free — the same
+ * reasoning v2 records for why its own shortcuts are suppressed inside a textarea.
+ */
+document.addEventListener("keydown", (event) => {
+  if (event.target.tagName === "TEXTAREA" || event.target.tagName === "INPUT") return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const map = { w: () => go(-1), s: () => go(1), j: () => judgeKey("up"), k: () => judgeKey("down") };
+  const hit = map[event.key.toLowerCase()];
+  if (!hit) return;
+  event.preventDefault();
+  hit();
+});
 document.addEventListener("click", (event) => {
   const row = event.target.closest("#list .row");
   if (row) { $("key").value = row.dataset.key; loadQuestion(); return; }

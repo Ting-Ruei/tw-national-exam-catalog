@@ -64,6 +64,26 @@ function remember(record) {
  * and the two would drift the first time a field was added to one of them.
  */
 async function seed(key) {
+  // **The unbound conversation.** The designer asked for both kinds (2026-09-28: 「3 兩者都要，
+  // 1先做」), and this is the second: no question in hand, so the model must be able to *find* one.
+  // Without a seed the model is standing in an empty room and says so — verbatim from the
+  // designer's transcript: 「我需要更多資訊才能回答這個問題——目前這則對話還沒有指定哪一道題」.
+  // That answer is not a model failure, it is a missing tool: the corpus view (`see_corpus`,
+  // `find_disputed`) and a sentence saying this conversation is allowed to start from nothing.
+  if (!key) {
+    return [
+      "這一則對話**沒有綁定任何一題**——設計者會从整個題庫的角度跟你討論。",
+      "",
+      "你現在有一組看全局的工具，**不要因為沒有指定題目就回答「我需要更多資訊」**：",
+      "- `see_corpus`：看整個題庫（每個類科幾題、有圖、被標記、被設計者點名、你判過幾題）。",
+      "- `find_disputed`：列出設計者曾標記為有問題（block／comment）的題目，含**他自己寫的字**。",
+      "- `find_question`：用科目／題號／關鍵字找一題；找到 key 之後再用 `get_question`。",
+      "",
+      "他說的是問題或方向時，先看全局、再挑一題深入，或直接回答他的問題。"
+      + "如果他點出一條**可以重複使用的規則**，用 `remember_lesson` 記下來。",
+      "**這裡是對話，不是判讀**：不要自己下 rating。",
+    ].join("\n");
+  }
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const run = promisify(execFile);
@@ -132,8 +152,11 @@ const SESSION_DIR = join(STORE_DIR, "chat-sessions");
  * a directory named only by a hash is a directory nobody can audit.
  */
 function sessionDirFor(key) {
-  const readable = (key.split(":").pop() || "q").replace(/[^A-Za-z0-9_-]/g, "");
-  const hash = createHash("sha256").update(key).digest("hex").slice(0, 12);
+  // An unbound conversation is its own session, with its own directory, so it neither inherits a
+  // question's context nor leaks its own into one — the same isolation the bound chat is built on.
+  const source = key || "__corpus__";
+  const readable = key ? (key.split(":").pop() || "q").replace(/[^A-Za-z0-9_-]/g, "") : "corpus";
+  const hash = createHash("sha256").update(source).digest("hex").slice(0, 12);
   return join(SESSION_DIR, `${readable}-${hash}`);
 }
 
@@ -229,7 +252,9 @@ async function ask(message) {
     }
     // The designer's turn is recorded **before** the answer, so a crash mid-answer still leaves the
     // sentence he typed. Losing his input is worse than losing the reply to it.
-    remember({ candidate_key: key, role: "designer", text });
+    // `candidate_key: null` for the unbound conversation, so a reader of the file can tell a
+    // corpus-level sentence from a question-bound one without inferring it from the text.
+    remember({ candidate_key: key || null, role: "designer", text });
     write({ id, event: "turn", role: "designer", text });
 
     // Capture the assistant's own text from the event stream, not from a return value: `prompt()`
@@ -247,7 +272,7 @@ async function ask(message) {
     } finally {
       collect();
     }
-    remember({ candidate_key: key, role: "agent", text: reply });
+    remember({ candidate_key: key || null, role: "agent", text: reply });
     write({ id, event: "turn", role: "agent", text: reply });
     write({ id, event: "done", seconds: (Date.now() - started) / 1000 });
   } catch (error) {
@@ -265,7 +290,9 @@ function turnsFor(key) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
-      if (row.candidate_key === key) out.push(row);
+      // `null` is the unbound conversation's key, and `undefined` (a line written before this
+      // field was always set) must not match it by accident.
+      if ((row.candidate_key ?? null) === (key || null)) out.push(row);
     } catch { /* a half-written line must not blank the conversation */ }
   }
   return out;

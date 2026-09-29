@@ -156,6 +156,47 @@ def human_events(key: str) -> list:
     return out
 
 
+# The pipeline's own AI-findings stream — 707 MB, 108,181 lines, written by the repair loop.
+#
+# This is the file that actually holds **what the model was asked and what it produced**: each record
+# carries `prompt_system`, `prompt_user`, the parsed `finding`, the `raw` completion and the model
+# name. The designer asked for exactly this (2026-09-28: 「我可以看到 jsonl 讓 AI 看到或是產生的
+# 內容到底是什麼，才有比較的依據」) and **neither console shows it** — v2 reads only the parsed
+# `finding` (verdict/where/fix), and this sandbox reads only its own `agent_feedback.jsonl`.
+#
+# Read by substring pre-filter, the same shape as `prior_judgements`: the file is 707 MB and parsing
+# every line per request would make the page unusable. A candidate_key is long enough that a false
+# positive needs the key to appear inside another question's prompt text, which cannot happen — the
+# key is this question's own identifier.
+AI_FINDINGS = os.path.join(QUEUE, "question_ai_findings.jsonl")
+
+
+def ai_findings(key: str, limit: int = 20) -> list:
+    """The pipeline's records for one question, oldest first.
+
+    **All** of them, not the newest: the loop runs a question more than once when a repair comes
+    back, and the sequence of readings is the evidence. The designer's words: 「才有比較的依據」 —
+    one reading has nothing to compare against.
+    """
+    if not key or not os.path.exists(AI_FINDINGS):
+        return []
+    out = []
+    with open(AI_FINDINGS, encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") != key:
+                continue
+            out.append(row)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def prior_judgements(key: str) -> list:
     """Judgements already made on this question, by the designer or by an earlier agent run.
 
@@ -359,6 +400,10 @@ def question_view(question: dict) -> dict:
         # what a person already found wrong, which is exactly what the model is being asked
         # to reproduce.
         "prior_judgements": prior_judgements(question.get("candidate_key") or ""),
+        # What the pipeline's own repair loop asked a model and what it answered. Carried here so the
+        # UI can show 「AI 實際讀到／產生什麼」; without it the only readable record of a model's
+        # reading was its parsed verdict (`where`/`fix`), which is the conclusion, not the evidence.
+        "ai_findings": ai_findings(question.get("candidate_key") or ""),
     }
 
 
@@ -548,6 +593,151 @@ def do_question(args) -> dict:
     return view
 
 
+# The human review stream: the designer's own decisions. Read-only here, always.
+HUMAN_EVENTS = os.path.join(QUEUE, "question_review_events.jsonl")
+
+
+def human_disputes(actions=("block", "comment"), limit: int = 50) -> dict:
+    """Where the designer said a question was wrong — the corpus view the agent did not have.
+
+    Measured 2026-09-28: 20,324 human events, of which **1,247 are `block`／`comment`**, and 313 of
+    those carry text in `notes` (average 25 characters). The agent could see a dispute only if it
+    already knew the question's key; it had no way to answer 「哪些題有問題」, which is why it told the
+    designer 「我需要更多資訊」 and asked for a key. The corpus is what it was missing.
+
+    `notes` is the field, **not `reason`**: `reason` is empty on every human event, and a query for it
+    returns "nobody wrote anything", which is false. The designer's example of what matters:
+    「答案沒進去」（q041）, 「表格應該用截圖的」.
+
+    Read-only by construction — this function opens the file for reading and the agent has no tool
+    that writes it.
+    """
+    if not os.path.exists(HUMAN_EVENTS):
+        return {"count": 0, "disputes": [], "note": "no human review stream at %s" % HUMAN_EVENTS}
+
+    # Newest first: a person's most recent complaint is the one still worth acting on, and the file
+    # is append-only so the end of it is the present.
+    rows = []
+    with open(HUMAN_EVENTS, encoding="utf-8") as handle:
+        for line in handle:
+            if not any('"%s"' % action in line for action in actions):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("action") not in actions:
+                continue
+            rows.append({
+                "candidate_key": row.get("candidate_key") or row.get("canonical_question_key"),
+                "action": row.get("action"),
+                "notes": row.get("notes") or "",
+                "reviewer": row.get("reviewer"),
+                "created_at": row.get("created_at") or row.get("at"),
+            })
+    rows.reverse()
+    with_notes = [row for row in rows if row["notes"].strip()]
+    return {
+        "count": len(rows),
+        "with_notes": len(with_notes),
+        "shown": min(len(rows), limit),
+        "disputes": rows[:limit],
+    }
+
+
+def do_disputes(args) -> dict:
+    return human_disputes(
+        actions=tuple(args.actions.split(",")),
+        limit=args.limit,
+    )
+
+
+def do_overview(args) -> dict:
+    """What the whole corpus looks like: how much is there, what state it is in.
+
+    The agent's answer to「我需要更多資訊」should not be a request for a key. This is the shape of the
+    corpus — per category, with how many carry a figure, how many a machine flagged, how many the
+    designer disputed, and how many the agent itself has judged. Every number is counted from a single
+    pass over the candidate file, which is measured at 0.3 s for all 79,090 questions.
+    """
+    for path in (CANDIDATES, HUMAN_EVENTS):
+        if not os.path.exists(path):
+            _die("%s not found; run scripts/sync_from_station.sh first" % path)
+
+    disputes = {}
+    with open(HUMAN_EVENTS, encoding="utf-8") as handle:
+        for line in handle:
+            if '"block"' not in line and '"comment"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("action") not in ("block", "comment"):
+                continue
+            key = row.get("candidate_key") or row.get("canonical_question_key")
+            entry = disputes.setdefault(key, {"block": 0, "comment": 0, "notes": ""})
+            entry[row["action"]] = entry.get(row["action"], 0) + 1
+            if (row.get("notes") or "").strip():
+                # Keep the newest sentence with text; an empty one must not overwrite a real one.
+                entry["notes"] = row["notes"]
+
+    judged = {}
+    if os.path.exists(STORE):
+        with open(STORE, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("candidate_key"):
+                    judged[row["candidate_key"]] = row.get("rating")
+
+    by_category = {}
+    total = 0
+    with open(CANDIDATES, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            total += 1
+            metadata = row.get("metadata") or {}
+            name = metadata.get("official_category_name") or "(未分類)"
+            bucket = by_category.setdefault(name, {
+                "questions": 0, "with_figures": 0, "machine_flagged": 0,
+                "disputed": 0, "disputed_with_notes": 0, "judged_by_agent": 0, "examples": [],
+            })
+            bucket["questions"] += 1
+            if row.get("image_refs"):
+                bucket["with_figures"] += 1
+            if row.get("quality_status") and row.get("quality_status") != "pass":
+                bucket["machine_flagged"] += 1
+            key = row.get("candidate_key")
+            dispute = disputes.get(key)
+            if dispute:
+                bucket["disputed"] += 1
+                if dispute["notes"].strip():
+                    bucket["disputed_with_notes"] += 1
+                    # A few keys with the designer's own words, so the agent can go straight to a
+                    # question where its judgement is worth the most, without another round trip.
+                    if len(bucket["examples"]) < 3:
+                        bucket["examples"].append({
+                            "candidate_key": key,
+                            "question_number": row.get("question_number"),
+                            "notes": dispute["notes"][:160],
+                        })
+            if judged.get(key):
+                bucket["judged_by_agent"] += 1
+
+    return {
+        "total_questions": total,
+        "categories": by_category,
+        "disputes_total": sum(1 for _ in disputes),
+        "judged_by_agent_total": len(judged),
+    }
+
+
 def do_browse(args) -> dict:
     """List categories and their questions, so no key has to be remembered.
 
@@ -577,6 +767,28 @@ def do_browse(args) -> dict:
                 if key:
                     judgments[key] = row.get("rating")
 
+    # The designer's own sentences, keyed for the list. His friction, verbatim: 「我原本在 v2
+    # 審核過的大量題目也沒有紀錄，我想要針對 block 的題目跟你進行對話暫時也做不到」. A list that
+    # cannot show which questions he already flagged is a list he has to remember his way through.
+    dispute_notes = {}
+    if os.path.exists(HUMAN_EVENTS):
+        with open(HUMAN_EVENTS, encoding="utf-8") as handle:
+            for line in handle:
+                if '"block"' not in line and '"comment"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("action") not in ("block", "comment"):
+                    continue
+                key = row.get("candidate_key") or row.get("canonical_question_key")
+                notes = (row.get("notes") or "").strip()
+                entry = dispute_notes.setdefault(key, {"actions": [], "notes": ""})
+                entry["actions"].append(row["action"])
+                if notes:
+                    entry["notes"] = notes
+
     by_category = {}
     with open(CANDIDATES, encoding="utf-8") as handle:
         for line in handle:
@@ -598,6 +810,12 @@ def do_browse(args) -> dict:
                 "figures": len(row.get("image_refs") or []),
                 "judged": judgments.get(key),
                 "stem": (row.get("stem") or "")[:70],
+                "disputed": bool(dispute_notes.get(key)),
+                "dispute_actions": (dispute_notes.get(key) or {}).get("actions", []),
+                # The person's own words. Shown in the list so he can pick by what he wrote, and
+                # so the agent is looking at the same sentence the reviewer saw.
+                "notes": (dispute_notes.get(key) or {}).get("notes", ""),
+                "prior_judgements": prior_judgements(key) if key else [],
             }
             by_category.setdefault(category, []).append(entry)
 
@@ -609,7 +827,8 @@ def do_browse(args) -> dict:
                 {"category": name,
                  "total": len(rows),
                  "judged": sum(1 for row in rows if row.get("judged")),
-                 "with_figures": sum(1 for row in rows if row.get("figures"))}
+                 "with_figures": sum(1 for row in rows if row.get("figures")),
+                 "disputed": sum(1 for row in rows if row.get("disputed"))}
                 for name, rows in sorted(by_category.items(), key=lambda kv: -len(kv[1]))
             ],
         }
@@ -623,6 +842,11 @@ def do_browse(args) -> dict:
         rows = [row for row in rows if not row.get("judged")]
     if args.with_figures:
         rows = [row for row in rows if row.get("figures")]
+    # `--disputed` is the designer's actual workflow: 「我想要針對 block 的題目跟你進行對話」.
+    # The filter is on the **list**, not on what the walker sees, so `S` on a filtered list still
+    # moves within that list (the v2 rule: 導覽跟隨被畫出的清單).
+    if getattr(args, "disputed", False):
+        rows = [row for row in rows if row.get("disputed")]
     total = len(rows)
     rows = rows[args.offset:args.offset + args.limit] if args.limit else rows[args.offset:]
     return {"category": args.category, "total": total, "offset": args.offset, "questions": rows}
@@ -699,9 +923,20 @@ def main() -> int:
     p_browse.add_argument("--category", default="", help="category substring; omit to list categories")
     p_browse.add_argument("--unjudged", action="store_true", help="only questions nobody has judged")
     p_browse.add_argument("--with-figures", action="store_true", help="only questions that have a figure")
+    p_browse.add_argument("--disputed", action="store_true",
+                          help="only questions the designer flagged (block/comment)")
     p_browse.add_argument("--offset", type=int, default=0)
     p_browse.add_argument("--limit", type=int, default=0, help="0 = all")
     p_browse.set_defaults(func=do_browse)
+
+    p_overview = sub.add_parser("overview", help="the shape of the whole corpus, per category")
+    p_overview.set_defaults(func=do_overview)
+
+    p_disputes = sub.add_parser("disputes", help="questions the designer said were wrong")
+    p_disputes.add_argument("--actions", default="block,comment",
+                            help="which human actions count as a dispute")
+    p_disputes.add_argument("--limit", type=int, default=50)
+    p_disputes.set_defaults(func=do_disputes)
 
     p_find = sub.add_parser("find", help="find questions by subject / number / text")
     p_find.add_argument("--subject", default="", help="substring of the category or subject name")

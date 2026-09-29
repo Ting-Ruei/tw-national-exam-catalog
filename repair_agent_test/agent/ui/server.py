@@ -303,8 +303,12 @@ def chat_turns(key: str) -> list[dict]:
     that no longer exists anywhere else.
     """
     path = STORE_DIR / "chat.jsonl"
-    if not path.is_file() or not key:
+    if not path.is_file():
         return []
+    # An empty key is the **unbound** conversation (candidate_key null), not "no conversation".
+    # Returning [] for both made the corpus-level transcript invisible after a reload while it was
+    # still on disk — the same class of defect as a chat box that forgets a restart.
+    wanted = key or None
     out = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -313,7 +317,7 @@ def chat_turns(key: str) -> list[dict]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("candidate_key") == key:
+        if (row.get("candidate_key") or None) == wanted:
             out.append(row)
     return out
 
@@ -441,14 +445,15 @@ class Handler(BaseHTTPRequestHandler):
         (the station fronts this with a proxy, and a buffered SSE stream arrives all at once at the
         end — which is exactly the blank box again).
         """
-        key = payload.get("key")
-        if not key:
-            self._json({"error": "chat needs a key: the session is bound to one question"}, 400)
-            return
+        # A missing key is the **unbound** conversation, not an error. The designer asked for both
+        # kinds (「3 兩者都要，1先做」); the first is bound to a question, the second starts from the
+        # whole corpus. Until this accepted `key: null`, the second kind could not be reached from
+        # the browser at all — the server answered 400 and the box looked broken.
+        key = payload.get("key") or ""
         message = {
             "id": payload.get("id") or "chat",
             "op": "ask",
-            "key": key,
+            "key": key or None,
             "text": payload.get("text") or "",
             "reset": bool(payload.get("reset")),
         }
@@ -493,6 +498,7 @@ class Handler(BaseHTTPRequestHandler):
             category=(query.get("category") or [""])[0],
             unjudged=(query.get("unjudged") or ["0"])[0] in ("1", "true"),
             with_figures=(query.get("with_figures") or ["0"])[0] in ("1", "true"),
+            disputed=(query.get("disputed") or ["0"])[0] in ("1", "true"),
             offset=int((query.get("offset") or ["0"])[0] or 0),
             limit=int((query.get("limit") or ["0"])[0] or 0),
         )

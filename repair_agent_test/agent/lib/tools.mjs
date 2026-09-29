@@ -100,6 +100,32 @@ const keyRequiredMessage =
 export function toolsFor(Type) {
   return [
     {
+      name: "see_corpus",
+      label: "看全庫（不是一題）",
+      description:
+        "看**整個題庫**的樣子：每個類科有幾題、幾題有圖、幾題被機器標記、幾題被設計者標記為有問題、" +
+        "你已經判過幾題。**回答『我做到哪了』／『有沒有全局』／『先看哪一科』之前先呼叫這個。**" +
+        "不要因為不知道某一題的 key 就回答「我需要更多資訊」——先看全庫，再挑。",
+      parameters: Type.Object({}),
+      execute: async () => asToolResult(await callBridge(["overview"], { timeout: 300_000 })),
+    },
+
+    {
+      name: "find_disputed",
+      label: "找設計者說有問題的題",
+      description:
+        "列出**設計者曾經標記為有問題（block／comment）**的題目，含他寫的字（在 notes 欄）。" +
+        "這是他真正的需求：「我想針對 block 的題目跟你進行對話」。**要挑一題深入看時，從這裡挑。**" +
+        "回傳的題目都有 key，可以直接接 get_question。",
+      parameters: Type.Object({
+        limit: Type.Optional(Type.Integer({ description: "最多幾筆，預設 50" })),
+      }),
+      execute: async (_id, params) =>
+        asToolResult(await callBridge(["disputes", "--limit", String(params.limit ?? 50)],
+                                      { timeout: 300_000 })),
+    },
+
+    {
       name: "find_question",
       label: "找題目",
       description:
