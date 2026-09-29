@@ -156,7 +156,14 @@ else
   echo "  （沒有 ${DERIVED_PAPERS}；先跑 qbr/scripts/build_browser_safe_papers.py --apply）"
 fi
 
-# 3. 佇列（選擇性）。crops 是佇列自帶的，所以要整棵一起來。
+# 3. 佇列（選擇性）。crops 隨佇列走，**但從 `--delete` 排除、分兩步同步**。
+#
+# 量到的（2026-09-29 佇列重建）：筆電重建後 crops 5,047 張，常駐機 21,543 張。差距是**裁切
+# 證據圖**（`*-dispute.png` 等）：它們由 `crop_run_figures --queue` 在常駐機上裁出，引用它們的
+# `question_ai_findings.jsonl` 以常駐機為家——筆電重建不重裁這些圖（build 的
+# 「finding crops: … missing」說的就是它們）。帶 `--delete` 的 rsync 會把這 16.5k 張「筆電沒有
+# 的」當成多餘檔刪掉，等於銷毀已承接 AI findings 的證據。所以主同步排除 `crops/`，再用一條
+# **不帶 `--delete`** 的 rsync 把筆電的 crop 只增不刪地補上。
 #
 # **人工紀錄先備份，再同步，而且從 --delete 的範圍排除。** 順序是刻意的：
 # 先留一份帶時間戳的離線副本，接著 rsync 才動到那個目錄。
@@ -172,6 +179,8 @@ if [[ "${DO_QUEUE}" == 1 ]]; then
   for name in "${PROTECTED_DIRS[@]}"; do
     PROTECT_ARGS+=("--exclude=${name}/")
   done
+  # crops 從 --delete 排除（理由見上面第 3 點的註），改走下面那條只增不刪的同步。
+  PROTECT_ARGS+=("--exclude=crops/")
 
   echo "  先備份常駐機上的人工紀錄…"
   # 注意這裡**沒有 `-n`**。`ssh -n` 把 stdin 接到 `/dev/null`，於是下面的 heredoc 根本沒送到常駐機，
@@ -205,6 +214,11 @@ REMOTE_BACKUP
   rsync -a --delete "${PROTECT_ARGS[@]}" \
     "${CATALOG}/qbr/data/review-queues/live/review-ui/" \
     "${STATION}:qbr-review/queue/review-ui/"
+
+  # crops 只增不刪：筆電的新 crop 補上；常駐機上筆電沒有的裁切證據圖（AI findings 引用的）
+  # 保留。`--delete` 在這條上會刪證據，見上面第 3 點的註。
+  rsync -a "${CATALOG}/qbr/data/review-queues/live/review-ui/crops/" \
+    "${STATION}:qbr-review/queue/review-ui/crops/"
 
   # 掃描的紀錄。**它在佇列根目錄，不在 `review-ui/` 底下**，所以上面的 rsync 不會帶它——
   # 而它正是討論區「排隊中 N 題」的來源。沒有它，那一塊永遠顯示「還沒跑過掃描」，
