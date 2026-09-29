@@ -40,6 +40,13 @@ i=0
 while read -r key; do
   [ -n "$key" ] || continue
   i=$((i + 1))
+  # **Resume is "run the same list again".** The summary file is the ledger: a key that is already
+  # in it is skipped, so a loop that was killed (the harness reaps a shell's children when the call
+  # ends — measured 2026-09-29, twice) does not judge the same question twice when it restarts.
+  if cut -f1 "$SUMMARY" | grep -qxF "$key"; then
+    echo "[$i/$total] $key 已完成，跳過"
+    continue
+  fi
   before=$(wc -l < "$STORE" 2>/dev/null || echo 0)
   started=$(date +%s)
   # `timeout` is not a binary on macOS (it is a shell builtin in the interactive shell only), so the
