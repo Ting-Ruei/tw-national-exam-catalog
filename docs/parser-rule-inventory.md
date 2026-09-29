@@ -10,11 +10,11 @@
 
 | 層級 | 來源 | 用途 | 是否可直接改題目 |
 |---|---|---|---|
-| 1 | [build_question_candidates_from_mineru.py](/Users/tim/tw-national-exam-catalog/scripts/build_question_candidates_from_mineru.py) | 題號、選項、表頭、題組候選、圖片資產、固定題數與結構 issue | 只做確定的 parser normalization；結構錯誤要保留 issue |
-| 2 | [text_normalization_rules.json](/Users/tim/tw-national-exam-catalog/configs/text_normalization_rules.json) | 可追蹤的通用／類科／科目詞組修正 | 需先對照 PDF，再由 repair script 追加 SQL event |
-| 3 | [core-rules.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/core-rules.md) | 所有科目的 AI advisory 標準 | 不可單獨改人工狀態 |
-| 4 | [subject-overrides.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/subject-overrides.md) | 醫事檢驗師、藥師等科目的特殊風險 | 只產生提示或建議修正 |
-| 5 | [ocr-correction-inbox.md](/Users/tim/tw-national-exam-catalog/docs/ocr-correction-inbox.md) | 人工逐步新增的發現 | `new` 尚未生效，確認後才轉入 registry |
+| 1 | [build_question_candidates_from_mineru.py](../scripts/build_question_candidates_from_mineru.py) | 題號、選項、表頭、題組候選、圖片資產、固定題數與結構 issue | 只做確定的 parser normalization；結構錯誤要保留 issue |
+| 2 | [text_normalization_rules.json](../configs/text_normalization_rules.json) | 可追蹤的通用／類科／科目詞組修正 | 需先對照 PDF，再由 repair script 追加 SQL event |
+| 3 | [core-rules.md](skills/national-exam-ai-audit/references/core-rules.md) | 所有科目的 AI advisory 標準 | 不可單獨改人工狀態 |
+| 4 | [subject-overrides.md](skills/national-exam-ai-audit/references/subject-overrides.md) | 醫事檢驗師、藥師等科目的特殊風險 | 只產生提示或建議修正 |
+| 5 | [ocr-correction-inbox.md](ocr-correction-inbox.md) | 人工逐步新增的發現 | `new` 尚未生效，確認後才轉入 registry |
 
 ## 一、既有通用 Parser 規則
 
@@ -68,7 +68,7 @@ Parser 只用明確格式產生候選：
 
 ## 二、目前 Parser 已有的通用 OCR 字形規則
 
-以下是 [parser 的 OCR_CHAR_MAP](/Users/tim/tw-national-exam-catalog/scripts/build_question_candidates_from_mineru.py:56) 目前直接生效的單字修正。它們不是人工審核通過，也不會刪除原始 PDF：
+以下是 [parser 的 OCR_CHAR_MAP](../scripts/build_question_candidates_from_mineru.py:56) 目前直接生效的單字修正。它們不是人工審核通過，也不會刪除原始 PDF：
 
 | OCR | 正規化 | OCR | 正規化 |
 |---|---|---|---|
@@ -92,7 +92,7 @@ Parser 只用明確格式產生候選：
 
 ## 三、醫事檢驗師專用規則
 
-完整細節在 [subject-overrides.md](/Users/tim/tw-national-exam-catalog/docs/skills/national-exam-ai-audit/references/subject-overrides.md)。目前已整理：
+完整細節在 [subject-overrides.md](skills/national-exam-ai-audit/references/subject-overrides.md)。目前已整理：
 
 ### 生物化學與臨床生化學
 
@@ -157,7 +157,7 @@ Parser 只用明確格式產生候選：
 
 ## 五、你之後要補哪裡
 
-- 發現一個具體錯字：填 [ocr-correction-inbox.md](/Users/tim/tw-national-exam-catalog/docs/ocr-correction-inbox.md)。
+- 發現一個具體錯字：填 [ocr-correction-inbox.md](ocr-correction-inbox.md)。
 - 發現一種 parser 結構錯誤：告訴我年份、考次、題號與 PDF 現象，我會修改 parser 並補 regression test。
 - 發現一整科反覆問題：在 `subject-overrides.md` 增加最小範圍的科目規則，再只重掃受影響題目。
 - 只看過但不確定：保留 `new`，不放進 active JSON。

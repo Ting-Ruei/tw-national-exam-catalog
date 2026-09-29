@@ -1,0 +1,94 @@
+# 新版題庫審題介面 — 常駐服務（LAN／Tailscale）
+#
+# 這份 compose 只做一件事：把**新管線**（qbr）的佇列放到瀏覽器上，讓其他裝置可以審題。
+# 它不是舊的 `deploy/ai395/compose.production.yaml`，也不連任何資料庫——原因寫在使用者
+# 可見的 `qbr/reports/two_review_stores.md`：舊的 SQL 佇列與新管線的 jsonl 佇列是兩個
+# 不相交的審核紀錄，把舊的混進來就等於讓兩邊互相污染。
+#
+#     docker compose -f deploy/qbr-review/compose.yaml up -d
+#
+# 設計上的三個決定：
+#
+# 1. **綁 0.0.0.0，不是 127.0.0.1。** 這是與舊 `scripts/review_run.sh` 唯一相反的地方，
+#    而且是刻意的：那個腳本綁 loopback 是為了「只有這台工作站能開」，而這裡的需求正好相反
+#    ——其他裝置要在瀏覽器審題。`REVIEW_UI_BIND` 設成 `127.0.0.1` 就能退回單機。
+#
+# 2. **佇列與程式碼唯讀，只有審核紀錄可寫。** 佇列（`candidates.jsonl`）是可重建的產物；
+#    審核紀錄（`question_review_events.jsonl`）是無可取代的人類決定。把前者掛唯讀、
+#    後者留在可寫的目錄，讓「重建佇列」不可能弄壞「人的紀錄」。這不是靠自律，是靠 mount。
+#
+# 3. **埠是參數。** 8765/8766 是舊 review-ui 容器的號碼；本服務預設 8774（新管線一直在用的
+#    那個），並可用 `.env` 改。書籤與已安裝的 PWA 是契約，所以預設值刻意等於使用者既有習慣。
+
+services:
+  qbr-review-ui:
+    build:
+      context: "${CATALOG_ROOT:-../..}"
+      dockerfile: deploy/qbr-review/Dockerfile
+    image: "${REVIEW_UI_IMAGE:-tw-national-exam-qbr-review-ui:local}"
+    container_name: qbr-review-ui
+    restart: unless-stopped
+    init: true
+    working_dir: /workspace
+    # 綁 0.0.0.0 讓 LAN 上的其他裝置進來；要收回單機就設 REVIEW_UI_BIND=127.0.0.1。
+    ports:
+      - "${REVIEW_UI_BIND:-0.0.0.0}:${REVIEW_UI_PORT:-8774}:8774"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # 這條服務**不讀資料庫**。刻意不設 DATABASE_URL：`--review-backend jsonl` 下不需要它，
+      # 而設了它會讓下一個讀這份檔案的人以為這兩條路線是同一條。
+      ASSET_ROOT: /workspace/國考題資料夾
+      REVIEW_UI_BACKEND: jsonl
+      # 佇列自己是 asset root：`build_review_queue.py` 把每個裁切圖複製進佇列，所以佇列
+      # 搬到哪裡、圖就跟到哪裡，不需要 984 個來源目錄留在原地。這段是它自成一體的關鍵。
+      REVIEW_UI_ADDITIONAL_ASSET_ROOTS: /queue
+      REVIEW_UI_READ_ONLY: "${REVIEW_UI_READ_ONLY:-0}"
+      REVIEW_UI_BASIC_AUTH_USERNAME: "${REVIEW_UI_BASIC_AUTH_USERNAME:-}"
+      REVIEW_UI_BASIC_AUTH_PASSWORD: "${REVIEW_UI_BASIC_AUTH_PASSWORD:-}"
+      REVIEW_UI_MAX_REQUEST_BYTES: "${REVIEW_UI_MAX_REQUEST_BYTES:-16777216}"
+      REVIEW_UI_REQUEST_TIMEOUT_SECONDS: "${REVIEW_UI_REQUEST_TIMEOUT_SECONDS:-60}"
+      REVIEW_UI_POST_RATE_LIMIT_PER_MINUTE: "${REVIEW_UI_POST_RATE_LIMIT_PER_MINUTE:-240}"
+    volumes:
+      # 程式碼唯讀：一個審題容器不該改得動管線。
+      - "${CATALOG_ROOT:-../..}:/workspace:ro"
+      # 問題 PDF 唯讀：審題時要能對照紙本，但不需要（也不該）改它。
+      - "${ASSET_ROOT:-../../國考題資料夾}:/workspace/國考題資料夾:ro"
+      # 佇列本身唯讀 + 審核紀錄可寫，見上面第 2 點。`/queue` 就是佇列的**根目錄**，因為
+      # `REVIEW_UI_ADDITIONAL_ASSET_ROOTS` 收的是「能開檔的根」，而佇列裡的裁切圖參考存成
+      # `review-ui/crops/<paper>/<name>`——**相對於佇列根**，所以它搬到哪個掛載點都能解析。
+      # 這正是 `build_review_queue.py::_adopt_crops` 修掉的那個 bug：以前存的是相對於「建佇列
+      # 時的工作目錄」，在容器裡每個圖都 404。
+      - "${QBR_QUEUE_DIR:-../../qbr/data/review-queues/live}:/queue:ro"
+      # 審核紀錄是唯一可寫的東西，單獨掛一個 rw 的 bind，位置在 host 的
+      # `<queue>/review-ui/question_review_events.jsonl`。Docker 的 bind 不能「同一目錄
+      # 唯讀、裡面一個檔案可寫」，所以紀錄單獨掛在它自己的路徑上（見下方 command 的
+      # --review-log），而 host 端的那個檔案就在唯讀目錄裡——由 `up.sh` 在啟動前 touch 出來。
+      - "${QBR_REVIEW_LOG:-../../qbr/data/review-queues/live/review-ui/question_review_events.jsonl}:/queue/review-ui/question_review_events.jsonl"
+    # The image's ENTRYPOINT is already `python3`, so the script name is the first argument - not
+    # `python3` again. Written as `python3 python3 ...` the container restarts forever with
+    # `can't open file '/workspace/python3'`, which is what happened the first time this was run.
+    command:
+      - scripts/serve_question_review_ui.py
+      - --candidate-jsonl
+      - /queue/review-ui/candidates.jsonl
+      - --issue-csv
+      - /queue/review-ui/issues.csv
+      - --review-log
+      - /queue/review-ui/question_review_events.jsonl
+      - --review-backend
+      - jsonl
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8774"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket; s=socket.create_connection(('127.0.0.1',8774),3); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    labels:
+      qbr.environment: review
+      qbr.project: tw-national-exam-catalog
+      qbr.pipeline: qbr-jsonl

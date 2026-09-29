@@ -253,11 +253,47 @@ def analyse_items(pdf_path):
     # segmentation did and cannot disagree with it about where a question is.
     images = extract.extract_images_a(pdf_path)
     _attach_bands(items, kept_a)
+    # Formula runs whose offset cannot be spelled are attached to the question whose band contains
+    # them, exactly as `_attach_bands` gives each question its page and its band. Done during the
+    # reading because this is the only moment the page exists: once read, a flattened `e-0.35t` and
+    # a printed `e-0.35t` are the same string, and `disputes.py` is PDF-free by design. Carrying the
+    # run rather than a verdict keeps the extractor out of the judgement - what is recorded is the
+    # page's geometry, and whether that is a defect is the reader's question.
+    _attach_flattened_offsets(items, kept_a)
     # `pdf_path` is carried so a later stage can look at a specific page again without being
     # handed the path separately. Only the pages that need it are re-read.
     return {"items": items, "text_a": text_a, "text_b": text_b, "images": images,
             "pdf_path": pdf_path,
             "style": diag.get("style"), "residual": residual, "diag": diag}
+
+
+def _attach_flattened_offsets(items, rows):
+    """Give every question the formula runs on the page that lost their offset.
+
+    The band is the one `_attach_bands` already computed for the question (`item["box"]`), which is
+    a fact about the page and not about the words: it runs from the question's own number down to
+    the next question's number. A run is attached to the question whose band contains its y.
+
+    The rows are needed, not the page, because `read_spans` has already collapsed the spans into
+    lines - and that collapse is exactly what destroyed the evidence: the raised run was folded back
+    into its host line so the formula would read as one line, and its geometry stopped being
+    visible. So the function re-reads the line's own geometry out of the rows. A row carries the
+    text as it was *printed* (the fold happens in `read_spans`), so nothing is reconstructed here.
+    """
+    if not items:
+        return
+    for row in rows:
+        y = float(row.get("y0") or 0.0)
+        page = int(row.get("page") or 0)
+        for item in items:
+            box = item.get("box")
+            if not box or int(item.get("page") or 0) != page:
+                continue
+            if float(box[1]) <= y < float(box[3]):
+                runs = row.get("flattened_offsets") or []
+                if runs:
+                    item.setdefault("flattened_offsets", []).extend(runs)
+                break
 
 
 #: How far below a question's number a line may still belong to it before the successor ends it.

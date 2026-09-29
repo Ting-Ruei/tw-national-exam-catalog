@@ -9,5 +9,6 @@ pymupdf>=1.24          # engine A: blocks, spans, fonts, size (the only engine t
 pdfminer.six>=20231228 # engine B support: word-level boxes with no font size
 pypdf>=4.0             # secondary container reader, used for cross-checks
 Pillow>=11,<13         # rendering, ink measurement, and the web-safe crop container
+pikepdf>=9.0          # rewrite official page images for browser-safe serving
 pytest>=8.0            # the suite
 hanzidentifier>=1.2    # simplified-only codepoint census (never a converter)

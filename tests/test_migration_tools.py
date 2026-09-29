@@ -140,24 +140,15 @@ class MigrationAssetManifestTests(unittest.TestCase):
 
 
 class MigrationPreflightTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.module = import_script("migration_preflight_test", "migration_preflight.py")
-
-    def test_root_spec_requires_label(self):
-        with self.assertRaises(SystemExit):
-            self.module.parse_root_specs("target", ["/data/assets"])
-
-    def test_recursive_usage_counts_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "sub").mkdir()
-            (root / "a").write_bytes(b"abc")
-            (root / "sub" / "b").write_bytes(b"12345")
-            files, total_bytes, errors = self.module.recursive_usage(root)
-            self.assertEqual(files, 2)
-            self.assertEqual(total_bytes, 8)
-            self.assertEqual(errors, [])
+    def test_retired_external_migration_entrypoint_fails_closed(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "migration_preflight.py")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("retired", result.stderr.lower())
 
 
 class ReviewUiMigrationPathTests(unittest.TestCase):
@@ -166,9 +157,13 @@ class ReviewUiMigrationPathTests(unittest.TestCase):
         cls.module = import_script("serve_question_review_ui_migration_test", "serve_question_review_ui.py")
 
     def test_old_mac_asset_path_rebinds_to_configured_root(self):
-        original = self.module.ASSET_ROOT
+        # `project_path` lives in `qbr.review_ui.paths` and rebinds using *that module's* ASSET_ROOT.
+        # Setting the attribute on the composition root would only rebind this module's re-exported
+        # copy, so the test would pass or fail depending on which name the function reads. Patch the
+        # owning module, which is what the assertion is actually about.
+        original = self.module.paths.ASSET_ROOT
         try:
-            self.module.ASSET_ROOT = Path("/data/tw-national-exam-catalog/國考題資料夾")
+            self.module.paths.ASSET_ROOT = Path("/data/tw-national-exam-catalog/國考題資料夾")
             migrated = self.module.project_path(
                 "/Users/tim/tw-national-exam-catalog/國考題資料夾/10_official_pdf/sample.pdf"
             )
@@ -177,7 +172,7 @@ class ReviewUiMigrationPathTests(unittest.TestCase):
                 Path("/data/tw-national-exam-catalog/國考題資料夾/10_official_pdf/sample.pdf"),
             )
         finally:
-            self.module.ASSET_ROOT = original
+            self.module.paths.ASSET_ROOT = original
 
 
 if __name__ == "__main__":

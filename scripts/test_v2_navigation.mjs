@@ -17,7 +17,13 @@ const htmlPath = process.argv[2] || 'review_ui/v2.html';
 const jsonlPath = process.argv[3];
 
 const html = fs.readFileSync(htmlPath, 'utf8');
-const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+// 本檔已拆成 `review_ui/v2/*.js`（一檔一區，載入序＝檔名序）。
+// 瀏覽器由 HTML 的 `<script src>` 順序串起；這裡按同一序重組後才 `eval`，
+// 因為各檔共用的 `S`/`A` 是頂层 `const`（跨腳本本體可見，但 `eval` 每段要自己收斂）。
+const parts = [...html.matchAll(/<script src="([^"]+)"><\/script>/g) ?? []].map(([, src]) =>
+  fs.readFileSync(path.join(path.dirname(path.resolve(htmlPath)), src), 'utf8'));
+if (!parts.length) throw new Error('v2.html 沒有可執行的 <script src>');
+const script = parts.join("\n");
 
 /* --- a browser small enough to hold the navigation path, and no smaller -------------------- */
 const elements = new Map();
@@ -44,12 +50,19 @@ for (const id of ['textSide', 'listBody', 'crumbs', 'scopeCount', 'doneCount', '
   'doneBar', 'paperSide', 'paperHint', 'paperFrame', 'reasonText', 'reasonBox', 'dirtyBox',
   'toast', 'figureNote', 'editor', 'viewStem', 'viewOpts', 'actFix', 'actSave', 'actAccept',
   'editStem', 'pickCategory', 'pickYear', 'pickSitting', 'pickSubject', 'figuresOnly',
-  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
-  'btnLast', 'actHold', 'actBlock']) makeElement(id);
+  'nAll', 'nGroup', 'nUnseen', 'nFlagged', 'nReturned', 'nDisputed', 'btnFirst', 'btnPrev', 'btnNext',
+  'btnLast', 'actHold', 'actBlock', 'actNote', 'noteFor', 'stateHint', 'where',
+  // The four-area shell. The navigation contract is about the *question* area's walk, which this
+  // harness drives directly by calling `go`/`next` - it never clicks an area button. But the
+  // script still wires the shell's elements at load time (the area buttons and the three other
+  // panes), so those nodes must exist or the script throws before the harness can reach it. The
+  // behaviour of the areas themselves is pinned by `test_v2_areas_browser.mjs` against real Chrome.
+  'whoami', 'homeCards', 'homeScope', 'sheetList', 'answerMain', 'discussMain', 'discussSide',
+  'areaHome', 'areaQuestion', 'areaAnswer', 'areaDiscuss']) makeElement(id);
 elements.get('figuresOnly').tagName = 'INPUT';
 
 /* The chip radios: only the chip the test selects should read as checked. */
-const chipViews = ['all', 'group', 'unseen', 'flagged', 'disputed'];
+const chipViews = ['all', 'group', 'unseen', 'flagged', 'returned', 'disputed'];
 const chipNodes = chipViews.map((view) => {
   const radio = makeElement(`radio_${view}`, 'input');
   radio.value = view;
@@ -67,11 +80,15 @@ const document_ = {
       return hit || null;
     }
     if (sel === '#chips .chip') return chipNodes[0];
+    // The area buttons are wired at load time; return none, so the loop is a no-op.
+    if (sel === '.area-btn') return null;
     if (sel === '.row.active') return null;
     return null;
   },
   querySelectorAll(sel) {
     if (sel === '#chips .chip') return chipNodes;
+    // `for (const button of document.querySelectorAll('.area-btn'))` is the load-time wiring.
+    if (sel === '.area-btn') return [];
     if (sel === '.row') return [];
     return [];
   },
@@ -83,14 +100,23 @@ const history_ = { replaceState() {} };
 const location_ = { hash: '' };
 
 const sandbox = {
-  document: document_, window: {}, history: history_, location: location_,
+  document: document_,
+  // `window` needs `addEventListener`/`removeEventListener`: the areas shell registers `hashchange`
+  // at load time. The harness drives the walk by calling `go`/`next` directly, so the listener is
+  // never fired here - it only has to exist.
+  window: { addEventListener() {}, removeEventListener() {} },
+  history: history_, location: location_,
   console, setTimeout, clearTimeout, Math, JSON, Object, Array, Map, Set, Number, String, Boolean,
-  Promise, URLSearchParams, fetch: async () => { throw new Error('no network in the harness'); },
+  Promise, URLSearchParams, decodeURIComponent,
+  CSS: { escape: (value) => String(value).replace(/["\\]/g, '\\$&') },
+  fetch: async () => { throw new Error('no network in the harness'); },
 };
 
-/* Expose the internals the harness drives. The script ends with `boot()`, which fetches; that is
-   replaced with a no-op so the harness can build the state itself from the JSONL. */
-const wrapped = script.replace(/\nboot\(\);\s*$/, '\n')
+/* Expose the internals the harness drives. The script ends with
+   `boot().then(() => showArea(areaFromHash(), { push: false }))`, which fetches; that is replaced
+   with a no-op so the harness can build the state itself from the JSONL. The pattern is anchored on
+   the boot call only, so the rest of the shell (including `showArea`) stays in place. */
+const wrapped = script.replace(/\nboot\(\)[^\n]*\n?\s*$/, '\n')
   + '\n;globalThis.__qbr = { S, rebuildRows, visibleRows, viewMode, isGrouped, stateOf, hasDispute, '
   + 'go, next, renderList, renderChips };';
 

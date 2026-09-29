@@ -12,6 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_ui_source import server_source  # noqa: E402
+
 
 def import_review_ui():
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -209,7 +212,7 @@ class ReviewUiScopeTests(unittest.TestCase):
         state = object.__new__(self.ui.ReviewState)
         heavy_cte, _ = state._sql_candidate_filter_parts({"q": "缓"})
         light_cte, _ = state._sql_light_candidate_filter_parts({"reviewStatus": "unreviewed"})
-        source = (ROOT / "scripts" / "serve_question_review_ui.py").read_text(encoding="utf-8")
+        source = server_source()
 
         self.assertIn("raw_candidate_json::text", heavy_cte)
         self.assertIn("latest_question_ai AS", light_cte)
@@ -222,7 +225,11 @@ class ReviewUiScopeTests(unittest.TestCase):
         self.assertIn("la.corrected_answer_json::text", source)
 
     def test_correction_notation_normalizer_handles_groups_symbols_and_word_boundaries(self):
-        page_script = self.ui.PAGE_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        html = self.ui.PAGE_HTML
+        parts = [p for p in re.findall(r"<script>(.*?)</script>", html, re.S) if p.strip()]
+        for src in re.findall(r'<script src="([^"]+)"></script>', html):
+            parts.append((ROOT / "review_ui" / src).read_text(encoding="utf-8"))
+        page_script = "\n".join(parts)
         start = page_script.index("const greekMap =")
         end = page_script.index("async function load()")
         harness = page_script[start:end] + r'''

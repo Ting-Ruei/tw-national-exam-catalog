@@ -197,3 +197,22 @@ def test_figure_region_is_none_when_every_picture_is_an_option():
                               (50.0, 538.0, 345.0, 610.0)]}
     assert vision.figure_region(entry, exclude=[o["box"] for o in owned]) is None
     assert vision.options_cover_the_figure(entry, owned) is True
+
+
+def test_describing_no_crop_is_a_named_outcome_not_a_crash():
+    """沒有裁切可看時，問模型是錯誤的呼叫，不是模型的回答。
+
+    量測 `1141_藥師(一)_藥學(一)` Q41：這一題的每張圖都是選項圖，所以沒有圖裁切，
+    `png` 是 `None`——第一個版本把它交給模型，`base64` 直接拋
+    `TypeError: a bytes-like object is required, not 'NoneType'`，整個切圖批次當在那裡。
+
+    這裡守的是呼叫邊界：`None` 必須回一個**有名字的結果**（`error=no-crop-to-describe`），
+    而不是讓下游的 encoder 決定訊息長什麼樣子。**沒有讀數**和**讀失敗**是兩件事。
+    """
+    from qbr import vision
+    outcome = vision.describe_crop(None, subject="藥學(一)", question="下列結構何者正確？")
+    assert outcome["error"] == "no-crop-to-describe"
+    assert outcome["verdict"] is None
+    assert outcome["bytes"] == 0
+    # 而且它必須是「不會去問模型」：真的送出請求的話，離線環境下會拖到 timeout 或被拒。
+    assert outcome["raw"] == "" and outcome["usage"] is None

@@ -59,9 +59,13 @@ class ReviewUiDeploymentSecurityTests(unittest.TestCase):
             readme = project_root / "README.md"
             readme.parent.mkdir(parents=True)
             readme.write_text("test", encoding="utf-8")
+            # `safe_file_path` lives in `qbr.review_ui.paths`, and reads *that module's* globals.
+            # Patching `serve_question_review_ui.PROJECT_ROOT` would rebind the composition root's
+            # re-exported copy, not the value the function actually reads, so the patch has to be
+            # applied where the code is. Same for the module the security test below inspects.
             with (
-                patch.object(review_ui, "PROJECT_ROOT", project_root),
-                patch.object(review_ui, "ASSET_ROOT", project_root / "國考題資料夾"),
+                patch.object(review_ui.paths, "PROJECT_ROOT", project_root),
+                patch.object(review_ui.paths, "ASSET_ROOT", project_root / "國考題資料夾"),
                 patch.dict(os.environ, {"REVIEW_UI_ALLOW_PROJECT_FILES": "1"}),
             ):
                 self.assertEqual(review_ui.safe_file_path(str(readme)), readme.resolve())

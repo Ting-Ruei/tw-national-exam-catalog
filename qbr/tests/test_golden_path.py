@@ -255,3 +255,50 @@ def test_two_sittings_of_one_subject_are_two_papers():
     # And the key carries the sitting in its exam code, which is how a later reader tells them
     # apart without knowing anything about this code.
     assert a["registry_key"].split(":")[1] != b["registry_key"].split(":")[1]
+
+
+# --------------------------------------------------------------------- the sheet's own count
+
+def _a_sheet(tmp_path, text):
+    path = tmp_path / "sheet.pdf"
+    path.write_bytes(b"%PDF-1.4\n")           # only the path is read here, not the PDF
+    return {"corrected": str(path)}
+
+
+def _count_with_a_text(monkeypatch, text):
+    """Run the count against `text` as though it were the sheet's own words."""
+    from qbr import answer_sheets
+    import golden_path
+    monkeypatch.setattr(answer_sheets, "read_table_text", lambda path, role="answer": text)
+    return golden_path._sheet_question_count({"corrected": "sheet.pdf"})
+
+
+def test_the_sheet_count_is_the_sentence_the_sheet_prints(tmp_path, monkeypatch):
+    """答案卷自己印的「題數：NN題」就是題數，不是從解析出的表格回推。
+
+    量測 `1001_醫師(二)_醫學(三)`（100 年第 1 次）：答案卷印 `題數： 80題`，
+    表格只解析出 79 題——第 80 題是 `#` ＋ 備註「一律給分」，`parse_answer_table`
+    會把 `#` 欄跳過，而送分題在表格裡**沒有任何字母**可放，所以它從表格消失了。
+    出貨的是 80 題，閘門卻說 `count-mismatch:items=80 expected=79(answer-sheet)`，
+    整份卷被擋下。
+    """
+    text = "題數： 80題\n題號 01 02 ... 80\n答案 D A ... #\n備註：第80題一律給分"
+    assert _count_with_a_text(monkeypatch, text) == 80
+
+
+def test_the_declared_count_ignores_spacing_and_the_full_width_colon(tmp_path, monkeypatch):
+    """印刷形式可能用全形冒號或空白，這不是在描述某一張紙，是在描述印刷形式。"""
+    for text in ("題數： 50題", "題數:50題", "題 數 ： 50 題", "題數：50題"):
+        assert _count_with_a_text(monkeypatch, text) == 50
+
+
+def test_a_sheet_that_declares_nothing_falls_back_to_its_table(tmp_path, monkeypatch):
+    """沒有印「題數」的卷退回舊法（表格的兩界），保留對「不印題數的卷」的檢查。
+
+    兩界都要從 1 開始才算「對整卷表態」——藥師系列有 50 題的科目，
+    盲目取最高號會低估，所以這個護欄留著。
+    """
+    assert _count_with_a_text(monkeypatch, "題號 01 02 03\n答案 D A C") == 3
+    # 兩界不一致（不是從 1 開始）＝不表態。
+    assert _count_with_a_text(monkeypatch, "題號 21 22 23\n答案 D A C") == 0
+    assert _count_with_a_text(monkeypatch, "") == 0

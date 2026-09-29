@@ -39,6 +39,30 @@ from . import disputes
 # silently flattened.
 SPECIAL_ANSWER_MARKERS = ("#", "送分", "從寬", "均給分")
 
+#: Fields on a review event that are **not** part of its identity.
+#:
+#: `_carried_from` is added by `build_review_queue.py` when a queue carries a record forward, so the
+#: same decision has a different value in two queues. Comparing it made every carried record look
+#: new: measured, a first rebuild carried 392 records and rebuilding from that queue carried 629 -
+#: the same 181 questions twice. The opposite mistake is a key narrower than the record (e.g. just
+#: `candidate_key`), which silently drops a reviewer's later decisions; measured, `sf8`'s 52 records
+#: all appeared missing from `sf9` although `sf9` held them all.
+NON_IDENTITY_FIELDS = ("_carried_from",)
+
+
+def record_identity(record):
+    """An event's identity: its whole content, minus the fields that record where it was found.
+
+    Deliberately "everything except", not "these fields": a decision is identified by what it says,
+    and a list of kept fields is a list somebody has to remember to extend when an event gains a
+    field. This lives here so the carry logic (`build_review_queue.py`) and the push helper
+    (`scripts/push_reviews_to_station.sh`) compare events the same way - two definitions of "the same
+    event" is two places for a review record to be lost or duplicated.
+    """
+    return json.dumps({key: value for key, value in record.items()
+                       if key not in NON_IDENTITY_FIELDS},
+                      sort_keys=True, ensure_ascii=False)
+
 
 def _answer_string(labels):
     if not labels:
@@ -106,9 +130,17 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
     merged = {
         "adapter_version": metadata.get("adapter_version"),
         "answer_authority_source": metadata.get("answer_authority_source"),
+        "answer_role_primary": metadata.get("answer_role_primary"),
         "answer_display": metadata.get("answer_display"),
+        "answer_pdf_primary_relative": metadata.get("answer_pdf_primary_relative"),
         "answer_pdf_relative": metadata.get("answer_pdf_relative"),
+        "answer_pdf_sha256": metadata.get("answer_pdf_sha256"),
+        "answer_source_documents": metadata.get("answer_source_documents"),
+        "answer_source_registry_key": metadata.get("answer_source_registry_key"),
+        "answer_source_registry_keys": metadata.get("answer_source_registry_keys"),
         "category_code": metadata.get("category_code"),
+        "corrected_answer_pdf_relative": metadata.get("corrected_answer_pdf_relative"),
+        "corrected_answer_pdf_sha256": metadata.get("corrected_answer_pdf_sha256"),
         # Carried through so the reviewer is told which questions the text layer could not spell
         # out completely, and where. The character renders on the page, so the question is
         # readable - but a reader comparing the screen against the paper deserves to know which
@@ -124,6 +156,7 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         "parser_status": _quality_status(gate, number),
         "parser_version": metadata.get("parser_version"),
         "question_pdf_relative": metadata.get("question_pdf_relative"),
+        "question_pdf_sha256": metadata.get("question_pdf_sha256"),
         "review_status": metadata.get("review_status"),
         "subject_code": metadata.get("subject_code"),
         "year": metadata.get("year"),
@@ -144,8 +177,8 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
             "is_special_correction": voided,
             "raw_answer": _answer_string(labels),
         },
-        "answer_source_registry_key": (metadata.get("external_registry_key") or "").replace(
-            ":question", ":answer") or None,
+        "answer_source_registry_key": metadata.get("answer_source_registry_key"),
+        "answer_source_registry_keys": metadata.get("answer_source_registry_keys") or [],
         "candidate_key": question["source_question_key"],
         "canonical_question_key": question["source_question_key"],
         "explanation": None,
@@ -174,6 +207,10 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         # reviewer can fix it against the paper; the character is never guessed at.
         "lost_glyphs": subitems.lost_glyphs(lost_source, legend) or None,
         "lost_glyph_note": subitems.describe_lost_glyphs(lost_source, legend),
+        # Formula runs the page's geometry says are offsets and Unicode cannot spell, carried out of
+        # the extraction because they cannot be found afterwards. Read from `metadata` under the same
+        # name the extractor wrote, so there is one spelling of the field from page to screen.
+        "flattened_offsets": metadata.get("flattened_offsets") or None,
         # The places where the reading is **not settled**. Filled in by `write_candidates`, which is
         # the only place that sees the whole paper at once - a `dangling-answer` needs the options,
         # and an `engine-disagreement` needs the paper's two counts. A question with no disputes
@@ -181,6 +218,59 @@ def candidate_from_question(question, *, gate, source="qbr_deterministic", extra
         # are different states and the queue must be able to tell them apart.
         "disputes": None,
     }
+
+
+def taxonomy_of(per_paper):
+    """`category -> year -> sitting -> subject -> {papers, questions}`, and the counts above it.
+
+    **One implementation, in the library, because two of them diverged.** This tree is the review
+    UI's navigation contract: `scopePapers()`/`whereOfPaper()` walk it to decide which papers a
+    scope names, and the sitting level is not decoration - the same subject is set twice a year and
+    the two settings are two different papers. A second copy lived in `refresh_queue_text.py` with
+    a *different shape* (`category -> year -> sitting -> subject -> {papers, questions}` as a bare
+    nested dict without the `years`/`sittings` wrappers and counts), and running it overwrote the
+    live queue's `queue_index.json`. Measured 2026-09-23: after `refresh_queue_text.py --queue live`
+    the question area stopped rendering at all - `scopePapers()` read `bucket.years` from a node
+    whose keys were year numbers, got `undefined`, and `Object.keys(undefined)` threw before the
+    first question was drawn. A test could not have caught it because the *build* path was correct;
+    only the second implementation was wrong. Single-sourced here so a third shape cannot appear.
+
+    The two spellings of one category are folded together, because they *are* one category: the
+    catalog spells `藥師（一）` with full-width brackets in some years and `藥師(一)` in others.
+    Measured: without folding the UI offers six categories where there are four, and the two
+    `藥師(一)` entries split 63 and 12 papers - a reviewer choosing one sees a quarter of the papers.
+    """
+    tree = {}
+    for entry in per_paper:
+        entry = dict(entry)
+        category = _fold_category(entry.get("category")) or "(未分類)"
+        year = str(entry.get("year") or "(未知)")
+        subject = entry.get("subject") or entry.get("paper") or "(未知)"
+        questions = int(entry.get("questions") or 0)
+        bucket = tree.setdefault(category, {"years": {}, "papers": 0, "questions": 0})
+        bucket["papers"] += 1
+        bucket["questions"] += questions
+        year_bucket = bucket["years"].setdefault(
+            year, {"sittings": {}, "papers": 0, "questions": 0})
+        year_bucket["papers"] += 1
+        year_bucket["questions"] += questions
+        sitting = str(entry.get("ordinal") or "")
+        sitting_bucket = year_bucket["sittings"].setdefault(
+            sitting, {"subjects": {}, "papers": 0, "questions": 0})
+        sitting_bucket["papers"] += 1
+        sitting_bucket["questions"] += questions
+        subject_bucket = sitting_bucket["subjects"].setdefault(
+            subject, {"papers": [], "questions": 0})
+        subject_bucket["papers"].append(entry.get("paper"))
+        subject_bucket["questions"] += questions
+    return tree
+
+
+def _fold_category(name):
+    """One category's name, with the brackets folded so two spellings are one entry."""
+    if not name:
+        return name
+    return str(name).replace("（", "(").replace("）", ")")
 
 
 def disputes_for_paper(rows):

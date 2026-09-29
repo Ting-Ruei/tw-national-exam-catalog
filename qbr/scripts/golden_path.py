@@ -176,19 +176,28 @@ def stage_dual(sheets):
 # --------------------------------------------------------------------------- S3 gate
 
 def _sheet_question_count(sheets):
-    """How many questions the official answer sheet lists, or 0 when it does not say.
+    """How many questions the official answer sheet says the paper has, or 0 when it does not say.
 
-    The count is the highest number the sheet prints, and the lowest, checked against each other:
-    a sheet that prints `1` to `80` is a statement that there are eighty questions, and it is the
-    same statement the person marking the paper used. Reading the table's own numbers rather than
-    counting its cells means a row the extraction dropped shows up as a gap instead of shrinking
-    the total.
+    The sheets state this themselves: every one of the 4,833 answer sheets in the corpus prints
+    `題數： 80題` in its header. That sentence is the paper's own statement of its length and the
+    same one the person marking the paper used, so it is read directly.
 
-    A sheet that covers only part of a paper - the pharmacists' 50-question subjects do this -
-    would understate the count if the highest number were taken blindly, so the two bounds have to
-    agree on starting at 1. Where they do not, the sheet is not making a whole-paper statement and
-    says nothing (0), leaving the anchor count to bound the reading.
+    It is read *instead of* the highest number in the parsed table, which is what this function
+    used to do. The table cannot carry the count: `parse_answer_table` drops a cell whose answer is
+    a correction placeholder (`#`) until the foot note explains it, and a question that was voided
+    (`第80題一律給分`) has no letter anywhere - so the table came back one short on 79 of the 4,833
+    sheets, and a paper whose own sheet said `80題` was blocked for publishing 80 questions.
+    Measured: 47 sheets under-counted 80 as 79, 4 as 50 as 49, and so on - **all 79 disagreements
+    are exactly one short**, and 4,754 agree. A defect with one shape has one cause.
+
+    The printed sentence is also the honest source: the sheet is making a statement about the whole
+    paper. When it does not print one, the table's own extent is used as a fallback, exactly as
+    before - a sheet that covers only part of a paper (the pharmacists' 50-question subjects do
+    this) would understate the count if its highest number were taken blindly, so the fallback still
+    requires the two bounds to agree on starting at 1. Falling back rather than returning 0 keeps
+    the check alive for a paper form that prints no count at all.
     """
+    pattern = re.compile(r"題\s*數\s*[:：]?\s*(\d{1,3})\s*題")
     for role in ("answer", "corrected"):
         entry = sheets.get(role)
         if not entry:
@@ -197,7 +206,15 @@ def _sheet_question_count(sheets):
         if not path:
             continue
         try:
-            table = canon.parse_answer_table(answer_sheets.read_table_text(path, role=role))
+            text = answer_sheets.read_table_text(path, role=role)
+        except Exception:
+            continue
+        match = pattern.search(canon.fold(text or ""))
+        if match and int(match.group(1)) > 0:
+            return int(match.group(1))
+        # No printed count: fall back to the table's own extent, under the starts-at-1 guard.
+        try:
+            table = canon.parse_answer_table(text or "")
         except Exception:
             continue
         if table:
@@ -551,7 +568,12 @@ def stage_records(parsed, gate, table, sheets, meta, registry_key, review_status
         rows.append(package.build_question(
             item, meta=meta, answer=labels, registry_key=registry_key,
             answer_source=source, flags=flags, review_status=review_status,
-            answer_text=answer_text))
+            answer_text=answer_text,
+            # The formula runs the page says are offsets and Unicode cannot spell. They travel with
+            # the question all the way to the reviewer's screen for the same reason `lost_glyphs`
+            # does: the defect is at a place on the paper, and the place is the useful half of the
+            # report. The name is the same one the extractor used, so there is one spelling of it.
+            extra_metadata={"flattened_offsets": item.get("flattened_offsets") or None}))
     return rows, sources
 
 

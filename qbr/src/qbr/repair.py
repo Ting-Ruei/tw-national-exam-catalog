@@ -56,6 +56,15 @@ _HAN = (chr(0x4E00) + "-" + chr(0x9FFF)
         + chr(0xF900) + "-" + chr(0xFAFF))
 
 _YEAR = re.compile("^[" + _WHITE + "]*[" + _DIGITS + "]{2,3}[" + _WHITE + "]*" + _chars(0x5E74))
+# What may follow the `年` of a paper's running head and still be a running head. The head is the
+# exam's own title - `115年第一次專門職業及技術人員高等考試…` - so after the year comes the
+# sitting or the kind of exam. A question stem that opens with a number and the word 年 continues
+# with the subject instead: `56 年老女性…`, `7 年齡介於65～79歲…`, `12 年金給付水準…`. Measured
+# over all 3,516 shipped papers: 2,186 `NNN年…` lines are heads and every one of them continues
+# with 第 or 專, and the 19 that continue with anything else are all question stems. The set is
+# therefore not fitted - it is the two words the print form actually uses, with the other
+# candidates (公/特/高/普) measured to add nothing over these two.
+_YEAR_HEAD_CONTINUATION = (0x7B2C, 0x5C08)   # 第 專
 _ANCHOR_RESIDUE = re.compile("^[" + _WHITE + "]*[" + _DIGITS + "]{1,3}$")
 
 # Deliberately explicit, source-anchored rule set for this corpus.
@@ -477,8 +486,34 @@ def starts_with_number(line):
 
 
 def is_year_line(line):
-    """`104年第一次…` headers start with digits but are not question numbers."""
-    return bool(_YEAR.match(line.strip()))
+    """`115年第一次…` headers start with digits but are not question numbers.
+
+    The old form of this rule was `^NNN年` and nothing else, so it also swallowed question stems
+    that open with a number and the word 年: `56 年老女性發生肱骨…`, `7 年齡介於65～79歲…`,
+    `12 年金給付水準…`. That is not a small mistake - the line was then treated as chrome and
+    skipped by the numbering scan, so the paper lost every question from that point on. Measured
+    over all 3,516 shipped papers, 19 papers were cut short this way, `1092_法醫師_一般醫學` to
+    43 questions of 100 and `1062_諮商心理師…` to 31 of 40.
+
+    What a head has that a stem does not is the rest of the exam's own title: after the year
+    comes the sitting or the kind of exam (`第`, `專`). Measured: 2,186 `NNN年…` lines are heads
+    and all 2,186 continue with one of those two; the other 19 are all stems. So the rule is the
+    continuation and not a length or a threshold - and it holds on unseen papers because it names
+    what the print form prints, not what any one paper happens to contain.
+
+    The comparison is made against the NFKC form, because these papers print the year with a
+    compatibility ideograph in some places: `年` (U+F98E) rather than `年` (U+5E74). The two are
+    different codepoints that only NFKC brings together, which is a property of the typesetting
+    and not of any engine - the same class of damage as the private-use bullets.
+    """
+    folded = unicodedata.normalize("NFKC", line.strip())
+    if not _YEAR.match(folded):
+        return False
+    match = re.match("^[" + _WHITE + "]*[" + _DIGITS + "]{2,3}[" + _WHITE + "]*" + _chars(0x5E74), folded)
+    if not match:
+        return False
+    rest = folded[match.end():]
+    return bool(rest) and ord(rest[0]) in _YEAR_HEAD_CONTINUATION
 
 
 def is_option_line(line):
@@ -538,40 +573,6 @@ def is_punctuation_only(line):
     return all(not ch.isalpha() and not ch.isdigit() for ch in stripped)
 
 
-def _is_year_running_head(line, consumed):
-    """True when a bare-number match is the year of a paper's running head.
-
-    `bare_number_space` accepts any line that starts with a number, whitespace and content,
-    because that is what a question looks like after a number cell has been merged onto its
-    question: `20 下列…`. The same shape describes the running head of the paper - `100 年第一次專門…`
-    - and the style then reads the year as question 100.
-
-    The two are told apart without a threshold, by a property of the paper rather than of an
-    engine. Measured over 1,500 papers from the corpus: the head is followed by `年` in every
-    case where it matches at all (973 papers had a `NNN年…` head, the year values running
-    100-114, the Republic-of-China years), and no question stem in the corpus begins that way.
-    The question numbers of these papers run 1-100, so the year and the numbering cannot
-    collide.
-
-    The comparison is made against the NFKC form of the line, because these papers print the
-    year with a compatibility ideograph: `年` (U+F98E) rather than `年` (U+5E74), and the two
-    are different codepoints that only NFKC brings together. That is a property of the
-    typesetting, not of any engine, and it is the same class of damage as the private-use
-    bullets - the character that is delivered is not the character that is meant.
-
-    Refusing the match here does not drop the line - it stays in the text and is reported as
-    residual, which is what it is.
-    """
-    if consumed is None or consumed >= len(line):
-        return False
-    rest = unicodedata.normalize("NFKC", line[consumed:]).lstrip()
-    return rest.startswith("年")
-    if consumed is None or consumed >= len(line):
-        return False
-    rest = line[consumed:].lstrip()
-    return rest.startswith("年")
-
-
 def _style_matches(style, line):
     """Return `(number, consumed_length)` or None for one candidate line."""
     if style == "cjk_number_line":
@@ -587,7 +588,12 @@ def _style_matches(style, line):
         number, consumed = int(match.group(1)), match.end()
     except (IndexError, ValueError, TypeError):
         return None
-    if style == "bare_number_space" and _is_year_running_head(line.strip(), consumed):
+    if style == "bare_number_space" and is_year_line(line):
+        # The running head of the paper - `100 年第一次專門…` - is the same shape as a questioned
+        # line after its number cell has been merged onto it (`20 下列…`), and without this the
+        # style reads the year as question 100. `is_year_line` is the single place that decides
+        # what a head is; a second, looser test used to sit here and it disagreed with this one
+        # often enough to cut 29 question stems out of 19 papers (measured, over all 3,516).
         return None
     return number, consumed
 
@@ -815,6 +821,53 @@ def _looks_like_a_wrap(line, found, following, *, inside_question, seen_option_m
     return sum(1 for char in following if ord(char) in option_marks) >= 2
 
 
+def _continues_an_option(line, record, option_marks):
+    """Whether `line` is the tail of the option printed just before it, not more of the stem.
+
+    The symmetric case of `_looks_like_a_wrap`, and it needs the same discipline: the question is
+    whether this line *opens* anything, not where it sits on the page. It continues an option only
+    when all four hold:
+
+    1. **An option has already been printed.** Before that there is no option to continue, and the
+       stem is still being read.
+    2. **The line opens nothing.** No mark of the paper's alphabet anywhere in it, and no anchor at
+       its head. A line that opens an option or a question is those, by definition.
+    3. **It is not chrome.** A page footer, a declared part heading, a metadata line and a
+       punctuation-only run are all things that arrive between options and belong to none of them.
+       Measured on 40 sampled papers, of the lines reaching this branch 169 are continuation
+       candidates, 29 are short fragments and 1 is punctuation-only - no footers, no headings, no
+       metadata - so these guards are for the corpus rather than for the sample.
+    4. **It carries text.** A blank line has no continuation in it.
+
+    Deliberately *not* a length test, unlike the stem's rule (which may use `<= 14` because a stem's
+    wrap is a short phrase before the options begin). Measured over the corpus, the continuation of
+    an option is frequently long: the intersection cases include a 24-character tail on
+    `1151_醫師(二)_醫學(三)` q13 C. A length cap here would refuse most of the real losses.
+
+    Anchors are excluded without consulting the style: a line whose head is a number and a dot is
+    the next question whatever the style's spelling, and `_style_matches` has already had its
+    chance to claim the line before this is reached.
+    """
+    if not record or not record.get("option_order"):
+        return False
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if _option_mark_in(stripped, option_marks):
+        return False
+    if _BARE_ANCHOR.match(stripped):
+        return False
+    if (is_page_footer(stripped) or is_section_head(stripped)
+            or is_metadata_line(stripped) or is_punctuation_only(stripped)):
+        return False
+    return True
+
+
+#: A number and a dot at the head of a line: the next question's anchor in any style this module
+#: spells. Used only to keep `_continues_an_option` from swallowing a question.
+_BARE_ANCHOR = re.compile(r"^\d{1,3}\s*\.")
+
+
 def segment_questions(text, style=None, *, validate=True, expected=None,
                      alignment_min=ALIGN_RECOVER_MIN_RATIO,
                      residual_budget=RESIDUAL_LINE_BUDGET):
@@ -998,10 +1051,33 @@ def segment_questions(text, style=None, *, validate=True, expected=None,
             if pending_option is not None:
                 # The option mark above this line carried no text, so this line is that option's
                 # body. Without this the text is handed to the stem and the option is left empty.
-                current["options"][pending_option] = (
-                    current["options"].get(pending_option, "") + " " + line).strip()
+                current["options"][pending_option] = join_lines(
+                    current["options"].get(pending_option, ""), line)
                 current["lines"].append(line)
                 pending_option = None
+                previous_text = line
+                continue
+            if _continues_an_option(line, current, option_marks):
+                # The symmetric case of the stem's wrap test above. Once an option has begun,
+                # a line that opens nothing (no mark, no number) is that option's continuation,
+                # not the stem's - the typesetter wrapped the option's own sentence and the
+                # option is printed in two rows.
+                #
+                # Without this the option stops at the wrap and the continuation is appended to
+                # the stem, so the stem reads `…何者正確？異常 iliac spine）…` while option A
+                # reads `…導致步態`. Measured on 160 sampled papers (12,840 questions), the
+                # intersection of the two engines' own readings - a loss BOTH independent readings
+                # report, so it is not one parser's line-splitting - is **385 fields on 265
+                # questions (2.06%), across 72 of the 160 papers**, and not one of them was
+                # flagged: `quality_status=pass`, `disputes=None`. Both engines print the
+                # continuation; only this loop dropped it.
+                #
+                # Only the LAST option that has appeared can be the one continued: `current`
+                # keeps options in `option_order`, and the paper prints an option's rows before
+                # the next option's mark, so nothing else is open.
+                last = current["option_order"][-1] if current.get("option_order") else None
+                current["options"][last] = join_lines(current["options"].get(last, ""), line)
+                current["lines"].append(line)
                 previous_text = line
                 continue
             current["stem"].append(line)

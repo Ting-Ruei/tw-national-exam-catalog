@@ -365,7 +365,17 @@ def _json_of(content, *, expect=("contains",)):
 
 
 def describe_crop(png_bytes, *, subject="", question="", kind="figure", think=True):
-    """Ask what a crop contains. Returns a dict; the verdict is advisory and never applied."""
+    """Ask what a crop contains. Returns a dict; the verdict is advisory and never applied.
+
+    A reading needs something to read, so `None` bytes is checked here rather than left to
+    `base64` - measured on `1141_藥師(一)_藥學(一)` Q41, where every picture in the question is an
+    option picture, so no figure crop exists and the call site passed `None`: it raised
+    `TypeError: a bytes-like object is required, not 'NoneType'` and killed the whole crop run.
+    This check is the boundary's, not the caller's, because any caller can forget.
+    """
+    if png_bytes is None:
+        return {"kind": kind, "verdict": None, "raw": "", "usage": None,
+                "error": "no-crop-to-describe", "seconds": 0.0, "bytes": 0, "think": think}
     system = FIGURE_SYSTEM if kind == "figure" else DISPUTE_SYSTEM
     opening = f"科目：{subject}\n" if subject else ""
     if question:

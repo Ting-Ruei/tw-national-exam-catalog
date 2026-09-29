@@ -12,9 +12,9 @@
 6. 有圖、題組、公式、上下標、希臘字母、羅馬數字、答案缺漏、題號不連續者，先進 `needs_review` 或 `blocked`。
 7. 人工審核只寫 `review_events` / `answer_review_events`，不改官方檔、不改 MinerU raw markdown。
 
-題組題、圖表題、人工補圖與正式入庫防跑版規格見 [group-and-layout-ingestion-policy.md](/Users/tim/tw-national-exam-catalog/docs/group-and-layout-ingestion-policy.md)。正式入庫前先執行 read-only 預檢：
+題組題、圖表題、人工補圖與正式入庫防跑版規格見 [group-and-layout-ingestion-policy.md](group-and-layout-ingestion-policy.md)。正式入庫前先執行 read-only 預檢：
 
-JSONL-heavy review 逐步轉成 SQL review staging 的方向、全量 SQL 匯入前的通用掃描規則、科目覆寫與目前醫事檢驗師未通過狀態盤點，見 [sql-review-staging-preflight.md](/Users/tim/tw-national-exam-catalog/docs/sql-review-staging-preflight.md)。
+JSONL-heavy review 逐步轉成 SQL review staging 的方向、全量 SQL 匯入前的通用掃描規則、科目覆寫與目前醫事檢驗師未通過狀態盤點，見 [sql-review-staging-preflight.md](sql-review-staging-preflight.md)。
 
 ```bash
 python3 scripts/preflight_formal_ingest.py
@@ -165,7 +165,7 @@ python3 scripts/serve_question_review_ui.py \
 
 未來供 AI Learning Platform 匯入的題庫包，應從 `exam.questions` / `exam.question_options` / `exam.answers` / `exam.question_assets` 這組正式表匯出，並遵守外部平台的資料包契約：只使用相對資產路徑、保留 `source_question_key` / `source_registry_key` / package version / schema version 等 lineage，不讓平台直接依賴本專案工作目錄。
 
-正式題庫包發布必須通過制度化檢查，而不是靠 AI 臨場記憶。標準流程見 [question-bank-release-validation-flow.md](/Users/tim/tw-national-exam-catalog/docs/question-bank-release-validation-flow.md)：先同步最新題組審核事件到 formal SQL，跑 `scripts/validate_formal_question_bank.py`，匯出 package，再跑 `scripts/validate_question_bank_package.py`。任一 validator exit non-zero 時不得 publish 或交給外部平台匯入。
+正式題庫包發布必須通過制度化檢查，而不是靠 AI 臨場記憶。標準流程見 [question-bank-release-validation-flow.md](question-bank-release-validation-flow.md)：先同步最新題組審核事件到 formal SQL，跑 `scripts/validate_formal_question_bank.py`，匯出 package，再跑 `scripts/validate_question_bank_package.py`。任一 validator exit non-zero 時不得 publish 或交給外部平台匯入。
 
 ## Review UI
 

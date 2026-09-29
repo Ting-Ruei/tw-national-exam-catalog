@@ -176,8 +176,12 @@ def crops_for_run(run_dir, paper_path, *, subject="", out_dir, think=False, limi
         # the geometry has no reason to re-ask the model about pictures that were already
         # described, and paying for 1,100 readings to move a box is how a rebuild becomes
         # something nobody runs. `--no-describe` re-cuts and leaves the reading to a later pass.
+        #
+        # And when the option pictures ARE the figure (`covered`), there is no crop to ask about:
+        # `png` is None, and passing it to the model is a crash, not a reading. The pictures the
+        # reviewer sees are the option crops, and their labels already say so.
         verdict = (vision.describe_crop(png, subject=subject, question=entry["stem"], think=think)
-                   if describe else {})
+                   if (describe and png is not None) else {})
         parsed = verdict.get("verdict") or {}
         # The shape the Review UI reads: a list of dicts, each with an absolute `path` (the run is
         # a registered asset root, so it is servable) and the measured reason as its label. A bare
@@ -237,6 +241,9 @@ def main() -> None:
     parser.add_argument("--no-describe", action="store_true",
                         help="cut the crops without asking the model what they contain")
     parser.add_argument("--only", nargs="*", default=None, help="run directory names")
+    parser.add_argument("--reannotate-only", action="store_true",
+                        help="recompute disputes on the existing rows without re-cutting any crop; "
+                             "for when a detector changed and the pictures did not")
     args = parser.parse_args()
 
     import batch_package
@@ -249,6 +256,50 @@ def main() -> None:
             candidates_path = os.path.join(run_dir, "review-ui", "candidates.jsonl")
             if not os.path.isfile(candidates_path):
                 continue
+
+            # `--reannotate-only`: a detector changed, the pictures did not.
+            #
+            # `image_refs` already records which options got a picture, and disputes are computed
+            # **from the rows plus that field** (`review_queue.disputes_for_paper` reads `image_refs`
+            # and needs no crop). So a detector change can be propagated by rewriting the rows
+            # alone - re-cutting 3,500 crops to refresh a JSON field would be minutes of work for a
+            # field that is already on disk. This path exists so that "the new rule reaches the
+            # reviewer" does not require pretending the pictures changed too.
+            if args.reannotate_only:
+                with open(candidates_path, encoding="utf-8") as handle:
+                    rows = [json.loads(line) for line in handle if line.strip()]
+                before = collections.Counter(d.get("kind") for row in rows
+                                             for d in (row.get("disputes") or []))
+                # How many *rows* changed, before the rewrite computes the new disputes.
+                #
+                # Reported, not just counted internally: the first version of this path printed the
+                # summary line's `更新候選列 0` while rewriting every row in 989 files, because the
+                # counter is only incremented by the crop path. "0 rows updated" next to a detector
+                # that had just started firing is the kind of summary that makes somebody re-run the
+                # step to check whether it worked - so the number has to come from this path too.
+                before_rows = [json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows]
+                review_queue.disputes_for_paper(rows)
+                after = collections.Counter(d.get("kind") for row in rows
+                                            for d in (row.get("disputes") or []))
+                changed = sum(1 for row, previous in zip(rows, before_rows)
+                              if json.dumps(row, ensure_ascii=False, sort_keys=True) != previous)
+                temporary = candidates_path + ".partial"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    for row in rows:
+                        handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                os.replace(temporary, candidates_path)
+                delta = {kind: after.get(kind, 0) - before.get(kind, 0)
+                         for kind in set(before) | set(after)
+                         if after.get(kind, 0) != before.get(kind, 0)}
+                totals["runs"] += 1
+                totals["changed-rows"] += changed
+                # The per-run line is printed only when something moved, so a 989-run pass reads as
+                # the handful of papers the new detector actually touched.
+                if changed or delta:
+                    print(f"  {name[:52]:54} 列 {len(rows):>3}  改 {changed:>3}  差 {delta or '無'}",
+                          flush=True)
+                continue
+
             category = name.split("_")[1] if len(name.split("_")) > 1 else ""
             paper = paper_path_of(category, name)
             if paper is None:
@@ -304,6 +355,9 @@ def main() -> None:
     print(f"\n=== 圖片裁切")
     print(f"  卷 {totals['runs']}   圖 {totals['figures']}   更新候選列 {totals['changed-rows']}"
           f"   找不到 PDF {totals['no-paper']}")
+    if args.reannotate_only:
+        print("  （--reannotate-only：只重算偵測結果，沒有重切任何圖）")
+        print("   （列上的 disputes 由列自己算出來，圖片沒有參與，所以不需要重切）")
 
 
 def reflow_subject(run_name):

@@ -33,8 +33,8 @@
 
 相關腳本：
 
-- [scripts/run_mineru_pdf_batch.py](/Users/tim/tw-national-exam-catalog/scripts/run_mineru_pdf_batch.py)
-- [scripts/benchmark_mineru_workers.py](/Users/tim/tw-national-exam-catalog/scripts/benchmark_mineru_workers.py)
+- [scripts/run_mineru_pdf_batch.py](../scripts/run_mineru_pdf_batch.py)
+- [scripts/benchmark_mineru_workers.py](../scripts/benchmark_mineru_workers.py)
 
 ## 另一台機器的建議安裝位置
 
@@ -69,7 +69,7 @@ python3.14 -m venv venv_mineru
 
 本次已凍結的套件版本清單在：
 
-- [requirements/mineru-3.3.1-py314-freeze.txt](/Users/tim/tw-national-exam-catalog/requirements/mineru-3.3.1-py314-freeze.txt)
+- [requirements/mineru-3.3.1-py314-freeze.txt](../requirements/mineru-3.3.1-py314-freeze.txt)
 
 安裝方式：
 
