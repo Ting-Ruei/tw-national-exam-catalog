@@ -1,0 +1,1001 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>判讀介面 — 一次一題</title>
+<!--
+  一次一題、整題完整、右邊配 PDF、判讀寫進檔案。
+
+  這一頁的資料全部來自 `fetch`（沒有 fetch 的頁面就是靜態紀錄，設計者第八輪要的不是那個）。
+  判讀 POST 到 /api/judgement，落到 `store/agent_feedback.jsonl`——**與 agent 同一條學習流**，
+  所以設計者下的指導，下一輪 agent 就讀得到。
+
+  版面沿用 v2 的概念（左內容／右 PDF，`review_ui/v2.html:530` `.compare` grid 1fr 1fr）。
+  這裡不引入框架：v2 也沒有，而多一個建置步驟就多一個會和原始碼不一致的產物。
+-->
+<style>
+  :root {
+    --ink: #1b1f24; --muted: #6b7280; --line: #d8dde5; --bg: #f6f8fa;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #b42318; --accent: #0969da;
+    /* Height reserved for the fixed write bar, so the panes are never hidden behind it. */
+    --footer-h: 168px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.65 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+         color: var(--ink); background: var(--bg); }
+  header { padding: 10px 16px; background: #fff; border-bottom: 1px solid var(--line);
+           display: flex; gap: 12px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  input, button, select { font: inherit; padding: 6px 9px; border: 1px solid var(--line);
+                          border-radius: 6px; background: #fff; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; margin-left: auto; }
+  #a2-link { color: var(--accent); font-size: 13px; text-decoration: none; white-space: nowrap; }
+  #a2-link:hover { text-decoration: underline; }
+
+  /* Three panes: the list never disappears.  The designer's complaint was that the only way in was
+     a key, so the list is a permanent column rather than a screen you navigate away from. */
+  main { display: grid; grid-template-columns: 310px minmax(0, 1fr) minmax(0, 1fr);
+         gap: 12px; padding: 12px; align-items: start; }
+  /* The chat is a fourth pane, and the layout is stated in one place. It is **not** a tab inside
+     the question pane: the designer's loop is 「看著它去調」 — he has to see the question and the
+     conversation at the same time, or he is alt-tabbing to compare, which is what the old
+     comment-below-the-question workflow made him do. */
+  main { grid-template-columns: 290px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.9fr); }
+  @media (max-width: 1700px) { main { grid-template-columns: 260px minmax(0, 1fr) minmax(0, 1fr); }
+                               #chat-pane { grid-column: 1 / -1; } }
+  @media (max-width: 1300px) { main { grid-template-columns: 250px minmax(0, 1fr); }
+                               #chat-pane { grid-column: 1 / -1; } }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; }
+                               #chat-pane { grid-column: auto; } }
+  .pane { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+             color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+
+  /* the list */
+  #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - var(--footer-h) - 84px);
+               display: flex; flex-direction: column; gap: 8px; }
+  #list-filters { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  #list-filters select { flex: 1 1 auto; min-width: 0; }
+  #list-filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  #cat-count { font-size: 12px; color: var(--muted); }
+  #list { overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; flex: 1 1 auto; }
+  .row { padding: 7px 9px; border-bottom: 1px solid #eef1f5; cursor: pointer; font-size: 13px; }
+  .row:last-child { border-bottom: 0; }
+  .row:hover { background: #f3f7ff; }
+  .row.on { background: #e8f1ff; box-shadow: inset 3px 0 0 var(--accent); }
+  .row .top { display: flex; gap: 6px; align-items: baseline; }
+  .row .no { font-weight: 700; }
+  .row .sub { color: var(--muted); font-size: 11px; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .row .snip { color: #444; font-size: 12px; line-height: 1.35; margin-top: 2px;
+               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .row .note { font-size: 12px; color: #7a5c1e; background: #fff8e6; border-left: 2px solid #f0d999;
+               padding: 2px 6px; margin-top: 4px; }
+  .judged { font-size: 11px; padding: 0 5px; border-radius: 3px; font-weight: 600; }
+  .judged.up { background: #e6f6ea; color: var(--ok); }
+  .judged.down { background: #fdecea; color: var(--bad); }
+  .judged.hold { background: #fff6e0; color: var(--warn); }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .stem { white-space: pre-wrap; margin: 0 0 12px; padding: 10px; background: var(--bg);
+          border-radius: 6px; border: 1px solid var(--line); }
+  .options { list-style: none; padding: 0; margin: 0 0 12px; }
+  .options li { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+                margin-bottom: 6px; display: flex; gap: 10px; }
+  .options li.answer { border-color: var(--ok); background: #f0fff4; }
+  .options li .k { font-weight: 700; min-width: 1.4em; }
+  .options li .empty { color: var(--bad); font-style: italic; }
+  /* An option's own picture, in that option's row.
+     The option **is** the picture on these questions (four chemical structures with empty bodies),
+     so the row shows the structure the key names and nothing else. Same rule as v2's
+     `optionCropHtml`: the crop is bound to its key by measurement (`option_key`), not guessed from
+     position — a whole-question crop would put all four structures in one image and leave the
+     reader to work out which quarter the answer refers to. */
+  .opt-img { max-width: 190px; max-height: 190px; border: 1px solid var(--line);
+             border-radius: 4px; background: #fff; cursor: zoom-in; }
+  .options li .t { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  /* The question's own figure crop (not an option's), shown under the stem. */
+  .fig-crop { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
+  .fig-note { font-size: 12px; color: var(--muted); }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 99px;
+         border: 1px solid var(--line); background: var(--bg); color: var(--muted); margin-right: 5px; }
+  .tag.bad { color: var(--bad); border-color: #f3c2bd; background: #fff5f4; }
+  .tag.ok { color: var(--ok); border-color: #b7e0c1; background: #f2fdf5; }
+  section { margin-top: 14px; }
+  section > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+  .said { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
+  .said .who { font-size: 12px; color: var(--muted); }
+  .said.designer { border-left-color: var(--accent); }
+  .said.agent { border-left-color: var(--ok); }
+  #pdf-frame { width: 100%; height: calc(100vh - var(--footer-h) - 150px); min-height: 320px;
+               border: 1px solid var(--line); border-radius: 6px; }
+  #crop-img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+  /* The write panel is a fixed footer. It used to sit below the panes, so the answer box and the
+     three buttons were only reachable by scrolling past the whole question and the PDF — the
+     designer had to scroll to judge (2026-09-28: 「我現在滑鼠滾輪要下滑才能看到框與按鈕」).
+     Fixed rather than sticky: a sticky element still scrolls with the document that contains it. */
+  body { padding-bottom: var(--footer-h); }
+  #write { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+           background: #fff; border-top: 1px solid var(--line);
+           box-shadow: 0 -2px 10px rgba(0,0,0,.06); padding: 10px 14px; }
+  #write textarea { width: 100%; min-height: 56px; max-height: 22vh; font: inherit; padding: 9px;
+                    border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+  #write .row { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  #write h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+              color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  .empty-note { color: var(--muted); font-style: italic; }
+
+  /* The platform's own typography, reproduced so the reviewer sees the question a learner sees.
+     `platform-app/frontend-next/app/globals.css` wraps the same fields in `.study-prose` and sizes
+     `sup`/`sub` at 0.78em with `line-height: 0` (so a subscript does not push the line apart).
+     Without this the markup renders but the layout does not match, and "looks like the platform"
+     becomes a claim rather than a check. */
+  .study sup, .study sub { font-size: 0.78em; line-height: 0; }
+  .study table { border-collapse: collapse; margin: 6px 0; }
+  .study th, .study td { border: 1px solid var(--line); padding: 3px 7px; }
+  .study img { max-width: 100%; }
+
+  /* The storage form, verbatim. Monospaced and scrollable so a long line can be read without
+     reflowing the JSON into something that is no longer what was stored. */
+  /* The tool trace: one line per call, monospaced, so the shape of a run is visible at a glance. */
+  .trace { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+           padding: 8px 10px; font: 12px/1.6 ui-monospace, Menlo, monospace;
+           max-height: 300px; overflow: auto; }
+  .trace .tcall { color: #1b5e20; }
+  .trace .tres { color: var(--muted); padding-left: 14px; }
+  .trace .tres.bad { color: var(--bad); }
+  pre.raw { background: #2b2723; color: #f3efe9; border-radius: 6px; padding: 10px 12px;
+            overflow: auto; max-height: 300px; font-size: 12px; line-height: 1.5;
+            white-space: pre-wrap; word-break: break-word; margin: 4px 0 10px; }
+  #chat-pane { display: flex; flex-direction: column; min-height: 320px; }
+  #chat-log { flex: 1; overflow: auto; max-height: 46vh; padding-right: 4px;
+              display: flex; flex-direction: column; gap: 8px; }
+  #chat-log .turn { border-radius: 8px; padding: 8px 10px; font-size: 14px;
+                    white-space: pre-wrap; word-break: break-word; }
+  #chat-log .turn.designer { background: #eef4fb; border: 1px solid #d3e2f3; }
+  #chat-log .turn.agent { background: var(--bg); border: 1px solid var(--line); }
+  #chat-log .turn.live { border-style: dashed; }
+  #chat-log .who { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+                   color: var(--muted); margin-bottom: 3px; }
+  #chat-row { display: flex; gap: 8px; margin-top: 8px; align-items: flex-start; }
+  #chat-text { flex: 1; font: inherit; padding: 8px; border: 1px solid var(--line);
+               border-radius: 6px; resize: vertical; }
+  #chat-log .chat-tool { font: 12px/1.5 ui-monospace, Menlo, monospace; color: #1b5e20; }
+  #chat-log .chat-tool.bad { color: var(--bad); }
+  .finding { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
+  .finding .fh { font-weight: 600; font-size: 13px; }
+  .finding .fq { font-size: 13px; margin: 4px 0; }
+  .finding summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+  .warn { background: #fff8e6; border: 1px solid #f0d999; padding: 9px 11px;
+          border-radius: 6px; font-size: 13px; }
+  /* three dispositions, not two: the middle one is an annotation, not a verdict */
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  .buttons button { font-weight: 600; border-width: 1px; }
+  #btn-up { border-color: #b7e0c1; color: var(--ok); }
+  #btn-up:hover { background: #f2fdf5; }
+  #btn-down { border-color: #f3c2bd; color: var(--bad); }
+  #btn-down:hover { background: #fff5f4; }
+  #btn-hold { border-color: #f0d999; color: var(--warn); }
+  #btn-hold:hover { background: #fffaf0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>判讀介面</h1>
+  <input id="search" size="22" placeholder="搜尋題號／題幹文字">
+  <button id="find">搜尋</button>
+  <input id="key" size="40" placeholder="candidate_key（直接貼上時用）">
+  <button id="load">讀這一題</button>
+  <a id="a2-link" href="/a2" target="_blank" title="模型比對頁與執行記錄（a2/runs）">A2 執行產物</a>
+  <span id="status">尚未載入</span>
+</header>
+
+<main>
+  <div class="pane" id="list-wrap">
+    <h2>候選列表</h2>
+    <div id="list-filters">
+      <select id="category"><option value="">載入中…</option></select>
+      <label><input type="checkbox" id="only-unjudged">未判讀</label>
+      <label><input type="checkbox" id="only-figures">有圖</label>
+      <label><input type="checkbox" id="only-disputed" title="設計者曾標記為有問題（block／comment）">有問題的（你說過的）</label>
+    </div>
+    <div id="cat-count">—</div>
+    <div id="list"></div>
+  </div>
+
+  <div class="pane">
+    <h2>題目（整題完整）</h2>
+    <div id="qmeta" class="meta"></div>
+    <div id="qbody"><p class="empty-note">從左邊的列表點一題，或在上方搜尋。</p></div>
+  </div>
+
+  <div class="pane">
+    <h2>紙本（右側，與左側解耦）</h2>
+    <div id="pdfmeta" class="meta"></div>
+    <iframe id="pdf-frame" title="官方題目卷"></iframe>
+    <div id="crop-wrap"></div>
+  </div>
+
+  <div class="pane" id="chat-pane">
+    <h2>跟 agent 對話
+      <span class="chat-modes">
+        <button id="chat-mode-question" class="on" title="對話綁在左邊選到的題目上">綁這一題</button>
+        <button id="chat-mode-corpus" title="不綁題：從整個題庫的角度討論，它可以自己找題">全庫</button>
+      </span>
+    </h2>
+    <p class="empty-note" id="chat-note">點一題就會開一個綁在這一題的對話。
+      這裡是跟它講話的地方：看到圖切錯了、字掉了，直接跟它說，它會邊說邊用工具去看，
+      你就能看著它去調。</p>
+    <div id="chat-log"></div>
+    <div id="chat-row">
+      <textarea id="chat-text" rows="2"
+        placeholder="例：「選項 B 的圖切到了 C 的結構，你把 B 重切一次看看」"></textarea>
+      <button id="chat-send" class="primary">送出</button>
+      <button id="chat-stop" title="中斷它現在正在跑的那一輪">停</button>
+    </div>
+    <div id="chat-status" class="meta"></div>
+  </div>
+</main>
+
+<div id="write">
+  <h2>我的判讀（寫進檔案，成為 agent 的學習語料）</h2>
+  <textarea id="reason" placeholder="你要註解什麼？寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
+  <div class="row">
+    <div class="buttons">
+      <button id="btn-up">沒問題</button>
+      <button id="btn-down">有問題</button>
+      <button id="btn-hold">暫存</button>
+    </div>
+    <span id="save-status" class="meta"></span>
+    <span class="meta" style="margin-left:auto">「暫存」＝留著這句話、我還沒判斷</span>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function setStatus(text) { $("status").textContent = text; }
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/**
+ * The platform's own rendering of a question field.
+ *
+ * `stem_html` / `options_html` come from the bridge, which renders them through
+ * `lib/platform_view.py` using **the platform's allowlist read out of its own source**
+ * (`platform-app/frontend-next/lib/sanitize.ts`). It is already sanitized there, so it is inserted
+ * as markup rather than escaped.
+ *
+ * Why this exists (designer, 2026-09-28): 「這題在考題平台會是以什麼方式被我看到，所以斜體、
+ * 上下標都應該是直接呈現出來（我不應該看到 <sup> 這種東西）」. Escaping this string is what made
+ * the page show `GABA<sub>B</sub>` instead of GABA_B — the reviewer was reading the storage format.
+ *
+ * It is **not** a second renderer: if `stem_html` is missing (an old payload, or the platform file
+ * could not be read) the text falls back to the escaped raw form rather than to a hand-rolled
+ * converter, so there is never a second opinion about how a question looks.
+ */
+function platformHtml(html, fallbackText) {
+  if (typeof html === "string" && html.length) return html;
+  return esc(fallbackText || "");
+}
+
+/** The answer, rendered the way the platform renders it. */
+function platformInline(text) {
+  // The answer sentence is generated by the pipeline (`ai_findings.answer_of`) and carries no
+  // markup of its own, so escaping is correct for it — but a `_` or `^` in it still means what the
+  // platform says it means, so it goes through the same normaliser on the way out.
+  return esc(text || "");
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json().catch(() => ({ error: "回應不是 JSON" }));
+  if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+  return payload;
+}
+
+// -- the question -------------------------------------------------------------------------
+function renderTags(question) {
+  const tags = [];
+  if (question.quality_status) {
+    tags.push(`<span class="tag ${question.quality_status === "pass" ? "ok" : "bad"}">機器：${esc(question.quality_status)}</span>`);
+  }
+  if (question.group_ref) tags.push(`<span class="tag">題組 ${esc(question.group_ref)}</span>`);
+  const figures = question.figures || [];
+  if (figures.length) tags.push(`<span class="tag">圖 ${figures.length}</span>`);
+  else tags.push(`<span class="tag">無圖</span>`);
+  if (question.human_events?.length) tags.push(`<span class="tag">人動過 ${question.human_events.length} 次</span>`);
+  return tags.join("");
+}
+
+function renderOptions(question) {
+  // `options` is a list of records on 78,979 of 79,090 questions; 111 carry bare values. Both are
+  // handled because a crash here hides the whole question, not just one row (that happened).
+  const raw = question.options || [];
+  const options = raw.map((option, index) => {
+    if (option && typeof option === "object") return option;
+    return { key: "ABCD"[index] || String(index + 1), text: option };
+  });
+  if (!options.length) {
+    return `<p class="warn">這一題的選項是空的。可能是選項本身是圖片（化學結構式等），
+      也可能是抽取缺陷——請看右邊紙本確認是哪一種。</p>`;
+  }
+  // The rendered form, keyed by option, produced by the platform's own allowlist. Falling back to
+  // the raw text per option means a missing render degrades to the escaped form, not to nothing.
+  const rendered = new Map((question.options_html || []).map((o) => [o.key, o.text_html]));
+  // **The answer is a string, not a list** — on every one of the 79,090 questions (measured).
+  // It is also not always a letter: 1,205 carry `送分` (voided) or `B或C` (either scores).
+  // `answer_keys` is the machine's list and comes from `accepted_values`, so it is already correct
+  // for both cases; the display string is shown separately.
+  const answerKeys = new Set((question.answer_keys || []).map((a) => String(a).toUpperCase()));
+  return `<ul class="options">${options.map((option) => {
+    const key = String(option.key ?? option.label ?? "").toUpperCase();
+    const text = String(option.text ?? option.value ?? "").trim();
+    return `<li class="${answerKeys.has(key) ? "answer" : ""}">
+      <span class="k">${esc(key)}.</span>
+      <span class="t">${optionCrops(question, key)}
+        <span class="study">${text ? platformHtml(rendered.get(key), text)
+          : '<span class="empty">（紙本上是圖，沒有文字）</span>'}</span></span>
+    </li>`;
+  }).join("")}</ul>`;
+}
+
+/**
+ * This option's own picture(s), bound by `option_key`.
+ *
+ * The binding is a **measurement**, not a position: the pipeline writes `asset_role:
+ * 'option-image'` and `option_key` when it cuts the picture, and this only draws the ones that
+ * name this key. Guessing from order would put option A's structure under option C's letter on any
+ * question where a crop failed — a picture that looks authoritative and is of the wrong thing.
+ *
+ * The same rule as v2 (`review_ui/v2/02-area-question.js::optionCropHtml`), deliberately: two
+ * consoles showing the same question must show the same picture for the same option.
+ */
+function optionCrops(question, key) {
+  const refs = (question.figures || []).filter((ref) => ref && typeof ref === "object"
+    && ref.exists !== false && ref.asset_role === "option-image" && ref.option_key === key);
+  if (!refs.length) return "";
+  return refs.map((ref) => `<img class="opt-img" loading="lazy"
+    src="/file?path=${encodeURIComponent(ref.relative_path || ref.path || "")}"
+    onclick="window.open(this.src,'_blank')"
+    alt="${esc(ref.description || ("選項 " + key + " 的圖"))}"
+    title="${esc(ref.source === "image-object" ? "取自圖物件本身" : "取自頁面區域")}">`).join("");
+}
+
+/** The question's own figures (not any option's), shown with the stem. */
+function stemCrops(question) {
+  const refs = (question.figures || []).filter((ref) => ref && typeof ref === "object"
+    && ref.exists !== false && ref.asset_role !== "option-image" && !ref.option_key);
+  if (!refs.length) return "";
+  return refs.map((ref) => {
+    const note = String(ref.ownership || "") === "unverified"
+      ? '<div class="fig-note">（無法確認這張圖屬於哪一題：紙本上量不到這一題的列）</div>'
+      : (ref.ownership_note ? `<div class="fig-note">${esc(ref.ownership_note)}</div>` : "");
+    return `<img class="fig-crop" loading="lazy"
+      src="/file?path=${encodeURIComponent(ref.relative_path || ref.path || "")}"
+      onclick="window.open(this.src,'_blank')"
+      alt="${esc(ref.description || ref.label || "這一題的圖")}">${note}`;
+  }).join("");
+}
+
+/**
+ * The answer line.
+ *
+ * Kept separate from the option list because the two answer readings are different on purpose:
+ * the letters that go green come from `accepted_values`, and the sentence uses the sheet's own
+ * wording (`送分`, `B或C`). Showing `B、C` for `答Ｂ或Ｃ者均給分` reads as a multi-select answer, and
+ * showing `A、B、C、D` for a voided question reads as four answers — both are defects the pipeline
+ * already documented (`ai_findings.answer_of`), and both are avoided by taking its output.
+ */
+function renderAnswer(question) {
+  const display = question.answer_display ?? question.answer ?? "";
+  const keys = question.answer_keys || [];
+  const voided = question.answer_is_void
+    ? '<span class="tag">這一題全部給分</span>' : "";
+  const green = keys.length && keys.length <= 4 ? `（選項 ${keys.join("、")} 算對）` : "";
+  return `<div class="meta">答案：<b>${platformInline(display) || "（無）"}</b>
+    ${voided}${green}
+    ｜題號頁：${esc(question.page ?? "未匯出（A1 之後才有）")}</div>`;
+}
+
+/**
+ * What the designer already did to this question **in v2**.
+ *
+ * His complaint (2026-09-28): 「我原本在 v2 審核過的大量題目也沒有紀錄」. The events were always in
+ * the view (`human_events`) but the page only printed a count — the count said he had touched a
+ * question and hid the sentence that said *what* he found, which is the part worth keeping.
+ *
+ * These are **read-only**: they come from `question_review_events.jsonl`, which only he writes.
+ * The `notes` field is the one with text; `reason` is empty on every human event.
+ */
+function renderHumanEvents(rows) {
+  const said = (rows || []).filter((row) => row && row.action);
+  if (!said.length) return '<p class="empty-note">你在 v2 沒有動過這一題。</p>';
+  const label = { accept: "沒問題", block: "有問題", comment: "註解", correct: "修正",
+                  needs_review: "待複查", reviewed: "看過" };
+  // Newest first: the latest thing he said is the one still worth answering.
+  return [...said].reverse().map((row) => `<div class="said designer">
+    <div class="who">設計者（v2）· ${esc(row.created_at || row.at || "")}
+      <span class="tag ${row.action === "block" ? "bad" : row.action === "accept" ? "ok" : ""}">
+        ${esc(label[row.action] || row.action)}</span></div>
+    <div>${row.notes ? esc(row.notes) : '<span class="empty-note">（沒寫字）</span>'}</div>
+  </div>`).join("");
+}
+
+function renderSaid(rows) {
+  if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
+  return rows.map((row) => {
+    const who = row.source === "designer" ? "設計者" : (row.engine || row.source || "agent");
+    const cls = row.source === "designer" ? "designer" : "agent";
+    const rating = row.rating === "down" ? '<span class="tag bad">有問題</span>'
+                 : row.rating === "hold" ? '<span class="tag">暫存</span>'
+                 : row.rating === "up" ? '<span class="tag ok">沒問題</span>' : "";
+    return `<div class="said ${cls}">
+      <div class="who">${esc(who)} · ${esc(row.at || "")} ${rating}</div>
+      <div>${esc(row.reason || "")}</div>
+    </div>`;
+  }).join("");
+}
+
+/**
+ * What the model actually read and produced.
+ *
+ * The designer asked for this by name (2026-09-28): 「你可以顯示JSONL實際上記錄到什麼，
+ * 或是AI實際上讀到/產生什麼，這是我要跟AI對話所需之到的樣子」.
+ *
+ * It is the **verbatim** text, not a summary: a summary of a model's reading is a second reading,
+ * and the point of showing this is to argue with the first one. A `read_page` record carries the
+ * engine's own reading (`seen`) and the diff against the stored value, so both are shown raw — a
+ * reviewer who cannot see what the model was given cannot tell a model error from a prompt error,
+ * which is exactly the loop the designer wants to close.
+ */
+function renderAiRead(question) {
+  const rows = (question.judgements || []).filter((row) => row.source !== "designer");
+  const sections = [];
+  for (const row of rows) {
+    const who = esc(row.engine || row.source || "agent");
+    if (row.seen) {
+      sections.push(`<h3>模型讀到什麼（${who}）</h3>
+        <pre class="raw">${esc(JSON.stringify(row.seen, null, 2))}</pre>`);
+    }
+    if (row.diff) {
+      sections.push(`<h3>與抽取值差在哪（${who}）</h3>
+        <pre class="raw">${esc(JSON.stringify(row.diff, null, 2))}</pre>`);
+    }
+    if (row.reason) {
+      sections.push(`<h3>模型產生什麼（${who}）</h3>
+        <pre class="raw">${esc(row.reason)}</pre>`);
+    }
+  }
+  if (!sections.length && !(question.trace || []).length) {
+    return `<h3>模型讀到什麼</h3><p class="empty-note">這一題還沒有 agent 的判讀，
+      所以還沒有模型讀過它。（設計者寫的那一區在上面。）</p>`;
+  }
+  return sections.join("") + renderTrace(question.trace);
+}
+
+/**
+ * The agent's tool calls for this question, verbatim from its trace.
+ *
+ * The feedback record keeps only the conclusion. To argue with a judgement you have to see the run:
+ * which tool, with what arguments, returning what. It also makes the **health** of a run visible —
+ * the project's rule is that a healthy trace has no `bash`, so a `bash` line here is the signal,
+ * not a detail to scroll past.
+ */
+function renderTrace(rows) {
+  if (!rows?.length) return "";
+  const lines = rows.map((row) => {
+    if (row.event === "tool_call") {
+      return `<div class="tcall">→ <b>${esc(row.tool)}</b> ${esc(JSON.stringify(row.args || {}))}</div>`;
+    }
+    if (row.event === "tool_result") {
+      return `<div class="tres">← ${esc(row.tool)} ${row.ok === false ? "<b>失敗</b>" : ""} ` +
+        `${esc(JSON.stringify(row.summary || {}))}</div>`;
+    }
+    if (row.event === "assistant_error") {
+      return `<div class="tres bad">模型錯誤：${esc(row.error)}</div>`;
+    }
+    return "";
+  }).join("");
+  const bash = rows.filter((r) => r.event === "tool_call" && r.tool === "bash").length;
+  const health = bash
+    ? `<span class="tag bad">軌跡含 ${bash} 次 bash——通常是繞路，不是正常路徑</span>`
+    : '<span class="tag ok">軌跡健康（沒有 bash）</span>';
+  return `<h3>agent 做了什麼（工具軌跡）</h3>${health}
+    <div class="trace">${lines}</div>`;
+}
+
+// -- the candidate list ---------------------------------------------------------------------
+// The list is the way in. A candidate_key box alone made the UI usable only by whoever built it.
+const JUDGED_LABEL = { up: "沒問題", down: "有問題", hold: "暫存" };
+let listRows = [];
+
+function renderList(rows, total) {
+  listRows = rows;
+  $("cat-count").textContent = rows.length === total
+    ? `${total} 題`
+    : `顯示 ${rows.length}／${total} 題`;
+  $("list").innerHTML = rows.length ? rows.map((q) => {
+    const judged = q.judged
+      ? `<span class="judged ${esc(q.judged)}">${esc(JUDGED_LABEL[q.judged] || q.judged)}</span>` : "";
+    const figures = q.figures ? `<span class="tag">圖 ${q.figures}</span>` : "";
+    // The designer's own flag, and his own words. He said the sandbox made his earlier review
+    // invisible (「我原本在 v2 審核過的大量題目也沒有紀錄」); a list that shows what he wrote is the
+    // smallest thing that makes it visible again.
+    const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
+    const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
+    return `<div class="row" data-key="${esc(q.candidate_key)}">
+      <div class="top"><span class="no">q${esc(q.question_number)}</span>${judged}${disputed}${figures}</div>
+      <div class="sub">${esc(q.subject || "")} ${esc(q.year || "")}</div>
+      <div class="snip">${esc(q.stem || "")}</div>
+      ${note}
+    </div>`;
+  }).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>';
+  highlightCurrent();
+}
+
+function highlightCurrent() {
+  const key = current?.candidate_key;
+  document.querySelectorAll("#list .row").forEach((row) => {
+    row.classList.toggle("on", row.dataset.key === key);
+  });
+}
+
+async function loadCategories() {
+  try {
+    const data = await api("/api/browse");
+    const options = ['<option value="">— 選一個科目 —</option>'].concat(
+      (data.categories || []).map((c) =>
+        `<option value="${esc(c.category)}">${esc(c.category)}（${c.total}，已判 ${c.judged}，有圖 ${c.with_figures}）</option>`));
+    $("category").innerHTML = options.join("");
+  } catch (error) {
+    $("category").innerHTML = '<option value="">載入失敗</option>';
+  }
+}
+
+/**
+ * Walk the list with the left hand, the way v2 does.
+ *
+ * The designer's complaint (2026-09-28): 「審題的 reviewUI/v2 我可以快速的上下切換跟 A 或 B，
+ * 但你現在做的這個切換題目有點困難」. `W`/`S` walk whatever the list is **drawing** — including
+ * when the 「有問題的」 filter is on — because a filter narrows what is drawn, not what is walked
+ * (the v2 defect this project already measured: pressing `S` on a filtered list jumped to another
+ * paper). `J`/`K` judge, so a decision is one keystroke like v2's `A`/`B`.
+ */
+function go(step) {
+  if (!listRows.length) return;
+  const at = listRows.findIndex((row) => row.candidate_key === current?.candidate_key);
+  const next = at < 0 ? 0 : Math.min(listRows.length - 1, Math.max(0, at + step));
+  const row = listRows[next];
+  if (!row) return;
+  $("key").value = row.candidate_key;
+  loadQuestion();
+}
+
+function judgeKey(rating) {
+  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
+  if (!$("reason").value.trim()) {
+    // Do not silently write an empty reason: the reason is what the agent learns from, and a
+    // judgement with no basis is a data point that teaches nothing (the server refuses it too).
+    $("reason").focus();
+    $("save-status").textContent = "請先寫下判讀依據，再按判斷鍵。";
+    return;
+  }
+  save(rating).then(() => go(1));
+}
+
+async function loadList() {
+  const category = $("category").value;
+  if (!category) { $("list").innerHTML = ""; $("cat-count").textContent = "—"; return; }
+  $("list").innerHTML = '<p class="empty-note" style="padding:10px">載入中…</p>';
+  const query = new URLSearchParams({ category });
+  if ($("only-unjudged").checked) query.set("unjudged", "1");
+  if ($("only-figures").checked) query.set("with_figures", "1");
+  if ($("only-disputed").checked) query.set("disputed", "1");
+  try {
+    const data = await api("/api/browse?" + query);
+    renderList(data.questions || [], data.total || 0);
+  } catch (error) {
+    $("list").innerHTML = `<p class="warn" style="margin:10px">${esc(error.message)}</p>`;
+  }
+}
+
+function renderQuestion(question) {
+  current = question;
+  setStatus(`已載入 q${question.question_number}（${question.subject || question.category || ""}）`);
+  $("key").value = question.candidate_key;
+  highlightCurrent();
+  $("qmeta").innerHTML = renderTags(question);
+  $("qbody").innerHTML = `
+    <div class="stem study">${platformHtml(question.stem_html, question.stem || "（題幹是空的）")}</div>
+    ${stemCrops(question)}
+    ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
+    ${renderOptions(question)}
+    ${renderAnswer(question)}
+    <details open><summary>機器說法（圖的歸屬與範圍）</summary>
+      ${(question.figures || []).length
+        ? `<ul>${question.figures.map((f) => `<li>${esc(f.label || "?")} · 第 ${esc(f.page ?? "?")} 頁
+             · ${f.clipped ? '<span class="tag bad">有裁切</span>' : '<span class="tag ok">未裁切</span>'}
+             ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
+        : '<p class="empty-note">沒有圖。</p>'}
+    </details>
+    <details open><summary>你在 v2 對這一題做過什麼（人工審核紀錄，唯讀）</summary>
+      ${renderHumanEvents(question.human_events)}</details>
+    <details open><summary>這個沙盒的判讀（你／agent 寫進 agent_feedback.jsonl）</summary>
+      ${renderSaid(question.judgements)}</details>
+    <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
+      <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
+        這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、
+        以及 agent 的工具軌跡。兩者不同時，不同在哪裡就是判讀的對象。</p>
+      <h3>題目欄位（JSONL 原樣）</h3>
+      <pre class="raw">${esc(JSON.stringify({
+        stem: question.stem, shared_stem: question.shared_stem,
+        options: question.options, answer: question.answer,
+        answer_payload: question.answer_payload,
+      }, null, 2))}</pre>
+      <h3>模型看到的提示詞與讀到的內容（agent 自己跑的）</h3>
+      ${renderAiRead(question)}
+      <h3>管線的 AI 判讀（question_ai_findings.jsonl，707MB／108,181 筆）</h3>
+      ${renderPipelineFindings(question.ai_findings)}
+    </details>
+    ${(question.lessons || []).length ? `<details><summary>這一題記下的教訓</summary>
+      <ul>${question.lessons.map((l) => `<li>${esc(l.text)}（已見 ${l.count || 1} 次）</li>`).join("")}</ul>
+    </details>` : ""}
+  `;
+
+  // The PDF panel is deliberately independent of the question panel: changing one must not
+  // move the other (the charter's rule, and a real v2 defect where a filter moved the walk).
+  const pdf = question.pdf_relative || question.pdf_absolute || "";
+  $("pdfmeta").innerHTML = pdf
+    ? `第 <b>${esc(question.page ?? "?")}</b> 頁 ｜ ${esc(pdf.split("/").pop())}`
+    : '<span class="empty-note">這一題沒有對應的題目卷。</span>';
+  $("pdf-frame").src = pdf
+    ? `/file?path=${encodeURIComponent(question.pdf_absolute || pdf)}#page=${question.page || 1}`
+    : "about:blank";
+  $("crop-wrap").innerHTML = question.crop_png
+    ? `<div class="meta">這是 agent 送給地端模型看的裁片（含它自己的圖框）：</div>
+       <img id="crop-img" src="/crop?path=${encodeURIComponent(question.crop_png)}" alt="這一題的裁片">`
+    : "";
+  // The conversation is bound to this question, so switching question switches conversation —
+  // and the transcript is read back from the file rather than from the child's memory, so a
+  // page reload or a server restart does not lose it.
+  // In corpus mode a loaded question must **not** steal the conversation: the whole point of that
+  // mode is to keep talking about the corpus while browsing questions.
+  if (chatMode === "question") openChatFor(question.candidate_key);
+}
+
+// -- the chat box -------------------------------------------------------------------------
+//
+// **The question-bound variant** (designer, 2026-09-28:「3 兩者都要，1先做」). The session lives in
+// `ui/chat.mjs`; this side only streams it. Two decisions worth naming:
+//
+//   1. The transcript shown is `chat.jsonl`, not what this tab happens to have seen. What the
+//      designer reads must be the record of the conversation, or a reload would "lose" a
+//      conversation that is still on disk.
+//   2. A turn is streamed with `fetch` + `ReadableStream`, not `EventSource`. `EventSource` only
+//      does GET, and the designer's sentence has to travel in a body — a question stem is long
+//      enough that a query string is the wrong place for it.
+let chatKey = null;
+let chatStreaming = false;
+// Which kind of conversation the box is in. The designer asked for both (「3 兩者都要，1先做」) and
+// named why the second matters: 「目前的Agent無法看到全局」. In `question` mode the box is bound the
+// moment a question is loaded; in `corpus` mode it is bound to nothing, and the agent starts from
+// `see_corpus`／`find_disputed` instead of asking for a key it was never given.
+let chatMode = "question";
+
+function setChatMode(mode) {
+  if (chatStreaming) { $("chat-status").textContent = "它還在回答，先等它說完再切。"; return; }
+  chatMode = mode;
+  $("chat-mode-question").classList.toggle("on", mode === "question");
+  $("chat-mode-corpus").classList.toggle("on", mode === "corpus");
+  if (mode === "corpus") {
+    // `null` is the unbound key, all the way down: chat.mjs keeps one session per key and the
+    // unbound session is keyed by `null`, so this tab and the next visit reach the same one.
+    chatKey = null;
+    $("chat-note").textContent = "這一則對話沒有綁定任何一題——你可以問它整個題庫的狀況，"
+      + "它會自己去看、自己挑一題深入。";
+    openChatFor("");
+  }
+}
+
+async function openChatFor(key) {
+  // Loaded only when a question is in hand or the box is in corpus mode. The old `if (!key) return`
+  // silently made the unbound transcript unreachable — the same shape as a chat box that forgets.
+  if (!key && chatMode !== "corpus") return;
+  chatKey = key || null;
+  $("chat-log").innerHTML = "";
+  $("chat-status").textContent = "讀取對話紀錄…";
+  try {
+    const data = await api("/api/chat?key=" + encodeURIComponent(key || ""));
+    const empty = chatMode === "corpus"
+      ? "還沒說話。這是整個題庫的對話——你可以問它「現在題庫整體是什麼狀況」、"
+        + "「哪幾題是我說過有問題的」，它會自己去找。"
+      : "還沒說話。這是這一題專屬的對話——直接問它。";
+    $("chat-log").innerHTML = (data.turns || []).map((t) => chatTurn(t, false)).join("")
+      || `<p class="empty-note">${empty}</p>`;
+    $("chat-status").textContent = (data.turns || []).length
+      ? `已有 ${data.turns.length} 則對話（存在 chat.jsonl）` : "";
+  } catch (error) {
+    $("chat-status").textContent = "讀對話紀錄失敗：" + error.message;
+  }
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+}
+
+/*
+ * One turn drawn from the transcript — the same shape for a reloaded turn and a live one, so the
+ * conversation does not change appearance when the process is restarted.
+ */
+function chatTurn(turn, live) {
+  const who = turn.role === "designer" ? "你" : "agent";
+  const body = turn.text ? esc(turn.text) : '<span class="empty-note">…</span>';
+  return `<div class="turn ${esc(turn.role)}${live ? " live" : ""}">
+    <div class="who">${esc(who)}${turn.at ? " · " + esc(turn.at.slice(11, 19)) : ""}</div>
+    <div class="body">${body}</div></div>`;
+}
+
+
+/**
+ * Send one designer turn and render the answer as it arrives.
+ *
+ * The live turn carries the tool calls inline, because that is the thing being taught: if the
+ * designer says "選項 B 的圖切錯了" and the agent's next move is four `bash` calls, **seeing that** is
+ * what lets him correct the prompt instead of the answer. A box that only showed the final
+ * sentence would hide exactly the signal the loop runs on.
+ */
+async function sendChat() {
+  const text = $("chat-text").value.trim();
+  if (!text) { $("chat-status").textContent = "先寫你要說什麼。"; return; }
+  if (!chatKey && chatMode !== "corpus") {
+    $("chat-status").textContent = "先載入一題，或切到「全庫」模式，才能說話。";
+    return;
+  }
+  if (chatStreaming) { $("chat-status").textContent = "它還在回答，等它說完或按「停」。"; return; }
+
+  const key = chatKey;  // null in corpus mode, and the server treats null as the unbound session
+  $("chat-text").value = "";
+  chatStreaming = true;
+  $("chat-send").disabled = true;
+  $("chat-status").textContent = "agent 正在想…";
+  const live = document.createElement("div");
+  live.className = "turn agent live";
+  live.innerHTML = '<div class="who">agent · 正在回答</div><div class="body"></div>';
+  $("chat-log").appendChild(live);
+  const body = live.querySelector(".body");
+
+  let answer = "";
+  try {
+    const response = await fetch("/api/chat/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, text, id: String(Date.now()) }),
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE frames are separated by a blank line. Parsing them here rather than with EventSource
+      // is what allows the POST body above.
+      let index;
+      while ((index = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        if (!frame.startsWith("data: ")) continue;
+        let event;
+        try { event = JSON.parse(frame.slice(6)); } catch { continue; }
+
+        if (event.event === "delta") {
+          answer += event.text;
+          body.textContent = answer;
+          $("chat-log").scrollTop = $("chat-log").scrollHeight;
+        } else if (event.event === "tool") {
+          body.insertAdjacentHTML("beforeend",
+            `<div class="chat-tool">→ ${esc(event.tool)} ${esc(JSON.stringify(event.args || {}))}</div>`);
+        } else if (event.event === "tool_result") {
+          const bad = event.ok === false;
+          body.insertAdjacentHTML("beforeend",
+            `<div class="chat-tool${bad ? " bad" : ""}">← ${esc(event.tool)} ` +
+            `${bad ? "<b>失敗</b> " : ""}${esc(JSON.stringify(event.summary || {}))}</div>`);
+        } else if (event.event === "error") {
+          body.insertAdjacentHTML("beforeend",
+            `<div class="chat-tool bad">錯誤：${esc(event.error)}</div>`);
+          $("chat-status").textContent = "出錯了——上面的紅字就是原因。";
+        } else if (event.event === "done") {
+          $("chat-status").textContent =
+            `完成（${(event.seconds || 0).toFixed(1)} 秒）`;
+        }
+      }
+    }
+  } catch (error) {
+    // A stream that dies mid-answer must say so in the box: a half sentence with no error reads as
+    // the agent having stopped talking, and the designer would wait for more.
+    body.insertAdjacentHTML("beforeend",
+      `<div class="chat-tool bad">串流中斷：${esc(error.message)}</div>`);
+    $("chat-status").textContent = "串流中斷";
+  } finally {
+    live.classList.remove("live");
+    live.querySelector(".who").textContent = "agent" + (live.querySelector(".who").textContent.includes("·")
+      ? " · " + new Date().toTimeString().slice(0, 8) : "");
+    chatStreaming = false;
+    $("chat-send").disabled = false;
+  }
+}
+
+async function stopChat() {
+  if (!chatStreaming) return;
+  try { await api("/api/chat/stop", { method: "POST", headers: { "Content-Type": "application/json" },
+                                     body: JSON.stringify({}) }); }
+  catch (error) { $("chat-status").textContent = "停止失敗：" + error.message; }
+}
+
+// -- actions ------------------------------------------------------------------------------
+/**
+ * What the pipeline's repair loop actually asked a model and what it produced.
+ *
+ * This is the record the designer kept asking for: 「我可以看到 jsonl 讓 AI 看到或是產生的內容
+ * 到底是什麼，才有比較的依據」. It is the only place the **prompt** and the **raw completion** are
+ * stored — v2 shows only the parsed verdict, and a verdict is a conclusion, so there is nothing in
+ * either console to compare it against.
+ *
+ * All of a question's readings are shown, oldest first, because the loop runs a question again when
+ * a repair comes back — one reading has nothing to compare with.
+ */
+function renderPipelineFindings(rows) {
+  const list = rows || [];
+  if (!list.length) {
+    return '<p class="empty-note">這一題沒有管線的 AI 判讀紀錄（`question_ai_findings.jsonl`）。'
+      + '通常是還沒被標記為有問題，所以迴圈沒跑過它。</p>';
+  }
+  return list.map((row, index) => {
+    const f = row.finding || {};
+    const usage = row.usage || {};
+    return `<div class="finding">
+      <div class="fh">第 ${index + 1} 次 · ${esc(row.model || '?')} · ${esc(row.created_at || '')}
+        · ${esc((row.seconds ?? '?') + 's')} · ${esc(f.verdict || '?')}
+        ${row.error ? `<span class="tag bad">錯誤：${esc(row.error)}</span>` : ''}</div>
+      <div class="fq"><b>模型回答（解析後）：</b>
+        where＝${esc(f.where || '')}<br>fix＝${esc(f.fix || '')}</div>
+      <details><summary>模型收到的提示詞（system）</summary>
+        <pre class="raw">${esc(row.prompt_system || '（未記錄）')}</pre></details>
+      <details><summary>模型收到的提示詞（user，含題目原文）</summary>
+        <pre class="raw">${esc(row.prompt_user || '（未記錄）')}</pre></details>
+      <details><summary>模型原始輸出（raw）＋用量</summary>
+        <pre class="raw">${esc(row.raw || '（未記錄；這一筆是解析後的 finding）')}\n\n${esc(JSON.stringify(usage, null, 2))}</pre></details>
+    </div>`;
+  }).join('');
+}
+
+async function loadQuestion() {
+  const key = $("key").value.trim();
+  if (!key) return;
+  setStatus("載入中…");
+  try {
+    renderQuestion(await api("/api/question?key=" + encodeURIComponent(key)));
+  } catch (error) {
+    // A rendering exception used to escape this function entirely: the fetch succeeded,
+    // `renderQuestion` threw on `answer.map`, and the panel kept its previous contents — which on
+    // first load is the placeholder. The designer saw no question and no error, and reported it as
+    // 「我還是沒有辦法看到任何題目」. A named reason on screen is the difference between a
+    // ten-second fix and a day of guessing, so the catch names both the key and the error.
+    setStatus("載入失敗");
+    $("qbody").innerHTML = `<p class="warn">載入這一題時出錯：<b>${esc(error.message)}</b><br>
+      （key：${esc(key)}）</p>`;
+  }
+}
+
+async function search() {
+  const term = $("search").value.trim();
+  if (!term) return;
+  setStatus("搜尋中…");
+  const looksNumeric = /^\d+$/.test(term);
+  const query = looksNumeric
+    ? "number=" + encodeURIComponent(term) + "&limit=20"
+    : "contains=" + encodeURIComponent(term) + "&limit=20";
+  try {
+    const data = await api("/api/search?" + query);
+  const rows = data.questions || [];
+    setStatus(rows.length + " 筆");
+    $("qbody").innerHTML = rows.length
+      ? `<p class="meta">點一題載入：</p><ul class="options">${rows.map((q) => `
+          <li><span class="k">${esc(q.question_number)}</span>
+            <a href="#" data-key="${esc(q.candidate_key)}">${esc(q.category || "")} ${esc(q.subject || "")}
+            ${q.figures ? `<span class="tag">圖 ${q.figures}</span>` : ""}</a></li>`).join("")}</ul>`
+      : '<p class="empty-note">沒有符合的題目。</p>';
+  } catch (error) {
+    setStatus("搜尋失敗");
+    $("qbody").innerHTML = `<p class="warn">${esc(error.message)}</p>`;
+  }
+}
+
+async function save(rating) {
+  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
+  const reason = $("reason").value.trim();
+  if (!reason) { $("save-status").textContent = "請先寫下判讀依據。"; return; }
+  document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = true; });
+  try {
+    const result = await api("/api/judgement", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: current.candidate_key,
+        question_number: current.question_number,
+        rating,
+        reason,
+      }),
+    });
+    $("save-status").textContent = "已寫入 " + result.store;
+    $("reason").value = "";
+    // Re-read so the new judgement is shown from the file, not from what we hoped we wrote.
+    renderQuestion(await api("/api/question?key=" + encodeURIComponent(current.candidate_key)));
+    // The list carries the same judgement, and a list that does not update makes the designer
+    // judge the same question twice tomorrow — so refresh it from the source, not from here.
+    if ($("category").value) await loadList();
+  } catch (error) {
+    $("save-status").textContent = "寫入失敗：" + error.message;
+  } finally {
+    document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = false; });
+  }
+}
+
+$("load").addEventListener("click", loadQuestion);
+$("find").addEventListener("click", search);
+$("btn-up").addEventListener("click", () => save("up"));
+$("btn-down").addEventListener("click", () => save("down"));
+$("btn-hold").addEventListener("click", () => save("hold"));
+$("chat-mode-question").addEventListener("click", () => setChatMode("question"));
+$("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
+$("chat-send").addEventListener("click", sendChat);
+$("chat-stop").addEventListener("click", stopChat);
+// Enter sends; Shift+Enter writes a newline. A designer's sentence about a question is often more
+// than one line, so the multi-line case must not be the one that accidentally sends.
+$("chat-text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendChat(); }
+});
+$("category").addEventListener("change", loadList);
+$("only-unjudged").addEventListener("change", loadList);
+$("only-figures").addEventListener("change", loadList);
+$("only-disputed").addEventListener("change", loadList);
+$("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loadQuestion(); });
+$("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+
+/**
+ * Left-hand keys, mirroring v2: `W`/`S` walk, `J`/`K` judge.
+ *
+ * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the 判讀框,
+ * and the sandbox has that box focused most of the time. `J`/`K` leave the letters free — the same
+ * reasoning v2 records for why its own shortcuts are suppressed inside a textarea.
+ */
+document.addEventListener("keydown", (event) => {
+  if (event.target.tagName === "TEXTAREA" || event.target.tagName === "INPUT") return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const map = { w: () => go(-1), s: () => go(1), j: () => judgeKey("up"), k: () => judgeKey("down") };
+  const hit = map[event.key.toLowerCase()];
+  if (!hit) return;
+  event.preventDefault();
+  hit();
+});
+document.addEventListener("click", (event) => {
+  const row = event.target.closest("#list .row");
+  if (row) { $("key").value = row.dataset.key; loadQuestion(); return; }
+  const link = event.target.closest("a[data-key]");
+  if (!link) return;
+  event.preventDefault();
+  $("key").value = link.dataset.key;
+  loadQuestion();
+});
+// A key in the URL loads on open, so a question can be sent to someone as a link.
+const initial = new URLSearchParams(location.search).get("key");
+loadCategories();
+if (initial) { $("key").value = initial; loadQuestion(); }
+</script>
+</body>
+</html>

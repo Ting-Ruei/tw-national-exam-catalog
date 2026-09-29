@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from review_ui_source import server_source  # noqa: E402
+from review_ui_source import run_node_script, server_source  # noqa: E402
 
 
 def import_review_ui():
@@ -248,14 +247,9 @@ const inputs = [
 ];
 process.stdout.write(JSON.stringify(inputs.map(normalizeCorrectionNotation)));
 '''
-        completed = subprocess.run(
-            ["node", "-e", harness],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        stdout = run_node_script(harness)
         self.assertEqual(
-            json.loads(completed.stdout),
+            json.loads(stdout),
             [
                 "C<sub>r</sub>",
                 "HCO<sub>3</sub><sup>-</sup>",

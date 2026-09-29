@@ -1,0 +1,25 @@
+{
+  "sampled": 12000,
+  "errors": 0,
+  "threshold": 0.5,
+  "scans": [
+    {
+      "path": "國考題資料夾/10_official_pdf/by_official_catalog/中醫師/100/第2次/1002_中醫師_中醫基礎醫學(二)(包括中醫方劑學、中醫藥物學).pdf",
+      "cover": 0.5402,
+      "pages": 12,
+      "creator": "Acrobat PDFMaker 7.0 for Word"
+    },
+    {
+      "path": "國考題資料夾_非醫學剩餘全集/10_official_pdf/by_official_catalog/高考三級/高考三級_一般行政/C201_一般行政/104/第1次/1041_C201_一般行政_行政學.pdf",
+      "cover": 1.0,
+      "pages": 2,
+      "creator": "Canon iR-ADV C5030  PDF"
+    },
+    {
+      "path": "國考題資料夾_非醫學剩餘全集/10_official_pdf/by_official_catalog/四等考試/四等考試_電子工程(蘭嶼錄取分發區)/C414_電子工程(蘭嶼錄取分發區)/102/第1次/1021_C414_電子工程(蘭嶼錄取分發區)_基本電學.pdf",
+      "cover": 0.8976,
+      "pages": 1,
+      "creator": "PDFCreator Version 1.2.2"
+    }
+  ]
+}

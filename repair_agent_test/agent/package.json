@@ -1,0 +1,18 @@
+{
+  "name": "repair-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "自進步題目修理 Agent —— 以 Pi SDK 為底層（設計者 2026-09-27 指定）。Pi 當指揮者，地端 ornith/occamy 當判讀器。",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env agent.mjs",
+    "probe": "node --env-file-if-exists=.env agent.mjs --probe"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "typebox": "1.3.27"
+  }
+}

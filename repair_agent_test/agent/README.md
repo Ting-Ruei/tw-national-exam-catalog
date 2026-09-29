@@ -1,0 +1,466 @@
+# 判讀 agent — 怎麼啟動、怎麼管、怎麼用
+
+**給設計者看的操作手冊。** 三件東西：
+
+| 東西 | 是什麼 | 誰寫入 |
+|---|---|---|
+| **自進步 agent**（`agent.mjs`） | Pi 當指揮者，叫地端模型看紙本、找錯、判讀 | agent 寫 `store/agent_feedback.jsonl` |
+| **判讀介面**（`ui/`） | 你一次看一題、右邊配 PDF、寫下你的判讀 | 你寫**同一條** `store/agent_feedback.jsonl` |
+| **對話框**（`ui/chat.mjs`） | 你**直接跟它講話**（綁在這一題上），邊說邊看它去做 | `store/chat.jsonl`（**與判讀分開**） |
+| **學習語料**（`store/lessons.jsonl`） | agent 自己累積的教訓，下一輪會讀到 | `read_page` 自動記 ＋ agent 主動記 |
+
+**關鍵**：你寫的判讀和 agent 的判讀**進同一個檔**，所以 agent 下一輪的 `get_question`
+就會看到你寫的話。這是整條迴路唯一的接點，也是 `learned=None` 缺陷修好的地方。
+
+---
+
+## 一、啟動
+
+### 1. 判讀介面（你要用的）
+
+```sh
+cd "/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/repair_agent_test/agent"
+../../qbr/.venv/bin/python ui/server.py --port 8790 --host 0.0.0.0
+```
+
+**`--host 0.0.0.0` 不能省。** 預設是 `127.0.0.1`，那只監聽這台筆電自己的 loopback——
+**從你的電腦連會連不上**（不是壞掉，是它根本沒在 LAN 位址上聽）。2026-09-28 就是少了這個參數，
+網址給了、頁面打不開。
+
+然後在瀏覽器開（**用 LAN 位址，不是 `127.0.0.1`**）：
+
+```
+http://100.96.207.80:8790/
+```
+
+**設計者是用 Tailscale 連進來的**，所以這個沙盒的網址是 `100.96.207.80:8790`（Tailscale 位址），
+不是 LAN 的 `192.168.20.249`，也不是 `127.0.0.1`。三個都可以用來自己測（它們回同一個 server，
+因為它監聽 `*:8790`），但**給設計者的網址一定要用 Tailscale 那個**。
+
+> ⚠️ **這是沙盒，不是主場。** 設計者的**正式審題主場在常駐站的 v2**：
+> `http://192.168.10.70:8765/v2`。他 2026-09-29 明講：「**6.v2主場好像在 192.168.10.70:8765/v2
+> 所以需要在 MBP 改完才能推到正式站**」。所以**任何要給設計者用的改動，改在 MBP、再
+> `scripts/deploy_station.sh --restart` 推上去**——只改沙盒，他看不到。
+
+> 🐌 **沙盒現在反應很慢**（設計者 2026-09-29：「如果要繼續測試則需要優化」）。
+> 已知熱點（見 `bridge.py`：`do_overview`／`do_disputes`／`do_browse`／`do_find` 與
+> `ai_findings`／`prior_judgements`／`human_events` 每次都**單趟掃全檔**，
+> `question_ai_findings.jsonl` 是 **707 MB**）。**動工前先量**，且每個優化都要有負對照。
+
+`100.96.207.80` 是這台筆電的 Tailscale IP（`ifconfig` 裡的 `utun` 介面）；LAN 位址用
+`ipconfig getifaddr en0` 查。兩者都會變，只有「**用設計者連得到的那個位址**」是規則。
+只想在這台電腦自己看時，才用 `127.0.0.1`。
+
+**確認有在聽所有介面**（`*:8790`，不是 `127.0.0.1:8790`）：
+
+```sh
+lsof -nP -iTCP:8790 -sTCP:LISTEN
+```
+
+**先同步站上狀態**（協定：「站上是家」）：
+
+```sh
+cd ..
+scripts/sync_from_station.sh --status    # 先看差多少
+scripts/sync_from_station.sh             # 撈回最新
+```
+
+不先同步的話，你看到的題目是筆電上的舊快照，不是站上的權威版本。
+
+### 2. agent（背景跑）
+
+**三種用法**：
+
+```sh
+cd ".../repair_agent_test/agent"
+
+# 1. 丟一句話給它（最常用）
+node agent.mjs "看這一題並判讀：<candidate_key>"
+
+# 2. 對話模式：連續問，它記得前面講過的（這一輪的上下文留著）
+node agent.mjs --interactive
+
+# 3. 自我檢查：只建起 session、不動任何題，印出它「真的拿到」的提示詞
+node agent.mjs --probe
+```
+
+**換大腦**（預設由 `lib/identity.mjs::BRAIN_ENGINE` 決定，2026-09-29 起是 `occamy-6bit`；
+`--probe` 會把 provider／model／兩個引擎常數印出來）：
+
+```sh
+REPAIR_AGENT_MODEL="mtplx-35b/ornith-1.5-mtplx-35b" node agent.mjs "…"
+```
+
+**不要在這裡抄模型 id。** 模型 id 只有一個來源：`qbr/src/qbr/engines.py` 對那個引擎記的
+`name`；`test_agent.mjs` 會比對 `BRAIN` 與該表，所以兩者不可能說不同的話。
+（README 以前把預設寫成 `occamy-6bit/occamy-1.0-6bit-XL-mlx`，**大小寫與表不符**
+——`occamy-1.0-6bit-xl-mlx`。抄一個 id 到第二個地方就是第二個會過期的地方。）
+
+**引擎的兩個上限跟著引擎走，不是寫在這裡的常數**：`contextWindow`／`maxTokens` 取自
+`engines.py` 的 `context_window`／`max_output_tokens`。原因是一個實測的 400：
+
+```
+{"detail":"Request needs 72264 context tokens (39496 prompt + 32768 max generation),
+ but MAX_KV_SIZE is 65536."}
+```
+
+occamy 這台是以 `MAX_KV_SIZE=$CTX_MLX`（預設 65536，`~/models/occamy/bin/occamy:91`）起的，
+所以「prompt ＋ 要求的輸出」超過 65536 就直接拒絕，而客戶端只看到 `400 status code (no body)`。
+要開大是 operator 的決定：`CTX_MLX=131072 occamy restart`。
+
+**`--probe` 的兩行數字要看**：
+
+```
+system prompt  : 7758 chars built → 25800 chars in session (the agent's own)
+```
+
+左邊是你算的、右邊是**session 真的拿到的**。**這兩個數字曾經不一致**（見下面「已知的坑」），
+而畫面上只印左邊，看起來完全正常。
+
+**agent 沒有 `edit`／`write` 工具**，所以它不能改題目檔、不能刪檔。它只能查題、看紙本、
+寫判讀與教訓。**但要講清楚：這不代表「改題目在治理上被禁止」**——改題目不是 G3，
+專案裡的 `apply_dispute_repairs.py` 一直在改題目。這裡只是把「判讀」與「套用」分成兩步，
+先讓你看得到它的判斷，再決定要不要套。
+
+---
+
+## 二、介面怎麼用
+
+四個面板：**左邊候選列表（不會消失）、中間題目、右邊紙本、最右邊「跟 agent 對話」**。
+
+### 找一題（不用記 key）
+
+| 想做 | 怎麼做 |
+|---|---|
+| **瀏覽**（主要方式） | 左邊下拉選一個科目 → 列表就出來了 → 點一題 |
+| **只看還沒判的** | 勾「未判讀」 |
+| **只看有圖的** | 勾「有圖」 |
+| **只看你說過有問題的** | 勾「**有問題的（你說過的）**」——列表只留你 block／comment 過的題，**每列印出你當時寫的字**（`notes` 欄，不是 `reason`：人工事件的 `reason` 永遠是空的） |
+| 只知道題號 | 上方搜尋欄打 `68` 按 Enter |
+| 找某個字 | 搜尋欄打題幹裡的字（例：`葡萄球菌`）按 Enter |
+| 知道 key | 貼進 `candidate_key` 欄，按「讀這一題」 |
+| **上下切換／直接判** | `W` 上一題、`S` 下一題；`J`＝沒問題、`K`＝有問題（判完自動跳下一題）。走的是**畫面上那份清單**——包含打開「有問題的」過濾時 |
+| 直接給別人看 | 開 `http://100.96.207.80:8790/?key=<candidate_key>`（**沙盒的 Tailscale 位址**；設計者走 Tailscale，不是 LAN、更不是 `127.0.0.1`）。**正式主場是站上的 v2：`http://192.168.10.70:8765/v2`** |
+
+**為什麼要有列表**：只給一個 `candidate_key` 輸入框的介面，只有建它的人能用（設計者
+2026-09-28：「我不可能記得 key，應該要有候選列表」）。下拉選單的每一項都直接顯示
+**總題數／已判／有圖**，所以「我做到哪了」不必另外查。
+
+列表裡每一列都有：題號、**已判狀態**（沒問題／有問題／暫存）、**你說過**（你若 block／comment 過）、
+有圖數量、科目、題幹前兩行，**以及你當初寫的那句話**。
+
+> `W`/`S` 是照 v2 的左手邏輯放的。設計者原話：「審題的 reviewUI/v2 我可以快速的上下切換跟
+> A 或 B，但你現在做的這個切換題目有點困難」。這裡用 `J`/`K` 而不是 v2 的 `A`/`B`，
+> 因為 `A`/`B` 是打字時會用到的字母，而這一頁的判讀框經常是聚焦的。
+判完一題**列表會自己更新**（不是只更新中間那一題），不然明天會再判同一題一次。
+
+> 讀取成本：**索引化之前**一次掃全庫 79,090 題要 **0.86 秒／題**、`/api/queue` **1.86 秒**；
+> `lib/queue_index.py`（byte-offset 索引，`store/index/`）之後是 **0.024 秒**／**0.065 秒**
+> （`/api/browse` 3.38 → 0.94 秒）。索引只是加速器：沒命中的 key 一律回退串流，
+> 所以它壞掉是變慢，不是答錯。剩下的 0.94 秒是 `do_browse` 仍要 `json.loads` 全庫——
+> 刻意沒動，因為那只會多出第二份計數實作。
+> 唯一需要「不快取」的理由是第二份會過期的語料；索引的失效條件只有 `(size, mtime_ns, ino)`。
+
+### 看什麼（中間）
+
+**一次一題、整題完整**（你第八輪的原話：「每一題都要讀取完整，不能只讀這個不讀那個」）：
+
+- 題幹、共同題幹、A B C D（**答案那一個會變綠**）、答案
+- **機器說法**：圖的歸屬、有沒有裁切、`ownership_note`
+- **這個題目已有的判讀**：`source: designer` 是你寫的，`agent` 是模型寫的
+
+選項是空的時候，畫面會提醒兩種可能：**選項本身是圖**（化學結構式等），或是**抽取缺陷**。
+這正是你要看紙本分辨的地方。
+
+#### 兩個視圖：**平台視圖** 與 **原始視圖**
+
+- **平台視圖（預設）**＝**這題在考題平台會怎麼被看到**。斜體、上下標是**直接渲染**的：
+  `GABA<sub>B</sub>` 顯示成 GABA_B，**不會看到字面 `<sup>`**。（2026-09-28 之前看到的
+  就是儲存格式本身，所以你讀到的是機器存的字，不是學生看到的字。）
+  - 渲染用的 HTML 白名單**直接從平台的 `platform-app/frontend-next/lib/sanitize.ts` 讀出來**，
+    不是這裡抄一份；CSS（`sup`/`sub` 0.78em、`line-height: 0`）也對齊平台的 `.study-prose`。
+  - 檔案不在就**拋錯**，不會靜默留一份過期的清單。
+- **原始視圖**（題目下方 `<details>`「原始記錄」）＝**JSONL 實際存的是什麼、AI 實際讀到／產生什麼**：
+  - 題目欄位原樣 JSON；
+  - 模型讀到什麼（`read_page` 的逐字判讀與 diff）；
+  - **agent 做了什麼**：工具軌跡，並直接標「**軌跡健康（沒有 bash）**」或「**含 N 次 bash——通常是繞路**」。
+
+> 這兩個視圖是你要跟 AI 對話所需要的東西（你第九輪的原話）。
+
+### 看什麼（右邊）
+
+**官方題目卷該頁**（不是答案卷），加上 **agent 送給模型看的裁片**。
+右邊和左邊**完全解耦**：改左邊不會動右邊（v2 的既有規則）。
+
+> **圖現在會出現了**（2026-09-28 修）：以前含圖題的畫面**一張裁片都沒有**，兩個獨立原因——
+> ① 這一層沒把 `asset_role`／`option_key` 傳下去，所以接不上選項列；
+> ② `/file` 拒絕服務 `review-ui/crops/...` 這種 queue 相對路徑，回 404。
+> 現在四個選項圖各自放在**它自己的選項列**上（q042 就是四個化學結構式）。規則是抄站上 v2 的：
+> 用 `option_key` 綁定，**不是**按順序猜——用順序猜的話，某張裁片失敗時 A 的結構會跑到 C 的字母下。
+
+> ⚠️ **頁碼顯示 `未匯出` 是什麼意思**：`question_page` 是 A1 分支（`agent/export-question-page-20260927`）
+> 才加的欄位，你現在跑的資料還沒重匯出過。PDF 面板仍會開在第 1 頁。
+> 這是已知的，不是壞掉——要真正跳頁得先重跑匯出。
+
+### 跟 agent 對話（最右邊，**綁在這一題上**）
+
+點一題就開一個**綁在這一題的對話**。這是你要的即時迴路：看到圖切錯了、字掉了，
+**直接跟它說**，它會邊說邊用工具去看（你看得到它每一步），你再糾正它。
+
+| 操作 | 效果 |
+|---|---|
+| 在框裡打字，按 **Enter**（Shift+Enter 換行） | 送出，回答會**逐字串流**出現 |
+| 按 **停** | 中斷它正在跑的那一輪 |
+| 載入別題 | 自動切到那一題的對話（**不同的題不會互相汙染**） |
+
+**你打字的地方和它回答的地方是同一個面板**，而且它 call 工具時**你也看得到**——
+這一點是刻意的：如果你說「選項 B 的圖切錯了」而它的下一步是四個 `bash`，
+**看到那件事**才是你能糾正提示詞（而不是糾正答案）的地方。
+
+- 對話存在 **`store/chat.jsonl`**（append-only）——**與 `agent_feedback.jsonl` 分開**：
+  對話不是評分，混在一起會讓評分表塞滿「什麼都沒評」的句子。
+- **重啟後對話會延續**：session 落在 `store/chat-sessions/<q042>-<hash>/`，
+  新行程會 `continueRecent` 接回同一段對話（實測：新行程問「暗號是什麼」→ 答對）。
+- **它的開場已經拿到圖的絕對路徑**，所以直接 `read` 就會看到圖，不必再 `bash`／`find` 去找。
+
+### 對話的兩種模式：**綁這一題** ／ **全庫**
+
+對話框標題右邊有兩顆按鈕切換：
+
+| 模式 | 什麼時候用 | 它拿得到什麼 |
+|---|---|---|
+| **綁這一題**（預設） | 你在看某一題，要針對它跟你對答 | 這一題的完整內容＋圖的絕對路徑，開場就給了 |
+| **全庫** | 你要問**整個題庫**的狀況，或不確定要看哪一題 | `see_corpus`（每個類科幾題、有圖、被標記、你點名過、它判過幾題）＋`find_disputed`（你 block／comment 過的題與你寫的字） |
+
+全庫模式是設計者指出的缺口：**「目前的 Agent 無法看到全局」**。它以前會答
+「我需要更多資訊才能回答這個問題——目前這則對話還沒有指定哪一道題」——**那是對的**，
+因為它每一個工具的第一個參數都是 `key`。**那不是模型不會，是少了一個端。**
+
+> 全庫模式**載入題目不會搶走對話**（綁題模式才會切換）。兩種對話各自有 session
+> （全庫的落在 `store/chat-sessions/corpus-<hash>/`），transcript 以 `candidate_key: null` 區分。
+
+### 寫下你的判讀
+
+底部文字框寫**依據**（不是「這題有問題」，是「哪個字／哪個欄位／哪張圖不同」），
+然後按**三個按鈕其中一個**：
+
+| 按鈕 | 意思 | 什麼時候用 |
+|---|---|---|
+| **沒問題** | 抽取值與紙本一致（`up`） | 你確認過了，這題乾淨 |
+| **有問題** | 抽取值與紙本不一致（`down`） | 你看到具體的差異 |
+| **暫存** | **留著這句話，我還没判斷**（`hold`） | 還沒想清楚，但想先給 agent 一句話 |
+
+**「暫存」不是第三種評分**，它是「先記下、不算判決」。你第八輪說你的判讀「比較像是註解」——
+註解沒必要被迫選邊。它寫進同一個檔，agent 一樣讀得到，但**列表上顯示的是「暫存」**，
+不是「沒問題」也不是「有問題」。
+
+> `hold` **只存在於這個沙盒**。正式流程的評分仍然只有 `up`／`down`
+> （`review_ui/constants.py` 的 `AI_FEEDBACK_RATINGS`）——放寬它是一個要另外被審的決定。
+> 這個界線有測試守著。
+
+**存檔會拒絕三件事**（刻意的）：
+- 沒有 `candidate_key` → 拒絕（沒有題目的判讀沒人能處理）
+- 依據是空白 → 拒絕（沒有依據的指導，模型學不到東西）
+- 評分不是 up／down／hold → 拒絕（不允許默默變成預設值）
+
+寫進 `store/agent_feedback.jsonl`，append-only。**永不碰 `question_review_events.jsonl`**
+（那是人工審核紀錄，只有你能寫）。
+
+---
+
+### A2 執行產物（標題列的連結）
+
+`a2/runs/` 的模型比對頁與執行記錄現在**服務得到**了（`/a2`）。
+
+> 以前看不到**不是壞掉，是從來沒接上**：`build_compare_page.py` 刻意產出**靜態頁**
+> （它自己的說明就寫 *opens by double-click with no server*），所以沒有任何 UI 連到它。
+> 從瀏覽器看，「沒連上」與「不存在」一模一樣。
+> 這裡**照原檔服務、不重新渲染**——頁面內嵌了它那一次的 run，重畫會多出第二份版本。
+
+## 三、已知的坑（都是量到的，不是猜的）
+
+這些都**不會讓答案變錯**，所以它們活了下來——直到有人去看「它是怎麼答的」。
+**審 agent 要看軌跡，不只看結論。**
+
+| 坑 | 症狀 | 現在 |
+|---|---|---|
+| **提示詞根本沒送進去** | 它自稱「我是一個編碼助理」；五條鐵則從未進模型 | ✅ 修了。要傳進 `DefaultResourceLoader({systemPrompt})`（session 的 options **沒有**這個欄位）；`--probe` 印「built → in session」，不一致就非零退出 |
+| **`crop` 說圖不存在** | 明明裁了 134,227 bytes，回你 `png: null` → 它跑去找圖 | ✅ 修了。沒給 `--out` 就自己命名，並回報真的寫出的檔名 |
+| **我自己把能力拿掉** 🔴 | 我看日誌看到 `read` 回 `{}`，就下結論「read 讀不到圖」，還把這句**寫進提示詞** | ✅ 修了。`{}` 是**我的 logger 有損**（只讀 `details`），read 一直看得到圖。提示詞改成「**你自己看得到圖**」 |
+| **含圖題一張裁片都沒有** | 四個選項都是圖的題，畫面四個空白列 | ✅ 修了。`asset_role`＋`option_key` 傳下去；`/file` 認 queue 相對路徑 |
+| **對話被 stdin 的 `end` 殺掉** | 餵檔案／關頁籤時，進行中的回合直接消失 | ✅ 修了。用**同步**的 `inflight` 計數，不是等 session 建好才設的 `current` |
+| **「原始記錄」說有做、其實沒接** 🔴 | 上輪兩處 edit **原子失敗**，`renderAiRead` 有定義、**從未被呼叫**；舊測試只找字串所以通過，畫面什麼都沒畫 | ✅ 修了。真的接進 `renderQuestion`，並新增管線判讀（`question_ai_findings.jsonl` 的 `prompt_system`／`prompt_user`／`raw`）。**新測試執行函式並看輸出**，另一支驅動真 bridge |
+| **agent 看不到全局** | 問「題庫整體怎樣」→「我需要更多資訊…還沒有指定哪一道題」 | ✅ 修了。`see_corpus`／`find_disputed`。**這個答案本身是對的**——缺的是端，不是腦 |
+| **綁題對話從來沒送過題目** 🔴 | 你點開一題問它，它的第一句是「請給我題號」；session 檔是 `system → user`，題目不在裡面 | ✅ 修了。`sessionFor()` 在 `buildSession()` **之後**才判 `restored`，而 `buildSession` 自己會寫一條 session 訊息 ⇒ 每一條新對話都被當成「續談」而跳過 seed。改成先讀 `manager.getEntries().length` |
+| **換 occamy 之後每一輪都 500** 🔴 | 畫面只有 `[error] 500 status code (no body)`，引擎端 `Unexpected message role` | ✅ 修了。Pi 對「reasoning 模型」會把系統提示詞用 `role: "developer"` 送，mlx_vlm 的 Jinja 模板只認 system/user/assistant/tool；MTPLX 收 developer 所以舊的腦把這個坑蓋掉了。宣告在 **`model.compat`**（provider 層的 compat 不會被 merge，所以第一次修沒有效果）|
+| **接著每一輪都 400** | 同上，`400 status code (no body)` | ✅ 修了。`max_tokens` 是每個引擎共用的常數 32768，但 occamy 是 `MAX_KV_SIZE=65536`；`39496 prompt + 32768` 超過就拒收。現在上限跟著 `engines.py` 走 |
+
+**健康的軌跡**：`read`（看裁片）與／或 `read_page`（第二意見）→ `record_judgement`，
+**`bash` 0 次**。實測 q042 對話：給了圖的絕對路徑後 **4 個 `read`、0 個 `bash`**；
+只給 metadata 時是 `bash ls`（失敗）＋`find`＋才 `read`。
+
+> 這裡有兩個坑是**「檢查自己會說謊」**：`--probe` 印出 7,504 字元的提示詞，看起來像「有在用」；
+> `crop` 的 `rows`／`bytes` 完全正確，只有 `png` 是 `null`。
+> 還有一個是**我自己造的**：把有損的日誌當成事實，然後據此**拿掉一個能用的能力**。
+> 所以本專案的測試要求每個檢查都附**負對照**——把修好的地方改回去，測試必須 FAIL。
+
+## 四、怎麼知道 agent 學到了
+
+### 看它讀到了什麼
+
+```sh
+# 你剛寫的那句話，agent 下一輪就會看到
+../../qbr/.venv/bin/python bridge.py question --key "<key>" | python3 -c \
+  "import json,sys; d=json.load(sys.stdin); print(len(d['prior_judgements']), '筆判讀')"
+```
+
+### 看它自己累積的教訓
+
+```sh
+cat store/lessons.jsonl | python3 -c "
+import json,sys
+for line in sys.stdin:
+    r=json.loads(line)
+    print('[%s] %s%s（%d 次）' % (r.get('subject') or '引擎', r['text'],
+          '（依據：%s）' % r['evidence'] if r.get('evidence') else '', r.get('count',1)))
+"
+```
+
+「次數」是重點：**同一個觀察在不同題重複出現，就是那個科目的習慣**。
+`螢→熒` 這種是引擎層級（標 `[引擎]`），`這類題的圖常被切細縫` 是科目層級。
+
+### 看 agent 做了什麼
+
+```sh
+python3 -c "
+import json
+for line in open('store/agent.log.jsonl'):
+    r=json.loads(line)
+    if r.get('event')=='tool_call': print('CALL', r['tool'])
+    elif r.get('event')=='tool_result':
+        s=r.get('summary') or {}
+        print('  RES', r['tool'], r.get('ok'), s.get('error','')[:80])
+"
+```
+
+**健康的樣子**：`get_question` → `read_page` → `record_judgement`，**沒有 `bash`**。
+如果出現 `bash`，代表某個工具有問題，agent 在繞路自己找答案——那是要修的信號，不是它在亂搞。
+
+---
+
+## 五、管理
+
+### 測試
+
+```sh
+./run_tests.sh        # 21 個契約測試，每個都有負對照
+```
+
+> 用 `run_tests.sh` 而不是直接 `node --test`：它把 `REPAIR_AGENT_STORE` **只 scope 給測試行程**。
+> 若先 `export` 再在同一 shell 啟動服務，**服務會繼承一個被刪掉的臨時路徑**——
+> 症狀是裁片明明在磁碟上，API 卻回 `null`，看起來像裁切 bug（實際發生過，2026-09-28）。
+
+### 停掉介面
+
+`Ctrl-C`，或 `pkill -f "ui/server.py"`。
+
+### 檔案在哪
+
+| 路徑 | 內容 | 能不能刪 |
+|---|---|---|
+| `store/agent_feedback.jsonl` | **學習語料**（你的判讀 ＋ agent 的判讀） | **不要刪**，這是唯一會累積的東西 |
+| `store/lessons.jsonl` | agent 的教訓 | 可清空重學 |
+| `store/agent.log.jsonl` | 每輪軌跡 | 可刪（只是紀錄） |
+| `store/crops/` | 裁片 | 可刪（會重裁） |
+
+### 改題目？（機器**已經在改**，但不是這個 agent 在改）
+
+**更正：之前寫「改題目是 G3、工具不給」是錯的。** 查 `docs/governance/README.md` 後的正確分法：
+
+| 級別 | 實際內容 |
+|---|---|
+| **G2**（可自主） | AI 工作流狀態、**更新 agent 自己的結果**、**parser／rule proposal** |
+| **G3** | deploy、production migration、advisory import、**publish/import apply** |
+| **G4** | 人工 accept/block、restore、writer switch、event repair、material deletion |
+
+**「改題目文字」不在 G3 那張表上。** G3 是「部署／發布／匯入正式庫」那一類。
+
+而且**機器已經在改題目，改得很多**——站上事件實測：`repair_italic_markup` 6,785、
+`repair_dispute_apply` 677、`repair_experience_apply` 248。這些來自
+`qbr/scripts/apply_dispute_repairs.py`，它的 docstring 第一行就是：
+
+> Apply the repairs that are **already decided by measurement** - no model opinion involved.
+
+它有三道護欄：**人已經 block 過這題** ＋ **第二引擎 `TRUST`** ＋ **量測對齊**。
+
+所以這條線**沒有被封死**。這個 agent **不直接改文字**，是因為：
+
+1. **它現在先做判讀**（成本低、可 append、不破壞）。q042 量到同一題、同模型、
+   兩次給相反結論——這種不穩定性直接餵進修復管線，就是把不確定性寫進題庫。
+2. **正接法不是「給 agent 一個 edit 工具」**，而是**判讀觸發既有的修復管線**——
+   那條管線本來就是「量測決定、不問模型意見」，而且有三道護欄。
+
+這也正是設計者第八輪說的 **B 案：接上既有的空管線**，不是新蓋一條。
+**要不要現在接，是設計者要決定的**（見 `qa-log.md`）。
+
+---
+
+## 六、現在的限制（誠實清單）
+
+1. **`page` 是 `None`（PDF 面板開在第 1 頁）。** `question_page` 是 A1 分支
+   （`agent/export-question-page-20260927`）才加的欄位，**目前全庫 79,090 題一筆都沒有**
+   （實測：`metadata` 裡沒有這個鍵）。要真正跳頁得先合併 A1 並重跑匯出。
+   **不是壞掉，是還沒做。**
+2. **一次一題**。分群（92.8% 快速瀏覽／7.2% 下指導）的**資料支持已有**，
+   但介面上**還沒有**「一群一群看」的按鈕。
+3. **只有一個模型看**。設計上支援兩個引擎（`occamy-6bit` ＋ `mtplx-35b` 第二意見），
+   agent 會自己決定要不要叫第二個，但介面不會自動並排顯示兩個判讀。
+4. **還沒有 G4 的自動流程**。`agent_verified` 這個狀態已經可用，
+   但「agent 判乾淨 → 自動標 `agent_verified` → 包進可交付 package」這條線還沒接。
+5. **藥師還沒掃**（盤點見 §「藥師」：711 題有圖，約 27 分鐘可跑完視覺稽核）。
+6. **`rating` 只講格式，不講內容。** 這是刻意的（見下面「一個真實的翻車」）：
+   模型**不能**因為「我覺得答案應該是 D」而把一題判 down。它覺得答案可疑但格式一致時，
+   `rating` 還是 `up`，那個懷疑寫在 `reason` 裡——**那一句要人看**。
+
+---
+
+## 七、一個真實的翻車（你必須知道，因為它決定了 `rating` 的語意）
+
+`1152_藥師(一)_藥學(一)` **q042**（Eteplirsen 的骨架）——**同一題、同一個模型、四次判讀、三種結論**：
+
+| # | 當時看到什麼 | 判 |
+|---|---|---|
+| 1 | 裁片只有選項 A（B/C/D 空白，Q31 的 bug） | up |
+| 2 | 你從這個 UI 寫下「四張結構式都要在裁片裡」 | （你的話） |
+| 3 | 裁片修好，四張結構式全到齊 | up |
+| 4 | **同一組四張圖** | **down**（說答案應為 D） |
+
+第 4 次的理由引用了「2'-O-methyl」「phosphorothioate」「31-mer」這些**真實存在的名詞**，
+但**組合是錯的**：Eteplirsen（Exondys 51）是 **PMO（morpholino ＋ 磷醯二胺鍵）＝選項 B**，
+也就是**官方答案**。2'-MOE ＋ phosphorothioate 是另一顆藥（mipomersen）。
+
+**所以：**
+
+- **圖修好了，判讀反而變壞。** 差別不在資料，在模型拿到更多可看的東西之後**開始推理化學**。
+- **選項全是圖、文字 diff 為空時最危險。** 模型不會說「沒有格式問題」，它會去找一個更
+  「有意思」的問題——找到的就是「答案好像怪怪的」。
+- 修法是：**把 `rating` 的語意綁死成「抽取值與紙本一不一致」**，並把**這次翻車原文放進提示詞**
+  （抽象禁令原本就有，擋不住它）。修完之後同一題判 `up`，且明說答案爭議「超出忠實性判讀範圍」。
+
+**你要做的事**：當 agent 在 `reason` 裡說「答案可能不對」但判 `up` 時，**那是要你裁決的訊號**，
+不是它搞錯。它把「它不該推翻的事」**標出來**給你，這正是設計要它做的。
+
+---
+
+## 八、出問題時先看哪裡
+
+| 症狀 | 先看 |
+|---|---|
+| 介面開啟但沒有題目 | `scripts/sync_from_station.sh --status`（是不是還沒同步） |
+| 「找不到題目」 | candidate key 對不對；`bridge.py find --number 68` |
+| PDF 面板空白 | 掃描頁 JPEG 2000；看 `qbr.review_ui.paths.safe_file_path` 的瀏覽器安全變體有沒有建 |
+| agent 用 `bash` 繞路 | `store/agent.log.jsonl` 裡那個工具回什麼錯（**現在錯誤會寫進 log 了**） |
+| agent 沒有引用你的判讀 | `bridge.py question` 有沒有 `prior_judgements`；沒有的話是 `bridge.py` 沒更新 |
+| 判讀沒寫進去 | POST 回 400 通常是缺 `reason` 或 `key` |
+
+**不要用「再疊一層」解決問題**（charter）。先看這張表，再看 `qa-log.md` 最新一則。

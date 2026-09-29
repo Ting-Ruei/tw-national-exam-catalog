@@ -1,0 +1,23 @@
+{
+  "corrections_for_questions": 51,
+  "note": "Ground truth is the reviewer's own `correct` event. The shipped text and the human text are both real; nothing here was written for the experiment.",
+  "queue": "/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/qbr/data/review-queues/live/review-ui",
+  "rows": 47,
+  "schema": "qbr_a2_dataset_v0.1",
+  "skipped": {
+    "no_candidate_row": 0,
+    "no_change": 4
+  },
+  "sources": {
+    "candidates.jsonl": {
+      "bytes": 199358785,
+      "rows_seen": 79090,
+      "sha256": "7cfb26734f2f063f69f85be524f2c9fab9396e77eb97a27f82eaa8bd85b95b75"
+    },
+    "question_review_events.jsonl": {
+      "bytes": 14139665,
+      "correct_events": 64,
+      "sha256": "508046fb225606f202461fe24f2b5c944ff2dfb127200a4d9b2347285b7ab704"
+    }
+  }
+}
