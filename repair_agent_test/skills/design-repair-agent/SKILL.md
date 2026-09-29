@@ -874,6 +874,22 @@ cat <out-dir>/summary.tsv            # key / rc / 秒數 / 這次多了幾行判
 「模型拒答 98 題」；改用 watchdog subshell 則會留下 `sleep 900`，第一題跑完後卡 15 分鐘。
 現在用 `perl -e 'alarm shift; exec @ARGV' 900`。
 
+**第三個坑：`nohup ... &` 活不過一個回合。** 這個 harness 會在啟動它們的呼叫結束時回收 shell 的
+子程序（實測：`nohup sleep 600 & disown` 兩秒後就不見了；這個迴圈死過兩次，一次在題目中、
+一次在兩題之間）。所以長跑要用 **launchd**：
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qbr.audit-pharmacist1.plist  # 裝
+launchctl bootout   gui/$(id -u) ~/Library/LaunchAgents/com.qbr.audit-pharmacist1.plist  # 拆
+```
+
+`summary.tsv` 是**帳本**：已在裡面的 key 會跳過，所以「重跑同一份清單」就是續跑，不會重複判。
+2026-09-29 收工時的進度：**q018 up、q053 down（`C∞min` 被壓平）、q041 up、q065 up**；
+其餘 95 題由 LaunchAgent 繼續。
+
+**順帶跑掉的驗證**：換 `vision.py` 預設之後 `qbr` 全套 **783 passed / 17 skipped**（與先前同一組
+數字），另外 `describe_crop` 走新預設實測成功；`repair_agent_test` 則 47 pass / 0 fail。
+
 **沙盒介面（改完要重啟，且真的在畫面上看過）**：`/api/browse?category=藥師(一)` 回 5,040 列
 （0.46 s）、勾「有問題的（你說過的）」篩出 **334** 列並印出設計者當初寫的那句話
 （`human_event_keys()` 那條路徑）、點一列會載入題目與 PDF；**新開的綁題對話在 session 檔裡
