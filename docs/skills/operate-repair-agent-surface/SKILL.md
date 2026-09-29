@@ -883,17 +883,26 @@ ssh macstudio 'launchctl print gui/$(id -u)/com.qbr.repair-daemon'
    排隊視窗在迴圈活著時會空轉到 30 分鐘上限。要改的是 `busy()`，不是加長等待。
 2. **部署閘門要能說出「這一輪少了哪一步」**：2026-09-25 第⑤步的 `NameError` 讓 5 輪一張表都沒切，
    而每一輪的結尾都寫「跑完了」（`repair-open-items` §4.5）。
-3. **先決定 findings 要不要回流站上**（2026-09-29 實測，見下表）。
+3. **先決定兩個流各自的方向**（2026-09-29 實測，見下表）：站上的 **human events 比筆電新**
+   （站上多 5 筆 accept），所以那條線只可以站上 → 筆電；筆電的 **findings 比站上多 200 筆失敗列**，
+   推上去只是污染。方向沒定之前，任何「同步」都可能是單向覆蓋，而覆蓋掉的是他按下的決定。
 
 ```sh
-# 2026-09-29 兩邊逐檔比對（sha256 前 16 碼）
+# 2026-09-29 兩邊逐檔比對（sha256 前 16 碼）——**同一天稍晚再量一次，human events 已經不同了**
 #   candidates.jsonl            7cfb26734f2f063f   兩邊相同
 #   figure_ownership.json       201b112b026bcdf3   兩邊相同
-#   question_review_events.jsonl 508046fb225606f2  兩邊相同
-#   question_ai_findings.jsonl  站上 b9d255ea…／筆電 2a0df06e…  ← 只有這一個不同
+#   question_ai_findings.jsonl  站上 b9d255ea…／筆電 2a0df06e…  ← 筆電多 200 行（全是失敗紀錄，見下）
+#   question_review_events.jsonl 站上 58faa93644fcbc09（20,329）／筆電 508046fb225606f2（20,324）
 ```
 
-不同的那一個是 **筆電多 200 行**（108,191 vs 107,991），而那 200 行**全部是失敗紀錄**：
+**`question_review_events.jsonl` 現在是站上比較多。** 2026-09-29 稍晚實測：站上多 5 筆
+`accept`（`reviewer: local`，`moex:103090:312:33:1:question:q036/q053/q057/q070/q073`，
+註記如「-0.2t 是上標」「VD 的D是下標」）。**人工事件是 append-only，所以這條線只可以站上 → 筆電
+（或整筆去重取聯集），筆電的快照絕不可以蓋回去——那會直接丟掉他這 5 個決定。**
+站上的 `question_ai_findings.jsonl` 仍是 2026-09-25 22:30 的 mtime／同一個 sha，代表站的 AI 流
+自那之後沒動過。
+
+筆電 findings 多出的 200 行**全部是失敗紀錄**：
 `error: "request failed"`、`model: incoai/Qwen3.8-27B-Splash`、`endpoint: http://127.0.0.1:8088`
 （該端點自 2026-09-25 起是 down），5 題 × 40 次，時間 2026-09-28T16:31 – 2026-09-29T12:04，
 `finding.verdict` 全是 `null`。
