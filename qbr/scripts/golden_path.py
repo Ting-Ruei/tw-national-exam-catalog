@@ -573,7 +573,16 @@ def stage_records(parsed, gate, table, sheets, meta, registry_key, review_status
             # the question all the way to the reviewer's screen for the same reason `lost_glyphs`
             # does: the defect is at a place on the paper, and the place is the useful half of the
             # report. The name is the same one the extractor used, so there is one spelling of it.
-            extra_metadata={"flattened_offsets": item.get("flattened_offsets") or None}))
+            #
+            # `page` is the page the question's **number** is printed on, taken from the reading that
+            # produced this record rather than re-derived here, so the exported place and the parsed
+            # place cannot disagree. Without it a question's position was not in the export at all,
+            # and every count of "questions on page N" had to be an upper bound over the whole paper.
+            # It is the number, not the band's end: a question can run past the foot of its page, and
+            # a page that was never printed is not a place. The band itself already travels to the
+            # gate, which is the one stage that needs the full extent.
+            extra_metadata={"flattened_offsets": item.get("flattened_offsets") or None,
+                            "question_page": item.get("page")}))
     return rows, sources
 
 
