@@ -885,21 +885,32 @@ keychain 與 env 都沒有。**比較基準是 `agent/review-ui-server-split-202
 不是 `main`**：5 支都含它為祖先、彼此不互相包含，相對 `main` 各是 96–104 commits／150–244 檔，
 相對 split 分支只有 7 個（`repair-agent-pi-sdk` 是 16 個）。逐支 compare：
 
-| 分支 | compare（base = split 分支） | 增量（`git rev-list --count <base>..origin/<b>`） |
-|---|---|---|
-| `agent/fix-option-alphabet-union-20260927` | `...compare/agent/review-ui-server-split-20260923...agent/fix-option-alphabet-union-20260927` | 7 |
-| `agent/engine-endpoints-runtime-20260927` | 同上換分支名 | 7 |
-| `agent/export-question-page-20260927` | 同上 | 7（**#5 裁決要合併的那支**） |
-| `agent/agent-verified-gate-20260928` | 同上 | 7 |
-| `agent/repair-agent-pi-sdk-20260928` | 同上 | 16（本輪又 +1，含這份文件） |
+**開 PR 的順序（2026-09-29 已建好第一支的來源分支）**：那 6 個共享 commit（`eda10de`…`2a5e97c`）
+**每一支都含在裡面**，所以直接開 5 支 PR 的話，同 6 個 commit 會被審 5 次、而且互相衝突。已建立
+`agent/qbr-shared-contracts-20260929`（＝`16bd5e4` ＋ 恰好那 6 個；`git rev-list --count 16bd5e4..`
+= 6，且**與各 feature commit 的檔案零重疊**，所以先合它，其餘就各自變成乾淨的小 PR）。
 
-`https://github.com/Ting-Ruei/tw-national-exam-catalog/` ＋ 上表後半段。開 PR 的順序：先讓 PR #5
-（split 分支）進去，再把這 5 支改成對 `main`；在那之前對 `main` 開 PR 會把整條 split 分支的
-96–104 commits 一起帶進來。
+| 順序 | 分支 | 標題 | 內容 |
+|---|---|---|---|
+| **1** | `agent/qbr-shared-contracts-20260929` | `Shared QBR review contracts (6 commits)` | 共享審題介面契約、掃描改走共享介面、repair contracts、原則提案 helper、daemon 執行模式測試、提案留在已核准引擎 |
+| 2 | `agent/fix-option-alphabet-union-20260927` | `Fix option alphabet: use the paper's most-used private-use family, not the union` | 選項字母（1 commit） |
+| 3 | `agent/engine-endpoints-runtime-20260927` | `Make the engine table a runtime parameter, not an import-time literal` | 引擎表改為呼叫時解析（1 commit） |
+| 4 | `agent/export-question-page-20260927` | `Export the page each question's number is printed on` | `question_page` 欄位；**#5 裁決要合併的那支**（1 commit） |
+| 5 | `agent/agent-verified-gate-20260928` | `Allow agent_verified packages without impersonating a human reviewer` | agent 閘門（1 commit） |
+| 6 | `agent/repair-agent-pi-sdk-20260928` | `Repair agent (Pi SDK): occamy brain, indexed queue reads, defined second opinion` | 判讀 agent ＋本輪 4 個 commit（16） |
 
-**站上 findings 的 200 行差異＝不要推。** 筆電多出的 200 行全是
-`model: incoai/Qwen3.8-27B-Splash`、`endpoint http://127.0.0.1:8088`（該端點 down）的
-`error: "request failed"`、`verdict: null`，5 題 × 40 次。推上去只會污染站上 findings。
+compare（base 一律 `agent/review-ui-server-split-20260923`；PR #5 還沒進去之前對 `main` 開會把
+96–104 commits 一起帶進來）：
+
+```text
+https://github.com/Ting-Ruei/tw-national-exam-catalog/compare/agent/review-ui-server-split-20260923...agent/<分支>
+```
+
+`gh` 在這台沒有可用 token，所以這 6 支要由你在網頁按（`git push` 已完成，每個分支都在 origin）。
+
+**站上 findings 沒有東西要回流（2026-09-29 稍晚證明）。** 行數看起來差幾百列，但把 `error`
+非空的列濾掉之後，兩邊的位元組流**完全相同**（各 105,100 列、sha256 `e99d5bf683c24541`）；
+差的全是失敗重試。細節與計算指令見 `docs/skills/operate-repair-agent-surface/SKILL.md`。
 
 #### 9.9 之後仍**待裁決**
 
