@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import unittest
 from pathlib import Path
+
+import review_ui_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +40,11 @@ def core_source() -> str:
 
 
 def run_node(expression: str) -> object:
-    """在真的 `01-core.js` 上跑一個運算式——不重寫一份 JS，因為重寫的那份不會壞。"""
-    node = shutil.which("node")
-    if not node:
-        raise unittest.SkipTest("node 不在這台機器上")
+    """在真的 `01-core.js` 上跑一個運算式——不重寫一份 JS，因為重寫的那份不會壞。
+
+    交給 node 的方式由 `review_ui_source.run_node_script` 決定（暫存檔，不是 `-e`：Linux 的單一
+    argv 上限是 128 KiB，見那個函式的註解）。
+    """
     source = core_source()
     # The module reads `document` at load time (the handlers are bound to real nodes), so a minimal
     # DOM is stubbed exactly as `scripts/test_v2_navigation.mjs` does.
@@ -62,11 +63,7 @@ def run_node(expression: str) -> object:
       globalThis.fetch = async () => ({ ok:false, status:0, json: async () => ({}) });
       globalThis.setTimeout = () => 0; globalThis.clearTimeout = () => {};
     """
-    script = f"{stub}\n{source}\nconsole.log(JSON.stringify({expression}));"
-    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise AssertionError(f"node 執行失敗：{result.stderr[-2000:]}")
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return review_ui_source.run_node_expression(f"{stub}\n{source}", expression)
 
 
 class ScopePickerContract(unittest.TestCase):
