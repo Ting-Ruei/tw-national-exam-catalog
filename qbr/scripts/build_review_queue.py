@@ -105,6 +105,12 @@ def sort_key(run):
     return (-year, -session, name)
 
 
+# The two streams a human being wrote directly. The zero-crops gate reads nothing else (and
+# `review_events_to_carry` carries them like everything else), because a rebuild that loses a
+# person's accept/block is the one loss a re-run cannot bring back.
+DECISION_STREAMS = ("question_review_events.jsonl", "answer_review_events.jsonl")
+
+
 def review_events_to_carry(out_dir, previous=()):
     """Review records that must survive a rebuild of the queue.
 
@@ -121,7 +127,7 @@ def review_events_to_carry(out_dir, previous=()):
 
     Returns `(records, carried, orphaned)`.
     """
-    names = ("question_review_events.jsonl", "answer_review_events.jsonl",
+    names = (*DECISION_STREAMS,
              "question_ai_review_events.jsonl", "question_ai_feedback_events.jsonl",
              "question_ai_learning_events.jsonl",
              "question_correction_feedback_events.jsonl",
@@ -185,7 +191,7 @@ def _keys_of(candidates_path):
     return keys
 
 
-def merge(work_roots, out_dir, *, include_papers=None, previous=()):
+def merge(work_roots, out_dir, *, include_papers=None, previous=(), allow_no_crops=False):
     # Made absolute **before anything reads it**, so `_adopt_crops` can compute a queue-relative
     # path with `os.path.relpath` regardless of how `--out` was spelled. Without this, a relative
     # `--out` would leave the stored crop reference pointing outside the queue. `abspath` (not
@@ -213,11 +219,20 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
     per_paper = []
     seen_keys = {}
     copied = collections.Counter()
+    # How many merged runs carry crops the crop stage cut into them. A run fresh from
+    # `batch_package` has an empty (or absent) `review-ui/crops` directory, because the crop
+    # stage is a separate pass over the packaged runs (`crop_run_figures.py --work`) that
+    # must run **between** packaging and this merge. Zero across every run is how a merge
+    # that skipped that stage announces itself - see the gate below.
+    run_crop_files = 0
     for run in runs:
         path = os.path.join(run, "review-ui", "candidates.jsonl")
         with open(path, encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle if line.strip()]
         paper = os.path.basename(run)
+        if os.path.isdir(os.path.join(run, "review-ui", "crops")) and \
+                any(os.scandir(os.path.join(run, "review-ui", "crops"))):
+            run_crop_files += 1
         # Groups are bound here as well as at packaging time, because this merge also runs over
         # queues that were packaged before grouping existed. The unit is the paper - the rows of
         # one run are one paper - so `承上題` on the first question of the next paper cannot attach
@@ -247,27 +262,13 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
         entry.update(taxonomy_of(os.path.basename(run), rows))
         per_paper.append(entry)
 
-    # Written into a `review-ui/` subdirectory because that is the shape a single run has, and
-    # `scripts/review_run.sh` serves a run directory. A merged queue is a run directory with one
-    # queue in it, so it is given the same shape rather than a second layout to keep in step.
-    out_dir = os.path.join(out_dir, "review-ui")
-    os.makedirs(out_dir, exist_ok=True)
-    candidates_path = os.path.join(out_dir, "candidates.jsonl")
-    with open(candidates_path, "w", encoding="utf-8") as handle:
-        for row in candidates:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-    # A reviewer's decisions are carried across a rebuild, keyed by `candidate_key`, which is the
-    # stable identity of a question. Written before the taxonomy so a queue that is served the
-    # instant this returns already knows what has been reviewed.
+    # The carry scan is **read-only** and runs before anything is written, so the refusal
+    # below leaves the destination untouched - the same rule `main`'s last-resort guard
+    # already answers to.
+    records = review_events_to_carry(out_dir, previous)
+    live = {row.get("candidate_key") for row in candidates}
     carried = collections.Counter()
     orphaned = collections.Counter()
-    records = review_events_to_carry(out_dir, previous)
-    # The evidence, not just the claim. A finding says "紙本這頁印的是 長", and the crop is that
-    # page; carrying the record without the picture leaves a note that still reads like a note with
-    # a basis, pointing at a 404. See `_adopt_finding_crops` for the measured loss.
-    _adopt_finding_crops(records, previous, crops_root, copied, queue_root=queue_root)
-    live = {row.get("candidate_key") for row in candidates}
     streams = {}
     # Where the carried records came from, counted by the queue directory itself. Printed below
     # because auto-discovery scans *every* sibling of `--out`, and the failure mode is silent:
@@ -283,6 +284,44 @@ def merge(work_roots, out_dir, *, include_papers=None, previous=()):
             carried[name] += 1
         else:
             orphaned[name] += 1
+
+    # The zero-crops gate. Measured 2026-09-29 21:56: a rebuild merged 989 runs whose crop
+    # stage had never been run, wrote a 79,090-row queue with every `image_refs` empty, and
+    # exited 0; the deploy that followed then deleted the station's cut crops with `--delete`.
+    # The property that must not be crossed: a rebuild that replaces a queue carrying human
+    # decisions must not be built from runs that carry **no** cut crops at all — that is not
+    # a figure-free corpus, it is a skipped stage. The gate fires only when a *decision*
+    # stream is actually being rewritten, so a finding-only carry or a fresh queue is not
+    # refused; `--allow-no-crops` names the deliberate no-evidence rebuild.
+    if runs and run_crop_files == 0 and not allow_no_crops:
+        decisions = sum(carried.get(name, 0) + orphaned.get(name, 0) for name in DECISION_STREAMS)
+        if decisions:
+            print("拒絕啟動：合併的 %d 個 run 沒有任何一個帶著裁好的 crop，"
+                  "卻要重寫一個帶著 %d 筆人工審核紀錄的佇列。" % (len(runs), decisions),
+                  file=sys.stderr)
+            print("  量到的（2026-09-29）：封裝之後沒跑 scripts/crop_run_figures.py --work <work>，"
+                  "build 就照寫 refs 全空的佇列（exit 0），下一個 rsync --delete 再把常駐機的"
+                  "裁切證據刪掉。", file=sys.stderr)
+            print("  先跑裁切，再合併；若刻意要無證據的重建，加 --allow-no-crops。", file=sys.stderr)
+            raise SystemExit(2)
+
+    # Written into a `review-ui/` subdirectory because that is the shape a single run has, and
+    # `scripts/review_run.sh` serves a run directory. A merged queue is a run directory with one
+    # queue in it, so it is given the same shape rather than a second layout to keep in step.
+    out_dir = os.path.join(out_dir, "review-ui")
+    os.makedirs(out_dir, exist_ok=True)
+    candidates_path = os.path.join(out_dir, "candidates.jsonl")
+    with open(candidates_path, "w", encoding="utf-8") as handle:
+        for row in candidates:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+    # A reviewer's decisions are carried across a rebuild, keyed by `candidate_key`, which is the
+    # stable identity of a question. Written before the taxonomy so a queue that is served the
+    # instant this returns already knows what has been reviewed.
+    # The evidence, not just the claim. A finding says "紙本這頁印的是 長", and the crop is that
+    # page; carrying the record without the picture leaves a note that still reads like a note with
+    # a basis, pointing at a 404. See `_adopt_finding_crops` for the measured loss.
+    _adopt_finding_crops(records, previous, crops_root, copied, queue_root=queue_root)
     for name, entries in streams.items():
         # Truncated, not appended. `previous` defaults to this very directory, so the file being
         # written is also the file being read: appending doubled every record on the second
@@ -569,6 +608,10 @@ def main() -> None:
     parser.add_argument("--allow-lost-reviews", action="store_true",
                         help="rebuild into a queue that carries none of the decisions sitting in "
                              "another queue; only for a deliberate throw-away run")
+    parser.add_argument("--allow-no-crops", action="store_true",
+                        help="merge packaged runs that carry no cut crops while rewriting a queue "
+                             "that holds human decisions; only for a deliberate no-evidence "
+                             "rebuild of a genuinely figure-free corpus")
     args = parser.parse_args()
     # Every sibling queue's records are carried, not only a named one's, and `--carry-from` **adds**
     # to that set rather than replacing it.
@@ -604,7 +647,8 @@ def main() -> None:
             print("  若這確實是丟棄用的執行，加 --allow-lost-reviews。", file=sys.stderr)
             raise SystemExit(2)
 
-    merge(args.work, args.out, include_papers=args.paper, previous=previous)
+    merge(args.work, args.out, include_papers=args.paper, previous=previous,
+          allow_no_crops=args.allow_no_crops)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,29 @@ for arg in "$@"; do
   esac
 done
 
+# 0a. **部署前應驗腳本版本**（量到的 2026-09-29：保護寫在分支、部署跑在 main——
+# crops 保護 commit `670e205` 已推上分支，而部署用的是 main 的版本，`--delete` 照刪）。
+# 這支腳本自己帶著的保護要能證明它帶著，否則不部署：
+# (1) 保護寫了但沒提交 ⇒ 你以為在跑的版本不是正在跑的版本，拒絕；
+# (2) 兩個量到的保護（crops 只增不刪、candidates 備份排除）不在腳本裡，拒絕——
+#     一份舊的腳本副本會安靜地少保護，這個檢查讓它自己先吵出來。
+# 真的要硬跑（明知無保護時）用 --force，但那是「我看過了」的決定，不是預設。
+if [[ "${DO_FORCE}" != 1 ]]; then
+  if [[ -n "$(git status --porcelain -- "${BASH_SOURCE[0]}")" ]]; then
+    echo "拒絕部署：deploy_station.sh 本身有未提交的修改。" >&2
+    echo "  這支腳本的保護就是部署的安全底線；沒提交的保護不算保護（2026-09-29 正是這樣刪掉的）。" >&2
+    echo "  先提交（或 git checkout -- scripts/deploy_station.sh 還原），再用 --force 明講要照跑。" >&2
+    exit 2
+  fi
+  if ! grep -q -- "exclude=crops/" "${BASH_SOURCE[0]}" || \
+     ! grep -q -- "exclude=candidates.jsonl\.\*" "${BASH_SOURCE[0]}"; then
+    echo "拒絕部署：這份 deploy_station.sh 缺少量到的保護（crops 只增不刪／candidates 備份排除）。" >&2
+    echo "  跑的是保護之前的舊版本——2026-09-29 的兩次資料損失都以這種方式發生。" >&2
+    echo "  更新到含保護的版本再部署；明知要無保護部署才用 --force。" >&2
+    exit 2
+  fi
+fi
+
 # 0. **迴圈在跑就不准部署。**
 #
 # 實測 2026-09-24 18:06：迴圈走到 ② 與 ③ 之間時，一次 `--restart` 部署把站上的
@@ -113,6 +136,29 @@ SRC_HEAD="$(git rev-parse HEAD)"
 SRC_DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
 echo "來源 ${CATALOG}"
 echo "  HEAD  ${SRC_HEAD:0:12}$( [[ "${SRC_DIRTY}" -gt 0 ]] && echo "  +${SRC_DIRTY} 個未提交檔（工作樹直送，站上也許沒有等價 commit）" )"
+
+# **部署前應驗腳本版本**（量到的 2026-09-29：保護寫在分支、部署跑在 main——
+# crops 保護 commit `670e205` 已推上分支，而部署用的是 main 的版本，`--delete` 照刪）。
+# 這支腳本自己帶著的保護要能證明它帶著，否則不部署：
+# (1) 保護寫了但沒提交 ⇒ 你以為在跑的版本不是正在跑的版本，拒絕；
+# (2) 兩個量到的保護（crops 只增不刪、candidates 備份排除）不在腳本裡，拒絕——
+#     一份舊的腳本副本會安靜地少保護，這個檢查讓它自己先吵出來。
+# 真的要硬跑（明知無保護時）用 --force，但那是「我看過了」的決定，不是預設。
+if [[ "${DO_FORCE}" != 1 ]]; then
+  if [[ -n "$(git -C "${CATALOG}" status --porcelain -- "${BASH_SOURCE[0]}")" ]]; then
+    echo "拒絕部署：deploy_station.sh 本身有未提交的修改。" >&2
+    echo "  這支腳本的保護就是部署的安全底線；沒提交的保護不算保護（2026-09-29 正是這樣刪掉的）。" >&2
+    echo "  先提交（或 git checkout -- scripts/deploy_station.sh 還原），再用 --force 明講要照跑。" >&2
+    exit 2
+  fi
+  if ! grep -q -- "exclude=crops/" "${BASH_SOURCE[0]}" || \
+     ! grep -q -- "exclude=candidates.jsonl\.\*" "${BASH_SOURCE[0]}"; then
+    echo "拒絕部署：這份 deploy_station.sh 缺少量到的保護（crops 只增不刪／candidates 備份排除）。" >&2
+    echo "  跑的是保護之前的舊版本——2026-09-29 的兩次資料損失都以這種方式發生。" >&2
+    echo "  更新到含保護的版本再部署；明知要無保護部署才用 --force。" >&2
+    exit 2
+  fi
+fi
 
 # 1. 程式碼。排除語料／產物／版本控制／虛擬環境——那些都不是「部署內容」。
 #
@@ -181,6 +227,15 @@ if [[ "${DO_QUEUE}" == 1 ]]; then
   done
   # crops 從 --delete 排除（理由見上面第 3 點的註），改走下面那條只增不刪的同步。
   PROTECT_ARGS+=("--exclude=crops/")
+
+  # **candidates.jsonl 的備份變體也從 --delete 排除。**
+  #
+  # 量到的（2026-09-29 21:58 佇列部署）：常駐機上唯一的重灌前完整備份
+  # `candidates.jsonl.before-italic-restore-20260926T115250` 是「筆電沒有的檔」，帶 --delete
+  # 的 rsync 安靜地把它刪了——之後 79,090 列的 refs 全空，而 09-24 以前的備份都是小語料版，
+  # 無法還原。備份檔不隨重建重生（它們是「重建前」那一刻的證據），刪掉就沒有第二次。
+  # `candidates.jsonl` 本身不受此樣式影響（沒有 `.` 字尾不會被比對到），照常同步。
+  PROTECT_ARGS+=("--exclude=candidates.jsonl.*")
 
   echo "  先備份常駐機上的人工紀錄…"
   # 注意這裡**沒有 `-n`**。`ssh -n` 把 stdin 接到 `/dev/null`，於是下面的 heredoc 根本沒送到常駐機，
