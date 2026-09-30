@@ -163,6 +163,34 @@ export function countDrafts(storeDir, key) {
 
 export function draftPath(storeDir) { return join(storeDir, "repair_drafts.jsonl"); }
 
+/**
+ * 逐題回話收集器。試跑量到的缺口（2026-09-30）：代理**拒收**時，理由它都講了——但只在
+ * session 轉錄裡；等裁決清單只剩「沒有草案落成」，設計者看不到為什麼。收集器把每次
+ * `session.prompt()` 完成時的最新助手結語帶出來，讓「為什麼不修」跟著工作一起落地。
+ */
+export function attachReplyCollector(session) {
+  const state = { latest: "", events: 0 };
+  const unsubscribe = session.subscribe?.((event) => {
+    if (event?.type === "message_end" && event.message?.role === "assistant") {
+      const content = event.message.content || [];
+      const text = content
+        .filter((part) => part && part.type === "text")
+        .map((part) => part.text || "")
+        .join("");
+      if (text.trim()) {
+        state.latest = text.trim();
+        state.events += 1;
+      }
+    }
+  });
+  return {
+    latest: () => state.latest,
+    events: () => state.events,
+    reset: () => { state.latest = ""; },
+    detach: () => { if (unsubscribe) unsubscribe(); },
+  };
+}
+
 /** 消費日誌（沙盒內）：每一題吃進與結束都留一行，讓「為什麼這一題沒草稿」可回查。 */
 export function appendConsumerLog(storeDir, row) {
   mkdirSync(storeDir, { recursive: true });
@@ -195,6 +223,7 @@ export async function runConsumerLoop({ ledger, storeDir, machinePrefixes = [], 
                                         intervalMs = 15_000, shouldStop = () => false }) {
   const summary = { blocks: 0, consumed: 0, drafts: 0, questions: 0, failures: 0, offset: startOffset };
   const cursor = { offset: startOffset };
+  const collector = attachReplyCollector(session);
   appendConsumerLog(storeDir, {
     event: "consumer_start", ledger, cursor_offset: startOffset,
     machine_prefixes: machinePrefixes.length, ...identity,
@@ -226,17 +255,22 @@ export async function runConsumerLoop({ ledger, storeDir, machinePrefixes = [], 
       });
       if (failed) break; // 游標停在它之前，下一輪重吃（草案是多版可存，重吃安全）
       const after = countDrafts(storeDir, key);
+      const reply = collector.latest();
       if (after > before) {
         summary.drafts += 1;
         appendConsumerLog(storeDir, { event: "task_done", key, drafts_after: after, landed: true });
       } else {
         summary.questions += 1;
         appendConsumerQuestion(storeDir, {
-          key, notes: note, why: "代理跑完任務但沒有草案落成——需要設計者裁決",
+          key, notes: note,
+          why: reply ? "代理跑完任務但沒有草案落成——它的結語：" + reply.slice(0, 800)
+                     : "代理跑完任務但沒有草案落成、也沒有結語——需要設計者裁決",
           ...identity,
         });
-        appendConsumerLog(storeDir, { event: "task_done", key, drafts_after: after, landed: false });
+        appendConsumerLog(storeDir, { event: "task_done", key, drafts_after: after, landed: false,
+                                      reply_chars: reply.length });
       }
+      collector.reset();
       safe = row.end;
       saveCursor(storeDir, { offset: safe, key, action: "block" });
     }

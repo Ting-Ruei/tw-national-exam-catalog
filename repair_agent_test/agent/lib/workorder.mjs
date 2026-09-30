@@ -17,7 +17,7 @@
  */
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { composeTask, countDrafts, draftPath, questionsPath,
+import { composeTask, countDrafts, draftPath, questionsPath, attachReplyCollector,
          appendConsumerQuestion, appendConsumerLog } from "./consumer.mjs";
 
 /** 讀工單：每列一個 JSON 物件；空行跳過；壞行列出來（不靜默吞）。 */
@@ -69,6 +69,7 @@ export function composeWorkOrderTask(item) {
 
 /** 一次執行：逐項跑 session、記草案計數。回每項結果（不寫佇列、不寫正式檔）。 */
 export async function runWorkOrder({ items, session, storeDir, identity = {}, onItem } = {}) {
+  const collector = attachReplyCollector(session);
   const results = [];
   for (const item of items) {
     if (results.some((r) => r.key === item.key)) {
@@ -76,6 +77,7 @@ export async function runWorkOrder({ items, session, storeDir, identity = {}, on
       continue;
     }
     const before = countDrafts(storeDir, item.key);
+    collector.reset();
     let failed;
     try {
       await session.prompt(composeWorkOrderTask(item));
@@ -84,10 +86,13 @@ export async function runWorkOrder({ items, session, storeDir, identity = {}, on
     }
     const after = countDrafts(storeDir, item.key);
     const landed = after > before;
+    const reply = collector.latest();
     const result = {
       key: item.key, drafts_before: before, drafts_after: after, landed,
       note: String(item.note || ""), lens: String(item.lens || ""),
-      acceptance: String(item.acceptance || ""), ...identity,
+      acceptance: String(item.acceptance || ""),
+      reply: reply.slice(0, 500), reply_chars: reply.length,
+      ...identity,
     };
     if (landed) {
       // 欄位填全率吃的是草案本體（fix/insert/basis），不是計數。
@@ -98,7 +103,9 @@ export async function runWorkOrder({ items, session, storeDir, identity = {}, on
     } else if (!landed) {
       appendConsumerQuestion(storeDir, {
         key: item.key, notes: result.note, lens: result.lens,
-        why: "工單跑完但沒有草案落成——需要設計者裁決", source: "workorder", ...identity,
+        why: reply ? "工單跑完但沒有草案落成——它的結語：" + reply.slice(0, 800)
+                   : "工單跑完但沒有草案落成、也沒有結語——需要設計者裁決",
+        source: "workorder", ...identity,
       });
     }
     results.push(result);

@@ -20,7 +20,7 @@ import {
   loadWorkOrder, composeWorkOrderTask, runWorkOrder, summarize,
   checkApplyFlags, appendReport, reportsPath, fixesByRun, judgeConsistency,
 } from "./lib/workorder.mjs";
-import { draftPath } from "./lib/consumer.mjs";
+import { draftPath, questionsPath } from "./lib/consumer.mjs";
 import { fakeSession } from "./lib/test_doubles.mjs";
 
 function writeWorkOrder(name, items) {
@@ -72,7 +72,23 @@ test("工單任務文案帶 key／註解／鏡頭／驗收與工具名；無註�
   assert.match(bare, /沒有附鏡頭/);
 });
 
-// ------------------------------------------------------------------ G3 閘
+test("拒收理由跟著等裁決清單走：replies 逐題回話被收集進 why 與結果行（負控制：吞掉理由）", async () => {
+  const store = join(SCRATCH, "reply-store");
+  mkdirSync(store, { recursive: true });
+  const items = [{ key: "moex:r:q1", note: "n1", lens: "superscript-family" },
+                 { key: "moex:r:q2", note: "n2", lens: "superscript-family" }];
+  const session = fakeSession(store, {
+    alwaysDraft: false,
+    replies: ["判定：rating up，紙本為普通文字，不需要修。",
+              "判定：紙本確為下標，但你看不出確切位置——需要設計者裁決。"],
+  });
+  const results = await runWorkOrder({ items, session, storeDir: store, identity: IDENTITY });
+  assert.ok(results[0].reply.includes("rating up"), "結語隨結果行走（報告可查）");
+  const questions = readFileSync(questionsPath(store), "utf8").trim().split("\n").map(JSON.parse);
+  assert.match(questions[0].why, /rating up/, "第一題的拒收理由=它的結語，不是泛泛一句");
+  assert.match(questions[1].why, /需要設計者裁決/);
+  assert.notEqual(questions[0].why, questions[1].why, "泛泛同一句＝理由被吞，兩題不可同why");
+});
 
 test("G3 閘：--apply／--land／--write-queue／--import 一律拒絕；一般旗標放行（負控制）", () => {
   assert.deepEqual(checkApplyFlags(["--workorder", "f", "--apply"]).refused, ["--apply"]);

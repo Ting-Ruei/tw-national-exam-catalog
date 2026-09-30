@@ -115,6 +115,8 @@ async function main() {
     appendReport(storeDir, {
       kind: "batch", workorder: workorder, workorder_sha8: sha8, variant,
       brain: BRAIN, metrics: summarize(results),
+      run_id: identity.run_id, session_id: identity.session_id,
+      prompt_version: identity.prompt_version,
       items: rows,
     });
     console.log(JSON.stringify({ variant, metrics: summarize(results),
