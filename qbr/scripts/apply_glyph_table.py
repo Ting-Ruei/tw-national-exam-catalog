@@ -17,9 +17,12 @@
 - **未決列不動**：`approvals` 沒有的編號＝不產生任何事件。
 - **修飾字母列（class=modifier-letter）即使被寫進決定也拒收**：它們是另案的記法轉換
   （折＋`<sup>/<sub>` 補位），不是這張「折碼放行」表的對象；折了會把上標感抹掉。
-- 影響範圍是表上的 `question_keys`（表建置時逐列量出來的）；佇列裡若又冒出表外也含
-  該字形碼位的列，那是表／佇列漂移——**列出來，拒絕寫入**。
-- 佇列已有同源落的（本工具 `source`＋同一組替換）→ 跳過，重跑＝冪等。
+- **映射是字級的，放行＝整佇列**（owner 的原話「某個字應該統一成某個字…一題多種字也根據
+  做完的決定放行」）。表上的 `question_keys` 只是表建置時（3.2 稀碼點掃描的取樣清單）
+  量到的子集——2026-09-30 落地前量到：156 列照表點名只有 12,571 個碼位，但同一批
+  核可字形在**整個佇列**裡有 42,063 個（9,870 列）。「統一」不可能是只折掃過的那三成；
+  所以範圍是整佇列、以字為準，逐映射的**實際**碼位數在 manifest 報告（表的計數欄＝
+  建置當下的取樣值，不當核可條件）。冪等：折過的列不再出事件。
 
 事件形狀沿用 2026-09-23 dispute landing（`⻑→長`）那筆的契約：
 `reset_review` ＋ `correction`（只帶被改的欄）＋ `changes`（逐碼位 from/to，`applied:"substitution"`）
@@ -69,7 +72,7 @@ def sha256_file(path: Path) -> str:
 
 
 def approved_mappings(table_path: Path, approvals_path: Path) -> list[dict]:
-    """The approved subset of the decision table: latest record wins per `no`."""
+    """The approved subset of the decision table: latest record wins per `no`; `from` unique."""
     table = [json.loads(line) for line in table_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     by_no = {row["no"]: row for row in table}
     approved: dict[int, bool] = {}
@@ -85,6 +88,7 @@ def approved_mappings(table_path: Path, approvals_path: Path) -> list[dict]:
                 raise SystemExit(f"決定 #{no} 的 from/to 與表漂移，拒收（附表時間戳對照再核）。")
             approved[no] = bool(decision.get("approved"))
     rows = []
+    seen_from = {}
     for no, is_approved in sorted(approved.items()):
         if not is_approved:
             continue
@@ -92,6 +96,10 @@ def approved_mappings(table_path: Path, approvals_path: Path) -> list[dict]:
         if row.get("class") not in LANDABLE_CLASSES:
             raise SystemExit(f"#{no}（{row['from']}→{row['to']}，class={row.get('class')}）"
                              "不是可折碼放行的列：修飾字母＝另案記法轉換，拒收。")
+        if row["from"] in seen_from:
+            raise SystemExit(f"同一個 from 字形有兩個核可決定（#{seen_from[row['from']]} 與 #{no}）——"
+                             "映射必須一對一，折兩種結果就沒有「統一」。")
+        seen_from[row["from"]] = no
         rows.append(row)
     return rows
 
@@ -123,7 +131,6 @@ def plan(queue_dir: Path, table_path: Path, approvals_path: Path, events_path: P
     """`{events, mappings}` — the whole batch as one deterministic plan (idempotent by text state:
     a mapping's `from` that is already folded away produces no hit and no event)."""
     mappings = approved_mappings(table_path, approvals_path)
-    wanted_keys = {key for row in mappings for key in row.get("question_keys") or []}
     fold = human_previous(events_path)
 
     events: list[dict] = []
@@ -133,8 +140,6 @@ def plan(queue_dir: Path, table_path: Path, approvals_path: Path, events_path: P
                 continue
             row = json.loads(line)
             key = row.get("candidate_key")
-            if key not in wanted_keys:
-                continue
             fields: dict[str, str] = {"stem": str(row.get("stem") or "")}
             for option in row.get("options") or []:
                 fields["option %s" % option.get("key")] = str(option.get("text") or "")
@@ -208,7 +213,7 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path,
                         help="新的事件檔路徑（--apply 才會寫；之後交給 apply_text_corrections 折疊）")
     parser.add_argument("--events", type=Path, default=None,
-                        help="帳本（取 previous_* 承接與表外漂移檢查）；預設 <queue>/review-ui/question_review_events.jsonl")
+                        help="帳本（取 previous_* 承接）；預設 <queue>/review-ui/question_review_events.jsonl")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="真的寫事件檔；預設 dry-run")
     mode.add_argument("--dry-run", action="store_true")
@@ -218,46 +223,23 @@ def main() -> int:
     events_path = args.events or (queue_dir / "review-ui" / "question_review_events.jsonl")
     plan_result = plan(queue_dir, Path(args.table), Path(args.approvals), events_path)
 
-    # 表外漂移：佇列裡還有**表內編號影響的碼位**落在表沒點名的列上 → 表或佇列曾變動，整批停。
-    mappings = {row["from"]: row for row in plan_result["mappings"]}
-    named = {key for row in plan_result["mappings"] for key in row.get("question_keys") or []}
-    outside = 0
-    with (queue_dir / "review-ui" / "candidates.jsonl").open(encoding="utf-8") as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if row.get("candidate_key") in named:
-                continue
-            text = str(row.get("stem") or "") + "".join(
-                str(o.get("text") or "") for o in row.get("options") or [])
-            if any(src in text for src in mappings):
-                outside += 1
-    if outside:
-        print(f"表外仍有 {outside} 個帶表內碼位的列（表／佇列有漂移）——先查清再落地，不寫任何東西。")
-        return 2
-
     m = manifest(queue_dir, plan_result, Path(args.table), Path(args.approvals))
     print(json.dumps(m, ensure_ascii=False, indent=1))
+    planned = {}
+    for event in plan_result["events"]:
+        for change in event["changes"]:
+            slot = planned.setdefault((change["from"], change["to"]), {"codes": 0, "rows": set()})
+            slot["codes"] += 1
+            slot["rows"].add(event["candidate_key"])
     for row in plan_result["mappings"]:
-        n = sum(1 for pair in [(c["from"], c["to"]) for e in plan_result["events"]
-                               for c in e["changes"]] if pair == (row["from"], row["to"]))
-        print(f"  #{row['no']} {row['from']}→{row['to']}（{row['class']}）：計畫 {n} 個碼位"
-              f"/ 表上 {row['codepoint_changes']}"
-              f"{' ✓' if n == row['codepoint_changes'] else ' ⚠ 數目不符'}")
+        slot = planned.get((row["from"], row["to"]), {"codes": 0, "rows": set()})
+        print(f"  #{row['no']} {row['from']}→{row['to']}（{row['class']}）："
+              f"{slot['codes']} 個受影響欄（折掉 {slot['codes']} 處代換）"
+              f"，事件 {len(slot['rows'])} 列（表建置時取樣：{row['codepoint_changes']} 碼位／{row['questions']} 列）")
 
     if not args.apply:
         print("（dry-run；--apply 才寫事件檔。折疊請再走 apply_text_corrections --events <out>。）")
         return 0
-    mismatches = []
-    for row in plan_result["mappings"]:
-        n = sum(1 for e in plan_result["events"] for c in e["changes"]
-                if (c["from"], c["to"]) == (row["from"], row["to"]))
-        if n != row["codepoint_changes"]:
-            mismatches.append(row["no"])
-    if mismatches:
-        print(f"計畫碼位數與表不符：{mismatches}；不寫。")
-        return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as fh:
         for event in plan_result["events"]:

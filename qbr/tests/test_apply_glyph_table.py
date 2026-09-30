@@ -4,9 +4,9 @@
 每個契約都帶一個「必須失敗」的負案例：
 - 未核可（不在 approvals 裡）的編號 → 不產生事件（未決列不動）；
 - 修飾字母列（另案記法轉換）即使被點頭也**拒收**（exit 2）；
-- 決定的 from/to 與表漂移 → 拒收；
-- 表點名的列沒有計畫、表外的碼位不擴張；
+- 決定的 from/to 與表漂移 → 拒收；同一個 from 有兩個核可決定 → 拒收（映射必須一對一）；
 - 冪等：`from` 已折掉的列 → 不再出事件；
+- 放行＝字級、整佇列（表上的 question_keys 只是取樣清單；表外有碼位的列照折）；
 - 上筆人工決定的 `previous_*` 承接；機器審查者前綴不算人；
 - 全鏈路：本工具的事件交給 `apply_text_corrections --apply`，磁碟真的變、原文進 `parser_original`。
 """
@@ -140,8 +140,8 @@ class GateTests(Harness):
             self.tool.approved_mappings(table_path, approvals)
         self.assertIn("漂移", str(caught.exception))
 
-    def test_unnamed_row_is_never_touched(self):
-        # 表點名 q051，但另一列也含 ⽤——映射不得擴張到表外；表外檢查會讓整批停。
+    def test_fold_is_char_level_whole_queue(self):
+        # 放行＝字級：表沒點名的列（question_keys 取樣之外的）含該字形也照折。
         row, table = self.fixtures()
         stranger = {"candidate_key": "moex:999:1:1:1:question:q001",
                     "stem": "本題也⽤到字形", "options": []}
@@ -155,8 +155,23 @@ class GateTests(Harness):
         plan_result = self.tool.plan(
             self.tmp, table_path, approvals,
             self.qdir / "review-ui" / "question_review_events.jsonl")
-        self.assertNotIn(stranger["candidate_key"], {e["candidate_key"] for e in plan_result["events"]},
-                         "表沒點名的列不得出事件（範圍＝表的 question_keys）")
+        self.assertIn(stranger["candidate_key"], {e["candidate_key"] for e in plan_result["events"]},
+                      "字級統一＝整佇列（表點名清單只是建置時的取樣）")
+
+    def test_duplicate_from_refused(self):
+        row, table = self.fixtures()
+        doubled = dict(table[2], no=42)
+        table_path = self.tmp / "table.jsonl"
+        write_jsonl(table_path, table + [doubled])
+        approvals = self.tmp / "approvals.jsonl"
+        write_jsonl(approvals, [{"schema": "glyph_approvals v1", "at": "2026-09-30T09:00:00.000+00:00",
+                                 "by": "x",
+                                 "decisions": [{"no": 17, "from": "⾦", "to": "金", "approved": True},
+                                               {"no": 42, "from": "⾦", "to": "金", "approved": True}]}])
+        self.enqueue([row])
+        with self.assertRaises(SystemExit) as caught:
+            self.tool.approved_mappings(table_path, approvals)
+        self.assertIn("一對一", str(caught.exception))
 
     def test_previous_human_decision_carried_machines_skipped(self):
         row, table = self.fixtures()
