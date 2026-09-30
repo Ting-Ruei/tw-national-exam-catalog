@@ -78,6 +78,22 @@ def workflow_page() -> bytes:
         return html_page()
 
 
+V2_PAGE_PATH = MOBILE_UI_ROOT / "v2.html"
+
+
+def v2_page() -> bytes:
+    """The baseline linear pass, as bytes, for whichever route serves it today.
+
+    v2.html's asset refs are relative (`v2/01-core.js`), and both `/` and `/v2` resolve them to
+    `/v2/<name>.js` - the document directory is the root on both mounts - so the same bytes serve
+    unchanged at either route and `_v2_script_response` keeps being the only script source.
+    """
+    try:
+        return V2_PAGE_PATH.read_bytes()
+    except OSError:
+        return workflow_page()
+
+
 def _v2_script_response(route: str) -> tuple[bytes, str, str] | None:
     """Serve `/v2/<name>.js` **from the file, not from a list**.
 
@@ -130,13 +146,12 @@ def mobile_asset_response(path: str) -> tuple[bytes, str, str] | None:
         # by an installed PWA have to keep landing in the same ledger.
         "/mobile": ("v1-reference/mobile.html", "text/html; charset=utf-8", "no-store"),
         "/mobile/workflow": ("v1-reference/workflow.html", "text/html; charset=utf-8", "no-store"),
-        "/workflow": ("v1-reference/workflow.html", "text/html; charset=utf-8", "no-store"),
-        # The linear pass: one list, one question, four decisions. **This is the baseline.**
-        # One array is both drawn and walked (charter: 導覽與內容必須來自同一個來源); a filter
-        # narrows what is drawn *and* what is walked, because a reviewer who filters to the 12
-        # questions with figures and then presses `S` must arrive at the next one with a figure.
-        "/v2": ("v2.html", "text/html; charset=utf-8", "no-store"),
-        "/v2/": ("v2.html", "text/html; charset=utf-8", "no-store"),
+        # 5.1（設計者 2026-09-30 裁決：root serve v2、v1 遷 /v1/*）：`/workflow` 與 `/legacy`
+        # **由 handlers 轉址到 /v1/***；`/v2` 本身也轉址到 `/`（書籤過渡）。資產引用是絕對路徑
+        # （`/mobile/*`、`/api/*`、`/file?…`），所以同一頁在 /v1/* 下照樣成立；`/mobile/*` 是
+        # PWA 的契約，原樣保留。
+        "/v1/workflow": ("v1-reference/workflow.html", "text/html; charset=utf-8", "no-store"),
+        "/v1/legacy": ("v1-reference/legacy.html", "text/html; charset=utf-8", "no-store"),
         # 一區一檔（載入序＝檔名前綴；`v2.html` 以 `<script src>` 串起）。
         # 這一張表**只留頁面**（`/v2`）與 v1 的相容資產。`v2/*.js` 不列在這裡：清單與
         # `<script src>` 是兩個會不一致的地方，而 2026-09-24 就真的不一致了——

@@ -7,16 +7,22 @@
   重跑把草案行洗掉或重複追加                        → append-only 被破壞（拒：冪等）
   佇列被寫入                                        → 越界（拒：程式只開寫 --out）
 """
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(PKG, "scripts"))
+SCRIPT = os.path.join(HERE, "..", "scripts", "build_repair_drafts.py")
 
-from scripts import build_repair_drafts as builder  # noqa: E402
+#: 這裡**不用** `from scripts import …`：repo 根與 qbr 根各有 `scripts` namespace，全量 suite 跑的
+#: 時候先被別處吃進來的是哪一個就固定哪一個（實測錯誤：`No module named 'scripts.build_repair_drafts'`）。
+#: 以檔案位置載入——掃描器解析陷阱的正解與 `scan_rule_hits.py` 載 `apply_text_corrections.py` 同一著。
+_spec = importlib.util.spec_from_file_location("build_repair_drafts", SCRIPT)
+builder = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = builder
+_spec.loader.exec_module(builder)
 
 
 def fixture(tmp_path, *, stem, options=None, hits=None):

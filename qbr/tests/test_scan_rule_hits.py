@@ -4,6 +4,7 @@
 每個鏡頭帶負控制——「必須命中」的旁邊都放一個「在舊行為下會被算進去」的形，
 以及「已知良好」不得出現在命中的斷言。全部用合成的小佇列（不碰 live、不碰帳本）。
 """
+import importlib.util
 import json
 import os
 import sys
@@ -14,9 +15,14 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PKG, "src"))
-sys.path.insert(0, os.path.join(PKG, "scripts"))
 
-from scripts import scan_rule_hits as scan_mod  # noqa: E402
+#: 與 `scan_rule_hits.py` 載姊妹支同一著：repo 根與 qbr 根各有 `scripts` namespace，
+#: 名字解析隨進入點漂移；以檔案路徑載入＝只認「哪一份程式」。
+_scan_path = os.path.join(PKG, "scripts", "scan_rule_hits.py")
+_scan_spec = importlib.util.spec_from_file_location("_qbr_scan_rule_hits", _scan_path)
+scan_mod = importlib.util.module_from_spec(_scan_spec)
+sys.modules.setdefault(_scan_spec.name, scan_mod)
+_scan_spec.loader.exec_module(scan_mod)
 
 
 def row(key, *, number=1, refs=None, stem="", options=None, pdf_relative=None, **extra):
