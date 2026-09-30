@@ -794,15 +794,18 @@ def test_the_reference_picture_is_the_questions_on_either_side_and_never_this_on
     assert [row["text"] for row in neighbours] == ["41.前一題", "43.下一題"]
 
 
-def test_the_reference_reading_replaces_the_direct_one_only_when_it_explains_more():
-    """判斷規則：鄰題那張圖只有在**多解釋了這一題的欄位**時才取代第一次判讀（業主描述的情形）。
-    兩邊都找到東西時留第一次判讀——那一張是被問這一題本身的圖，鄰題只是脈絡。"""
+def test_the_reference_reading_replaces_only_when_the_direct_read_was_blind():
+    """判斷規則（2026-09-30 量測後改）：鄰題那張圖只在**第一次判讀真的看不見**時取代——
+    第一次轉錄答了 ▢、或根本沒切成圖。乾淨的「一致」不是盲：一張不同的紙（鄰題帶）也會在
+    所有欄位上不同，實測（藥師(二) 樣本 21/29）證明把「解釋」量成「欄位不同」會讓鄰題文字
+    取代一致判讀，變成張冠李戴的假缺陷。"""
     question = _question(options=[{"key": "A", "text": "x"}, {"key": "B", "text": "較⻑"},
                                   {"key": "C", "text": "y"}, {"key": "D", "text": "z"}])
     agreed = _seen(options={"A": "x", "B": "較⻑", "C": "y", "D": "z"})
+    blind_b = _seen(options={"A": "x", "B": "▢", "C": "y", "D": "z"})
     explains_b = _seen(options={"A": "x", "B": "較長", "C": "y", "D": "z"})
 
-    answers = [explains_b, agreed]
+    answers = [explains_b, explains_b, explains_b]
     original_crop, original_transcribe = (confirm_dispute.neighbour_crop_for,
                                           confirm_dispute.transcribe)
     confirm_dispute.neighbour_crop_for = lambda *a, **k: (b"PNG", 2, None)
@@ -811,18 +814,24 @@ def test_the_reference_reading_replaces_the_direct_one_only_when_it_explains_mor
         send = {"endpoint": {"name": "m", "url": "u"}, "max_tokens": 10, "timeout": 10,
                 "principles": None, "answers": None, "notes": None, "rejected": None,
                 "figures": ""}
-        # 第一次判讀什麼都沒解釋 → 鄰題讀到 option B 的差異 → 取代它。
+        # **負控制（量到的缺陷）**：第一次判讀乾淨地一致 → 鄰題圖就算讀出滿��的字**也不取代**。
         first = confirm_dispute.reference_read(question, number=42, pdf_path="p.pdf", kept_rows=[],
                                               crops_root="/q/crops", dpi=200, send=send,
                                               first_seen=agreed)
-        assert first["used"] is True
-        assert first["explained"] == ["option B"] and first["first_explained"] == []
-        # 兩邊都解釋了同一格 → 維持第一次判讀。
+        assert first["used"] is False, "一致≠盲：鄰題轉錄不得取代一致的第一次判讀"
+        assert first["first_blind"] == [] and first["first_explained"] == []
+        # 業主的實測案例（2026-09-24 q42）：第一次判讀看得見別格、選項 B 是 ▢ → 鄰題讀得到就取代。
         second = confirm_dispute.reference_read(question, number=42, pdf_path="p.pdf", kept_rows=[],
-                                               crops_root="/q/crops", dpi=200, send=send,
-                                               first_seen=explains_b)
-        assert second["used"] is False
-        assert second["explained"] == [] and second["first_explained"] == ["option B"]
+                                                crops_root="/q/crops", dpi=200, send=send,
+                                                first_seen=blind_b)
+        assert second["used"] is True
+        assert second["first_blind"] == ["option B"]
+        assert second["explained"] == ["option B"]
+        # 直接沒切成圖（no-crop）也算盲：這是業主說「內容不在題號說的地方」的最強情形。
+        third = confirm_dispute.reference_read(question, number=42, pdf_path="p.pdf", kept_rows=[],
+                                              crops_root="/q/crops", dpi=200, send=send,
+                                              first_seen=None, first_error="no-crop")
+        assert third["used"] is True
     finally:
         confirm_dispute.neighbour_crop_for, confirm_dispute.transcribe = (original_crop,
                                                                          original_transcribe)

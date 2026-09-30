@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { remember, lessonsFromDiff, BRAIN_ENGINE } from "./identity.mjs";
+import { recordRuleHit } from "./rules.mjs";
 
 const run = promisify(execFile);
 
@@ -267,6 +268,35 @@ export function toolsFor(Type) {
     },
 
     {
+      name: "propose_repair",
+      label: "提出修法（草案，不動正式檔）",
+      description:
+        "把你建議的**修法**寫成草案（append-only；可多版，寫入不等於核准）。" +
+        "fix＝改成什麼字；insert＝落到哪一格／哪一選項；basis＝**你依據什麼**（紙本哪個字、哪張圖）；" +
+        "crop＝你實際看過的那張裁片路徑（會記其 SHA-256 當憑證）。" +
+        "它不修題目、不動人工審核紀錄——真正核准在沙盒 UI，由設計者按。",
+      parameters: Type.Object({
+        key: Type.String({ description: keyRequiredMessage }),
+        fix: Type.String({ description: "修法：改成什麼（目標文字／值）" }),
+        insert: Type.String({ description: "插入點：哪一格／哪一欄／哪一選項" }),
+        basis: Type.String({ description: "依據：紙本哪個字、哪張圖（你親眼看過的）" }),
+        crop: Type.Optional(Type.String({ description: "裁片憑證：你看過的裁片路徑" })),
+      }),
+      execute: async (_id, params) => {
+        const argv = [
+          "propose",
+          "--key", params.key,
+          "--fix", params.fix,
+          "--insert", params.insert,
+          "--basis", params.basis,
+        ];
+        if (params.crop) argv.push("--crop", params.crop);
+        const result = await callBridge(argv, { timeout: 120_000 });
+        return asToolResult(result);
+      },
+    },
+
+    {
       name: "remember_lesson",
       label: "記下一條教訓",
       description:
@@ -296,6 +326,29 @@ export function toolsFor(Type) {
             key: params.key || "",
           }),
         }),
+    },
+
+    {
+      name: "record_rule_hit",
+      label: "記下規則命中",
+      description:
+        "設計者的基本原則若在這一題**真的被你用上**——依它察覺錯誤、依它決定要看什麼或怎麼修——記一筆命中" +
+        "（規則編號是原則清單方括號裡的 `pN`）。**命中率是規則淘汰的證據**：亂記會讓好規則被誤殺、" +
+        "漏記會讓有用的規則看起來沒用，所以「用上才記」。同一題同一條重複記不會加分。",
+      parameters: Type.Object({
+        rule: Type.String({ description: "規則編號，例如 p3（原則清單方括號裡的那個）" }),
+        key: Type.String({ description: keyRequiredMessage }),
+        why: Type.Optional(
+          Type.String({ description: "它這次幫你看到或決定了什麼，一句話" }),
+        ),
+      }),
+      execute: async (_id, params) => {
+        try {
+          return asToolResult(recordRuleHit(params.rule, { key: params.key, why: params.why || "" }));
+        } catch (error) {
+          return asToolResult({ error: String(error.message).slice(0, 600) });
+        }
+      },
     },
   ];
 }

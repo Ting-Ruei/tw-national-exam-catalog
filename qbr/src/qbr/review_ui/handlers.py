@@ -36,7 +36,7 @@ import time
 import urllib.request
 from .ai_audit import normalized_correction
 from .constants import ANSWER_REVIEW_ACTIONS, QUESTION_REVIEW_ACTIONS, SqlWriteError
-from .legacy_assets import html_page, mobile_asset_response, mobile_review_event, workflow_page
+from .legacy_assets import html_page, mobile_asset_response, mobile_review_event, v2_page, workflow_page
 from .paths import content_type_of, safe_file_path
 from .queue_view import (SIMILAR_LIMIT, SIMILAR_LIMIT_MAX, machine_activity_counts,
                          principles_projection, repair_questions_projection, similar_questions)
@@ -48,6 +48,19 @@ from .review_state import ReviewState
 #: the keys its cards name (a handful); the cap is there so a mistyped URL cannot turn the endpoint
 #: into a bulk export of the finding store.
 FINDING_KEYS_LIMIT = 50
+
+#: 5.1 書籤過渡（設計者 2026-09-30：root 即 v2、v1 遷 `/v1/*`）。302＝過渡，不是永久搬家——
+#: 路由史（`docs/ROUTE_HISTORY.md`）教過契約比整潔重要，留 client 繼續問舊路徑的能力，
+#: 撤銷這次改動時不必清瀏覽器快取。`/mobile/*` 不在此列：已安裝 PWA 的契約，原樣保留。
+PAGE_REDIRECTS = {
+    "/v2": "/",
+    "/v2/": "/",
+    "/workflow": "/v1/workflow",
+    "/workflow/": "/v1/workflow",
+    "/legacy": "/v1/legacy",
+    "/legacy/": "/v1/legacy",
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.0 closes the socket after every response, so a page that loads one paper, its six
@@ -160,6 +173,18 @@ class Handler(BaseHTTPRequestHandler):
             return data
         return gzip.compress(data, 5)
 
+    def send_redirect(self, location: str) -> None:
+        """書籤過渡用的轉址（302＋no-store）。`workflow`／`legacy`／`/v2` 都走這裡到新家。
+
+        302 不是 301：這是「過渡」——路由史（`docs/ROUTE_HISTORY.md`）教過契約比整潔重要，
+        保留 client 繼續問舊路徑的能力，撤銷這次改變時不必清瀏覽器快取。
+        """
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def send_json(self, payload: Any, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         content_type = "application/json; charset=utf-8"
@@ -181,10 +206,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.require_authorization():
             return
         parsed = urllib.parse.urlparse(self.path)
+        # 5.1 書籤過渡：舊路由一律 302 到新家；root 從此就是 v2（設計者 2026-09-30：輸入不帶 /v2）。
+        location = PAGE_REDIRECTS.get(parsed.path)
+        if location:
+            self.send_redirect(location)
+            return
         if (parsed.path.startswith("/mobile") or parsed.path.startswith("/v2")) \
                 and self.send_mobile_asset(parsed.path, head_only=True):
             return
-        if parsed.path in {"/", "/workflow", "/workflow/"}:
+        if parsed.path == "/":
+            data = v2_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path in {"/v1/workflow", "/v1/workflow/"}:
             data = workflow_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -192,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             return
-        if parsed.path in {"/legacy", "/legacy/"}:
+        if parsed.path in {"/v1/legacy", "/v1/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -233,10 +271,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.require_authorization():
             return
         parsed = urllib.parse.urlparse(self.path)
+        location = PAGE_REDIRECTS.get(parsed.path)
+        if location:
+            self.send_redirect(location)
+            return
         if (parsed.path.startswith("/mobile") or parsed.path.startswith("/v2")) \
                 and self.send_mobile_asset(parsed.path):
             return
-        if parsed.path in {"/", "/workflow", "/workflow/"}:
+        if parsed.path == "/":
+            data = v2_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path in {"/v1/workflow", "/v1/workflow/"}:
             data = workflow_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -245,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if parsed.path in {"/legacy", "/legacy/"}:
+        if parsed.path in {"/v1/legacy", "/v1/legacy/"}:
             data = html_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

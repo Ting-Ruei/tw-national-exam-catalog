@@ -202,6 +202,18 @@ else
   echo "  （沒有 ${DERIVED_PAPERS}；先跑 qbr/scripts/build_browser_safe_papers.py --apply）"
 fi
 
+# 2b-2. **平台的 sanitize 契約**。沙盒（`repair_agent_test/agent`）的 render 合約讀的是
+# platform-app 的 `lib/sanitize.ts` 本體（不是副本）；常駐機的 code 樹不帶 platform-app
+# （deployment-only），所以這一個檔跟著資產走（`assets/sanitize.ts`），沙盒用
+# `PLATFORM_SANITIZE_TS` 指到它。只增不刪、來源缺席時整段跳過——跟 2b 的理由相同。
+if [[ -f "${CATALOG}/platform-app/frontend-next/lib/sanitize.ts" ]]; then
+  rsync -a "${CATALOG}/platform-app/frontend-next/lib/sanitize.ts" \
+    "${STATION}:qbr-review/assets/"
+  echo "  平台 sanitize 契約已同步（沙盒以 PLATFORM_SANITIZE_TS 指到 assets/sanitize.ts）"
+else
+  echo "  （沒有 platform-app/frontend-next/lib/sanitize.ts；沙盒的 render 合約會拒絕啟動）"
+fi
+
 # 3. 佇列（選擇性）。crops 隨佇列走，**但從 `--delete` 排除、分兩步同步**。
 #
 # 量到的（2026-09-29 佇列重建）：筆電重建後 crops 5,047 張，常駐機 21,543 張。差距是**裁切

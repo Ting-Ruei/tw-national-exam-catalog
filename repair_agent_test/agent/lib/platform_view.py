@@ -46,7 +46,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(HERE)
 CATALOG = os.path.dirname(os.path.dirname(AGENT_DIR))
 PLATFORM_ROOT = os.path.join(os.path.dirname(CATALOG), "platform-app", "frontend-next")
-SANITIZE_TS = os.path.join(PLATFORM_ROOT, "lib", "sanitize.ts")
+
+# The laptop layout resolves the platform by sitting beside it in the umbrella repo. The
+# station's code tree is deployment-only (`~/qbr-review/code`) and carries **no** platform-app,
+# so a station deployment that starts the sandbox points `PLATFORM_SANITIZE_TS` at the copy the
+# deploy script ships into `~/qbr-review/assets/`. One file, one origin, no second allowlist.
+SANITIZE_TS = os.environ.get("PLATFORM_SANITIZE_TS") \
+    or os.path.join(PLATFORM_ROOT, "lib", "sanitize.ts")
 
 
 def _parse_string_array(source: str, name: str) -> list[str]:
@@ -67,7 +73,8 @@ def load_allowlist() -> tuple[set[str], set[str]]:
         raise RuntimeError(
             "the platform's sanitize.ts is not at %s. It defines which markup reaches a learner's "
             "screen; the review UI must render what the platform renders, so this is required "
-            "rather than optional." % SANITIZE_TS
+            "rather than optional. Away from the laptop's repo layout (the station), point the "
+            "PLATFORM_SANITIZE_TS environment variable at the deployed copy." % SANITIZE_TS
         )
     with open(SANITIZE_TS, encoding="utf-8") as handle:
         source = handle.read()

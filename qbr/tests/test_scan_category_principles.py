@@ -141,6 +141,45 @@ def test_another_category_is_not_read(tmp_path):
     assert [r["candidate_key"] for r in selection.rows] == ["k-pharm"]
 
 
+def test_only_touched_intersects_with_the_latest_human_decision(tmp_path):
+    # 設計者 2026-09-30：除命中考別外，再與「最新人工 block／accept」取交集——comment／
+    # needs_review／沒有事件／機器事件都不算被「看過」。事件流只讀不寫（append-only 不動）。
+    ui = _queue(tmp_path / "queue", [
+        _row("k-blocked", 1, "醫事檢驗師"),   # block → 進
+        _row("k-accepted", 2, "醫事檢驗師"),  # accept → 進
+        _row("k-needs", 3, "醫事檢驗師"),     # needs_review → 不進
+        _row("k-note-only", 4, "醫事檢驗師"),  # 只有 comment（帶 notes 的非決定）→ 不進
+        _row("k-machine", 4, "醫事檢驗師"),   # 機器寫的 block → 不進（冒充不了人）
+        _row("k-untouched", 5, "醫事檢驗師"),  # 沒有任何事件 → 不進
+    ])
+    # 事件走生產端的寫法（同一個 schema），最新一筆蓋過前面：k-accepted 先 block 再 accept。
+    events = os.path.join(ui, "question_review_events.jsonl")
+    with open(events, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-blocked",
+                                 "action": "block", "source": "review_ui", "reviewer": "local",
+                                 "created_at": "2026-09-29T10:00:00Z"}) + "\n")
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-accepted",
+                                 "action": "block", "source": "review_ui", "reviewer": "local",
+                                 "created_at": "2026-09-29T10:01:00Z"}) + "\n")
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-accepted",
+                                 "action": "accept", "source": "review_ui", "reviewer": "local",
+                                 "created_at": "2026-09-29T10:02:00Z"}) + "\n")
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-needs",
+                                 "action": "needs_review", "source": "review_ui",
+                                 "reviewer": "local", "created_at": "2026-09-29T10:03:00Z"}) + "\n")
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-note-only",
+                                 "action": "comment", "source": "review_ui", "reviewer": "local",
+                                 "created_at": "2026-09-29T10:04:00Z"}) + "\n")
+        handle.write(json.dumps({"schema_version": 1, "candidate_key": "k-machine",
+                                 "action": "block", "source": "detector", "reviewer": "detector",
+                                 "created_at": "2026-09-29T10:05:00Z"}) + "\n")
+    before = os.path.getsize(events)
+    selection = scan.selected_questions(ui, ["醫事檢驗師"], only_touched=True)
+    assert [r["candidate_key"] for r in selection.rows] == ["k-blocked", "k-accepted"]
+    assert selection.matched == 6 and selection.untouched == 4 and selection.skipped == 0
+    assert os.path.getsize(events) == before, "事件流是 append-only 資產：選題過程不得改它一個字"
+
+
 def test_the_group_key_and_the_names_inside_it_select_the_same_questions(tmp_path):
     # 一個拼字來源：群組 key 展開成的集合，與那些名稱一個一個寫出來，必須選出同一組題目——包括
     # 全角括號的 `藥師（一）`，它是 `normalize_category_name` 折掉的，而不是這一支自己比對出來的。

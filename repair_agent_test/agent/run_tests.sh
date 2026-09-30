@@ -13,4 +13,4 @@ set -e
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 STORE=$(mktemp -d)
 trap 'rm -rf "$STORE"' EXIT
-REPAIR_AGENT_STORE="$STORE" node --test "$DIR/test_agent.mjs"
+REPAIR_AGENT_STORE="$STORE" node --test "$DIR/test_agent.mjs" "$DIR/test_consumer.mjs" "$DIR/test_workorder.mjs"
