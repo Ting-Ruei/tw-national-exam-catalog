@@ -25,6 +25,7 @@ import {
   countDrafts, appendConsumerQuestion, runConsumerLoop, loadMachinePrefixes,
   cursorPath, questionsPath, draftPath, ledgerPath,
 } from "./lib/consumer.mjs";
+import { fakeSession } from "./lib/test_doubles.mjs";
 
 const BLOCK = (key, notes, extra = {}) => ({
   action: "block", candidate_key: key, notes: notes || "", reviewer: "local",
@@ -42,25 +43,6 @@ function makeLedgerDir(rows, { trailing = "" } = {}) {
   const body = rows.map((r) => JSON.stringify(r) + "\n").join("");
   writeFileSync(join(ledgerPath(dir)), body + trailing, "utf8");
   return dir;
-}
-
-function fakeSession(storeDir, { alwaysDraft = true, failOn } = {}) {
-  const tasks = [];
-  return {
-    tasks,
-    async prompt(text) {
-      tasks.push(text);
-      if (failOn && text.includes(failOn)) throw new Error("model blew up");
-      const key = /candidate key：(\S+)/.exec(text)?.[1];
-      if (alwaysDraft && key) {
-        const path = draftPath(storeDir);
-        const prev = existsSync(path) ? readFileSync(path, "utf8") : "";
-        writeFileSync(path,
-          prev + JSON.stringify({ action: "repair_draft", candidate_key: key, status: "proposed" }) + "\n",
-          "utf8");
-      }
-    },
-  };
 }
 
 // ------------------------------------------------------------------ 誰的工作機會
