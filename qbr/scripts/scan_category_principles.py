@@ -90,7 +90,7 @@ POPULATION = "category-scan"
 SHOW = 20
 
 #: What one round selected, and what the filter did to the population on the way.
-Selection = collections.namedtuple("Selection", "rows matched skipped by_category")
+Selection = collections.namedtuple("Selection", "rows matched skipped by_category untouched")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-confirmed", action="store_true",
                         help="同一個讀法已經有 category-scan 紀錄的題目跳過（續跑用；沒有它，"
                              "跑第二次就是把整批重拍重問一次）")
+    parser.add_argument("--only-touched", action="store_true",
+                        help="把選到的題目與**帶有最新人工 block／accept 決定**的題目取交集"
+                             "（2026-09-30 設計者：醫事檢驗師＋藥師(一) 直接進，"
+                             "其他考別暫緩、只進有人決定過的）。fold 的是這條 queue 自己的人工"
+                             "事件流（append-only，只讀不寫）；comment／needs_review 等不算")
     parser.add_argument("--dry-run", action="store_true",
                         help="只印出選到的題目就結束；**這本來就是預設**，這個旗標是把它寫出來")
     parser.add_argument("--apply", action="store_true",
@@ -145,7 +150,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def selected_questions(queue_dir, categories, limit=0, *, already=None):
+def selected_questions(queue_dir, categories, limit=0, *, already=None, only_touched=False,
+                       review_log=None):
     """這一輪要讀的題目：**只看考別**，不看爭議種類，也不看任何人的決定。
 
     That is the whole point of this tool and the one thing it must not inherit from the dispute loop:
@@ -162,21 +168,36 @@ def selected_questions(queue_dir, categories, limit=0, *, already=None):
     about. A key is skipped only while its **current** reading still hashes to the recorded one, so a
     repair re-opens the question by itself.
 
-    Returns `Selection(rows, matched, skipped, by_category)`: `matched` counts the questions in the
-    named categories before the skip (that is the population the report is about), `skipped` counts
-    the ones `already` took out, and `by_category` maps each `--category` value to what it matched.
-    `--limit` applies **after** the skip, so a resumed batch is the next N unread questions rather than
-    N questions of which most are skipped.
+    `only_touched` 在**考別條件之外**再加一個交集：這題最新的人工決定（`repair_loop.fold_review_events`
+    對 queue 自己的 `question_review_events.jsonl` 做**一次單讀**——append-only，這裡不寫任何東西）
+    要是 `block` 或 `accept`。2026-09-30 設計者的重定向：醫事檢驗師＋藥師(一) 直接進；
+    其他考別暫緩、只進「有人決定過」的。一個「comment 還站著」或 `needs_review` 的事件**不是**
+    被看過的決定，不算 touched（與 fold 的規則同一份，不另寫一套）。
+
+    Returns `Selection(rows, matched, skipped, by_category, untouched)`: `matched` counts the questions
+    in the named categories before the skip (that is the population the report is about), `skipped`
+    counts the ones `already` took out, and `by_category` maps each `--category` value to what it
+    matched. `untouched` is what `--only-touched` took out on top of that. `--limit` applies **after**
+    both skips, so a resumed batch is the next N unread questions rather than N questions of which most
+    are skipped.
     """
     candidates = os.path.join(queue_dir, "candidates.jsonl")
     if not os.path.isfile(candidates):
         print("找不到 candidates.jsonl：%s" % queue_dir, file=sys.stderr)
-        return Selection([], 0, 0, {})
+        return Selection([], 0, 0, {}, 0)
     already = {} if already is None else already
     by_category = collections.OrderedDict((want, 0) for want in categories)
+    touched = set()
+    if only_touched:
+        path = review_log or os.path.join(queue_dir, "question_review_events.jsonl")
+        folded = repair_loop.fold_review_events(path)
+        # 只有人下的決定才把人「看過這一題」變真：`folded` 的 `action` 只會是人寫的決定
+        # （機器與量測腳本的事件在 fold 裡已經被 `is_human_event` 擋掉）。
+        touched = {key for key, row in folded.items() if row.get("action") in ("block", "accept")}
     rows = []
     matched = 0
     skipped = 0
+    untouched = 0
     for question in repair_loop.load_candidates(candidates):
         category = ai_findings.category_of(question)
         wanted = next((want for want in categories if category_matches_filter(category, want)), None)
@@ -185,13 +206,16 @@ def selected_questions(queue_dir, categories, limit=0, *, already=None):
         matched += 1
         by_category[wanted] += 1
         key = question.get("candidate_key")
+        if only_touched and key not in touched:
+            untouched += 1
+            continue
         if key in already and already[key] == ai_findings.reading_fingerprint(question):
             skipped += 1
             continue
         rows.append(question)
     if limit:
         rows = rows[:limit]
-    return Selection(rows, matched, skipped, by_category)
+    return Selection(rows, matched, skipped, by_category, untouched)
 
 
 def confirmed_keys(store_path):
@@ -309,10 +333,13 @@ def main() -> int:
         return report(out)
 
     already = confirmed_keys(out) if args.skip_confirmed else None
-    selection = selected_questions(queue_dir, args.category, args.limit, already=already)
+    selection = selected_questions(queue_dir, args.category, args.limit, already=already,
+                                   only_touched=args.only_touched)
     print("考別：%s" % "、".join(args.category))
     for wanted, count in selection.by_category.items():
         print("  %-12s %6d 題" % (wanted, count))
+    if args.only_touched:
+        print("（--only-touched）人工 block／accept 有決定的才進：拿掉 %d 題。" % selection.untouched)
     print("符合 %d 題；其中 %d 題的這個讀法已經有紀錄（跳過）；這一批 %d 題。"
           % (selection.matched, selection.skipped, len(selection.rows)))
     for question in selection.rows[:SHOW]:
