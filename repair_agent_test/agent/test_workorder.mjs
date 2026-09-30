@@ -18,7 +18,7 @@ const SCRATCH = mkdtempSync(join(tmpdir(), "workorder-test-"));
 
 import {
   loadWorkOrder, composeWorkOrderTask, runWorkOrder, summarize,
-  checkApplyFlags, appendReport, reportsPath, fixesByRun, judgeConsistency,
+  checkApplyFlags, appendReport, reportsPath, fixesByRun, judgeConsistency, normalizeField,
 } from "./lib/workorder.mjs";
 import { draftPath, questionsPath } from "./lib/consumer.mjs";
 import { fakeSession } from "./lib/test_doubles.mjs";
@@ -167,4 +167,47 @@ test("重判一致性：同 key 兩輪修法，去空白後相同才一致（負
     { both: 1, same: 0, rate: 0 }, "實質不同＝不一致");
   assert.deepEqual(judgeConsistency({ k1: "x" }, { k2: "y" }), { both: 0, same: 0, rate: null },
     "沒有交集就誠實說 rate 無法計");
+});
+
+test("落址正規化：欄位名後面的散文留在原地（2026-09-30 試跑 q070 的實際形）", () => {
+  assert.equal(normalizeField("option B 的 TH2"), "option B");
+  assert.equal(normalizeField("option A"), "option A");
+  assert.equal(normalizeField("stem 的 76"), "stem");
+  assert.equal(normalizeField("Question 3"), "question");
+  assert.equal(normalizeField(""), "");
+  // 不是這些形狀的落址原樣保留：靠寬鬆比對抹平差異＝把不一致矇混成一致。
+  assert.equal(normalizeField("選項B"), "選項B");
+});
+
+test("fixesByRun 一題多份草案：以（題＋正規化欄位）為鍵；同欄後寫者勝（負控制：同一輪的兩份草案不得互相抵消）", () => {
+  // 2026-09-30 試跑實測（moex:100030:101:0101:1:question:q070）：A 輪落址帶散文、B 輪乾淨；
+  // 舊的單鍵「只留該輪第一列」把三選項全同意的判斷量成 rate 0。負控制就是那次量錯。
+  const store = join(SCRATCH, "field-join-store");
+  mkdirSync(store, { recursive: true });
+  const key = "moex:100030:101:0101:1:question:q070";
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runA",
+                         insert: "option B 的 TH2", fix: "T<sub>H</sub>2" });
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runA",
+                         insert: "option C 的 TH3", fix: "T<sub>H</sub>3" });
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runA",
+                         insert: "option A 的 TH1", fix: "T<sub>H</sub>1" });
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runB",
+                         insert: "option B", fix: "T<sub>H</sub>2" });
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runB",
+                         insert: "option C", fix: "T<sub>H</sub>3" });
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runB",
+                         insert: "option A", fix: "T<sub>H</sub>1" });
+  const a = fixesByRun(store, "runA");
+  const b = fixesByRun(store, "runB");
+  assert.equal(Object.keys(a).length, 3, "一題三份草案＝三個（題＋欄位）鍵，第一列不遮掉後兩列");
+  assert.deepEqual(judgeConsistency(a, b), { both: 3, same: 3, rate: 1 },
+    "兩輪每個選項的修法全同意＝rate 1（修正前會量成 0）");
+  // 負控制：B 輪一個選項換了修法，這個欄位誠實地算不一致。
+  writeDraftRow(store, { action: "repair_draft", candidate_key: key, run_id: "runC",
+                         insert: "option A", fix: "T<sub>H</sub>1a" });
+  const c = fixesByRun(store, "runC");
+  assert.deepEqual(judgeConsistency(a, c), { both: 1, same: 0, rate: 0 },
+    "同一欄位修法不同＝不一致（單欄交集）");
+  assert.deepEqual(judgeConsistency({ [key]: "純題鍵" }, { [key]: "純題鍵" }),
+    { both: 1, same: 1, rate: 1 }, "沒有落址資訊的鍵維持純題鍵（舊形不破）");
 });

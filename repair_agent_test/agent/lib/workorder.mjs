@@ -189,18 +189,42 @@ export function fixesByRun(storeDir, runId) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
-      if (row.run_id === runId && row.candidate_key && fixes[row.candidate_key] === undefined) {
-        fixes[row.candidate_key] = String(row.fix || "");
-      }
+      if (row.run_id !== runId || !row.candidate_key) continue;
+      // 多版可存（2026-09-30 試跑實測）：一題可以同時落 option A／B／C 三份草案，只用
+      // candidate_key 當鍵會「A 輪的 option B 配 B 輪的 option A」，把實際一致的判斷抹成 0
+      // （moex:100030:101:0101:1:question:q070 三選項全同意，量出 rate 0——測到才修正）。
+      // 鍵改為「題＋正規化欄位」，同一欄位的同一 run 以**最後一次**為準（最新的判斷站著）。
+      const label = normalizeField(row.insert ?? row.field ?? "");
+      const fieldKey = label ? `${row.candidate_key}|${label}` : row.candidate_key;
+      fixes[fieldKey] = String(row.fix || "");
     } catch { /* 壞行不算 */ }
   }
   return fixes;
 }
 
 /**
- * 重判一致性：同一份工單、兩個 prompt_version 的 run，在「兩輪都落了草案」的題目上，
+ * 草案落址（`insert`）是模型的自由話——同一輪它可能寫「option B 的 TH2」，另一輪只寫
+ * 「option B」。欄位的**本體**是欄位名本身；正規化只認 `stem`／`question`／`option <字母>`
+ * 開頭的邊界，把後面的散文（「 的 TH2」這種）留在原地不猜——不是這些形狀的落址**原樣保留**，
+ * 讓不一致如實現形，而不是靠寬鬆比對矇混過去。
+ */
+export function normalizeField(insert) {
+  const text = String(insert || "").trim();
+  const match = text.match(/^(stem|question|option\s*[0-9A-Za-z])/i);
+  if (!match) {
+    return text;
+  }
+  // 關鍵字统一小寫（ledger 的寫法），但選項字母保留原大小寫——`Option B`／`option B` 同欄，
+  // `option a` 與 `option A` 不在 ledger 混用的形。改太多就是靠寬鬆比對抹平差異。
+  return match[1].replace(/^([A-Za-z]+)/, (word) => word.toLowerCase()).replace(/\s+/g, " ");
+}
+
+/**
+ * 重判一致性：同一份工單、兩個 prompt_version 的 run，在「兩輪都落了草案」的（題＋欄位）上，
  * 修法文字**連同空白一併刪除**後相同的比例（草案的 fix 是自由文字——「A→MAO<sub> A</sub>」
  * 與「A→MAO<sub>A</sub>」是同一個判斷）。1.0＝兩版提示做出同樣的判斷；低＝改動動搖了判斷。
+ * 鍵由 `fixesByRun` 給：`candidate_key|正規化欄位`——一題多份草案（多選項各自一份）是這個
+ * 量測的實際輸入，不是雜訊（2026-09-30 試跑 moex:100030:101:…:q070 三選項全同意）。
  */
 export function judgeConsistency(fixesA, fixesB) {
   const keys = Object.keys(fixesA).filter((k) => fixesB[k] !== undefined);
