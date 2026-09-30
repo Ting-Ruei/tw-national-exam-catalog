@@ -212,3 +212,42 @@ ssh macstudio '/usr/bin/tail -40 /Users/tim/qbr-review/code/qbr/runs/repair_daem
 - 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
 - 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
 <!-- /project-map:belongs-to -->
+
+## 6. 2026-09-29 下午：合併後收斂（PR #15，六個 commit，工作樹歸零）
+
+設計者下達「1+2」：①工作樹與剛合完的 main 對齊、②重跑 golden_path 讓 `question_page`
+真的進 candidates。兩件都做完，並把全部積壓收斂成 **六個 commit、一個 PR**：
+
+**PR：https://github.com/Ting-Ruei/tw-national-exam-catalog/pull/15**
+（`agent/repair-agent-pi-sdk-20260928` → `main`；governance / unit-tests / qbr-tests **三綠**，
+2026-09-29 17:05 由 GitHub Linux runner 親跑。**待設計者按 Merge。**）
+
+| Commit | 內容 | 量到的證據 |
+|---|---|---|
+| `ceaa99c` | 對齊 main：把四個「站上在跑、git 沒有」的模組還原成提交（`vision`/`reread`/`reflow`/`engines`：B2 跨頁截圖縫合、`quoted_lines_region` 表格裁切、occamy-6bit 預設、**出網閘門**＋外部呼叫稽核流）；`package.py` 答案 lineage 文件欄位＋`paper_key` 正規化；`golden_path.paper_metadata()` 定位解析＋`--subject-code`＋三份 PDF sha256 進 meta；9 檔退休 | pytest 28 failed → **0**（788 passed／18 skipped）；golden 檔 md5 `4b899e1e…` 兩側相同（未動） |
+| `fcac6de` | governance **1.1.0**：workflow_state 從退役的 AI395 SQL 狀態機改指「選定 QBR 佇列＋可修訂的 AI 自有結果」；production writer 指向 Mac Studio 網站 runtime；catalog PostgreSQL 標記 `configured: false` | `validate_agent_governance.py` passed |
+| `0d8a61b` | 退休 ai395 時代的 audit/probe 線：scripts/tests/deploy 瘦身＋13 個 `.project-map-ignore` 退休標記 | −15,357 行；unittest discover **OK (skipped=8)** |
+| `fe764ef` | `docs/README` 改為 active 路由（active 入口才授權部署/writer/模型）；兩代歷史文件一一蓋「已退休」章（不靜默改寫） | 每個 active 路由指向存在的檔案 |
+| `a7388be` | QBR 抽取線（orchestrator/context_budget/salvage/scan_pharmacist_track…）＋review UI v2 **區塊拆分**（`03-area-answer.js`、`03-area-principles.js`；原則→獨立頁、討論區只留註記）＋`rowReviewAction` 人的決定先問＋`S.scopeRequest` 刷新鎖＋server 模組 (+969 行)＋agent bridge/`question_page` | 新測試 18 檔全帶負對照；`test_v2_navigation.mjs` 對真 80 題佇列「**全部符合**」 |
+| `4cbde31` | 本地審查工具鏈（`local_review.sh`/`manage_local_review.py`/evidence 三支）＋站上 lane：站名改 **Tailscale**（`timmac-studio`）、`verify-mounts.sh`、compose 註解對齊治理 | 六支 shell `bash -n` 全過 |
+
+### 這一輪量到的新事實
+
+1. **golden 檔的 `category_code` 全是錯的**：`moex:115090:308:0504:1` 舊 inline 解析把兩個
+   code 都讀成 bits[3]（`"0504"`，80/80），`batch_package` 自己的 resolver 卻讀 bits[2] 為
+   category——`paper_metadata()` 修掉這個分家。修正後單卷 smoke：80/80 `question_page`
+   為整數（頁 1–14、無 null），**隨機抽 6 題對照官方 PDF（fitz 實測）全部相符**。
+2. **qbr 建包器不寫 `package_content_sha256`** ⇒ validator 必報 mismatch（單卷 smoke 第一次
+   跑 exit=1 量到）。已在 `package.build_package` 補上（算法照 `export_..._from_postgres.py:936`），
+   重跑 exit=0、structural findings = 0（governance finding＝review-status 未審，預期）。
+3. **藥師(一)稽核跑完了**：99/99 全 rc=0（帳本 `/tmp/agent_perf/audit/summary.tsv` 100 行；
+   單題 66–749 秒），LaunchAgent 自然退出。`agent_feedback.jsonl` 92 行＝沙盒自有流。
+4. **gh token 的病灶**：`~/.config/gh/hosts.yml` 在 09-26 16:24 被寫成 86 bytes 的**無 token
+   空殼**（`token in default is invalid` 的根因）。09-29 裝置授權重登後 token 直寫 hosts.yml
+   （`gho_…`，scopes repo/read:org/gist），`gh api user` 驗證通過、PR #15 三綠。
+   **下次再失效：先 `stat ~/.config/gh/hosts.yml` 看 mtime 抓重寫者。**
+
+### 等設計者（更新：P.6 §2 的兩題仍在，加一題）
+
+3. **整佇列 79,090 題重建進站上 candidates**（讓 `question_page` 進站上）＝站上停服務重建
+   （G3，`review_record_safety.md`：rebuild 前暫停服務）、PR #15 併入後跑。smoke 已全綠。

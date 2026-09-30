@@ -1716,3 +1716,34 @@ HEAD 都還被 remote 分支收著，未提交的只有 `scripts/test_v2_areas_b
    刪完可用空間不變，但**檔案數少了 370 萬個**）。判斷「真的省了多少」要看刪前後的 `df`。
 5. 這一台 shell 的 `rm` 對**大目錄**不可靠（`rm -rf` 回 0 但目錄還在、還會被背景化）；
    大目錄請用 **`/bin/rm -rf`** 並給長 timeout。
+
+---
+
+## P.7 第六輪（2026-09-29 下午；設計者授權「1+2」，工作樹歸零、PR #15 開立）
+
+執行紀錄（不是問題）：**PR https://github.com/Ting-Ruei/tw-national-exam-catalog/pull/15**（六 commit，
+2026-09-29 17:05 三綠：governance / unit-tests / qbr-tests），**待設計者按 Merge**。
+
+### 已完成
+
+| 事 | 結果與量法 |
+|---|---|
+| ①工作樹與 main 對齊 | merge 至 `ad683de`（=origin/main）＋六 commit 收斂（`ceaa99c..4cbde31`）；工作樹 **0 uncommitted**；四個「站上在跑、git 沒有」的模組（vision/reread/reflow/engines，B2 跨頁＋表格裁切＋egress 閘門＋occamy 預設）入 git＝**B2 的 G1 缺口關閉** |
+| ②golden_path 重跑 smoke | `moex:115090:308:0504:1` exit=0；`question_page` 80/80 整數、抽 6 題**對照官方 PDF（fitz）全符**；抓到並修：建包器缺 `package_content_sha256`（validator 必報 mismatch）、`category_code` 兩 code 同源錯位（golden 檔 80/80 都寫 `0504`）|
+| 9 檔退休落 commit | umbrella 已收 `operate-local-open-models`；其餘 8 檔唯二引用＝歷史文註 |
+| 9/29 剩餘積壓 | governance 1.1.0、ai395 線退休（−15,357 行）、docs 路由重寫、v2 區塊拆分＋測試、本地審查工具、站名 Tailscale 化——全部有測試與負對照 |
+| 藥師(一)稽核 | **99/99 全 rc=0**（帳本 100 行），LaunchAgent 自然退出；沙盒 `agent_feedback.jsonl` 92 行 |
+
+### 未決（承接 P.6 §2，加一題）
+
+1. 站上討論區現在就拿掉嗎（G3＋`deploy_station.sh --restart`）。
+2. 刷新鎖推站上嗎（G3；`scopeRequest` 已在工作樹/PR 內）。
+3. **整佇列 79,090 題站上重建**（讓 `question_page` 進站上 candidates）＝停服務重建，等一句話。
+4. PR #4（`codex/offsets-20260919`）三顆綠，持續開著。
+5. `disputed_filter`／`startup_navigation` 兩測試檔去留（P.2 名單剩下的）。
+
+### 工具註記
+
+- `gh` 已可用（裝置授權重登；hosts.yml 09-26 被寫成無 token 空殼＝之前每次失效的根因；
+  再失效先 `stat ~/.config/gh/hosts.yml` 看 mtime 抓重寫者）。開 PR 就直接 `gh pr create`。
+- `/tmp/run_pages/` 是單卷 smoke 產物（可刪）；帳本 `/tmp/agent_perf/audit/summary.tsv`。

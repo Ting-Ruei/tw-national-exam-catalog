@@ -313,3 +313,20 @@ Owner-only／blocked：未做事項、原因、解除條件
 - 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
 - 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
 <!-- /project-map:belongs-to -->
+
+---
+
+## 附錄：2026-09-29 下午快照（合併後收斂；PR #15 等裁決）
+
+上一節是 09-24 的深夜快照。**09-29 的新位置**（每個數字的量法在
+[`repair-open-items`](../repair-open-items/SKILL.md) §6）：
+
+- **程式面**：`agent/repair-agent-pi-sdk-20260928` 六個 commit 開成
+  **PR #15**（governance / unit-tests / qbr-tests 三綠），等設計者按 Merge。
+  內容：B2 跨頁截圖＋表格裁切入 git、出網閘門（預設關）、答案 lineage 欄位、
+  `question_page` 進 candidates、governance 1.1.0、ai395 線退休（−15,357 行）、
+  v2 區塊拆分（原則→獨立頁）、站名 Tailscale 化。**工作樹已歸零。**
+- **匯出面**：單卷 smoke（115-2 生化）exit=0；`question_page` 80/80 整數且抽 6 題
+  對照官方 PDF 全符。**整佇列 79,090 題的站上重建等一句話**（停服務重建，G3）。
+- **稽核面**：藥師(一) 99/99 全 rc=0 跑完，LaunchAgent 自然退出。
+- **站上資料**：本節數字未重新量（09-24 快照仍是最後一次站上盤點）。
