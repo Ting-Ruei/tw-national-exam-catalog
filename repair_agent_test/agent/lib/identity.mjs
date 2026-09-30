@@ -48,7 +48,7 @@ export const BRAIN_ENGINE = process.env.REPAIR_AGENT_ENGINE || "occamy-6bit";
  * prompt's own words; `agent.mjs` and the chat box read it from here, and `bridge.py` writes
  * whatever value the caller handed it — no second table.
  */
-export const PROMPT_VERSION = "repair-agent-2026-09-30-rules-house";
+export const PROMPT_VERSION = "repair-agent-2026-09-30-rules-house+compress-2";
 
 /**
  * The task. Every line here is a constraint someone measured or asked for, not a style choice.

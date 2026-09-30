@@ -734,8 +734,30 @@ def neighbour_numbers(number):
     return tuple(candidate for candidate in (value - 1, value + 1) if candidate >= 1)
 
 
+def blind_fields(seen):
+    """Fields the read couldn't see at all: the transcription answered ▢（UNREADABLE_MARK）.
+
+    This is the only shape `reference_read`'s replacement is for (owner 2026-09-25): the direct
+    picture could not show the question's content, and the neighbouring bands may hold the text.
+    A direct read that transcribed everything (agreement included) is **not** blind — measured
+    2026-09-30 on the 藥師(二) 50-question sample: 21 of 29 "defects" were neighbour-band
+    transcriptions (the model read the neighbouring question's text) replacing an agreeing direct
+    read, because `explained` counted *differing* fields and a different question's text differs on
+    every field. Agreement plus a neighbour picture is context, not a replacement.
+    """
+    if not isinstance(seen, dict):
+        return set()
+    out = set()
+    if isinstance(seen.get("stem"), str) and ai_findings.UNREADABLE_MARK in seen["stem"]:
+        out.add("stem")
+    for key, text in (seen.get("options") or {}).items():
+        if isinstance(text, str) and ai_findings.UNREADABLE_MARK in text:
+            out.add("option %s" % key)
+    return out
+
+
 def reference_read(question, *, number, pdf_path, crops_root, dpi, send, first_seen,
-                   kept_rows=None):
+                   kept_rows=None, first_error=None):
     """Re-read this question with its **neighbouring questions' bands** in the picture.
 
     Owner 2026-09-25: 「有些題目的圖片沒有截圖正確，有些題目沒有圖片但是卻截別題的來貼上，AI的審核是
@@ -750,26 +772,38 @@ def reference_read(question, *, number, pdf_path, crops_root, dpi, send, first_s
     image and the neighbour switch), so the two reads differ in **one** thing: the picture. That is
     what makes their answers comparable.
 
-    The reference reading **replaces** the direct one only when it explains more of this question's
-    fields (`explained_fields`) - the case the owner described, where the direct crop could not find
-    what the neighbours could. When both found something, the direct read is kept: it is a picture of
-    the question itself, and the reference picture is context.
+    The reference reading **replaces** the direct one only when the direct read was **blind** - the
+    first picture could not be made (`first_error` from `no-rows`/`no-crop`) or it answered ▢ for a
+    field - and the neighbour read produced a reading. A direct read that transcribed fields and
+    agreed is never replaced by a neighbour picture: the neighbour bands are other questions' rows,
+    and 量測 2026-09-30 (藥師(二) 50-question sample) showed a neighbour transcription differing on
+    every field was being counted as "explaining more" - 21 of 29 defects were the neighbour's text
+    replacing an agreement. The reference read still runs on agreement (the trigger stands); it is
+    evidence beside the note, not the deciding picture.
     """
     out_png = crop_output_path(crops_root, pdf_path, number, suffix="neighbours")
     png, rows, failure = neighbour_crop_for(pdf_path, number, dpi=dpi, out_png=out_png,
                                            kept_rows=kept_rows)
     if failure:
-        return {"used": False, "failure": failure[0], "rows": rows, "crop_png": None}
+        return {"used": False, "failure": failure[0], "rows": rows, "crop_png": None,
+                "first_blind": sorted(blind_fields(first_seen))}
     neighbours = neighbour_numbers(number)
     seen, raw, error, usage, seconds = transcribe(png, neighbours=neighbours, number=number, **send)
     explained = explained_fields(question, seen)
     first = explained_fields(question, first_seen)
-    return {"used": bool(error is None and explained and not first), "seen": seen, "raw": raw,
+    blind = blind_fields(first_seen)
+    # 取代的第一道閘：第一次判讀**真的看不見**（有 ▢ 或根本沒切成圖）。乾淨的「一致」不是盲——
+    # 一張不同的紙（鄰題帶）也會在所有欄位上不同，量測（2026-09-30，藥師(二) 樣本 21/29）證明
+    # 這種取代會把「紙本讀到別題」當成題目的缺陷。被問那題自己的帶轉錄得乾淨時，參考讀取只是
+    # 旁證（`seen` 不換、changes 不重算）。
+    used = bool(error is None and explained and (first_error or blind))
+    return {"used": used, "seen": seen, "raw": raw,
             "error": error, "usage": usage, "seconds": seconds, "crop_png": out_png, "rows": rows,
             "system": transcribe_system(send.get("principles"), send.get("answers"),
                                         send.get("notes"), send.get("rejected"),
                                         send.get("figures"), neighbours),
-            "explained": sorted(explained), "first_explained": sorted(first)}
+            "explained": sorted(explained), "first_explained": sorted(first),
+            "first_blind": sorted(blind)}
 
 
 def confirm_one(question, *, endpoint, args, crops_root, queue_root, principles=None,
@@ -814,7 +848,8 @@ def confirm_one(question, *, endpoint, args, crops_root, queue_root, principles=
     reference = None
     if needs_reference_read(kept, error):
         reference = reference_read(question, number=number, pdf_path=pdf_path,
-                                   crops_root=crops_root, dpi=args.dpi, send=send, first_seen=seen)
+                                   crops_root=crops_root, dpi=args.dpi, send=send, first_seen=seen,
+                                   first_error=error)
         if reference and reference.get("used"):
             seen, raw, error, usage, seconds = (reference["seen"], reference["raw"],
                                                reference["error"], reference["usage"],
@@ -842,6 +877,8 @@ def confirm_one(question, *, endpoint, args, crops_root, queue_root, principles=
             "neighbour_rows": (reference or {}).get("rows"),
             "neighbour_failure": (reference or {}).get("failure"),
             "neighbour_explained": (reference or {}).get("explained"),
+            # 為什麼（沒）取代：第一次判讀有哪些欄位是 ▢（沒有 ▢ ＝乾淨的轉錄，鄰題圖不取代）
+            "neighbour_first_blind": sorted((reference or {}).get("first_blind") or []),
             "read_with_neighbours": bool(reference and reference.get("used"))}
 
 

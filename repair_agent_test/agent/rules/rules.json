@@ -1,6 +1,6 @@
 {
   "schema": "qbr_review_rules_v0.1",
-  "version": "stream-import-357ca0e6+compress-1",
+  "version": "stream-import-357ca0e6+compress-2",
   "imported_from": {
     "file": "/Users/tim/AI workspace/ai_learning_platform/tw-national-exam-catalog/qbr/data/review-queues/live/review-ui/question_review_principles.jsonl",
     "sha256": "357ca0e655116915736c0159ab6e93c079f302076463f27c16454b7f2c8bdd01",
@@ -37,10 +37,12 @@
       "action": "add",
       "created_at": "2026-09-24T11:42:35",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p2",
@@ -81,10 +83,12 @@
       "action": "add",
       "created_at": "2026-09-24T11:42:35",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p4",
@@ -100,10 +104,12 @@
       "action": "add",
       "created_at": "2026-09-24T11:42:35",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p5",
@@ -118,10 +124,12 @@
       "action": "add",
       "created_at": "2026-09-24T11:42:35",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p6",
@@ -158,10 +166,12 @@
       "action": "add",
       "created_at": "2026-09-25T14:43:22",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p8",
@@ -436,10 +446,12 @@
       "action": "add",
       "created_at": "2026-09-25T16:24:08",
       "schema": "qbr_review_principle_v0.1",
-      "active": true,
-      "superseded_by": null,
+      "active": false,
+      "superseded_by": "retired-by-designer",
       "occurrences": 1,
-      "other_row_stamps": []
+      "other_row_stamps": [],
+      "retired_at": "2026-09-30T06:55:19.965Z",
+      "retired_reason": "designer-decision-zero-hit"
     },
     {
       "principle_id": "p12",
@@ -1464,6 +1476,20 @@
       ],
       "basis": "duplicate pairs measured p15↔p16=0.81 / p8↔p16=0.672 / p8↔p15=0.600 (bigram Jaccard); family read p2,p6,p8,p9,p12–p18 = 同主題（上下標）；p9「依慣用語補全」與 p18「回紙本核對」矛盾，合併時明寫以紙本為準",
       "merged_into_note": "p10 併入：同家族（科學符號緊貼→sub/sup；例子與家族全同），其「自動插入」為已被「回紙本核對優先」取代的變體。"
+    },
+    {
+      "pass": "retire-2026-09-30",
+      "at": "2026-09-30T06:55:19.965Z",
+      "approved_by": "designer-2026-09-30-chat(Q57#7)",
+      "basis": "設計者 2026-09-30 裁決『退場，之後有新的問題用新的決策方式重新建立』；zero-hit（命中量測 2026-09-30 開始）",
+      "retired": [
+        "p1",
+        "p3",
+        "p4",
+        "p5",
+        "p7",
+        "p11"
+      ]
     }
   ]
 }

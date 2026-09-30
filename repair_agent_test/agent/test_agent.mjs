@@ -2087,15 +2087,17 @@ test("the record_rule_hit tool is registered and writes only its own store-side 
   assert.equal(tool.parameters.properties.rule.type, "string",
     "the tool's rule parameter must be a string schema — it carries the house's id");
   // p2 was retired (compression pass 1 → superseded_by p18), and this test earned the refusal the
-  // hard way (measured 2026-09-30): hits may only credit *active* rules. p1 is active today.
-  const firstWrap = await tool.execute("t1", { rule: "p1", key: "moex:smoke:1", why: "tool seam" });
+  // hard way (measured 2026-09-30): hits may only credit *active* rules. As of compress-2, p18 is
+  // the only active entry left (Q57#7 retired p1/p3/p4/p5/p7/p11) — the seam must credit it.
+  const firstWrap = await tool.execute("t1", { rule: "p18", key: "moex:smoke:1", why: "tool seam" });
   const first = firstWrap?.details ?? firstWrap;
-  const secondWrap = await tool.execute("t2", { rule: "p1", key: "moex:smoke:1", why: "tool seam" });
+  const secondWrap = await tool.execute("t2", { rule: "p18", key: "moex:smoke:1", why: "tool seam" });
   const second = secondWrap?.details ?? secondWrap;
   assert.equal(first.ok, true, "the tool seam writes the same store the library reads");
   assert.equal(second.duplicated, true, "the tool must not double-count one question's hit");
   // Negative control: a *retired* rule loses its tool credit too — no new facts may land on it.
-  const retiredWrap = await tool.execute("t3", { rule: "p2", key: "moex:smoke:2", why: "old wording" });
+  // p1 as the negative is the freshly retired one (compress-2, Q57#7): the same loud refusal.
+  const retiredWrap = await tool.execute("t3", { rule: "p1", key: "moex:smoke:2", why: "old wording" });
   const retired = retiredWrap?.details ?? retiredWrap;
   assert.match(String(retired.error), /no active rule/,
     "hits must refuse a superseded rule — the same loud refusal as an unknown id");
