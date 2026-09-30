@@ -381,6 +381,93 @@ def test_a_finding_whose_crop_cannot_be_found_is_still_kept_and_counted(tmp_path
     assert not (out / "review-ui/crops/gone/q004-dispute.png").exists()
 
 
+# ---------------------------------------------------------------- the zero-crops gate
+# Measured 2026-09-29 21:56: a rebuild merged 989 packaged runs whose crop stage never ran,
+# wrote a 79,090-row queue with every `image_refs` empty, and exited 0; the deploy that followed
+# deleted the station's cut crops. The refusal below is the gate that must make that shape fail.
+
+def _zero_crops_run(tmp_path, *, with_crops):
+    """A one-run work directory; `with_crops` puts a (content-free) crop file into it."""
+    work = tmp_path / "work"
+    run = work / "paper-x"
+    (run / "review-ui").mkdir(parents=True)
+    with open(run / "review-ui" / "candidates.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"candidate_key": "k1", "question_number": 4}) + "\n")
+    if with_crops:
+        crops = run / "review-ui" / "crops"
+        crops.mkdir(parents=True)
+        (crops / "q004_embedded-image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    return work
+
+
+def test_a_zero_crop_merge_cannot_rewrite_a_queue_carrying_decisions(tmp_path):
+    """零 crop 的 run 不得重寫帶人工決定的佇列：先拒收，再談其餘。
+
+    量到的（2026-09-29 21:56）：封裝之後沒跑 `crop_run_figures.py --work`，`build_review_queue`
+    在「crops: 0 copied」時照寫 refs 全空的 79,090 列佇列，exit 0——下一個 `rsync --delete`
+    就把常駐機上的裁切證據刪掉了（16,443 張，2026-09-29 22:25 才重切回來）。
+    負控制：把閘拿掉（或把 `run_crop_files` 的量測移除），這個測試就回到照寫不擋的行為。
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    _write_log(source, "question_review_events.jsonl", [_event("k1", "block")])
+    work = _zero_crops_run(tmp_path, with_crops=False)
+    out = tmp_path / "queue"
+    with pytest.raises(SystemExit) as raised:
+        builder.merge([str(work)], str(out), previous=[str(source)])
+    assert "2" == str(raised.value.code), "拒收必須是 exit 2，不是安靜地照寫"
+    assert not (out / "review-ui" / "candidates.jsonl").exists(), \
+        "拒收後目的地不得被寫入任何東西"
+
+
+def test_a_merge_with_crops_is_not_refused(tmp_path):
+    """跑過裁切的 run 不受閘影響：同一形狀、帶著一個 crop 檔，合併照常。"""
+    builder = _builder()
+    source = tmp_path / "src"
+    _write_log(source, "question_review_events.jsonl", [_event("k1", "block")])
+    work = _zero_crops_run(tmp_path, with_crops=True)
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+    assert (out / "review-ui" / "candidates.jsonl").is_file()
+
+
+def test_allow_no_crops_names_the_deliberate_no_evidence_rebuild(tmp_path):
+    """真正無圖的語料仍可重建，但要明講：`--allow-no-crops`。
+
+    閘的例外不能是「再猜一次」，要是一個名字。少了這條，一個真的整本無圖的重建會被擋成
+    「永遠做不下去」，操作者就會學會反射性地繞過閘——那是比沒有閘更糟的結局（見
+    `--allow-lost-reviews` 的同一個教訓）。
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    _write_log(source, "question_review_events.jsonl", [_event("k1", "block")])
+    work = _zero_crops_run(tmp_path, with_crops=False)
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)], allow_no_crops=True)
+    assert (out / "review-ui" / "candidates.jsonl").is_file()
+
+
+def test_a_finding_only_carry_is_not_refused_by_the_zero_crops_gate(tmp_path):
+    """只帶 findings 的 carry 不該被閘擋：閘讀的是**人工決定流**。
+
+    findings 是模型對一頁的判讀；它的 carry（與找不找得到 crop）是另一條合約，已由上面的
+    「找得到就帶圖」測試守住。閘若連 findings 的 carry 也擋，每天的小 rebuild 會被誤擋。
+    """
+    builder = _builder()
+    source = tmp_path / "src"
+    crop = "review-ui/crops/paper-x/q004-dispute.png"
+    (source / crop).parent.mkdir(parents=True, exist_ok=True)
+    (source / crop).write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    _write_log(source, "question_ai_findings.jsonl", [
+        {"candidate_key": "k1", "crop": crop, "population": "dispute",
+         "reading_sha256": "abc", "finding": {"verdict": "DEFECT"}}])
+    work = _zero_crops_run(tmp_path, with_crops=False)
+    out = tmp_path / "queue"
+    builder.merge([str(work)], str(out), previous=[str(source)])
+    # The finding came with its crop, through the same merge the gate sits in.
+    assert (out / crop).is_file()
+
+
 # ---------------------------------------------------------------- the navigation tree
 
 def test_the_taxonomy_is_the_shape_the_review_ui_walks():
