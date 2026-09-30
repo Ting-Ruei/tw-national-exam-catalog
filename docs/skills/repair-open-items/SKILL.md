@@ -18,6 +18,43 @@ description: 這一輪維修改了什麼（每一項附量到的數字與量法�
 
 數字一律附「怎麼量的」。**沒量到的不要寫成事實**。
 
+## 0-bis. 2026-09-29/30 佇列重建＋crops 事故修復（owner 已准「就做吧」）
+
+owner 2026-09-29：「你幫我確定PR #4，然後依照你列的 你一句話就能動的 就做吧」——授權執行：
+(a) 核定 PR #4 下落、(b) 常駐機佇列重建（79,090 題＋`question_page`）、(c) 站上討論區下線、
+(d) 刷新鎖推站、(e) daemon 恢復與 occamy KV（此兩項**未核**，見 3.10／3.11）、
+(f) `disputed_filter`／`startup_navigation` 處置（未決，見 3.12）。
+
+### 這一輪做了什麼（每一項附量法）
+
+| # | 做了什麼 | 檔案／指令 | 量到的結果（量法） |
+|---|---|---|---|
+| 1 | PR #4 核定：**已吸收進 main，無可搶救** | `git merge-base`＋golden 檔 diff | head `2e3fc873d` 不是 main 祖先，但其實質全在：`_SUP_LETTERS`／`_SUB_LETTERS`／`_OFFSET_WHITESPACE`／`_body_centre` 經 `d3b70e2`（超集，另加 `_OFFSET_BLOCKING_PUNCTUATION`＋`_BODY_SIZE_TOLERANCE`）。PR4 golden vs main golden **diff = 0 行**。判定評論：PR #4 issue comment 5891371863 |
+| 2 | 交接紀錄成冊 | PR #16（`agent/handoff-record-20260929`，3ca3214） | 三份 skill 記錄（repair-open-items §6／design-repair-agent P.7／status 附錄）；**待 owner 合併** |
+| 3 | 佇列重建（筆電、純確定性、**零模型呼叫**） | `batch_package.py --category <8 類> --work /tmp/qbr-rebuild` | 995 卷 glob 問世：**packaged 985**／blocked 10（S3 `options-not-four`／`answer-not-on-sheet`、S6 validator；與 0921 行為**逐卷相同**）。有產出的卷 **989 ＝ live 卷集**（差集雙向 = 0）。每卷 ~0.8s（log 計時） |
+| 4 | 佇列合併（原地重建，承接自動） | `build_review_queue.py --work /tmp/qbr-rebuild --out data/review-queues/live` | **989 卷 79,090 題**、0 issue rows；**承接 128,980 筆**、orphaned 48（計數保留）；finding crops「missing 18,976（already present 1,231）」——這行後來變成 §0-bis 的第 4 列事故 |
+| 5 | 站上部署＋重啟 | `QBR_STATION=192.168.10.70 deploy_station.sh --queue --restart` | 站上 candidates **79,090 列、100% 帶 `question_page`**（ssh python 逐列查 `metadata`）；人工事件 **20,329 完好**（備份 5 檔 → `backups/*.20260929-215837.bak`）；容器 Up (healthy)；`/v2` → 200 |
+| 6 | 抽檢 6 題 | pymupdf 對官方 PDF | Q7/10/20/42/51/69（1152_醫事檢驗師_生物化學與臨床生化學）：宣稱頁 2/2/4/8/9/12 **逐題 token 命中**；Q42 題幹「超氧化物歧化酶…細胞色素氧化酶」與官方頁面文字逐字一致 |
+| 7 | **事故：`--delete` 刪了站上 finding crops** | 見 `deploy_station.sh` 舊第 3 點 | 筆電重建後 crops **5,047** vs 站上 **21,543** 差額＝站上裁的證據圖；`--delete` 刪掉後 finding crops present **1,002**／missing **18,807**（ssh python 逐筆 os.path.exists） |
+| 8 | **修復：純幾何重切** | `confirm_dispute.crop_for(pdf, qn, dpi=200)`（不需模型；量法：`extract_cells_a`→`band_rows`→`crop_rows`） | 重切 **16,443** 張（280 卷、20 分鐘、零失敗）；只增不刪 rsync 推回：站上 **present 19,809／missing 0**；crops 21,490 png |
+| 9 | 防復發 | PR #17（`agent/station-queue-rebuild-20260929`，670e205） | `deploy_station.sh`：主同步 `--exclude=crops/`，另加一條**不帶 `--delete`** 的 crops rsync。合併前下一次重建會重演刪除 |
+| 10 | 刷新鎖隨部署生效 | 容器重建（同一個 `--restart`） | `S.scopeRequest` 在 main 的 `01-core.js`；重啟後站上跑的就是新容器 |
+
+### 這一輪的取捨
+
+- **重建在筆電跑、站上只收佇列**：golden path/batch_package 是純 PDF 計算；站上只需停機 rsync＋重啟的時間。
+- **刪後的證據圖用「重新裁切」而非「還原備份」**：站上備份目錄無 crops、無 Time Machine snapshot；crop_for 是同一個受測定義的重推導（200 dpi 同參），不是猜想。
+- **crops 後續一律只增不刪**：刪除權交給未來真正的重建判準，不給 rsync。
+
+### 站上狀態（2026-09-30 清晨量）
+
+- `qbr-review-ui` Up since 2026-09-29 21:58（healthy）；daemon/掃描行程 **0**（`ps` 計數）；station disk 142Gi free。
+- 事件流：question_review_events 20,329／question_ai_findings 107,991（rsync 排除清單保住；方向＝站上是家）。
+- PR 開著：#16（交接紀錄）、#17（crops 增量 rsync）——**都待 owner 合併**。
+- 筆電本地unittest discover OK（skipped=8）；qbr pytest 788 passed／18 skipped（merge 前量）。
+
+---
+
 ## 0. 2026-09-26 治理與資料整理階段交接
 
 ### 已確認的 interim 決定
@@ -111,6 +148,22 @@ description: 這一輪維修改了什麼（每一項附量到的數字與量法�
 ### 3.9 已知未解（不是這一輪造成的）
 - 重建候選檔時服務仍開著 ⇒ 列表與檔案短暫不一致（`qbr/reports/review_record_safety.md`、「Pause the service during a rebuild」）。今天三個排隊視窗也會經過這條路。
 - `qbr/scripts/repair_daemon.sh` 的 `busy()` 把常駐迴圈自己算進去 ⇒ 排隊視窗在迴圈活著時空轉（今天實測：30 分鐘上限）。**要改的是 `busy()` 的定義，不是加長等待。**
+
+### 3.10 站上 daemon 恢復（未核，不啟動）
+- **量到的事實**：站上 daemon/掃描行程 **0**（`ps` 計數，2026-09-29）；plist 狀態合併後未驗證。
+- **啟動前必須**：lane 指向 occamy（不是 DGX）、`QBR_ALLOW_EXTERNAL_LLM` 未設定（charter）。
+- **要 owner 決**：何時重啟、lane 參數。
+
+### 3.11 occamy KV 擴容（未核，擱置）
+- **量到的事實**：重建（batch_package/golden_path）是純確定性，**不需要模型**；KV 65536 現值對佇列重建無影響。
+- **硬理由只剩**：reflow 全卷預算 156k → `CTX_MLX=131072 occamy restart fit6`。**要 owner 決**是否值得。
+
+### 3.12 兩支未接手的測試檔（未決）
+- `tests/test_review_ui_disputed_filter.py`、`tests/test_review_ui_startup_navigation.py`（pytest 風格，unittest discover 從未收）。**要 owner 決**：重寫成 unittest 還是放棄。
+
+### 3.13 站上錯題討論區下線（5.3 決定「廢掉、沙盒穩定後補回」；介面移除待一句話）
+- **量到的事實**：v2.html 第 733 行 `data-area="discuss"` 按鈕（v2.html L733）＋ `#areaDiscuss` 區塊（L829）＋ `04-area-discuss.js` `<script>`；下線＝拿掉這三處＋`03-areas.js` 四個註冊表的 `discuss` 項＋再度 `--restart`（站上 G2/G3 已得「就做吧」的方向，但**移除本身 owner 尚未點頭**——P.3 保留的問題）。
+- **要 owner 決**：現在就拿掉，或沙盒穩定後再說。
 
 ---
 
