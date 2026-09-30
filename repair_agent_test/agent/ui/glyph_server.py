@@ -51,6 +51,7 @@ PAGE = r"""<!doctype html>
   .card { display:flex; align-items:baseline; gap:12px; background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin:8px 0; cursor:pointer; }
   .card.approved { border-color:var(--ok); box-shadow:inset 3px 0 0 var(--ok); }
   .card.rejected { border-color:var(--bad); box-shadow:inset 3px 0 0 var(--bad); }
+  .card.deferred { opacity:.55; background:#fbf8f2; cursor:not-allowed; }
   .no { color:var(--muted); font-size:12px; width:40px; flex:none; }
   .glyph { font-size:22px; width:70px; text-align:center; flex:none; font-family:serif; }
   .glyph.to { color:var(--ok); font-weight:600; }
@@ -95,12 +96,15 @@ PAGE = r"""<!doctype html>
 <script>
 let rows = [], decided = {}, pending = false;
 function hex(c){ return [...c].map(x => 'U+' + x.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')).join(' '); }
+function decidedRows(){ return rows.filter(r => !r.deferred); }
 function tally(){
-  const yes = Object.values(decided).filter(v => v===1).length,
-        no = Object.values(decided).filter(v => v===-1).length,
-        none = rows.length - yes - no;
+  const pool = decidedRows();
+  const yes = pool.filter(r => decided[r.no]===1).length,
+        no = pool.filter(r => decided[r.no]===-1).length,
+        none = pool.length - yes - no;
+  const deferred = rows.length - pool.length;
   document.getElementById('tally').innerHTML =
-    `<b class="ok">同意 ${yes}</b><b class="bad">退回 ${no}</b><b>未決 ${none}</b>`;
+    `<b class="ok">同意 ${yes}</b><b class="bad">退回 ${no}</b><b>未決 ${none}</b><b>另案（記法轉換）${deferred}</b>`;
   document.getElementById('submitBtn').disabled = pending || (yes+no)===0;
 }
 function draw(){
@@ -113,7 +117,10 @@ function draw(){
                || r.class.toLowerCase().includes(q) || sample.toLowerCase().includes(q)
                || String(r.no)==q)) continue;
     const card = document.createElement('div');
-    card.className = 'card' + (decided[r.no]===1?' approved':decided[r.no]===-1?' rejected':'');
+    card.className = 'card' + (r.deferred ? ' deferred' : decided[r.no]===1?' approved':decided[r.no]===-1?' rejected':'');
+    const state = r.deferred ? `<span class="meta" style="color:#8a5300">另案：記法轉換（折＋<code>&lt;sup&gt;</code> 補位）；不在這張表決 →</span>`
+                             : `<span class="verdict"><button class="yes" onclick="event.stopPropagation();dec(${r.no},1,${r.questions})">同意</button>`
+                               + `<button class="no" onclick="event.stopPropagation();dec(${r.no},-1,${r.questions})">退回</button></span>`;
     card.innerHTML = `<span class="no">#${r.no}</span>`
       + `<span class="glyph" title="${hex(r.from)}">${esc(r.from)}</span>`
       + `<span class="arrow">→</span>`
@@ -121,9 +128,8 @@ function draw(){
       + `<span class="meta"><span class="cls">${esc(r.class||'?')}</span>`
       + `${r.questions} 題 · ${r.codepoint_changes} 位置（fields ${r.fields}）`
       + `<div class="keys">${esc(sample)}</div></span>`
-      + `<span class="verdict"><button class="yes" onclick="event.stopPropagation();dec(${r.no},1,${r.questions})">同意</button>`
-      + `<button class="no" onclick="event.stopPropagation();dec(${r.no},-1,${r.questions})">退回</button></span>`;
-    card.onclick = () => dec(r.no, decided[r.no] ? 0 : 1);
+      + state;
+    if (!r.deferred) card.onclick = () => dec(r.no, decided[r.no] ? 0 : 1);
     host.appendChild(card);
   }
   tally();
@@ -131,7 +137,7 @@ function draw(){
 function esc(s){ const d=document.createElement('div'); d.textContent=s??''; return d.innerHTML; }
 function dec(no, v){ decided[no] = v || undefined; if (!decided[no]) delete decided[no]; draw(); fetchRecords(); }
 function bulk(v){
-  if (v===0) decided = {}; else rows.forEach(r => decided[r.no] = v);
+  if (v===0) decided = {}; else decidedRows().forEach(r => decided[r.no] = v);
   draw();
 }
 async function fetchRecords(){
@@ -140,7 +146,7 @@ async function fetchRecords(){
   document.getElementById('records').textContent = j.records + ' 筆';
 }
 async function submit(){
-  const decisions = rows.filter(r => decided[r.no]!==undefined)
+  const decisions = rows.filter(r => !r.deferred && decided[r.no]!==undefined)
     .map(r => ({no:r.no, from:r.from, to:r.to, approved: decided[r.no]===1}));
   if (!decisions.length) return;
   pending = true; tally();
@@ -148,7 +154,8 @@ async function submit(){
     body: JSON.stringify({ by: document.querySelector('meta[name=owner]')?.content || 'owner-click-ui', decisions }) });
   const j = await res.json();
   pending = false; draw();
-  document.getElementById('flash').textContent = `已送出 ${decisions.length} 決定（紀錄 #${j.record}）`;
+  document.getElementById('flash').textContent = j.ok ? `已送出 ${decisions.length} 決定（紀錄 #${j.record}）`
+                                                      : '送出失敗：' + (j.error || '');
   setTimeout(()=>{ document.getElementById('flash').textContent=''; }, 6000);
   fetchRecords();
 }
@@ -156,7 +163,12 @@ async function submit(){
   rows = await (await fetch('/api/table')).json();
   rows.forEach(r => r.sample_keys = (r.question_keys||[]).slice(0,4));
   document.getElementById('count').textContent = `${rows.length} 個映射 · ${rows.reduce((a,r)=>a+r.codepoint_changes,0)} 個位置`;
-  await fetchRecords();
+  // 載入時以**最後一筆**決定紀錄還原畫面（append-only；同一編號以最後一次送出為準——設計者不用重看一次）。
+  const latest = await (await fetch('/api/latest')).json();
+  if (latest.latest && Array.isArray(latest.latest.decisions)) {
+    for (const d of latest.latest.decisions) decided[d.no] = d.approved ? 1 : -1;
+  }
+  document.getElementById('records').textContent = latest.records + ' 筆';
   draw();
 })();
 </script>
@@ -188,6 +200,10 @@ class GlyphHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/table":
             rows = [json.loads(line) for line in TABLE.read_text(encoding="utf-8").splitlines() if line.strip()]
+            # 修飾字母（英文字母）列＝**另案：記法轉換**（設計者 2026-09-30 原話「只有大小有差」，
+            # open-items §2.3：折＋<sup>/<sub> 補位要一起落地才算正確）。這一表只負責「折碼放行」，
+            # 所以這些列**不進點選**：送出會被 409 拒收，頁面也只叫它「另案」。
+            rows = [{**row, "deferred": row.get("class") == "modifier-letter"} for row in rows]
             body = json.dumps(rows, ensure_ascii=False).encode("utf-8")
             self._send(body, "application/json; charset=utf-8")
             return
@@ -198,7 +214,18 @@ class GlyphHandler(BaseHTTPRequestHandler):
                     count = sum(1 for line in fh if line.strip())
             self._send(json.dumps({"records": count}).encode("utf-8"), "application/json; charset=utf-8")
             return
-        self.send_error(404, "only /, /api/table, /api/records, /api/decisions")
+        if path == "/api/latest":
+            lines = []
+            if APPROVALS.exists():
+                lines = [line for line in APPROVALS.read_text(encoding="utf-8").splitlines() if line.strip()]
+            # 記錄是 append-only，同一個編號以**最後一次**送出為準（§2.3）：
+            # 頁面載入時以最後一筆決定還原畫面，設計者不用重看一次。
+            record = json.loads(lines[-1]) if lines else None
+            self._send(json.dumps({"records": len(lines), "latest": record},
+                                  ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+            return
+        self.send_error(404, "only /, /api/table, /api/records, /api/latest, /api/decisions")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         if self.path.split("?", 1)[0] != "/api/decisions":
@@ -218,6 +245,12 @@ class GlyphHandler(BaseHTTPRequestHandler):
                 row = table[int(item["no"])]
             except (KeyError, TypeError, ValueError):
                 raise SystemExit
+            if row.get("class") == "modifier-letter":
+                # 修飾字母＝另案（記法轉換；open-items §2.3）：折＋<sup>/<sub> 補位要一起落地，
+                # 這張「折碼放行」表不收它的決定——設計者答應「未來核可在正式核可面」。
+                self.send_error(409, f"#{item['no']} 是修飾字母（英文字母）＝另案的記法轉換，"
+                                     "不在這張表放行（open-items §2.8 正式核可面）")
+                return
             if item["from"] != row["from"] or item["to"] != row["to"]:
                 self.send_error(409, f"decision #{item['no']} does not match the table (from/to drifted)")
                 return
