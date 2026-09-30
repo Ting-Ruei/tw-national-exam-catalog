@@ -18,6 +18,43 @@ description: 這一輪維修改了什麼（每一項附量到的數字與量法�
 
 數字一律附「怎麼量的」。**沒量到的不要寫成事實**。
 
+## 0-bis. 2026-09-29/30 佇列重建＋crops 事故修復（owner 已准「就做吧」）
+
+owner 2026-09-29：「你幫我確定PR #4，然後依照你列的 你一句話就能動的 就做吧」——授權執行：
+(a) 核定 PR #4 下落、(b) 常駐機佇列重建（79,090 題＋`question_page`）、(c) 站上討論區下線、
+(d) 刷新鎖推站、(e) daemon 恢復與 occamy KV（此兩項**未核**，見 3.10／3.11）、
+(f) `disputed_filter`／`startup_navigation` 處置（未決，見 3.12）。
+
+### 這一輪做了什麼（每一項附量法）
+
+| # | 做了什麼 | 檔案／指令 | 量到的結果（量法） |
+|---|---|---|---|
+| 1 | PR #4 核定：**已吸收進 main，無可搶救** | `git merge-base`＋golden 檔 diff | head `2e3fc873d` 不是 main 祖先，但其實質全在：`_SUP_LETTERS`／`_SUB_LETTERS`／`_OFFSET_WHITESPACE`／`_body_centre` 經 `d3b70e2`（超集，另加 `_OFFSET_BLOCKING_PUNCTUATION`＋`_BODY_SIZE_TOLERANCE`）。PR4 golden vs main golden **diff = 0 行**。判定評論：PR #4 issue comment 5891371863 |
+| 2 | 交接紀錄成冊 | PR #16（`agent/handoff-record-20260929`，3ca3214） | 三份 skill 記錄（repair-open-items §6／design-repair-agent P.7／status 附錄）；**待 owner 合併** |
+| 3 | 佇列重建（筆電、純確定性、**零模型呼叫**） | `batch_package.py --category <8 類> --work /tmp/qbr-rebuild` | 995 卷 glob 問世：**packaged 985**／blocked 10（S3 `options-not-four`／`answer-not-on-sheet`、S6 validator；與 0921 行為**逐卷相同**）。有產出的卷 **989 ＝ live 卷集**（差集雙向 = 0）。每卷 ~0.8s（log 計時） |
+| 4 | 佇列合併（原地重建，承接自動） | `build_review_queue.py --work /tmp/qbr-rebuild --out data/review-queues/live` | **989 卷 79,090 題**、0 issue rows；**承接 128,980 筆**、orphaned 48（計數保留）；finding crops「missing 18,976（already present 1,231）」——這行後來變成 §0-bis 的第 4 列事故 |
+| 5 | 站上部署＋重啟 | `QBR_STATION=192.168.10.70 deploy_station.sh --queue --restart` | 站上 candidates **79,090 列、100% 帶 `question_page`**（ssh python 逐列查 `metadata`）；人工事件 **20,329 完好**（備份 5 檔 → `backups/*.20260929-215837.bak`）；容器 Up (healthy)；`/v2` → 200 |
+| 6 | 抽檢 6 題 | pymupdf 對官方 PDF | Q7/10/20/42/51/69（1152_醫事檢驗師_生物化學與臨床生化學）：宣稱頁 2/2/4/8/9/12 **逐題 token 命中**；Q42 題幹「超氧化物歧化酶…細胞色素氧化酶」與官方頁面文字逐字一致 |
+| 7 | **事故：`--delete` 刪了站上 finding crops** | 見 `deploy_station.sh` 舊第 3 點 | 筆電重建後 crops **5,047** vs 站上 **21,543** 差額＝站上裁的證據圖；`--delete` 刪掉後 finding crops present **1,002**／missing **18,807**（ssh python 逐筆 os.path.exists） |
+| 8 | **修復：純幾何重切** | `confirm_dispute.crop_for(pdf, qn, dpi=200)`（不需模型；量法：`extract_cells_a`→`band_rows`→`crop_rows`） | 重切 **16,443** 張（280 卷、20 分鐘、零失敗）；只增不刪 rsync 推回：站上 **present 19,809／missing 0**；crops 21,490 png |
+| 9 | 防復發 | PR #17（`agent/station-queue-rebuild-20260929`，670e205） | `deploy_station.sh`：主同步 `--exclude=crops/`，另加一條**不帶 `--delete`** 的 crops rsync。合併前下一次重建會重演刪除 |
+| 10 | 刷新鎖隨部署生效 | 容器重建（同一個 `--restart`） | `S.scopeRequest` 在 main 的 `01-core.js`；重啟後站上跑的就是新容器 |
+
+### 這一輪的取捨
+
+- **重建在筆電跑、站上只收佇列**：golden path/batch_package 是純 PDF 計算；站上只需停機 rsync＋重啟的時間。
+- **刪後的證據圖用「重新裁切」而非「還原備份」**：站上備份目錄無 crops、無 Time Machine snapshot；crop_for 是同一個受測定義的重推導（200 dpi 同參），不是猜想。
+- **crops 後續一律只增不刪**：刪除權交給未來真正的重建判準，不給 rsync。
+
+### 站上狀態（2026-09-30 清晨量）
+
+- `qbr-review-ui` Up since 2026-09-29 21:58（healthy）；daemon/掃描行程 **0**（`ps` 計數）；station disk 142Gi free。
+- 事件流：question_review_events 20,329／question_ai_findings 107,991（rsync 排除清單保住；方向＝站上是家）。
+- PR 開著：#16（交接紀錄）、#17（crops 增量 rsync）——**都待 owner 合併**。
+- 筆電本地unittest discover OK（skipped=8）；qbr pytest 788 passed／18 skipped（merge 前量）。
+
+---
+
 ## 0. 2026-09-26 治理與資料整理階段交接
 
 ### 已確認的 interim 決定
@@ -112,6 +149,22 @@ description: 這一輪維修改了什麼（每一項附量到的數字與量法�
 - 重建候選檔時服務仍開著 ⇒ 列表與檔案短暫不一致（`qbr/reports/review_record_safety.md`、「Pause the service during a rebuild」）。今天三個排隊視窗也會經過這條路。
 - `qbr/scripts/repair_daemon.sh` 的 `busy()` 把常駐迴圈自己算進去 ⇒ 排隊視窗在迴圈活著時空轉（今天實測：30 分鐘上限）。**要改的是 `busy()` 的定義，不是加長等待。**
 
+### 3.10 站上 daemon 恢復（未核，不啟動）
+- **量到的事實**：站上 daemon/掃描行程 **0**（`ps` 計數，2026-09-29）；plist 狀態合併後未驗證。
+- **啟動前必須**：lane 指向 occamy（不是 DGX）、`QBR_ALLOW_EXTERNAL_LLM` 未設定（charter）。
+- **要 owner 決**：何時重啟、lane 參數。
+
+### 3.11 occamy KV 擴容（未核，擱置）
+- **量到的事實**：重建（batch_package/golden_path）是純確定性，**不需要模型**；KV 65536 現值對佇列重建無影響。
+- **硬理由只剩**：reflow 全卷預算 156k → `CTX_MLX=131072 occamy restart fit6`。**要 owner 決**是否值得。
+
+### 3.12 兩支未接手的測試檔（未決）
+- `tests/test_review_ui_disputed_filter.py`、`tests/test_review_ui_startup_navigation.py`（pytest 風格，unittest discover 從未收）。**要 owner 決**：重寫成 unittest 還是放棄。
+
+### 3.13 站上錯題討論區下線（5.3 決定「廢掉、沙盒穩定後補回」；介面移除待一句話）
+- **量到的事實**：v2.html 第 733 行 `data-area="discuss"` 按鈕（v2.html L733）＋ `#areaDiscuss` 區塊（L829）＋ `04-area-discuss.js` `<script>`；下線＝拿掉這三處＋`03-areas.js` 四個註冊表的 `discuss` 項＋再度 `--restart`（站上 G2/G3 已得「就做吧」的方向，但**移除本身 owner 尚未點頭**——P.3 保留的問題）。
+- **要 owner 決**：現在就拿掉，或沙盒穩定後再說。
+
 ---
 
 ## 4. 這一輪我做的取捨（你可以推翻）
@@ -159,3 +212,42 @@ ssh macstudio '/usr/bin/tail -40 /Users/tim/qbr-review/code/qbr/runs/repair_daem
 - 不確定從哪開始：[`project_map`](../../../../project_map) 是整棵樹的可點擊地圖
 - 卡住時的回溯路徑：技能 → 本層 `AGENTS.md` → `project_map` 入口文件鏈 → 傘層 → charter
 <!-- /project-map:belongs-to -->
+
+## 6. 2026-09-29 下午：合併後收斂（PR #15，六個 commit，工作樹歸零）
+
+設計者下達「1+2」：①工作樹與剛合完的 main 對齊、②重跑 golden_path 讓 `question_page`
+真的進 candidates。兩件都做完，並把全部積壓收斂成 **六個 commit、一個 PR**：
+
+**PR：https://github.com/Ting-Ruei/tw-national-exam-catalog/pull/15**
+（`agent/repair-agent-pi-sdk-20260928` → `main`；governance / unit-tests / qbr-tests **三綠**，
+2026-09-29 17:05 由 GitHub Linux runner 親跑。**待設計者按 Merge。**）
+
+| Commit | 內容 | 量到的證據 |
+|---|---|---|
+| `ceaa99c` | 對齊 main：把四個「站上在跑、git 沒有」的模組還原成提交（`vision`/`reread`/`reflow`/`engines`：B2 跨頁截圖縫合、`quoted_lines_region` 表格裁切、occamy-6bit 預設、**出網閘門**＋外部呼叫稽核流）；`package.py` 答案 lineage 文件欄位＋`paper_key` 正規化；`golden_path.paper_metadata()` 定位解析＋`--subject-code`＋三份 PDF sha256 進 meta；9 檔退休 | pytest 28 failed → **0**（788 passed／18 skipped）；golden 檔 md5 `4b899e1e…` 兩側相同（未動） |
+| `fcac6de` | governance **1.1.0**：workflow_state 從退役的 AI395 SQL 狀態機改指「選定 QBR 佇列＋可修訂的 AI 自有結果」；production writer 指向 Mac Studio 網站 runtime；catalog PostgreSQL 標記 `configured: false` | `validate_agent_governance.py` passed |
+| `0d8a61b` | 退休 ai395 時代的 audit/probe 線：scripts/tests/deploy 瘦身＋13 個 `.project-map-ignore` 退休標記 | −15,357 行；unittest discover **OK (skipped=8)** |
+| `fe764ef` | `docs/README` 改為 active 路由（active 入口才授權部署/writer/模型）；兩代歷史文件一一蓋「已退休」章（不靜默改寫） | 每個 active 路由指向存在的檔案 |
+| `a7388be` | QBR 抽取線（orchestrator/context_budget/salvage/scan_pharmacist_track…）＋review UI v2 **區塊拆分**（`03-area-answer.js`、`03-area-principles.js`；原則→獨立頁、討論區只留註記）＋`rowReviewAction` 人的決定先問＋`S.scopeRequest` 刷新鎖＋server 模組 (+969 行)＋agent bridge/`question_page` | 新測試 18 檔全帶負對照；`test_v2_navigation.mjs` 對真 80 題佇列「**全部符合**」 |
+| `4cbde31` | 本地審查工具鏈（`local_review.sh`/`manage_local_review.py`/evidence 三支）＋站上 lane：站名改 **Tailscale**（`timmac-studio`）、`verify-mounts.sh`、compose 註解對齊治理 | 六支 shell `bash -n` 全過 |
+
+### 這一輪量到的新事實
+
+1. **golden 檔的 `category_code` 全是錯的**：`moex:115090:308:0504:1` 舊 inline 解析把兩個
+   code 都讀成 bits[3]（`"0504"`，80/80），`batch_package` 自己的 resolver 卻讀 bits[2] 為
+   category——`paper_metadata()` 修掉這個分家。修正後單卷 smoke：80/80 `question_page`
+   為整數（頁 1–14、無 null），**隨機抽 6 題對照官方 PDF（fitz 實測）全部相符**。
+2. **qbr 建包器不寫 `package_content_sha256`** ⇒ validator 必報 mismatch（單卷 smoke 第一次
+   跑 exit=1 量到）。已在 `package.build_package` 補上（算法照 `export_..._from_postgres.py:936`），
+   重跑 exit=0、structural findings = 0（governance finding＝review-status 未審，預期）。
+3. **藥師(一)稽核跑完了**：99/99 全 rc=0（帳本 `/tmp/agent_perf/audit/summary.tsv` 100 行；
+   單題 66–749 秒），LaunchAgent 自然退出。`agent_feedback.jsonl` 92 行＝沙盒自有流。
+4. **gh token 的病灶**：`~/.config/gh/hosts.yml` 在 09-26 16:24 被寫成 86 bytes 的**無 token
+   空殼**（`token in default is invalid` 的根因）。09-29 裝置授權重登後 token 直寫 hosts.yml
+   （`gho_…`，scopes repo/read:org/gist），`gh api user` 驗證通過、PR #15 三綠。
+   **下次再失效：先 `stat ~/.config/gh/hosts.yml` 看 mtime 抓重寫者。**
+
+### 等設計者（更新：P.6 §2 的兩題仍在，加一題）
+
+3. **整佇列 79,090 題重建進站上 candidates**（讓 `question_page` 進站上）＝站上停服務重建
+   （G3，`review_record_safety.md`：rebuild 前暫停服務）、PR #15 併入後跑。smoke 已全綠。
