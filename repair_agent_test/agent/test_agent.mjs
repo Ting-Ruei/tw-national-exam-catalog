@@ -18,7 +18,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, mkdtempSync, writeFileSync, mkdirSync,
+         openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -298,6 +299,137 @@ test("the judgement store is the sandbox stream, not a human review stream", asy
     "the agent must never append to the human review stream");
 });
 
+/** The queue head's first candidate — a 4 KB head read, never a 300 MB stream into memory. */
+function queueHeadKey() {
+  const fd = openSync(join(PATHS.CATALOG, "qbr", "data", "review-queues", "live", "review-ui",
+                           "candidates.jsonl"), "r");
+  const head = Buffer.alloc(4096);
+  readSync(fd, head, 0, 4096, 0);
+  closeSync(fd);
+  return JSON.parse(head.toString("utf8").split("\n")[0]).candidate_key;
+}
+
+/**
+ * A judgement row says **when, and in what context**, it was written — whoever wrote it.
+ *
+ * 2.1 (2026-09-30): the agent's rows carried no `at` at all, and neither writer carried a run /
+ * session id or a prompt version — two writers of one stream were two shapes, and no row could
+ * answer「這一判是何時、在哪個 run 做的」. One producer, `bridge.judgement_envelope()`, now stamps
+ * both writers; the agent and the chat box name the run in the environment, and a direct designer
+ * rating (no run) carries the honest empty string. The negative control is the very row the old
+ * code wrote: no `at`, no ids, no schema on the designer's side.
+ */
+test("every judgement row is stamped with when and in what context it was written", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+
+  const KEY = queueHeadKey();
+  assert.ok(KEY, "the queue head yields a candidate to judge");
+
+  // Drive the bridge — what must hold is the row it writes, not the call site.
+  const runBridge = (extraEnv = {}) => run(PATHS.PYTHON, [PATHS.BRIDGE, "feedback",
+    "--key", KEY, "--rating", "up", "--reason", "stamp shape check"],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_RUN_ID: "test-run-01",
+             REPAIR_AGENT_SESSION_ID: "sess-01",
+             REPAIR_AGENT_PROMPT_VERSION: "pv-test", ...extraEnv } });
+
+  const { stdout } = await runBridge();
+  const row = JSON.parse(stdout).appended;
+  assert.equal(row.run_id, "test-run-01", "the row names the run that made it");
+  assert.equal(row.session_id, "sess-01", "the row names the conversation it was made in");
+  assert.equal(row.prompt_version, "pv-test", "the row names the prompt it answered to");
+  assert.match(row.at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/, "and says when");
+  assert.equal(row.schema, "repair_agent_test/agent_feedback v2", "the shape says its own version");
+
+  // The designer's writer stamps with the **same producer**: same columns, and since the POST
+  // carries no run, the run id is the honest empty string rather than a silently wrong one.
+  const uiScript = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "out = mod.append_judgement({'candidate_key': sys.argv[2], 'rating': 'up',",
+    "  'reason': 'ui stamp check'})",
+    "print(json.dumps(out, ensure_ascii=False))",
+  ].join("\n");
+  const { stdout: uiOut } = await run(PATHS.PYTHON, ["-c", uiScript,
+    join(AGENT_DIR, "ui", "server.py"), KEY],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+  const uiRow = JSON.parse(uiOut);
+  for (const column of ["at", "run_id", "session_id", "prompt_version"]) {
+    assert.ok(column in uiRow, `the designer's row carries ${column} too`);
+  }
+  assert.equal(uiRow.run_id, "", "no run may be invented for a direct designer rating");
+  assert.match(uiRow.at, /^\d{4}-\d{2}-\d{2}T/, "the designer's row is still stamped with when");
+  assert.equal(uiRow.schema, row.schema, "one stream, one schema string, both writers");
+  assert.equal(uiRow.action, "ai_feedback", "the designer's row is self-describing too");
+
+  // The wiring that hands the stamp its values: the run names itself, and the chat box names the
+  // session the ask came in on (source checks here; the runtime shape is asserted above).
+  const agentSource = readFileSync(new URL("./agent.mjs", import.meta.url), "utf8");
+  assert.match(agentSource, /REPAIR_AGENT_RUN_ID/, "the run names itself to the bridge");
+  assert.match(agentSource, /manager\.getSessionId/, "the run names its Pi session");
+  const chatSource = readFileSync(new URL("./ui/chat.mjs", import.meta.url), "utf8");
+  assert.match(chatSource, /REPAIR_AGENT_SESSION_ID = entry\.manager\.getSessionId/,
+    "a chat judgement names this question's session, not the process's default");
+});
+
+/**
+ * A note is optional for the designer, never for the agent.
+ *
+ * Old UI (measured 2026-09-30): a judgement without prose was refused in two places — the
+ * browser's `judgeKey` put up 「請先寫下判讀依據」 and the server raised `reason is required`. v2's
+ * own `A`/`R` never asked for prose, and the designer ruled his decision **is** the verdict
+ * (workplan 2.2: 判定免註解). The asymmetry is the point: a human rating and a machine rating are
+ * different authorships with different burdens, so the burden moved to the machine — both writers
+ * are driven for real here, each with the case that must fail on the old behaviour.
+ */
+test("a note is optional for the designer, never for the agent", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const KEY = queueHeadKey();
+
+  // The designer's writer, through the real server module: a rating with an **empty** note must
+  // append and come back stamped (the old server raised before writing a byte).
+  const uiScript = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "out = mod.append_judgement({'candidate_key': sys.argv[2], 'rating': 'up', 'reason': ''})",
+    "print(json.dumps(out, ensure_ascii=False))",
+  ].join("\n");
+  const { stdout: uiOut } = await run(PATHS.PYTHON, ["-c", uiScript,
+    join(AGENT_DIR, "ui", "server.py"), KEY],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+  const uiRow = JSON.parse(uiOut);
+  assert.ok(uiRow.at, "the bare designer rating still carries its stamp");
+  assert.equal(uiRow.reason, "", "and its honest empty note");
+
+  // The agent's writer: a bare rating is refused — the case that must fail on the old behaviour,
+  // where a machine could write an unevidenced rating and it would land as if it were a judgement.
+  // A **human** source (the rare CLI path where the designer types the rating himself) still goes
+  // through, so the gate is on authorship, not on the column.
+  const runBridge = (extraArgs, extraEnv = {}) => run(PATHS.PYTHON,
+    [PATHS.BRIDGE, "feedback", "--key", KEY, "--rating", "up", ...extraArgs],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...extraEnv } });
+
+  await assert.rejects(
+    runBridge(["--source", "agent"]),
+    (error) => {
+      assert.match(String(error.stdout || ""), /--reason/,
+        "the refusal must say what is missing");
+      return true;
+    },
+    "the agent must not write a rating with no basis");
+
+  // And the same bare input under the human source appends: the gate follows the author.
+  const { stdout: humanOut } = await runBridge(["--source", "human"]);
+  assert.equal(JSON.parse(humanOut).appended.reason, "",
+    "a human bare rating goes through — the gate is on authorship");
+});
+
 test("the Pi providers are derived from engines.py, not written a second time", () => {
   const source = readFileSync(new URL("./lib/session.mjs", import.meta.url), "utf8");
   assert.match(source, /engines\.endpoints\(\)/,
@@ -353,8 +485,221 @@ test("the UI writes to the file, and only the file", () => {
   // could write a reviewer's decision would be an agent impersonating a human by another route.
   assert.equal(/question_review_events\.jsonl[^\n]*"a"/.test(server), false,
     "the UI must not append to the human review stream");
-  // A judgement with no basis cannot be learned from, so the server must refuse it.
-  assert.match(server, /reason is required/);
+  // The designer's rating is one key, and the note is optional (2.2, 2026-09-30 判定免註解) —
+  // the server must not refuse it. The agent's rating carries the burden instead: the bridge
+  // refuses an agent judgement with no basis (its own contract below).
+  assert.equal(/reason is required/.test(server), false,
+    "a one-key designer rating must write itself, note or no note");
+});
+
+/**
+ * 「刷新此題」 re-draws the question area, and the list keeps its place.
+ *
+ * The old flow (measured 2026-09-30): after a run the designer pressed F5 — which threw away his
+ * filters, his selected row and the list scroll: his way back to the question he was looking at.
+ * The contract (workplan 2.3): a button in the question pane, an auto re-fetch when the run's turn
+ * ends, and a lamp that says "data may be changing" while it runs.
+ */
+test("刷新此題 re-fetches the question, list untouched, run completion refreshes itself", () => {
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="refresh-question"/, "the question pane carries the button");
+  assert.match(html, /refresh-question"\)\.addEventListener\("click"/, "and it is wired to a click");
+  // Negative control: the page had no such button before today — every match below is new code.
+  assert.match(html, /refreshQuestion\("run"\)/, "a finished run re-fetches without a click");
+
+  // A lamp that turns on and never off is a lamp nobody trusts: it lights in `askChat` and goes
+  // out in the send's `finally`, because a turn that died mid-stream never saw its `done`.
+  assert.match(html, /classList\.add\("watching"\)/, "the lamp lights while the run is in flight");
+  const finallyBlock = html.slice(html.indexOf("} finally {"));
+  assert.match(finallyBlock, /classList\.remove\("watching"\)/,
+    "and a dead stream still turns it off");
+
+  // It re-walks `loadQuestion` and nothing around it: re-filtering the list would reorder what
+  // the designer is walking — the F5 behaviour this replaces.
+  const refreshStart = html.indexOf("async function refreshQuestion");
+  const refreshNext = html.indexOf("\nasync function", refreshStart + 10);
+  const refresh = html.slice(refreshStart, refreshNext);
+  assert.match(refresh, /loadQuestion\(\)/, "it re-reads the question from the source");
+  assert.equal(/loadList\(\)/.test(refresh), false,
+    "and must not re-filter the list — his place stays");
+});
+
+/**
+ * A repair proposal is the agent's own, in its own file — and writing one is not approving one.
+ *
+ * Rules the designer fixed 2026-09-30 (workplan 2.4): the agent **proposes, never applies**; a
+ * draft names 修法/插入點/依據 and its crop **with the crop's own checksum** (evidence that cannot
+ * be re-proved is a claim); several drafts may sit per question (多版可存); and none of that
+ * arrives a batch approval (不逐稿批) — the question's JSONL and the human ledger stay untouched.
+ * Negative controls: a draft with no 修法, and a crop citation to a file that does not exist —
+ * the two ways a confident-sounding proposal hides that it has neither substance nor evidence.
+ */
+test("propose_repair drafts evidence-bearing proposals to their own file, writes no answers", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { createHash } = await import("node:crypto");
+  const run = promisify(execFile);
+  const KEY = queueHeadKey();
+
+  // A draft through the real bridge, with a real crop citation carrying its real checksum.
+  const crop = join(SCRATCH, "draft-evidence.png");
+  writeFileSync(crop, Buffer.from("propose-repair-negative-control")); // contents, not format: the hash is the contract
+  const expectSha = createHash("sha256").update("propose-repair-negative-control").digest("hex");
+  const runPropose = (extra) => run(PATHS.PYTHON,
+    [PATHS.BRIDGE, "propose", "--key", KEY, "--fix", "抽取值改成「白色蠟」",
+     "--insert", "選項 B 的化學式行", "--basis", "紙本第 2 欄第 3 個結構式", ...extra],
+    { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout: first } = await runPropose(["--crop", crop]);
+  const row = JSON.parse(first).appended;
+  assert.equal(row.action, "repair_draft", "the stream's own action, so a draft is not a judgement");
+  assert.equal(row.status, "proposed", "writing a draft is not approving it");
+  assert.equal(row.insert, "選項 B 的化學式行", "插入點 travels with the draft");
+  assert.equal(row.crop.sha256, expectSha, "the crop citation is provable, not decorative");
+
+  // A second draft for the same question lands next to the first — revision, not overwrite.
+  const { stdout: second } = await runPropose([]);
+  const draftsFile = JSON.parse(second).drafts;
+  const onDisk = readFileSync(draftsFile, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(onDisk.length, 2, "multiple drafts may sit per question (多版可存)");
+  assert.ok(onDisk.every((r) => r.candidate_key === KEY), "and both belong to the question");
+
+  // Negative control: no 修法 → refused (argparse fails before the write); a crop citation
+  // without a file → refused by the bridge itself. Both names must reach the caller.
+  await assert.rejects(
+    run(PATHS.PYTHON, [PATHS.BRIDGE, "propose", "--key", KEY, "--insert", "x", "--basis", "y"],
+        { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }),
+    (error) => {
+      assert.match(String(error.stderr || "") + String(error.stdout || ""), /--fix/,
+        "the refusal must name what is missing");
+      return true;
+    },
+    "a draft with no 修法 is not actionable");
+  await assert.rejects(
+    runPropose(["--crop", join(SCRATCH, "does-not-exist.png")]),
+    (error) => { assert.match(String(error.stdout || ""), /does not exist/); return true; },
+    "a crop citation without a file is not evidence");
+
+  // The UI reads them — read-only: the server renders drafts into the question view and never
+  // writes the drafts file (the person's accept/return key is the only mover of a status). The
+  // check runs on executable lines only: the *docstring* that names the file while promising not
+  // to touch it is allowed to say so.
+  const server = readFileSync(new URL("./ui/server.py", import.meta.url), "utf8");
+  assert.match(server, /drafts = bridge\.drafts_for\(/, "the question view loads the drafts");
+  assert.match(server, /view\["drafts"\] = drafts/, "and it carries them into the view");
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /function renderDrafts\(/, "the drafts renderer exists");
+  assert.match(html, /\$\{renderDrafts\(question\)}/, "and it is actually called");
+  // Nothing after `append_judgement` may OPEN the drafts file for write — reading is allowed
+  // (the checksum lookup does exactly that), appending or rewriting is what a second writer means.
+  // Executable lines only: the docstring that names the file while promising not to touch it
+  // is allowed to say so.
+  const onlyServerWrite = stripDocstringsAndComments(
+    server.slice(server.indexOf("def append_judgement")));
+  const draftWrites = onlyServerWrite.split("\n").filter((ln) =>
+    /DRAFTS|repair_drafts/.test(ln) && /open\(/.test(ln) && /["'](a|w)[\+a-z]*["']/.test(ln));
+  assert.deepEqual(draftWrites, [], "nothing in the server appends or rewrites the drafts file");
+});
+
+/**
+ * The pass key writes the reviewer's ledger; the machine never gets one.
+ *
+ * 2026-09-30 (workplan 2.5): 「通過鍵在教學 pane、按即寫人審帳本（事件參照草稿 checksum；機器不得
+ * 代按）; 退回理由進規則候選」. The runtime proof drives the real server module with a redirected
+ * ledger, and the negative controls are the exact impersonations the rule forbids: a checksum that
+ * names no draft (a forged or stale decision), and a return with no reason — both refused before a
+ * byte is written. The 退回 lands in the learning stream with the draft's checksum attached, so
+ * the rule house (3.1) can harvest the reason without re-reading the drafts file.
+ */
+test("an accept points at a proven draft row; a return carries its rule raw material", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { createHash } = await import("node:crypto");
+  const run = promisify(execFile);
+  const KEY = queueHeadKey();
+
+  // The sandbox's own surfaces, all redirected: store (drafts + learning stream) and ledger.
+  const store = join(SCRATCH, "verdict-store");
+  const ledger = join(SCRATCH, "verdict-ledger.jsonl");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(ledger, ""); // append-only surface; the server refuses to invent one
+
+  const seed = promisify(execFile)(PATHS.PYTHON,
+    [PATHS.BRIDGE, "propose", "--key", KEY, "--fix", "把「hroblastosis」修成「fibroblastosis」",
+     "--insert", "題幹", "--basis", "紙本 f 音節；read_page 附圖"],
+    { timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: store } });
+  await seed;
+
+  // The reference is the SHA-256 of the draft's **own line** in the store — computed here from
+  // those exact bytes, so what the event carries is what the file said, byte for byte.
+  const draftsFile = join(store, "repair_drafts.jsonl");
+  const line = readFileSync(draftsFile, "utf8").split("\n")[0];
+  const lineSha = createHash("sha256").update(line, "utf8").digest("hex");
+
+  const SERVER_BOOT = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+  ].join("\n");
+  const runServer = (pyCode) => run(PATHS.PYTHON,
+    ["-c",
+     SERVER_BOOT + "\n" + pyCode + "\nprint(json.dumps(OUT, ensure_ascii=False))",
+     join(AGENT_DIR, "ui", "server.py")],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: store, REPAIR_AGENT_LEDGER: ledger } });
+
+  const { stdout: acceptOut } = await runServer(
+    `OUT = mod.append_accept({'key': ${JSON.stringify(KEY)}, 'draft_sha256': '${lineSha}', 'notes': '照 v2 的 A 流程'})`);
+  const accepted = JSON.parse(acceptOut).event;
+  assert.equal(accepted.action, "accept", "a sandbox verdict is a real review event");
+  assert.equal(accepted.reviewer, "local", "the decision is a human's — the ledger says so");
+  assert.equal(accepted.source, "sandbox_accept", "and it names the entry it was pressed from");
+  assert.equal(accepted.repair_draft_sha256, lineSha, "the event references the draft by checksum");
+  const onDisk = readFileSync(ledger, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(onDisk.length, 1, "exactly one event was written");
+  assert.ok(onDisk[0].created_at, "and it keeps the reviewer's own timestamp");
+
+  // Reading the verdict back marks the draft decided — from the ledger, never a shadow status.
+  const marks = await run(PATHS.PYTHON,
+    ["-c", SERVER_BOOT + `\nOUT = mod.sandbox_accepts_for(${JSON.stringify(KEY)})\nprint(json.dumps(OUT, ensure_ascii=False))`,
+     join(AGENT_DIR, "ui", "server.py")],
+    { timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: store, REPAIR_AGENT_LEDGER: ledger } });
+  assert.ok(JSON.parse(marks.stdout).some((e) => e.repair_draft_sha256 === lineSha),
+    "the drafts panel can see the accept where the ledger wrote it");
+
+  // Refusals: a checksum no draft carries must not write; an unreasoned return must not learn.
+  await assert.rejects(
+    runServer(`OUT = mod.append_accept({'key': ${JSON.stringify(KEY)}, 'draft_sha256': '${"f".repeat(64)}', 'notes': ''})`),
+    (error) => {
+      assert.match(String(error.stdout || "") + String(error.stderr || ""), /no draft of key/,
+        "the refusal must say what is wrong");
+      return true;
+    },
+    "a checksum that names nothing is a forged decision");
+  await assert.rejects(
+    runServer(`OUT = mod.append_return({'key': ${JSON.stringify(KEY)}, 'draft_sha256': '${lineSha}', 'reason': ''})`),
+    (error) => {
+      assert.match(String(error.stdout || "") + String(error.stderr || ""), /must say why/,
+        "the refusal must name the missing reason");
+      return true;
+    },
+    "the return's reason is the rule raw material; empty is refused");
+  const { stdout: returnOut } = await run(PATHS.PYTHON,
+    ["-c", SERVER_BOOT + `\nOUT = mod.append_return({'key': ${JSON.stringify(KEY)}, 'draft_sha256': '${lineSha}', 'reason': '選項斜體與紙本不符'})\nprint(json.dumps(OUT, ensure_ascii=False))`,
+     join(AGENT_DIR, "ui", "server.py")],
+    { timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: store, REPAIR_AGENT_LEDGER: ledger } });
+  const returnRow = JSON.parse(returnOut).appended;
+  assert.equal(returnRow.action, "repair_return", "a return is its own stream action");
+  assert.equal(returnRow.repair_draft_sha256, lineSha, "joinable to the draft it rejected");
+  assert.match(returnRow.reason, /斜體/);
+
+  // The machine-never-presses guard is structural: no accept route exists outside the server, and
+  // the bridge — the agent's whole surface — contains none of it.
+  const bridgeSource = readFileSync(new URL("./bridge.py", import.meta.url), "utf8");
+  assert.equal(/append_accept|sandbox_accept/.test(bridgeSource), false,
+    "no ledger-writing route exists on the agent's side of the wall");
 });
 
 /**
@@ -720,21 +1065,25 @@ test("the role prompt renders whole: every section reaches the model, in order",
 /**
  * Memory inputs must not depend on where the *store* is.
  *
- * `principles()` walked up three levels from `REPAIR_AGENT_STORE` to find the designer's approved
- * rules. That path is correct only while the store is the default — the moment it is redirected
- * (which `run_tests.sh` and the README both do), the walk lands elsewhere and the function returns
- * `[]`. Measured: **0 of 19 principles**, with no error and a shorter prompt that still built.
+ * Before the rules house (2026-09-30), `principles()` walked up three levels from
+ * `REPAIR_AGENT_STORE` to find the designer's approved rules. That path was correct only while the
+ * store was the default — the moment it was redirected (which `run_tests.sh` and the README both
+ * do), the walk landed elsewhere and the function returned `[]`. Measured: **0 of 19 principles**,
+ * with no error and a shorter prompt that still built.
  *
- * The designer's standing rules are the last thing that may disappear silently, so this is checked
- * by **redirecting the store** and requiring the count to be unchanged.
+ * The rules house keeps the rule of that failure: the prompt must carry the same rules wherever
+ * the store points, and a broken house must be *loud* (the old shape went silent).
  */
 test("the designer's principles survive a redirected store", async () => {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const run = promisify(execFile);
 
-  const script = `import { principles, AGENT_DIR } from "${new URL("./lib/identity.mjs", import.meta.url).pathname}";
-console.log(JSON.stringify({ count: principles().length, agentDir: AGENT_DIR }));`;
+  const script = `import { systemPrompt, AGENT_DIR } from "${new URL("./lib/identity.mjs", import.meta.url).pathname}";
+import { rulesPath } from "${new URL("./lib/rules.mjs", import.meta.url).pathname}";
+const prompt = systemPrompt();
+console.log(JSON.stringify({ agentDir: AGENT_DIR,
+  labelled: (prompt.match(/^- \\[p\\d+\\]/gm) || []).length }));`;
 
   const normal = JSON.parse((await run("node", ["--input-type=module", "-e", script],
     { cwd: AGENT_DIR, timeout: 300_000 })).stdout.trim().split("\n").pop());
@@ -742,21 +1091,21 @@ console.log(JSON.stringify({ count: principles().length, agentDir: AGENT_DIR }))
     { cwd: AGENT_DIR, env: { ...process.env, REPAIR_AGENT_STORE: "/tmp/not-the-store" },
       timeout: 300_000 })).stdout.trim().split("\n").pop());
 
-  // If the corpus is absent the count is 0 for a real reason and the test cannot measure anything;
+  // If the house were empty the count is 0 for a real reason and the test cannot measure anything;
   // say so rather than passing vacuously.
-  assert.ok(normal.count > 0,
-    "the designer's principles must be readable at all — otherwise this test proves nothing");
-  assert.equal(redirected.count, normal.count,
-    `redirecting the store must not change the principles (got ${redirected.count} of ${normal.count}) ` +
-    `— memory inputs are not store inputs`);
-  // Negative control: the shape that failed. Scope it to `principles()` — `lessons.jsonl` and the
-  // narrative log **should** follow the store; it is the corpus path that must not.
-  const identity = stripDocstringsAndComments(
-    readFileSync(new URL("./lib/identity.mjs", import.meta.url), "utf8"));
-  const body = identity.slice(identity.indexOf("export function principles"),
-                              identity.indexOf("export function lessonsFromDiff"));
-  assert.equal(/join\(STORE_DIR,/.test(body), false,
-    "the principles path must not be derived from STORE_DIR (the store is not where rules live)");
+  assert.ok(normal.labelled > 0,
+    "the designer's rules must be injected at all — otherwise this test proves nothing");
+  assert.equal(redirected.labelled, normal.labelled,
+    `redirecting the store must not change the injected rules (got ${redirected.labelled} of ` +
+    `${normal.labelled}) — the house is not a store input`);
+  // Negative control: the shape that failed. Scope it to where the *house* resolves — hits.jsonl
+  // **should** follow the store (they are run facts); it is the rules themselves that must not.
+  const rulesSource = stripDocstringsAndComments(
+    readFileSync(new URL("./lib/rules.mjs", import.meta.url), "utf8"));
+  const rulesPathBody = rulesSource.slice(rulesSource.indexOf("export function rulesPath"),
+                                          rulesSource.indexOf("export function hitsPath"));
+  assert.equal(/REPAIR_AGENT_STORE/.test(rulesPathBody), false,
+    "the rules house path must not be derived from the store (the store is not where rules live)");
 });
 
 /**
@@ -1268,6 +1617,51 @@ test("the designer's v2 decisions and his own words are shown on the question", 
   assert.ok((view.human_events || []).length, `the view carries the human events (${key})`);
   const withNote = view.human_events.find((row) => (row.notes || "").trim());
   assert.ok(withNote, "and at least one carries the designer's sentence");
+
+  // Mislabel measured 2026-09-30 from the designer's screenshot: the ledger also holds machine
+  // repair rows, and the renderer printed them as 設計者（v2） — a machine name on a human. The
+  // authorship must be computed once, in the bridge, from **v2's own** closed prefix set, and the
+  // renderer branches on that flag.
+  //
+  // The machine **case** is found by streaming the ledger for the first row whose reviewer carries
+  // a repair prefix, then loading that key. Found the over-strict way on 2026-09-30: picking the
+  // case from the annotated dispute assumed the designer's question carries machine rows too —
+  // after its queue was rebuilt it carries only his own rows, so the assertion could no longer see
+  // a machine row the ledger really has. The key is now defined by the stream, not by the notes.
+  const { stdout: prefixJson } = await run(PATHS.PYTHON,
+    ["-c", "import json,sys; sys.path.insert(0, sys.argv[1]); from qbr.review_ui.constants import REPAIR_REVIEWER_PREFIXES; print(json.dumps(list(REPAIR_REVIEWER_PREFIXES)))",
+     join(PATHS.CATALOG, "qbr", "src")],
+    { timeout: 300_000 });
+  const prefixes = JSON.parse(prefixJson);
+  const { createReadStream } = await import("node:fs");
+  const { createInterface } = await import("node:readline");
+  const ledger = join(PATHS.CATALOG, "qbr", "data", "review-queues", "live", "review-ui",
+                      "question_review_events.jsonl");
+  let machineKey = null;
+  const lines = createInterface({ input: createReadStream(ledger), crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line.includes('"reviewer"')) continue;
+    try {
+      const row = JSON.parse(line);
+      if (prefixes.some((prefix) => String(row.reviewer || "").startsWith(prefix))) {
+        machineKey = String(row.candidate_key || row.canonical_question_key || "");
+        break;
+      }
+    } catch { /* the ledger's last line can be mid-write; skip it */ }
+  }
+  assert.ok(machineKey, "the ledger really carries a machine repair row to test the label against");
+  const { stdout: mq } = await run(PATHS.PYTHON, [PATHS.BRIDGE, "question", "--key", machineKey],
+                                  { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  const machineView = JSON.parse(mq);
+  assert.ok(machineView.human_events.some((row) => row.machine_reviewer === true),
+    "the streamed machine row arrives labelled machine in the bridge's view");
+  assert.ok(machineView.human_events.every((row) => typeof row.machine_reviewer === "boolean"),
+    "the bridge labels every ledger row; an unlabelled row would read as the designer's");
+  const htmlUi = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(htmlUi, /row\.machine_reviewer === true/,
+    "the renderer branches on the bridge-computed authorship, not its own copy of the list");
+  assert.ok(!/isMachine\s*=/.test(htmlUi),
+    "no second copy of the prefix list may live in the UI");
 });
 
 /**
@@ -1301,13 +1695,26 @@ test("a fresh bound conversation is seeded with the question, and a restart is n
   const key = "moex:115090:311:0704:1:question:q001";
   const marker = "設計者正在跟你一起看這一題";
 
+  // Count **structured user messages** carrying the seed, not raw substrings: the model's own
+  // thinking sometimes *quotes* the seed line back (measured 2026-09-30 — the thinking field
+  // contained a verbatim quotation while quoting is harmless), and a raw grep then reads one seed
+  // as two. A re-seed, the thing this test must catch, always adds another user message.
   const seedsInStore = () => {
     const dir = join(store, "chat-sessions");
     if (!existsSync(dir)) return 0;
     let n = 0;
     for (const sub of readdirSync(dir)) {
       for (const file of readdirSync(join(dir, sub))) {
-        n += readFileSync(join(dir, sub, file), "utf8").split(marker).length - 1;
+        for (const line of readFileSync(join(dir, sub, file), "utf8").split("\n")) {
+          if (!line.trim() || !line.includes(marker)) continue;
+          try {
+            const row = JSON.parse(line);
+            const message = row?.message;
+            if (message?.role === "user") n += 1;
+          } catch {
+            // a torn line is not a seed; the transcript is written structured
+          }
+        }
       }
     }
     return n;
@@ -1515,4 +1922,185 @@ print(json.dumps(record))
   }
   assert.ok(answers.join("").trim().length > 0,
     `the brain must answer; it produced ${answers.length} assistant messages (${BRAIN})`);
+});
+
+// ===========================================================================
+// The rules house (2026-09-30, §9.11-6/7/8).
+//
+// `rules/rules.json` is the single authority: one entry per distinct rule, provenance preserved,
+// `active`/`superseded_by` lineage, hits measured in a store-side stream, injection ordered by
+// recent hits under a budget, compression done by an *approved* pass that this module never
+// performs. Each test below ships the case that must fail on the old behaviour.
+// ===========================================================================
+
+import {
+  loadRules, promptRules, recordRuleHit, readHits, hitIndex, compressionReport,
+  rulesPath, hitsPath, DUPLICATE_JACCARD,
+} from "./lib/rules.mjs";
+
+/** A minimal but fully-populated house entry, so the validator sees a real shape. */
+const fxRule = (id, text, over = {}) => ({
+  principle_id: id,
+  text,
+  rationale: null,
+  evidence: [],
+  reviewer: "principle_curator",
+  source: "comment_review",
+  scope: null,
+  action: null,
+  created_at: "2026-09-24T11:42:35",
+  schema: "qbr_review_principle_v0.1",
+  active: true,
+  superseded_by: null,
+  occurrences: 1,
+  other_row_stamps: [],
+  ...over,
+});
+
+/** Write a fixture house (never the tracked one) and return its path. */
+function houseFixture(rules) {
+  const dir = join(SCRATCH, `house-fx-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "rules.json");
+  writeFileSync(file, JSON.stringify({ schema: "qbr_review_rules_v0.1", version: "fx", rules }, null, 1) + "\n");
+  return file;
+}
+
+const writeHitsFixture = (path, rows) =>
+  writeFileSync(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+const fxHit = (rule_id, at, key = "") => ({ schema: "rule_hit_v0.1", rule_id, at, by: "agent", key, why: "" });
+
+test("a broken rules house stops the run loudly — the old stream shape went silent", () => {
+  const broken = [
+    ["wrong schema", [{ schema: "other", rules: [fxRule("p1", "x")] }]],
+    ["duplicate id", [{ schema: "qbr_review_rules_v0.1", rules: [fxRule("p1", "x"), fxRule("p1", "y")] }]],
+    ["textless entry", [{ schema: "qbr_review_rules_v0.1", rules: [fxRule("p1", "")] }]],
+    ["non-boolean active", [{ schema: "qbr_review_rules_v0.1", rules: [fxRule("p1", "x", { active: 1 })] }]],
+  ];
+  for (const [label, doc] of broken) {
+    const file = houseFixture(doc[0].rules ? doc[0].rules : []);
+    // `houseFixture` wrote the doc's rules; the doc wrapper itself varies per case, so rewrite raw.
+    writeFileSync(file, JSON.stringify(label === "wrong schema"
+      ? { schema: doc[0].schema, rules: doc[0].rules }
+      : { schema: "qbr_review_rules_v0.1", rules: doc[0].rules }, null, 1) + "\n");
+    assert.throws(() => loadRules(file), new RegExp(label === "wrong schema" ? "expected" : "rules house"),
+      `the house must refuse: ${label}`);
+  }
+  // The real house, by contrast, must validate — it is what every run stands on.
+  const real = loadRules(rulesPath());
+  assert.ok(real.rules.length > 0, "the real rules house must load and carry rules");
+});
+
+test("record_rule_hit measures use, duplicates collapse, unknown ids refuse", () => {
+  const house = houseFixture([fxRule("p1", "alpha rule"), fxRule("p2", "beta rule")]);
+  const hits = join(SCRATCH, "fx-hits.jsonl");
+  const first = recordRuleHit("p1", { key: "moex:1:q7", why: "subscript check" }, { rulesPath: house, hitsPath: hits });
+  const again = recordRuleHit("p1", { key: "moex:1:q7", why: "subscript check" }, { rulesPath: house, hitsPath: hits });
+  assert.ok(first.ok && !first.duplicated, "first record must append");
+  assert.ok(again.duplicated, "same (rule, key) must collapse — a question used a rule or it did not");
+  // The negative control: an id that is not in the house must refuse, not vanish into a stray stream.
+  assert.throws(() => recordRuleHit("p99", { key: "moex:1:q8" }, { rulesPath: house, hitsPath: hits }),
+    /no active rule/, "unknown rule id must fail loudly");
+  // A keyless hit records (tooling may hit outside a single question) but never dedupes.
+  process.env.REPAIR_AGENT_PROMPT_VERSION = "pv-test";
+  try {
+    assert.ok(recordRuleHit("p2", {}, { rulesPath: house, hitsPath: hits }).ok);
+  } finally {
+    delete process.env.REPAIR_AGENT_PROMPT_VERSION;
+  }
+  const { hits: rows, torn } = readHits(hits);
+  assert.equal(torn.length, 0, "nothing written by this module may be torn");
+  assert.deepEqual(
+    rows.map((r) => ({ rule_id: r.rule_id, key: r.key, schema: r.schema, by: r.by,
+                       prompt_version: r.prompt_version })),
+    [{ rule_id: "p1", key: "moex:1:q7", schema: "rule_hit_v0.1", by: "agent", prompt_version: "" },
+     { rule_id: "p2", key: "", schema: "rule_hit_v0.1", by: "agent", prompt_version: "pv-test" }],
+    "hit facts must carry the recording identity, the rule they credit, and the prompt they ran under");
+  const index = hitIndex(rows);
+  assert.equal(index.get("p1").count, 1, "collapsed duplicates must count once");
+});
+
+test("the injection budget keeps recently-hit rules and ranks the rest deterministically", () => {
+  const house = houseFixture([
+    fxRule("p1", "r1", { created_at: "2026-09-24T10:00:00" }),
+    fxRule("p2", "r2", { created_at: "2026-09-24T11:00:00" }),
+    fxRule("p3", "r3", { created_at: "2026-09-24T09:00:00" }),
+    fxRule("p4", "r4", { created_at: "2026-09-24T12:00:00", active: false }),
+    fxRule("p5", "r5", { created_at: "2026-09-24T08:00:00", superseded_by: "p1" }),
+  ]);
+  const hits = join(SCRATCH, "fx-order-hits.jsonl");
+  writeHitsFixture(hits, [
+    fxHit("p2", "2026-09-30T08:00:00"), // less recent
+    fxHit("p1", "2026-09-30T09:00:00"), // most recent
+  ]);
+  const all = promptRules({ path: house, hits: readHits(hits), budget: 0 });
+  assert.deepEqual(all.ordered.map((r) => r.id), ["p1", "p2", "p3"],
+    "without a budget every active non-superseded rule injects, hot first, never-hit by curation age");
+  assert.equal(all.capped, false);
+  const slice = promptRules({ path: house, hits: readHits(hits), budget: 2 });
+  assert.deepEqual(slice.ordered.map((r) => r.id), ["p1", "p2"],
+    "under budget, the recently-hit rules stay in the prompt");
+  assert.deepEqual([slice.capped, slice.total, slice.budget], [true, 3, 2]);
+});
+
+test("the compression pass reports candidates and never writes the house", () => {
+  const long = "上下標的核對要看到字母，不是只看到數字。紙本的 GPIIb/IIIa、VD、KM、GABA_B 與 r_t 都要逐個字母核對；數字對不上就是錯，要回到紙本那一行。";
+  const twin = "上下標的核對要看到字母，不是只看到數字。紙本的 GPIIb/IIIa、VD、KM、GABA_B 與 r_t 都要逐個字母核對；數字對不上就是錯，須回到紙本那一行。";
+  const unrelated = "表格的內容不要靠文字層推論或重排。紙本的表格在文字層只剩一串數字，遇到表格時要回到原表。";
+  const house = houseFixture([fxRule("p1", long), fxRule("p8", twin), fxRule("p3", unrelated)]);
+  const before = readFileSync(house, "utf8");
+  const report = compressionReport({ rulesPath: house, hitsPath: join(SCRATCH, "fx-empty-hits.jsonl") });
+  const top = report.duplicate_candidates[0];
+  assert.equal(top?.rules.join(","), "p1,p8", "near-duplicates must surface with their measured score");
+  assert.ok(top.similarity >= DUPLICATE_JACCARD);
+  assert.ok(!report.duplicate_candidates.some((p) => p.rules.join(",").includes("p3")),
+    "a distinct-topic rule must not be a candidate");
+  assert.deepEqual(report.zero_hit, ["p1", "p8", "p3"], "with no hits everything reads zero-hit — honestly");
+  assert.equal(readFileSync(house, "utf8"), before,
+    "the compression pass is a report; it must not touch the house it measured");
+});
+
+test("the rules house env contract: budget refusal and stream-inbox drift surface in the report", () => {
+  const house = houseFixture([fxRule("p1", "alpha rule")]);
+  process.env.REPAIR_AGENT_RULE_BUDGET = "not-a-number";
+  try {
+    assert.throws(() => promptRules({ path: house }),
+      /REPAIR_AGENT_RULE_BUDGET/, "a broken budget env must refuse to guess");
+  } finally {
+    delete process.env.REPAIR_AGENT_RULE_BUDGET;
+  }
+  // Inbox drift: the house records which stream state it imported; new rows must be reported,
+  // never injected by themselves (§9.11-6: 規則誕生需要設計者).
+  const stream = join(SCRATCH, "fx-stream.jsonl");
+  const imported = houseFixture([fxRule("p1", "alpha rule")]);
+  writeFileSync(house, readFileSync(imported, "utf8").replace('"version": "fx"', '"version": "fx",\n "imported_from": {"file": ' + JSON.stringify(stream) + ', "sha256": "old", "row_count": 1, "empty_rows": 0, "empty_row_ids": [], "torn_lines": []}'), "utf8");
+  writeFileSync(stream, JSON.stringify({ principle_id: "p2", text: "a brand-new rule awaiting approval", reviewer: "principle_curator", created_at: "2026-09-30T09:00:00" }) + "\n", "utf8");
+  const report = compressionReport({ rulesPath: house, hitsPath: join(SCRATCH, "fx-drift-hits.jsonl") });
+  assert.ok(report.inbox?.drifted === true, "a changed stream behind the house must be visible");
+  assert.deepEqual(report.inbox.rows_not_in_house.map((r) => r.principle_id), ["p2"],
+    "the drift is the row's arrival; its id is reported, not invented");
+});
+
+test("the record_rule_hit tool is registered and writes only its own store-side stream", async () => {
+  const tool = toolsFor(Type).find((t) => t.name === "record_rule_hit");
+  assert.ok(tool, "the agent must be able to record a rule hit");
+  assert.equal(tool.parameters.properties.rule.type, "string",
+    "the tool's rule parameter must be a string schema — it carries the house's id");
+  // p2 was retired (compression pass 1 → superseded_by p18), and this test earned the refusal the
+  // hard way (measured 2026-09-30): hits may only credit *active* rules. p1 is active today.
+  const firstWrap = await tool.execute("t1", { rule: "p1", key: "moex:smoke:1", why: "tool seam" });
+  const first = firstWrap?.details ?? firstWrap;
+  const secondWrap = await tool.execute("t2", { rule: "p1", key: "moex:smoke:1", why: "tool seam" });
+  const second = secondWrap?.details ?? secondWrap;
+  assert.equal(first.ok, true, "the tool seam writes the same store the library reads");
+  assert.equal(second.duplicated, true, "the tool must not double-count one question's hit");
+  // Negative control: a *retired* rule loses its tool credit too — no new facts may land on it.
+  const retiredWrap = await tool.execute("t3", { rule: "p2", key: "moex:smoke:2", why: "old wording" });
+  const retired = retiredWrap?.details ?? retiredWrap;
+  assert.match(String(retired.error), /no active rule/,
+    "hits must refuse a superseded rule — the same loud refusal as an unknown id");
+  // The tool takes no paths: the store-side default seam is where the facts must land.
+  assert.equal(hitsPath(), join(SCRATCH, "rule_hits.jsonl"),
+    "without REPAIR_AGENT_HITS the tool writes the redirected store's rule_hits.jsonl");
+  assert.equal(readHits(hitsPath()).hits.length, 1, "exactly one fact per (rule, key)");
 });

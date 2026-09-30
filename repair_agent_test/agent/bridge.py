@@ -49,10 +49,22 @@ if os.path.join(HERE, "lib") not in sys.path:
 import platform_view  # noqa: E402
 import queue_index  # noqa: E402
 
+# The closed set naming "a machine" — imported from **review_ui's own constants**, never copied:
+# two copies of the prefix list is two places they can drift.
+from qbr.review_ui.constants import REPAIR_REVIEWER_PREFIXES  # noqa: E402
+
 # `image_refs[].path` is relative to the **live queue root** — `review-ui/crops/...` — which is the
 # parent of the directory holding `candidates.jsonl`, not that directory itself. Measured: joining
 # against `QUEUE` gives `.../review-ui/review-ui/crops/...` and matches nothing.
-QUEUE_ROOT = os.path.join(QBR, "data", "review-queues", "live")
+#
+# The root follows the **station's own layout contract**: the laptop keeps the queue under
+# `qbr/data/review-queues/live` in the repo; the station keeps it at `~/qbr-review/queue` and its
+# code tree deliberately carries **no** `qbr/data/` (deploy excludes it). The sandbox is deployed
+# to the station like the review UI is, so it needs the same one-variable handoff: start it with
+# `REPAIR_AGENT_QUEUE=~/qbr-review/queue` and everything here — candidates, ledger, crops allowlist
+# (server reads `bridge.QUEUE_ROOT`) — resolves against the station's queue, not a missing path.
+QUEUE_ROOT = os.environ.get("REPAIR_AGENT_QUEUE") \
+    or os.path.join(QBR, "data", "review-queues", "live")
 QUEUE = os.path.join(QUEUE_ROOT, "review-ui")
 CANDIDATES = os.path.join(QUEUE, "candidates.jsonl")
 STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.join(SANDBOX, "agent", "store")
@@ -61,6 +73,10 @@ STORE_DIR = os.environ.get("REPAIR_AGENT_STORE") or os.path.join(SANDBOX, "agent
 # path, so a test that set the variable still appended its rows to the **real** learning stream
 # (measured 2026-09-29: a redirected smoke run grew `store/agent_feedback.jsonl` by one line).
 STORE = os.path.join(STORE_DIR, "agent_feedback.jsonl")
+#: A repair **draft** is not a judgement and not a change: it is the agent's own proposal, written
+#: to its own file so the judge (a person, 2.5) reads proposals from one append-only place whose
+#: every row keeps its provenance — and so no batch of drafts pretends to be an approval.
+DRAFTS = os.path.join(STORE_DIR, "repair_drafts.jsonl")
 DEFAULT_ENGINE = "occamy-6bit"
 
 # --- the byte-offset index ---------------------------------------------------------------
@@ -217,6 +233,15 @@ def human_events(key: str) -> list:
             except ValueError:
                 continue
             if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
+                # The ledger carries two authorships (human `local` rows + machine repair rows).
+                # Label at the boundary with **v2's own closed prefix set**, so the UI never keeps
+                # a second copy of the list. Mislabel measured 2026-09-30: the designer's own
+                # screenshot showed a machine `reset_review` row wearing his name (設計者（v2）) —
+                # the display form of the "機器冒充人類審核者" failure the governance rule forbids.
+                reviewer = str(row.get("reviewer") or "")
+                row = dict(row)
+                row["machine_reviewer"] = any(
+                    reviewer.startswith(prefix) for prefix in REPAIR_REVIEWER_PREFIXES)
                 out.append(row)
     return out
 
@@ -512,8 +537,12 @@ def pdf_path_of(question: dict) -> str:
     relative = metadata.get("question_pdf_relative")
     if not relative:
         _die("question has no question_pdf_relative; cannot crop a page without a PDF")
-    # `question_pdf_relative` is relative to the repository root, not to qbr/.
-    path = relative if os.path.isabs(relative) else os.path.join(CATALOG, relative)
+    # `question_pdf_relative` is relative to the corpus root, not to qbr/. The laptop keeps the
+    # corpus inside the repo; the station keeps it in `~/qbr-review/assets/` and points
+    # `REPAIR_AGENT_CORPUS_ROOT` there — the code tree's `國考題資料夾` is only the container's
+    # mount point, and carrying the corpus inside `code/` is exactly what deploy excludes.
+    corpus_root = os.environ.get("REPAIR_AGENT_CORPUS_ROOT") or CATALOG
+    path = relative if os.path.isabs(relative) else os.path.join(corpus_root, relative)
     if not os.path.exists(path):
         _die("question PDF not found: %s" % path)
     return path
@@ -724,6 +753,37 @@ def do_read(args) -> dict:
     }
 
 
+#: One string names the sandbox judgement stream's shape, read by **both** writers (the bridge and
+#: the UI's `append_judgement`) — a schema named twice is two schemas that can drift.
+AI_FEEDBACK_SCHEMA = "repair_agent_test/agent_feedback v2"
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def judgement_envelope() -> dict:
+    """The provenance stamp every judgement row carries, whoever wrote it.
+
+    One producer of the four columns (`at`, `run_id`, `session_id`, `prompt_version`) so an agent
+    row and a designer row share their shape and the two writers cannot drift — measured
+    2026-09-30 (workplan 2.1): the agent's rows had **no `at` at all** and neither writer carried a
+    run/session id, so no row could answer「這一判是何時、在哪個 run、哪段對話脈絡下」. The ids
+    come from the caller's environment (`REPAIR_AGENT_RUN_ID`, `REPAIR_AGENT_SESSION_ID`,
+    `REPAIR_AGENT_PROMPT_VERSION`) and stay the honest empty string where a writer genuinely has
+    none: a direct designer rating is not an agent run, and its `engine` field still says who
+    wrote it.
+    """
+    return {
+        "at": _utc_now(),
+        "run_id": os.environ.get("REPAIR_AGENT_RUN_ID", ""),
+        "session_id": os.environ.get("REPAIR_AGENT_SESSION_ID", ""),
+        "prompt_version": os.environ.get("REPAIR_AGENT_PROMPT_VERSION", ""),
+    }
+
+
 def do_feedback(args) -> dict:
     """Append the agent's or the person's judgement to the sandbox learning stream.
 
@@ -731,11 +791,18 @@ def do_feedback(args) -> dict:
     first. The record copies `review_state.append_ai_feedback`'s field names on purpose:
     promoting this into the production stream later is then a change of path, not of shape
     — and a shape that has already been written is a shape that has already been tested.
+    Provenance is stamped by **`judgement_envelope()`**, the one producer of the four columns.
+
+    The two authorships carry different burdens (2026-09-30, workplan 2.2): the designer's rating
+    is a verdict and may go without a note, but **an agent rating must say why** — a machine
+    writing a bare rating is exactly what cannot be audited later.
     """
+    if args.source == "agent" and not (args.reason or "").strip():
+        _die("an agent judgement must carry --reason: a rating with no basis teaches nothing")
     question = load_question(args.key)
     record = {
         "action": "ai_feedback",
-        "schema": "repair_agent_test/agent_feedback v1",
+        "schema": AI_FEEDBACK_SCHEMA,
         "candidate_key": question.get("candidate_key"),
         "question_number": question.get("question_number"),
         "subject": (question.get("metadata") or {}).get("normalized_subject_name"),
@@ -751,6 +818,7 @@ def do_feedback(args) -> dict:
             experience_for(question.get("candidate_key"), queue=args.queue)
         ),
     }
+    record = {**judgement_envelope(), **record}
     os.makedirs(os.path.dirname(STORE), exist_ok=True)
     with open(STORE, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -758,6 +826,80 @@ def do_feedback(args) -> dict:
     # expectation is that each subject has its own habitual errors, so a lesson that cannot say
     # which subject it came from is a lesson the next subject has to learn again.
     return {"appended": record, "store": STORE, "subject": record["subject"]}
+
+
+def drafts_for(key: str) -> list:
+    """This question's repair drafts, oldest first — every one of them, none approved by existing.
+
+    A draft is a **proposal**, and reading is the only thing this function can do to one: it does
+    not advance, select or approve. Acceptance is a separate act (the UI's key, 2.5), and the
+    append-only file keeps every superseded proposal — a proposal the agent revised is a trail, not
+    a loss, so re-writing or deleting "old" drafts is forbidden by shape (the file is opened with
+    `"a"` or read, never `"w"`).
+    """
+    rows = []
+    if not os.path.exists(DRAFTS):
+        return rows
+    with open(DRAFTS, encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue  # a torn tail line is later than any reader; skip it
+            if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
+                rows.append(row)
+    return rows
+
+
+def do_propose(args) -> dict:
+    """Append the agent's own repair draft — a proposal, which is never a change.
+
+    The name is the contract: `propose`, not `apply`. This writes the agent's own file only
+    (`store/repair_drafts.jsonl`); the question's JSONL, the review streams and the human ledger
+    are untouched, and multiple drafts may pile up per question — writing a second version is how
+    the agent revises, not a dispute and not a self-approval (不逐稿批).
+
+    The four columns travel together (2026-09-30): `fix` (改成什麼), `insert` (落到哪一格),
+    `basis` (依據 — 紙本哪個字、哪張圖), and the **crop's own checksum** — a draft whose evidence
+    cannot be re-proved later is advice, not a proposal. Provenance is the same
+    `judgement_envelope()` stamp the judgement stream uses.
+    """
+    for column, value in (("--fix (修法：改成什麼)", args.fix),
+                          ("--insert (插入點：哪一格/哪一欄/哪一選項)", args.insert),
+                          ("--basis (依據：紙本哪個字、哪張圖)", args.basis)):
+        if not (value or "").strip():
+            _die("a repair draft must say what to change: %s is required" % column)
+    question = load_question(args.key)
+    crop_ref = None
+    if args.crop:
+        # The cited crop must be on disk: a citation of a file that does not exist is not evidence,
+        # and the checksum is what makes the evidence auditable after a rebuild moves paths.
+        if not os.path.isfile(args.crop):
+            _die("crop evidence file does not exist: %s" % args.crop)
+        import hashlib
+
+        with open(args.crop, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        crop_ref = {"path": args.crop, "bytes": os.path.getsize(args.crop), "sha256": digest}
+    record = {
+        "action": "repair_draft",
+        "schema": "repair_agent_test/repair_drafts v1",
+        "candidate_key": question.get("candidate_key"),
+        "question_number": question.get("question_number"),
+        "subject": (question.get("metadata") or {}).get("normalized_subject_name"),
+        "fix": args.fix,
+        "insert": args.insert,
+        "basis": args.basis,
+        "crop": crop_ref,
+        "status": "proposed",
+    }
+    record = {**judgement_envelope(), **record}
+    os.makedirs(os.path.dirname(DRAFTS), exist_ok=True)
+    with open(DRAFTS, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"appended": record, "drafts": DRAFTS}
 
 
 def do_question(args) -> dict:
@@ -1264,6 +1406,15 @@ def main() -> int:
     p_feedback.add_argument("--source", default="agent", choices=("agent", "human"))
     p_feedback.add_argument("--queue", default="", help="queue dir holding the review streams (default: live snapshot)")
     p_feedback.set_defaults(func=do_feedback)
+
+    p_propose = sub.add_parser("propose",
+                               help="append the agent's own repair draft (a proposal, never a change)")
+    p_propose.add_argument("--key", required=True)
+    p_propose.add_argument("--fix", required=True, help="修法：改成什麼字／哪個欄位值")
+    p_propose.add_argument("--insert", required=True, help="插入點：哪一格／哪一欄／哪一選項")
+    p_propose.add_argument("--basis", required=True, help="依據：紙本哪個字、哪張圖")
+    p_propose.add_argument("--crop", default="", help="裁片憑證：這次判讀依據的裁片路徑（記其 SHA-256）")
+    p_propose.set_defaults(func=do_propose)
 
     args = parser.parse_args()
     try:

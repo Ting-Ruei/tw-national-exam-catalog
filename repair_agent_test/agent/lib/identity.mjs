@@ -5,7 +5,7 @@
  *
  *   1. `ROLE`      — the task's non-negotiables, in code, because they are a contract.
  *   2. `LESSONS`   — what earlier runs learned about **this subject**, read from disk each run.
- *   3. `principles`— the designer's standing rules from the review UI, if any exist.
+ *   3. `promptRules`— the designer's standing rules from the rules house (`agent/rules/rules.json`),
  *
  * Two failure modes this shape is built to avoid:
  *
@@ -22,6 +22,7 @@
 import { readFileSync, existsSync, appendFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promptRules } from "./rules.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const AGENT_DIR = join(HERE, "..");
@@ -38,6 +39,16 @@ const LESSONS_PATH = join(STORE_DIR, "lessons.jsonl");
  * is the pair of tables that can disagree, which this project has already paid for once.
  */
 export const BRAIN_ENGINE = process.env.REPAIR_AGENT_ENGINE || "occamy-6bit";
+
+/**
+ * Which version of this agent's prompt a judgement was made under.
+ *
+ * The discipline: bump when the prompt's meaning changes (identity text, task, rules), not on every
+ * phrasing touch-up — what it labels is「這一判讀是哪一代提示詞下做的」. Declared next to the
+ * prompt's own words; `agent.mjs` and the chat box read it from here, and `bridge.py` writes
+ * whatever value the caller handed it — no second table.
+ */
+export const PROMPT_VERSION = "repair-agent-2026-09-30-rules-house";
 
 /**
  * The task. Every line here is a constraint someone measured or asked for, not a style choice.
@@ -269,42 +280,23 @@ function firstCharacterDifference(left, right) {
 }
 
 /**
- * The designer's standing rules, if the review UI has any.
+ * 2026-09-30 (§9.11-7, rules house): the designer's standing rules come from
+ * `agent/rules/rules.json` — the single authority — via `rules.mjs::promptRules()`, which sorts by
+ * most recent recorded hit and cuts at the injection budget. The old stream read (`identity.mjs`'s
+ * own `principles()` walking to `qbr/data/review-queues/live/review-ui/`) was retired with the
+ * import of its 19 usable rows; new designer rules arrive in that stream as an **inbox** and reach
+ * the prompt only through the approved import. Stream rows are not injected by themselves, the
+ * same way candidates never become packages without the gate.
  *
- * Read tolerantly: this is a *memory* input, and a missing file or a half-written line must not
- * stop a run. `discuss.py` owns the authoritative projection; this only reads the stream.
+ * The failure that shaped both readers: measured 2026-09-28, the stream read derived its path
+ * three levels up from `STORE_DIR`, so redirecting the store (every test run, per `run_tests.sh`)
+ * silently left the prompt with **0 of the designer's 19 principles** — no error, a shorter prompt
+ * that still built. The house path is derived from the module's own directory, never from
+ * `STORE_DIR`, and a broken house now throws instead of going quiet.
  *
- * The path is derived from this module's **own directory**, never from `STORE_DIR`.
- *
- * Measured 2026-09-28: it used `join(STORE_DIR, "..", "..", "..", ...)` — three levels up from the
- * store. That happens to land on `repair_agent_test/`, so it worked while `REPAIR_AGENT_STORE` was
- * unset; the moment the store was redirected to run tests or a second experiment (which
- * `run_tests.sh` and the README both instruct), the walk landed somewhere else and this returned
- * **0 of the designer's 19 principles**. Silently: no error, no log line, a shorter prompt that
- * still built. The designer's rules are the last thing that may go missing without a word.
+ * The prompt shows each rule's `principle_id` in square brackets: `record_rule_hit` takes that id,
+ * so the label the agent reads is exactly the label it records — one naming, both places.
  */
-export function principles() {
-  const candidates = [
-    join(AGENT_DIR, "..", "..", "qbr", "data", "review-queues", "live", "review-ui",
-         "question_review_principles.jsonl"),
-  ];
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-    const approved = [];
-    for (const line of lines) {
-      try {
-        const row = JSON.parse(line);
-        const text = row.text || row.principle || row.note;
-        if (text && !row.rejected) approved.push(String(text).trim());
-      } catch {
-        // skip malformed
-      }
-    }
-    if (approved.length) return approved;
-  }
-  return [];
-}
 
 /**
  * Compose the run's system prompt. Called once per run; the result is what gets recorded, so the
@@ -338,11 +330,13 @@ export function systemPrompt() {
     );
   }
 
-  const rules = principles();
-  if (rules.length) {
+  const rules = promptRules();
+  if (rules.ordered.length) {
     parts.push(
       "\n## 設計者訂的基本原則（每次都必須遵守）\n" +
-        rules.map((rule) => `- ${rule}`).join("\n")
+        "方括號是規則編號——哪一條原則幫你看到或決定了什麼，用 `record_rule_hit` 記它的編號" +
+        "（命中率是規則淘汰的證據；沒用到就不要記，亂記會讓好規則被誤殺）。\n" +
+        rules.ordered.map((rule) => `- [${rule.id}] ${rule.text}`).join("\n")
     );
   }
 

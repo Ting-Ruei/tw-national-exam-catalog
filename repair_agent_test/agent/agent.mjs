@@ -17,7 +17,7 @@
  */
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { STORE_DIR, LOG_PATH } from "./lib/identity.mjs";
+import { STORE_DIR, LOG_PATH, PROMPT_VERSION } from "./lib/identity.mjs";
 import { PATHS } from "./lib/tools.mjs";
 import { buildSession, BRAIN } from "./lib/session.mjs";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -96,13 +96,20 @@ async function main() {
 
   // One builder, shared with the chat box (`lib/session.mjs`). This file must not build its own —
   // a second construction site is a second place a prompt fix can be applied to only one of.
+  // The judgement stamp (workplan 2.1, 2026-09-30): `bridge.py` reads these at write time, so a
+  // `record_judgement` row carries the run, the Pi session and the prompt version it was made in —
+  // without them「同一題為什麼換了答案」cannot be asked of a specific run.
+  process.env.REPAIR_AGENT_RUN_ID = `run-${new Date().toISOString()}-${process.pid}`;
+  process.env.REPAIR_AGENT_PROMPT_VERSION = PROMPT_VERSION;
+  const manager = SessionManager.create(HERE);
   let built;
   try {
-    built = await buildSession({ sessionManager: SessionManager.create(HERE) });
+    built = await buildSession({ sessionManager: manager });
   } catch (error) {
     console.error(error.message);
     return error.code === "MODEL_NOT_FOUND" ? 3 : 1;
   }
+  process.env.REPAIR_AGENT_SESSION_ID = manager.getSessionId?.() || "";
   const { session, model, prompt } = built;
 
   log({ event: "session_start", brain: BRAIN, system_prompt: prompt, task,

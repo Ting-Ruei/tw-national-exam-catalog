@@ -30,7 +30,7 @@
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildSession, BRAIN } from "../lib/session.mjs";
-import { STORE_DIR } from "../lib/identity.mjs";
+import { STORE_DIR, PROMPT_VERSION } from "../lib/identity.mjs";
 import { PATHS } from "../lib/tools.mjs";
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -177,8 +177,9 @@ async function sessionFor(key) {
   const restored = manager.getEntries().length > 0;
   const built = await buildSession({ sessionManager: manager });
   // Entries already present means this session was restored, so its opening context is already in
-  // it. Re-sending the seed would put the question in the conversation twice.
-  const entry = { ...built, seeded: restored };
+  // it. Re-sending the seed would put the question in the conversation twice. `manager` is kept
+  // so a judgement written inside this conversation can name the session it belongs to.
+  const entry = { ...built, seeded: restored, manager };
   sessions.set(key, entry);
   return entry;
 }
@@ -224,6 +225,15 @@ async function ask(message) {
   const started = Date.now();
   const entry = await sessionFor(key);
   const { session } = entry;
+
+  // The stamp a judgement written **inside this conversation** will carry — `bridge.py` reads these
+  // at write time (workplan 2.1, 2026-09-30). A turn is one question: these are set *before* the
+  // model runs, so a `record_judgement` inside this turn names this question's session, and the
+  // next ask overwrites them for its own — a judgement can only be written inside a turn, so no
+  // other turn can read a stale value.
+  process.env.REPAIR_AGENT_RUN_ID = `chat-${key || "__corpus__"}`;
+  process.env.REPAIR_AGENT_SESSION_ID = entry.manager.getSessionId?.() || "";
+  process.env.REPAIR_AGENT_PROMPT_VERSION = PROMPT_VERSION;
 
   if (reset) {
     entry.seeded = false;

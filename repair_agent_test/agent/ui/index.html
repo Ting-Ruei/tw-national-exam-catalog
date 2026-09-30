@@ -53,6 +53,20 @@
   .pane { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
   .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  /* 「刷新此題」 lives in the pane title: it is a question-area action, not a filter. While the
+     agent's run is in flight the data it will touch is exactly this question's, so the button
+     turns into the page's 「資料可能正在變」 lamp (workplan 2.3, 2026-09-30). */
+  #refresh-question { font-size: 12px; padding: 3px 8px; text-transform: none; letter-spacing: 0; }
+  #refresh-question.watching { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  #refresh-question.refreshed { border-color: var(--ok, #3a7d44); color: var(--ok, #3a7d44); }
+
+  /* 裁決列（教學 pane）：通過／退回在設計者剛對話的地方，草案的目標在那列看得到。 */
+  #verdict-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+                 padding: 6px 0; border-top: 1px dashed var(--line); margin-top: 6px; }
+  #verdict-target { flex: 1 1 240px; min-width: 160px; }
+  li.draft.target { background: #f6f8ef; border-radius: 6px; padding: 4px 6px; }
+  .draft .old { color: var(--muted); text-decoration: line-through 1px solid var(--muted); }
+  .draft .new { font-weight: 600; }
 
   /* the list */
   #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - var(--footer-h) - 84px);
@@ -232,7 +246,10 @@
   </div>
 
   <div class="pane">
-    <h2>題目（整題完整）</h2>
+    <h2>題目（整題完整）
+      <button id="refresh-question"
+        title="重抓重畫：把檔案裡的最新內容重新拉一次。不清單、不整頁，左邊選的位置不動。">刷新此題</button>
+    </h2>
     <div id="qmeta" class="meta"></div>
     <div id="qbody"><p class="empty-note">從左邊的列表點一題，或在上方搜尋。</p></div>
   </div>
@@ -255,6 +272,14 @@
       這裡是跟它講話的地方：看到圖切錯了、字掉了，直接跟它說，它會邊說邊用工具去看，
       你就能看著它去調。</p>
     <div id="chat-log"></div>
+    <div id="verdict-bar">
+      <span id="verdict-target" class="meta">未選草案——在題目面板挑一則草案「設為驗收對象」。</span>
+      <button id="accept-draft" class="primary"
+        title="通過選定草案：寫進人審帳本，事件參照草案的 checksum。機器不會代按。">✅ 通過（寫人審帳本）</button>
+      <button id="return-draft" title="退回選定草案：理由必填，理由成為規則候選。">↩ 退回（進規則候選）</button>
+      <input id="return-reason" size="34" placeholder="退回理由（必填；成為規則候選）">
+      <button id="verdict-clear" title="收掉本次的驗收選擇">收掉</button>
+    </div>
     <div id="chat-row">
       <textarea id="chat-text" rows="2"
         placeholder="例：「選項 B 的圖切到了 C 的結構，你把 B 重切一次看看」"></textarea>
@@ -267,7 +292,7 @@
 
 <div id="write">
   <h2>我的判讀（寫進檔案，成為 agent 的學習語料）</h2>
-  <textarea id="reason" placeholder="你要註解什麼？寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
+  <textarea id="reason" placeholder="可留空——一個鍵就是一個判決。要註解時寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
   <div class="row">
     <div class="buttons">
       <button id="btn-up">沒問題</button>
@@ -430,28 +455,89 @@ function renderAnswer(question) {
 }
 
 /**
- * What the designer already did to this question **in v2**.
+ * What the designer (and the machine, in the same appendix-only ledger) already did to this
+ * question **in v2**.
  *
  * His complaint (2026-09-28): 「我原本在 v2 審核過的大量題目也沒有紀錄」. The events were always in
  * the view (`human_events`) but the page only printed a count — the count said he had touched a
  * question and hid the sentence that said *what* he found, which is the part worth keeping.
  *
- * These are **read-only**: they come from `question_review_events.jsonl`, which only he writes.
- * The `notes` field is the one with text; `reason` is empty on every human event.
+ * These are **read-only**. The append-only ledger carries **two authorships** — his rows and
+ * machine repair rows. The authorship flag is computed **once**, in `bridge.py::human_events`,
+ * from v2's own closed set (`review_ui/constants.py::REPAIR_REVIEWER_PREFIXES`); this renderer
+ * branches on `machine_reviewer` instead of keeping a second copy of that list. A machine row
+ * must never wear the designer's name — the mislabel (a `reset_review` row printed as 設計者（v2）)
+ * was measured from the designer's own screenshot (2026-09-30) and is exactly the display form of
+ * the "機器冒充人類審核者" failure the governance rule forbids.
+ * The `notes` field is the one with text on his rows; `reason` is empty there.
  */
 function renderHumanEvents(rows) {
   const said = (rows || []).filter((row) => row && row.action);
   if (!said.length) return '<p class="empty-note">你在 v2 沒有動過這一題。</p>';
   const label = { accept: "沒問題", block: "有問題", comment: "註解", correct: "修正",
                   needs_review: "待複查", reviewed: "看過" };
-  // Newest first: the latest thing he said is the one still worth answering.
-  return [...said].reverse().map((row) => `<div class="said designer">
-    <div class="who">設計者（v2）· ${esc(row.created_at || row.at || "")}
+  // Newest first: the latest thing said about this question is the one still worth answering.
+  return [...said].reverse().map((row) => {
+    const machine = row.machine_reviewer === true;
+    const who = machine ? `機器（${esc(row.reviewer)}）` : "設計者（v2）";
+    return `<div class="said ${machine ? "agent" : "designer"}">
+    <div class="who">${who} · ${esc(row.created_at || row.at || "")}
       <span class="tag ${row.action === "block" ? "bad" : row.action === "accept" ? "ok" : ""}">
         ${esc(label[row.action] || row.action)}</span></div>
     <div>${row.notes ? esc(row.notes) : '<span class="empty-note">（沒寫字）</span>'}</div>
-  </div>`).join("");
+  </div>`}).join("");
 }
+
+/**
+ * The agent's own repair proposals, exactly as proposed — plus where the designer's verdict put them.
+ *
+ * Honesty rules survive from 2026-09-30's rulings: multiple versions of one fix may sit here side
+ * by side (writing is not batch-announcing, and the trail of revisions is the trail); the
+ * **acceptance is not decided here** — a draft row shows the proposal, its evidence and a 「設為
+ * 驗收對象」 switch, and the pass key lives in the teaching pane below; a draft the ledger has
+ * recorded as accepted is marked from the ledger's own row (the server reads the ledger, not a
+ * shadow status), because two files that both look decided would disagree one day.
+ */
+function renderDrafts(question) {
+  const rows = question.drafts || [];
+  if (!rows.length) {
+    return '<p class="empty-note">還沒有草案。agent 用 propose_repair 提出後會出現在這裡。</p>';
+  }
+  const accepted = new Set((question.sandbox_accepts || []).map((e) => e.repair_draft_sha256));
+  return `<ul>${rows.map((row) => {
+    const sha = row._sha256 || "";
+    const isAccepted = accepted.has(sha);
+    return `<li class="draft ${verdictDraftSha === sha && !isAccepted ? "target" : ""}" data-draft-sha="${esc(sha)}">
+    <div><span class="tag ${isAccepted ? "ok" : ""}">${isAccepted ? "已通過（帳本）" : esc(row.status || "草案")}</span>
+      <b>${esc(row.insert || "（未說明位置）")}</b>：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span>
+      → <span class="new">${esc(row.fix || "（沒寫修法）")}</span></div>
+    <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
+    ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
+      ${row.crop.path && row.crop.path.includes("/store/crops/")
+        ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
+    ${!isAccepted && sha ? `<div class="meta"><a href="#" class="picky" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</a></div>` : ""}
+  </li>`;}).join("")}</ul>`;
+}
+
+/**
+ * The proposed end-state against the value the page currently shows — the honest scope of a
+ * sandbox diff. The `insert` field is free text (the agent names where in its own words), so this
+ * resolves the common targets it actually names (選項 X / 題幹) and otherwise shows only the fix;
+ * nothing is auto-applied — 3.4's runner is the thing that applies an approved draft to the queue.
+ */
+function draftCurrentValue(question, draft) {
+  const insert = draft.insert || "";
+  const optionMatch = insert.match(/選項\s*([A-D])／?\s*/);
+  if (optionMatch) {
+    const opts = question.options || {};
+    const key = optionMatch[1];
+    return opts[key] !== undefined ? String(opts[key]) : "（頁面上沒有這個選項）";
+  }
+  if (insert.includes("題幹") || insert.includes("stem")) return question.stem || "";
+  return "";
+}
+
+let verdictDraftSha = null;
 
 function renderSaid(rows) {
   if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
@@ -657,13 +743,10 @@ function go(step) {
 
 function judgeKey(rating) {
   if (!current) { $("save-status").textContent = "先載入一題。"; return; }
-  if (!$("reason").value.trim()) {
-    // Do not silently write an empty reason: the reason is what the agent learns from, and a
-    // judgement with no basis is a data point that teaches nothing (the server refuses it too).
-    $("reason").focus();
-    $("save-status").textContent = "請先寫下判讀依據，再按判斷鍵。";
-    return;
-  }
+  // One key is one verdict (designer, 2026-09-30: 判定免註解). The note is optional — whatever is
+  // typed travels with the rating; the agent's rating is the one that must carry its basis (its
+  // own contract, refused in the bridge). Nothing is silently swallowed: the row is written with
+  // an empty `reason` and the stream says which column was empty.
   save(rating).then(() => go(1));
 }
 
@@ -703,10 +786,12 @@ function renderQuestion(question) {
              ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
-    <details open><summary>你在 v2 對這一題做過什麼（人工審核紀錄，唯讀）</summary>
+    <details open><summary>這一題在 v2 的審核紀錄（設計者的動作 ＋ 機器事件，唯讀——機器寫的不會掛設計者的名）</summary>
       ${renderHumanEvents(question.human_events)}</details>
     <details open><summary>這個沙盒的判讀（你／agent 寫進 agent_feedback.jsonl）</summary>
       ${renderSaid(question.judgements)}</details>
+    <details open><summary>修復草案（agent 的提議，propose_repair 寫的；多版並存、寫入不是核准——真正通過/退回在下面的教學討論區）</summary>
+      ${renderDrafts(question)}</details>
     <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
       <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
         這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、
@@ -839,6 +924,9 @@ async function sendChat() {
   $("chat-text").value = "";
   chatStreaming = true;
   $("chat-send").disabled = true;
+  // While it runs, this question's data is exactly what it may change — the refresh button is the
+  // page's 「資料可能正在變」 lamp until the turn ends (workplan 2.3).
+  $("refresh-question").classList.add("watching");
   $("chat-status").textContent = "agent 正在想…";
   const live = document.createElement("div");
   live.className = "turn agent live";
@@ -891,6 +979,10 @@ async function sendChat() {
         } else if (event.event === "done") {
           $("chat-status").textContent =
             `完成（${(event.seconds || 0).toFixed(1)} 秒）`;
+          // run 完成 → 自動重抓 (2026-09-30, workplan 2.3): the turn may have written judgements,
+          // crops or notes; what the panel already shows is one fetch behind. Not awaited: the
+          // chat box's own tail (status, streaming flag) must not wait on the re-render.
+          refreshQuestion("run");
         }
       }
     }
@@ -906,6 +998,10 @@ async function sendChat() {
       ? " · " + new Date().toTimeString().slice(0, 8) : "");
     chatStreaming = false;
     $("chat-send").disabled = false;
+    // A turn that died mid-stream never saw its `done`, so the lamp is extinguished here — and a
+    // turn that did see it may already have turned the lamp green; removing `watching` does not
+    // touch `refreshed`.
+    $("refresh-question").classList.remove("watching");
   }
 }
 
@@ -914,6 +1010,75 @@ async function stopChat() {
   try { await api("/api/chat/stop", { method: "POST", headers: { "Content-Type": "application/json" },
                                      body: JSON.stringify({}) }); }
   catch (error) { $("chat-status").textContent = "停止失敗：" + error.message; }
+}
+
+// -- 對草案的裁決（通過／退回） -------------------------------------------------------------
+//
+// 2026-09-30 (workplan 2.5): the two keys live in the **teaching pane**, beside the conversation
+// the designer just had — this is where he decided, so this is where the decision is recorded.
+// The target is a draft the panel let him pick by checksum; the machine cannot press either key:
+// neither the agent tools nor the bridge hold a route into these two endpoints.
+
+function verdictTargetText() {
+  const drafts = (current || {}).drafts || [];
+  if (!verdictDraftSha) { return "未選草案——在題目面板挑一則草案「設為驗收對象」。"; }
+  const row = drafts.find((d) => d._sha256 === verdictDraftSha);
+  if (!row) { return "選定草案已不在本題的草案列表裡。"; }
+  return `驗收對象：${row.insert || "（未說明位置）"} → ${row.fix || ""}`;
+}
+
+function refreshVerdictTarget() {
+  $("verdict-target").textContent = verdictTargetText();
+}
+
+async function acceptDraft() {
+  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
+  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
+  document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
+  try {
+    const notes = $("reason").value.trim();
+    // The event carries the draft's line checksum — the whole reason a checksum is the reference:
+    // it names an immutable proposal, not 「第三則草案」.
+    const result = await api("/api/accept-draft", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, notes }),
+    });
+    $("verdict-target").textContent =
+      "已寫入人審帳本（" + esc(result.event.repair_draft_sha256.slice(0, 12)) + "…）——草案在此題面板標為已通過。";
+    verdictDraftSha = null;
+    await refreshQuestion("manual");
+  } catch (error) {
+    $("verdict-target").textContent = "通過失敗：" + esc(error.message);
+  } finally {
+    document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
+  }
+}
+
+async function returnDraft() {
+  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
+  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
+  const reason = $("return-reason").value.trim();
+  if (!reason) {
+    // The reason IS the rule candidate; an unpinned reason would be a return nobody can learn.
+    $("verdict-target").textContent = "退回要寫理由——理由就是規則候選的原料。";
+    return;
+  }
+  document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
+  try {
+    await api("/api/return-draft", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, reason }),
+    });
+    $("return-reason").value = "";
+    verdictDraftSha = null;
+    $("verdict-target").textContent = "已退回（理由已進學習流，3.1 起由規則家收走）。";
+    await refreshQuestion("manual");
+  } catch (error) {
+    $("verdict-target").textContent = "退回失敗：" + esc(error.message);
+  } finally {
+    document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
+    refreshVerdictTarget();
+  }
 }
 
 // -- actions ------------------------------------------------------------------------------
@@ -971,6 +1136,29 @@ async function loadQuestion() {
   }
 }
 
+/**
+ * 「刷新此題」 (workplan 2.3, 2026-09-30): re-fetch and re-render the question area only.
+ *
+ * What it must NOT do is a full page reload — an `F5` throws away the list, the filters and the
+ * selected row, and the designer then has to find his way back to the question he was looking at.
+ * So this walks the same `/api/question` path `loadQuestion` walks, and touches nothing around it;
+ * the queue index's own `(size, mtime_ns, inode)` guard is what makes the next read the fresh one.
+ */
+let refreshTimer = null;
+async function refreshQuestion(source = "manual") {
+  if (!current) { setStatus("先載入一題，才有得刷新。"); return; }
+  const button = $("refresh-question");
+  if (source === "manual") { button.classList.remove("watching", "refreshed"); }
+  await loadQuestion();
+  if (source === "run") {
+    button.classList.remove("watching");
+    button.classList.add("refreshed");
+    setStatus("run 完成——已重抓這一題的最新內容。");
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => button.classList.remove("refreshed"), 2500);
+  }
+}
+
 async function search() {
   const term = $("search").value.trim();
   if (!term) return;
@@ -997,8 +1185,9 @@ async function search() {
 
 async function save(rating) {
   if (!current) { $("save-status").textContent = "先載入一題。"; return; }
+  // Optional note (2026-09-30 判定免註解): an empty `reason` still names the rating's emptiness —
+  // the stream's column is honest, and the rating itself is the designer's verdict.
   const reason = $("reason").value.trim();
-  if (!reason) { $("save-status").textContent = "請先寫下判讀依據。"; return; }
   document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = true; });
   try {
     const result = await api("/api/judgement", {
@@ -1026,6 +1215,7 @@ async function save(rating) {
 }
 
 $("load").addEventListener("click", loadQuestion);
+$("refresh-question").addEventListener("click", () => refreshQuestion("manual"));
 $("find").addEventListener("click", search);
 $("btn-up").addEventListener("click", () => save("up"));
 $("btn-down").addEventListener("click", () => save("down"));
@@ -1034,6 +1224,20 @@ $("chat-mode-question").addEventListener("click", () => setChatMode("question"))
 $("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-stop").addEventListener("click", stopChat);
+$("accept-draft").addEventListener("click", acceptDraft);
+$("return-draft").addEventListener("click", returnDraft);
+$("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; refreshVerdictTarget(); });
+// Picking the verdict target is a delegated click: the drafts panel is re-rendered by every
+// refresh, so the handler cannot be attached once to the list.
+document.addEventListener("click", (event) => {
+  const picky = event.target.closest(".picky");
+  if (!picky) return;
+  event.preventDefault();
+  verdictDraftSha = picky.dataset.draftSha;
+  refreshVerdictTarget();
+  // Re-rendering refreshes every 「設為驗收對象」 label: the panel must show which one is on.
+  renderQuestion(current);
+});
 // Enter sends; Shift+Enter writes a newline. A designer's sentence about a question is often more
 // than one line, so the multi-line case must not be the one that accidentally sends.
 $("chat-text").addEventListener("keydown", (event) => {

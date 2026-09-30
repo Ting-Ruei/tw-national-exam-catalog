@@ -83,6 +83,17 @@ CROPS = STORE_DIR / "crops"
 
 _write_lock = threading.Lock()
 
+#: The reviewer's ledger. The **bridge** never writes it (its own header contract:
+#: 永不碰 `question_review_events.jsonl`); the *only* way a sandbox-written human event comes into
+#: existence is a designer's own click on the accept key — server-side, under this lock, with the
+#: accepted draft's checksum carried in the event so the decision points at an immutable proposal.
+#: `REPAIR_AGENT_LEDGER` redirects it for tests; unset in real use means the live queue's own file.
+HUMAN_LEDGER = os.environ.get("REPAIR_AGENT_LEDGER") or bridge.HUMAN_EVENTS
+
+#: The sandbox's own source marker: distinguishable, at a glance, from v2's `linear_v2` rows —
+#: the ledger must be able to answer 「這一筆 accept 是在哪個入口按的」.
+SANDBOX_ACCEPT_SOURCE = "sandbox_accept"
+
 
 def _read_jsonl(path: Path) -> list[dict]:
     """Tolerant read: a half-written last line must not blank the whole page."""
@@ -143,23 +154,157 @@ def append_judgement(record: dict) -> dict:
     Mirrors `review_state.append_ai_feedback`'s shape so that promoting this stream into the real
     one later is a change of destination, not of format. `candidate_key` is required because a
     judgement with no question is a judgement nobody can act on.
+
+    The provenance stamp is the **bridge's** `judgement_envelope()` — the one producer of the four
+    columns (`at`/`run_id`/`session_id`/`prompt_version`), so a designer row and an agent row are
+    the same shape and cannot drift (workplan 2.1, 2026-09-30). A designer rating is not an agent
+    run, so its run/session id is the honest empty string; `engine: human:designer` still says who
+    wrote it.
+
+    The reason is **optional** here (2026-09-30, workplan 2.2): the designer's decision is the
+    verdict, and a one-key rating must not be gated on writing prose first. The agent's rating —
+    a different writer — carries its basis as a contract of its own, refused in `bridge.py`.
     """
     if not record.get("candidate_key"):
         raise ValueError("candidate_key is required")
-    if not str(record.get("reason") or "").strip():
-        raise ValueError("reason is required: guidance with no basis cannot be learned from")
-    record["at"] = record.get("at") or _utc_now()
+    stamp = bridge.judgement_envelope()
+    merged = {**stamp, **record}
+    merged["at"] = record.get("at") or stamp["at"]
+    merged.setdefault("action", "ai_feedback")
+    merged.setdefault("schema", bridge.AI_FEEDBACK_SCHEMA)
     with _write_lock:
         STORE_DIR.mkdir(parents=True, exist_ok=True)
         with STORE.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+            handle.write(json.dumps(merged, ensure_ascii=False) + "\n")
+    return merged
 
 
-def _utc_now() -> str:
-    from datetime import datetime, timezone
+def _draft_line_by_sha(key: str, draft_sha256: str) -> dict:
+    """The referenced draft, looked up by the checksum of **its own line**.
 
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    The reference is the whole point of the checksum: an accept event that names a draft as
+    「the 3rd one, roughly」 points at a moving target, while the line's own SHA-256 cannot change.
+    A ref that matches no line is a fabricated or stale decision and is refused outright.
+    """
+    import hashlib
+
+    if not os.path.exists(bridge.DRAFTS):
+        raise ValueError("no drafts exist for this store yet")
+    with open(bridge.DRAFTS, "rb") as handle:
+        for raw in handle:
+            line = raw.rstrip(b"\n")
+            if not line:
+                continue
+            digest = hashlib.sha256(line).hexdigest()
+            if digest != draft_sha256:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") != key:
+                raise ValueError("draft checksum refers to another question's draft")
+            out = dict(row)
+            out["_line_sha256"] = digest
+            return out
+    raise ValueError("no draft of key %s carries checksum %s" % (key, draft_sha256))
+
+
+def append_accept(event: dict) -> dict:
+    """Append one **human** review event — reachable only from the designer's own click.
+
+    The ruling it implements (2026-09-30, workplan 2.5): the pass key writes the reviewer's ledger
+    with the event referencing the accepted draft's checksum, and **the machine never presses it**
+    — there is no CLI, tool or agent route into this function's write, and the bridge itself stays
+    a reader of the ledger by contract. Appended-only (`open "a"`): a mistake in judgement is a
+    row to outlive, not something to rewrite.
+    """
+    key = str(event.get("key") or "").strip()
+    draft_sha = str(event.get("draft_sha256") or "").strip()
+    if not key or not draft_sha:
+        raise ValueError("accept requires the question key and the draft's line checksum")
+    draft = _draft_line_by_sha(key, draft_sha)
+    created = bridge._utc_now()
+    review_event = {
+        "action": "accept",
+        "candidate_key": key,
+        "created_at": created,
+        "notes": (event.get("notes") or "").strip()[:2000],
+        "reviewer": "local",
+        "source": SANDBOX_ACCEPT_SOURCE,
+        "repair_draft_sha256": draft["_line_sha256"],
+        "repair_draft_crop_sha256": (draft.get("crop") or {}).get("sha256") or "",
+        "repair_draft_at": (draft.get("at") or ""),
+    }
+    with _write_lock:
+        ledger = Path(HUMAN_LEDGER)
+        if not ledger.exists():
+            raise ValueError(
+                "reviewer ledger not found at %s; refusing to create one from the sandbox" % ledger)
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(review_event, ensure_ascii=False) + "\n")
+    return {"event": review_event, "ledger": str(HUMAN_LEDGER)}
+
+
+def append_return(payload: dict) -> dict:
+    """Record the designer's 退回 of a draft: a judgement in the learning stream, reason required.
+
+    The reason is the point: it is the raw material the rule house (3.1) harvests, so an empty
+    return is refused rather than politely saved. The draft's file itself is untouched — the
+    proposal stays proposed on paper and is superseded by the designer's row here, with the draft
+    checksum keeping the two record types joinable.
+    """
+    key = str(payload.get("key") or "").strip()
+    draft_sha = str(payload.get("draft_sha256") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if not key or not draft_sha:
+        raise ValueError("return requires the question key and the draft's line checksum")
+    if not reason:
+        raise ValueError("a return must say why: the reason is the rule candidate")
+    draft = _draft_line_by_sha(key, draft_sha)
+    stamp = bridge.judgement_envelope()
+    row = {
+        **stamp,
+        "action": "repair_return",
+        "schema": bridge.AI_FEEDBACK_SCHEMA,
+        "candidate_key": key,
+        "question_number": draft.get("question_number"),
+        "subject": draft.get("subject"),
+        "rating": "down",
+        "reason": reason[:2000],
+        "engine": "human:designer",
+        "source": "designer",
+        "repair_draft_sha256": draft["_line_sha256"],
+    }
+    with _write_lock:
+        STORE_DIR.mkdir(parents=True, exist_ok=True)
+        with STORE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return {"appended": row, "store": str(STORE)}
+
+
+def sandbox_accepts_for(key: str) -> list[dict]:
+    """This question's sandbox accept events, read from the reviewer's ledger itself.
+
+    The drafts panel marks a proposal 「已通過」 only when the **ledger** says so — the drafts file
+    stays proposals-only, and what the panel shows as decided is exactly what the reviewer's own
+    stream records, not a shadow state that could disagree with it.
+    """
+    path = Path(HUMAN_LEDGER)
+    if not path.is_file():
+        return []
+    out = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if key not in line or SANDBOX_ACCEPT_SOURCE not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") == key and row.get("source") == SANDBOX_ACCEPT_SOURCE:
+                out.append(row)
+    return out
 
 
 def question_payload(key: str) -> dict:
@@ -181,6 +326,31 @@ def question_payload(key: str) -> dict:
     view["judgements"] = judgements_for(key)
     view["lessons"] = lessons_for(key)
     view["trace"] = trace_for(key)
+    # The agent's own repair proposals, read-only here: the server never writes `repair_drafts.jsonl`
+    # — the agent proposes, the person decides (2026-09-30, workplan 2.4). Each row travels with
+    # the SHA-256 of **its own line** (`_sha256`), because that checksum is what a verdict event
+    # must reference to point at an immutable proposal.
+    drafts = bridge.drafts_for(key)
+    if drafts and os.path.exists(bridge.DRAFTS):
+        import hashlib
+
+        by_prefix = {}
+        with open(bridge.DRAFTS, "rb") as handle:
+            for raw in handle:
+                line = raw.rstrip(b"\n")
+                if line:
+                    by_prefix[hashlib.sha256(line).hexdigest()] = line
+        for row in drafts:
+            # Match by content is the only join a stream of append-only rows can offer.
+            for digest, line in by_prefix.items():
+                try:
+                    if json.loads(line.decode("utf-8")) == row:
+                        row["_sha256"] = digest
+                        break
+                except (ValueError, UnicodeDecodeError):
+                    continue
+    view["drafts"] = drafts
+    view["sandbox_accepts"] = sandbox_accepts_for(key)
     return view
 
 
@@ -416,13 +586,17 @@ class Handler(BaseHTTPRequestHandler):
                     "reason": payload.get("reason"),
                     "engine": payload.get("engine") or "human:designer",
                     "source": "designer",
-                    "scope": "question",
+                    "audit_scope": "question",
                     "question_number": payload.get("question_number"),
                 }
                 if record["rating"] not in RATINGS:
                     self._json({"error": "rating must be one of %s" % ", ".join(RATINGS)}, 400)
                     return
                 self._json({"appended": append_judgement(record), "store": str(STORE)})
+            elif parsed.path == "/api/accept-draft":
+                self._json(append_accept(payload))
+            elif parsed.path == "/api/return-draft":
+                self._json(append_return(payload))
             elif parsed.path == "/api/chat/ask":
                 self._chat_ask(payload)
             elif parsed.path == "/api/chat/stop":
