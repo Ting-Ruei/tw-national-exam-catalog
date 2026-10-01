@@ -368,3 +368,100 @@ def judge_with_evidence(question, finding, *, endpoint, timeout=120, max_tokens=
     judgement["model"] = endpoint.get("name")
     judgement["evidence_look"] = True
     return judgement, ""
+
+
+#: The figure-missing instruction. Same discipline `parse_judgement` states: the answer is a strict
+#: JSON object; anything the pack did not show is not available to cite — here that means the refs
+#: must be filenames the pack listed, and the runner re-checks that instead of trusting the text.
+FIGURE_INSTRUCTION = (
+    "這一題的 image_refs 為空，但磁碟上有它的裁片檔（清單在 available_crops；影像也在附件）。\n"
+    "只回一個 JSON 物件：{\"decision\": \"insert\"|\"none\"|\"uncertain\", "
+    "\"refs\": [檔名…], \"where\": \"要插進哪一格（一句話）\", \"basis\": \"依據（一句話）\"}。\n"
+    "判定：那張圖確實屬於這一題 ⇒ insert，refs 填 **清單裡的檔名**（一或多個）；"
+    "這一題沒有需要引用的圖 ⇒ none，refs 空陣列；看圖仍無法決定 ⇒ uncertain，refs 空陣列。"
+    "refs 只能使用 available_crops 列出的檔名，不得自行拼造。")
+
+
+def _figure_payload(question, *, crop_names, current_refs):
+    """The evidence pack for a figure-ref decision, all of it deterministic except the reading."""
+    payload = {
+        "task": "figure_ref_missing",
+        "candidate_key": question.get("candidate_key") or "",
+        "question_number": question.get("question_number") or "",
+        "stem": question.get("stem") or "",
+        "options": ["%s：%s" % (opt.get("key"), str(opt.get("text") or "")[:200])
+                    for opt in (question.get("options") or []) if isinstance(opt, dict)],
+        "current_image_refs": (current_refs or [])[:400],
+        "available_crops": crop_names,
+    }
+    return payload
+
+
+def parse_figure_decision(raw) -> dict | None:
+    """The figure decision, or `None`; same tolerance/strictness trade as `parse_judgement`.
+
+    Strict where it matters: `decision` must be one of the three named states, and a decision that
+    is neither insert nor none is `uncertain` — never defaulted to insert (a made-up ref that lands
+    corrupts the question row; "no decision" only costs a human moment).
+    """
+    text = engines.content_of(raw) or ""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1] if "```" in text[3:] else text[3:]
+        text = text.lstrip("json").strip() if text.startswith("json") else text
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        parsed = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    decision = str(parsed.get("decision") or "").strip().lower()
+    if decision not in ("insert", "none", "uncertain"):
+        return None
+    refs = parsed.get("refs") or []
+    if not isinstance(refs, list):
+        return None
+    return {"decision": decision,
+            "refs": [str(r) for r in refs if str(r).strip()],
+            "where": str(parsed.get("where") or "")[:200],
+            "basis": str(parsed.get("basis") or "")[:400]}
+
+
+def propose_figure_refs(question, crop_names, crop_paths, *, endpoint, timeout=120,
+                        max_tokens=800):
+    """Decide `image_refs` for one question, with the crops themselves attached.
+
+    The workorder-shaped agent session measured 2026-10-01 at 5–9 min/item on occamy and hung >15 min
+    with a dgx brain; the deterministic scan already names the crop pattern, so the missing judgement is
+    one evidence pack away. Returns `(record_or_None, note)`; `None` degrades — an unusable answer is
+    recorded as such, never defaulted to insert. The runner re-checks `refs ⊆ crop_names` because the
+    pack shows the model the names; a model may still invent one.
+    """
+    refusal = engines.egress_refusal(endpoint)
+    if refusal:
+        return None, refusal
+    payload = _figure_payload(question, crop_names=crop_names, current_refs=[])
+    text = json.dumps(payload, ensure_ascii=False) + "\n\n" + FIGURE_INSTRUCTION
+    images = [part for part in (crop_image_part(path) for path in crop_paths) if part]
+    content = [{"type": "text", "text": text}] + images if images else text
+    if not images:
+        content += "\n\n（這一題沒有可附上的裁片影像；決策請基於文字與清單。）"
+    messages = [
+        {"role": "system", "content": ORCHESTRATOR_SYSTEM},
+        {"role": "user", "content": content},
+    ]
+    try:
+        raw, seconds = engines.ask(messages, endpoint=endpoint, max_tokens=max_tokens, timeout=timeout)
+    except Exception as exc:
+        return None, "指揮者呼叫失敗：%s" % exc
+    if raw is None:
+        return None, "指揮者沒有回答（%s）" % endpoint.get("name")
+    decision = parse_figure_decision(raw)
+    if decision is None:
+        return None, "指揮者的回答不是可用的 JSON（沒有預設 decision）"
+    decision["seconds"] = round(seconds, 3)
+    decision["model"] = endpoint.get("name")
+    return decision, ""
