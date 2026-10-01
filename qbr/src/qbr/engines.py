@@ -88,13 +88,21 @@ BUILTIN_ENDPOINTS = {
     "occamy-6bit": {"url": "http://127.0.0.1:18130",
                     "name": "occamy-1.0-6bit-xl-mlx", "key": "", "reasoning": "none",
                     "context_window": 65536, "max_output_tokens": 16384},
-    # DGX Spark (Tailscale `timsdgx`). The designer authorised calling it when extra tokens are
-    # needed; it is reached over Tailscale, not the LAN address, so it works from any host on the
-    # tailnet. Not the default: an experiment must name it.
+    # DGX Spark (Tailscale `timsdgx`, LAN `192.168.10.90`). The designer repointed this endpoint at
+    # GLM-5.3-Flash-EXL3 on 2026-10-01 and will keep swapping the framework/model behind it — so the
+    # upgrade path is `QBR_DGX_MODEL=<the served id>` (one variable, no code change), and the pin
+    # must never quietly drift: `/v1/models` is probed and the mismatch fails the suite loudly
+    # (silent relabelling is worse than a 404). Not the default: an experiment must name it.
+    # Measured 2026-10-01 (synthetic probes + one real q051 crop):
+    #   thinking off (this spelling) -> 0.59 s / 14 tok, exact JSON first try
+    #   thinking on (template default) -> 2.96 s / 96 tok, ≈32 tok/s incl. reasoning
+    #   accepts image parts; read the printed q051 formula field-exact in 3.1 s
+    #   `/v1/models` says max_model_len = 850,000
     "dgx-flash": {"url": os.environ.get("QBR_DGX_BASE_URL", "http://timsdgx:8888"),
-                  "name": os.environ.get("QBR_DGX_MODEL", "qwen3.8-flash-next"),
+                  "name": os.environ.get("QBR_DGX_MODEL", "GLM-5.3-Flash-EXL3"),
                   "key": os.environ.get("QBR_DGX_API_KEY", "dgx-spark-local"),
-                  "reasoning": "none"},
+                  "thinking": {"chat_template_kwargs": {"enable_thinking": False}},
+                  "context_window": 850000, "max_output_tokens": 16384},
 }
 
 #: Legacy per-engine variables, kept so every existing run command keeps working unchanged.
@@ -322,3 +330,36 @@ def named(name: str):
     if name not in table:
         raise KeyError("unknown engine %r; known: %s" % (name, ", ".join(sorted(table))))
     return table[name]
+
+
+def served_id(endpoint, *, timeout=5.0) -> str:
+    """The model id the endpoint actually serves, or `""` when that cannot be learned.
+
+    The framework behind an address moves under it — the DGX endpoint served Qwen before GLM, and
+    the designer upgrades it freely. A pin that no longer names what the server runs means every
+    record built from that lane describes a model that did not produce the bytes, which is exactly
+    the silent-relabelling class of failure this module exists to prevent. So the pin is *checked*,
+    not assumed: one small GET of `/v1/models`, and
+    `tests/test_engines.py::test_the_pin_names_what_the_endpoint_serves` fails the suite when they
+    drift. The completion call itself keeps sending the pin — a stale pin then fails loudly there
+    (vLLM 404s on an unknown id) instead of being quietly substituted, and the fix is one variable
+    (`QBR_DGX_MODEL=<served id>`).
+
+    One listed id is the truth; several ids accept the pin when the pin is among them; anything
+    else — including a server that does not answer — is `""`, and the caller falls back to the pin.
+    """
+    base = endpoint.get("url") or ""
+    base = base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    try:
+        raw = json.loads(urllib.request.urlopen(base + "/models", timeout=timeout).read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+        return ""
+    ids = [str(entry.get("id") or "") for entry in (raw.get("data") or []) if entry.get("id")]
+    pin = str(endpoint.get("name") or "")
+    if len(ids) == 1:
+        return ids[0]
+    if pin and pin in ids:
+        return pin
+    return ""

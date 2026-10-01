@@ -217,7 +217,7 @@ def test_cli_writes_per_lens_files_and_refuses_nothing_on_empty(tmp_path):
     ) + "\n", encoding="utf-8")
     out = tmp_path / "scans"
     proc = subprocess.run(
-        [os.path.join(PKG, ".venv", "bin", "python"),
+        [sys.executable,  # this suite's interpreter; a relative `.venv` made the subprocess checkout-bound
          os.path.join(PKG, "scripts", "scan_rule_hits.py"),
          "--candidates", str(candidates), "--events", str(tmp_path / "no-events.jsonl"),
          "--crops", str(tmp_path / "no-crops"), "--out", str(out)],
