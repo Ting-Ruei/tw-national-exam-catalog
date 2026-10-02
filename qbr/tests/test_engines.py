@@ -287,3 +287,92 @@ def test_no_endpoint_literal_survives_outside_the_one_table():
         code = "\n".join(line for line in source.splitlines()
                          if not line.lstrip().startswith("#"))
         assert "127.0.0.1:18120" not in code, "%s still carries a second copy of the MTPLX address" % name
+
+
+# ------------------------------------------------------------------ the pin names what the endpoint serves
+
+def _stub_engine_server(responder):
+    """One HTTP server on a random port; `responder(method, path, body)->(status, payload)`."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _answer(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            status, payload = responder(self.command, self.path, body)
+            raw = _json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        do_GET = do_POST = _answer
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _stub_endpoint(server, name="GLM-5.3-Flash-EXL3"):
+    return {**engines.BUILTIN_ENDPOINTS["dgx-flash"], "url": "http://127.0.0.1:%d" % server.server_port,
+            "name": name}
+
+
+def test_the_glms_thinking_spelling_is_the_measured_one():
+    # Measured 2026-10-01 on the DGX (probes in the report doc): the vLLM GLM deployment takes the
+    # MTPLX spelling and gives exact JSON in 0.59s / 14 tokens with it. The body-level contract is
+    # the same statement the Splash test makes, pinned to the other engine.
+    body = engines.body_for(dict(engines.named("dgx-flash")), [{"role": "user", "content": "x"}],
+                            max_tokens=10)
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in body
+
+
+def test_the_negative_control_the_splash_spelling_is_not_the_glms():
+    body = engines.body_for(dict(engines.named("dgx-flash")), [{"role": "user", "content": "x"}],
+                            max_tokens=10)
+    assert "reasoning_effort" not in body  # the switch this measurement replaces
+
+
+def test_served_id_reports_what_the_endpoint_answers():
+    server = _stub_engine_server(lambda m, p, b: (200, {"data": [{"id": "GLM-5.3-Flash-EXL3"}]}))
+    try:
+        endpoint = _stub_endpoint(server)
+        assert engines.served_id(endpoint) == "GLM-5.3-Flash-EXL3"
+    finally:
+        server.shutdown()
+
+
+def test_the_negative_control_a_drifted_pin_is_detectable_not_assumed():
+    # The old behaviour assumed pin == served: the DGX lane kept saying `qwen3.8-flash-next` while
+    # GLM answered. The probe returns the served id, so the drift is a fact the caller can see.
+    server = _stub_engine_server(lambda m, p, b: (200, {"data": [{"id": "next-leader-v2"}]}))
+    try:
+        endpoint = _stub_endpoint(server)  # pin still says GLM
+        assert engines.served_id(endpoint) == "next-leader-v2"
+        assert engines.served_id(endpoint) != endpoint["name"]
+    finally:
+        server.shutdown()
+
+
+def test_a_multi_model_listing_accepts_the_pin_or_declines_to_guess():
+    server = _stub_engine_server(
+        lambda m, p, b: (200, {"data": [{"id": "a"}, {"id": "GLM-5.3-Flash-EXL3"}]}))
+    try:
+        assert engines.served_id(_stub_endpoint(server)) == "GLM-5.3-Flash-EXL3"  # pin among them
+        assert engines.served_id(_stub_endpoint(server, name="missing")) == ""
+    finally:
+        server.shutdown()
+
+
+def test_an_endpoint_that_does_not_answer_leaves_the_pin_standing():
+    # Discovery failing must not turn into a wrong claim either: "" means "unknown", and the caller
+    # keeps the pin (a stale pin then 404s loudly at the completion call).
+    endpoint = {**engines.BUILTIN_ENDPOINTS["dgx-flash"], "url": "http://127.0.0.1:1"}
+    assert engines.served_id(endpoint) == ""  # nothing listens there
