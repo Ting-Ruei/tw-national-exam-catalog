@@ -26,6 +26,12 @@
   header { padding: 10px 16px; background: #fff; border-bottom: 1px solid var(--line);
            display: flex; gap: 12px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #how { padding: 6px 16px; background: #fffdf3; border-bottom: 1px solid var(--line); }
+  #how summary { cursor: pointer; font-size: 13.5px; color: var(--ink); }
+  #how ol { margin: 8px 0 4px; padding-left: 22px; font-size: 13.5px; }
+  #how li { margin: 3px 0; }
+  .pane h2 .hint, #write h2 .hint { font-weight: 400; text-transform: none; letter-spacing: 0;
+                                   color: var(--muted); font-size: 12px; margin-left: 6px; }
   input, button, select { font: inherit; padding: 6px 9px; border: 1px solid var(--line);
                           border-radius: 6px; background: #fff; color: inherit; }
   button { cursor: pointer; }
@@ -218,13 +224,26 @@
   <button id="find">搜尋</button>
   <input id="key" size="40" placeholder="candidate_key（直接貼上時用）">
   <button id="load">讀這一題</button>
+  <a id="v2-link" href="__V2_BASE__/v2" target="_blank" title="正式審題站——寫人審帳本的只有那裡">v2 審題站 ↗</a>
+  <a id="fig-link" href="/figure" target="_blank" title="核對圖片草案的專頁">核圖草案</a>
   <a id="a2-link" href="/a2" target="_blank" title="模型比對頁與執行記錄（a2/runs）">A2 執行產物</a>
   <span id="status">尚未載入</span>
 </header>
 
+<details id="how">
+  <summary>這一頁怎麼用（點開：一分鐘版 ＋ 整個圈怎麼轉）</summary>
+  <ol>
+    <li><b>左邊列表挑一題</b>：中間看題目內容、右邊對官方紙本。</li>
+    <li><b>要 agent 做事</b>：右下對話框直接打字送出——它會邊做邊給你看；一句話總評就用最下面「我的判讀」的按鈕。</li>
+    <li><b>它提出修法</b>後，中間會出現「agent 提的修法」：點其中一條 → 按 👁 先看改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。</li>
+    <li><b>正式裁決「題目准不准」</b>在右上 v2 審題站（帳本只有那裡寫）；<b>核對圖片草案</b>在「核圖草案」頁。</li>
+    <li>你按過的每一件事都寫進檔案，沒有東西只存在畫面上：學習檔 <code>agent_feedback.jsonl</code>、修法清單 <code>repair_drafts.jsonl</code>、正式帳本 <code>question_review_events.jsonl</code>。</li>
+  </ol>
+</details>
+
 <main>
   <div class="pane" id="list-wrap">
-    <h2>候選列表</h2>
+    <h2>候選列表 <span class="hint">點一題就會載入；上面的篩選只是縮小清單</span></h2>
     <div id="list-filters">
       <select id="category"><option value="">載入中…</option></select>
       <select id="human-status" title="人在站上（v2）對這一題做過的裁決">
@@ -249,7 +268,8 @@
   </div>
 
   <div class="pane">
-    <h2>題目（整題完整）
+    <h2>題目（整題完整） <span class="hint">看內容與機器對圖的說法</span>
+      <a id="v2-question" hidden target="_blank" title="到正式審題站打開這一題（帶著卷次與題號）">在 v2 開這一題 ↗</a>
       <button id="refresh-question"
         title="重抓重畫：把檔案裡的最新內容重新拉一次。不清單、不整頁，左邊選的位置不動。">刷新此題</button>
     </h2>
@@ -258,14 +278,14 @@
   </div>
 
   <div class="pane">
-    <h2>紙本（右側，與左側解耦）</h2>
+    <h2>紙本 <span class="hint">官方卷對照——它不跟著左邊換頁</span></h2>
     <div id="pdfmeta" class="meta"></div>
     <iframe id="pdf-frame" title="官方題目卷"></iframe>
     <div id="crop-wrap"></div>
   </div>
 
   <div class="pane" id="chat-pane">
-    <h2>跟 agent 對話
+    <h2>跟 agent 對話 <span class="hint">直接打字說要改什麼；它會邊做邊給你看</span>
       <span class="chat-modes">
         <button id="chat-mode-question" class="on" title="對話綁在左邊選到的題目上">綁這一題</button>
         <button id="chat-mode-corpus" title="不綁題：從整個題庫的角度討論，它可以自己找題">全庫</button>
@@ -284,6 +304,7 @@
         <button id="return-draft" title="否決「這則草案」：理由必填，agent 會讀你的理由去學。">↩ 退回這則草案</button>
         <input id="return-reason" size="34" placeholder="退回理由：寫給 agent 看的（例：這張圖是別題的）">
         <button id="verdict-clear" title="只是取消目前選定的草案，不寫任何檔案。">取消選取</button>
+        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent｜👁 只是在畫面上預覽，不會真的改</span>
       </span>
     </div>
     <div id="chat-row">
@@ -297,7 +318,7 @@
 </main>
 
 <div id="write">
-  <h2>我的判讀（寫進檔案，成為 agent 的學習語料）</h2>
+  <h2>我的判讀 <span class="hint">你的意見給 agent 學習——不是正式審題；正式審題在 v2</span></h2>
   <textarea id="reason" placeholder="可留空——一個鍵就是一個判決。要註解時寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
   <div class="row">
     <div class="buttons">
@@ -306,7 +327,7 @@
       <button id="btn-hold">暫存</button>
     </div>
     <span id="save-status" class="meta"></span>
-    <span class="meta" style="margin-left:auto">「暫存」＝留著這句話、我還沒判斷</span>
+    <span class="meta" style="margin-left:auto">「暫存」＝留著這句話、我還沒判斷；三顆都會記進 agent 的學習檔</span>
   </div>
 </div>
 
@@ -817,6 +838,10 @@ function renderQuestion(question) {
   $("key").value = current.candidate_key;
   highlightCurrent();
   $("qmeta").innerHTML = renderTags(current);
+  // The deep link is per-question and built server-side (v2's own hash shape); hidden when the
+  // question lacks the paper coordinates rather than shown as a link that opens nothing.
+  const v2q = $("v2-question");
+  if (v2q) { v2q.href = current.v2_url || "__V2_BASE__/v2"; v2q.hidden = !current.v2_url; }
   $("qbody").innerHTML = `
     ${previewing ? `<div class="preview-banner">👁 預覽：這是套用「${esc((current.drafts.find((x) => x._sha256 === previewDraftSha) || {}).insert || "草案")}」後的樣子——<b>還沒真的改</b>。
       <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
@@ -825,20 +850,20 @@ function renderQuestion(question) {
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
     ${renderOptions(question)}
     ${renderAnswer(question)}
-    <details open><summary>機器說法（圖的歸屬與範圍）</summary>
+    <details open><summary>機器對圖的說法（哪一頁、裁到了嗎）</summary>
       ${(question.figures || []).length
         ? `<ul>${question.figures.map((f) => `<li>${esc(f.label || "?")} · 第 ${esc(f.page ?? "?")} 頁
              · ${f.clipped ? '<span class="tag bad">有裁切</span>' : '<span class="tag ok">未裁切</span>'}
              ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
-    <details open><summary>這一題在 v2 的審核紀錄（設計者的動作 ＋ 機器事件，唯讀——機器寫的不會掛設計者的名）</summary>
+    <details open><summary>你在 v2 的審題紀錄（唯讀——機器寫的不會掛你的名）</summary>
       ${renderHumanEvents(question.human_events)}</details>
-    <details open><summary>這個沙盒的判讀（你／agent 寫進 agent_feedback.jsonl）</summary>
+    <details open><summary>判讀紀錄（你＋agent 寫的，學習檔 agent_feedback.jsonl）</summary>
       ${renderSaid(question.judgements)}</details>
-    <details open><summary>修復草案（agent 的提議，propose_repair 寫的；多版並存、寫入不是核准——真正通過/退回在下面的教學討論區）</summary>
+    <details open><summary>agent 提的修法 <span style="color:var(--muted);font-weight:400">——先點一條，下面才會出現通過／退回</span></summary>
       ${renderDrafts(question)}</details>
-    <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
+    <details><summary>原始資料（進階：機器實際存的、模型實際讀到的）</summary>
       <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
         這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、
         以及 agent 的工具軌跡。兩者不同時，不同在哪裡就是判讀的對象。</p>

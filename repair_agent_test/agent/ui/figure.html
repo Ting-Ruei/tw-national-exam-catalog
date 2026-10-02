@@ -50,9 +50,11 @@ input.t { flex:1 1 220px; padding:5px 9px; border:1px solid var(--line); border-
 </head>
 <body>
 <header>
-  <h1>figure 草案核讀（634 題 image_refs 決策，A/B 兩輪）<span class="hint">資料＝/api/figure；裁決寫進 store/agent_feedback.jsonl；人審帳本本頁不碰</span></h1>
+  <h1>核圖草案（634 題）<span class="hint">每張卡：看左邊的圖，判斷它屬不屬於這一題——屬於按 ✅，不屬於按 ↩（寫一句理由）</span>
+    <a href="/" style="margin-left:auto;font-size:13px;color:var(--accent);text-decoration:none">← 回主頁</a></h1>
   <div class="chips" id="chips"></div>
   <div class="hint" id="stats" style="margin-top:6px;"></div>
+  <div class="hint" style="margin-top:2px;">這裡的裁決寫進 agent 的學習檔（agent_feedback.jsonl）；<b>不寫人審帳本</b>——正式審題請用主頁右上角的 v2 審題站。</div>
 </header>
 <main id="cards"></main>
 <button class="more" id="more">載入更多</button>
@@ -111,13 +113,13 @@ function card(d) {
                    d.ruling === "pass" ? `<span class="badge ruling-pass">你判：通過</span>` :
                    d.ruling === "return" ? `<span class="badge ruling-return">你判：退回</span>` : "" ].join("");
   el.innerHTML = `
-    <div class="k">${d.key} ${badges}</div>
+    <div class="k">${d.key} ${badges} <a href="/?key=${encodeURIComponent(d.key)}" style="color:var(--accent);text-decoration:none">🔎 主頁看這題（題目＋官方卷）</a></div>
     <div class="cols"><div class="img">${cropTag}</div>
     <div class="dec"><table>${rounds}</table></div></div>
     <div class="act">
       <button class="approve">✅ 這個 refs 提法是對的</button>
       <button class="returnb">↩ 不對（退回）</button>
-      <input class="t" placeholder="退回時填理由（可留空）">
+      <input class="t" placeholder="退回理由（例：這是別題的圖）">
       ${d.ruling ? `<span class="hint">已判（${d.ruling}）——再按會追加一筆新裁決</span>` : `<span class="hint">判讀＝設計者動作，append-only</span>`}
     </div>`;
   const [approve, ret, reason] = [el.querySelector(".approve"), el.querySelector(".returnb"), el.querySelector(".t")];

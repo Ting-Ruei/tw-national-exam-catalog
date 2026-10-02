@@ -94,6 +94,21 @@ HUMAN_LEDGER = os.environ.get("REPAIR_AGENT_LEDGER") or bridge.HUMAN_EVENTS
 #: the ledger must be able to answer 「這一筆 accept 是在哪個入口按的」.
 SANDBOX_ACCEPT_SOURCE = "sandbox_accept"
 
+#: Where the v2 審題站 lives. The sandbox links to it and v2 links back here (owner 2026-10-02:
+#: 「整套圈要可以運作」), so neither side hard-codes the other's host in HTML. Default is the
+#: station's own service; a checkout running v2 locally overrides with `REPAIR_AGENT_V2_BASE`.
+V2_BASE = os.environ.get("REPAIR_AGENT_V2_BASE") or "http://192.168.10.70:8765"
+
+
+def _page(name: str) -> bytes:
+    """One UI page with the deployment's own links baked in.
+
+    The pages are static files carrying a single token, `__V2_BASE__`; replacing it here is what
+    lets the same checkout point at a local v2 or at the station without editing HTML. `no-store`
+    already governs these responses, so a changed base is a refresh away.
+    """
+    return (HERE / name).read_bytes().replace(b"__V2_BASE__", V2_BASE.encode())
+
 
 def _read_jsonl(path: Path) -> list[dict]:
     """Tolerant read: a half-written last line must not blank the whole page."""
@@ -351,6 +366,21 @@ def question_payload(key: str) -> dict:
                     continue
     view["drafts"] = drafts
     view["sandbox_accepts"] = sandbox_accepts_for(key)
+    # 綁定 v2（owner 2026-10-02：「整套圈要可以運作」）。The hash follows v2's own
+    # `scopeToHash()` shape `#類科/年/次/科目/qNNN`, spelled with the **normalized** names —
+    # v2's tree is keyed on those (its `toItem()` reads `normalized_*`). The `/qNNN` tail is the
+    # named-question contract `scopeFromHash()` already reads. A missing piece leaves the URL
+    # unset and the link hidden, rather than a link that opens the wrong paper.
+    meta = question.get("metadata") or {}
+    cat = meta.get("normalized_category_name") or meta.get("official_category_name")
+    subj = meta.get("normalized_subject_name") or meta.get("official_subject_name")
+    year, ordinal = meta.get("year"), meta.get("exam_ordinal")
+    if cat and subj and year is not None and ordinal is not None and view.get("question_number"):
+        import urllib.parse
+
+        tail = "/".join(urllib.parse.quote(str(p), safe="")
+                        for p in (cat, year, ordinal, subj, "q%d" % view["question_number"]))
+        view["v2_url"] = "%s/v2#%s" % (V2_BASE, tail)
     return view
 
 
@@ -571,9 +601,9 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if parsed.path in ("/", "/index.html"):
-                self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+                self._send(200, _page("index.html"), "text/html; charset=utf-8")
             elif parsed.path == "/figure":
-                self._send(200, (HERE / "figure.html").read_bytes(), "text/html; charset=utf-8")
+                self._send(200, _page("figure.html"), "text/html; charset=utf-8")
             elif parsed.path == "/api/figure":
                 self._json(figure_drafts())
             elif parsed.path == "/api/search":
