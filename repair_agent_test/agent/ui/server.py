@@ -433,6 +433,9 @@ def figure_drafts() -> dict:
         agreed = None
         if by.get("A") and by.get("B"):
             agreed = (a["decision"], sorted(a["refs"])) == (b["decision"], sorted(b["refs"]))
+        # 整題**不在**這份 payload 裡（owner 2026-10-02:「沒有看到整題，無法判斷對錯」——但要
+        # 的是卡上看得到整題，不是把 634 題塞進一次回應：634 × 題幹＋選項＝數 MB、冷建 15 s）。
+        # 卡片各自向既有 `/api/question` 懶載入（每題 ~0.1 s，隨渲染補上），前端 questionPane。
         drafts.append({"key": key, "a": a, "b": b, "agreed": agreed,
                        "crops": crops, "ruling": said.get(key, "")})
     drafts.sort(key=lambda d: d["key"])
