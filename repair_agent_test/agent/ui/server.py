@@ -354,6 +354,61 @@ def question_payload(key: str) -> dict:
     return view
 
 
+# --- figure-missing 證據包草案 --------------------------------------------------------------
+#
+# `figure_missing_second_pass.py`（qbr/scripts，PR #20）把 deterministic 掃描工單的每一列
+# 決策寫進 `store/scans/20261001-figure-producer/figure_drafts_run{A,B}.jsonl`（append-only、
+# queue 零寫入）。這一節只**讀**那兩個流 + 工單的裁片路徑，合成一張卡的素材；設計者的
+# 裁決走 `/api/judgement` 既有寫路徑（`store/agent_feedback.jsonl`，學習流）——這一頁
+# **不**寫人審帳本：落地（G3）另行 owner 核准。
+FIGURE_DIR = STORE_DIR / "scans" / "20261001-figure-producer"
+FIGURE_WO = STORE_DIR / "workorders" / "wo-4.1-figure-missing.jsonl"
+
+
+def figure_drafts() -> dict:
+    import figure_missing_second_pass as figure_producer  # qbr/scripts 已在 sys.path
+
+    wo_rows: dict[str, dict] = {}
+    for row in _read_jsonl(FIGURE_WO):
+        hits = figure_producer.crop_hits_of(row.get("note"))
+        wo_rows[row.get("key") or ""] = hits[0] if hits else {}
+
+    rounds: dict[str, dict[str, dict]] = {}
+    for path in sorted(FIGURE_DIR.glob("figure_drafts_run*.jsonl")):
+        for row in _read_jsonl(path):
+            key = row.get("candidate_key") or ""
+            tag = str(row.get("tag") or "")[:1]
+            if key and tag:
+                rounds.setdefault(key, {})[tag] = row
+
+    said: dict[str, str] = {}
+    for row in _read_jsonl(STORE):  # 最後一次裁決說話（append-only 的「現在值」）
+        extras = (row.get("extras") or {}) if isinstance(row.get("extras"), dict) else {}
+        if (row.get("candidate_key") or "") in rounds and extras.get("figure_review"):
+            said[row["candidate_key"]] = str(extras["figure_review"])
+
+    def view(row: dict) -> dict:
+        rec = row.get("record") or {}
+        return {"decision": rec.get("decision"), "refs": rec.get("refs") or [],
+                "where": rec.get("where"), "basis": rec.get("basis"),
+                "degraded": bool(rec.get("degraded")),
+                "at": row.get("at"), "tag": row.get("tag")}
+
+    drafts = []
+    for key, by in rounds.items():
+        hit = wo_rows.get(key) or {}
+        crops = ["review-ui/crops/%s/%s" % (hit.get("run", ""), fn)
+                 for fn in (by.get("A", {}).get("crop_files") or [])]
+        a, b = view(by.get("A", {})), view(by.get("B", {}))
+        agreed = None
+        if by.get("A") and by.get("B"):
+            agreed = (a["decision"], sorted(a["refs"])) == (b["decision"], sorted(b["refs"]))
+        drafts.append({"key": key, "a": a, "b": b, "agreed": agreed,
+                       "crops": crops, "ruling": said.get(key, "")})
+    drafts.sort(key=lambda d: d["key"])
+    return {"count": len(drafts), "drafts": drafts}
+
+
 # The A2 run artifacts. `HERE` is `agent/ui`, so the sandbox is two levels up.
 A2_RUNS = Path(bridge.SANDBOX) / "a2" / "runs"
 
@@ -517,6 +572,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path in ("/", "/index.html"):
                 self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+            elif parsed.path == "/figure":
+                self._send(200, (HERE / "figure.html").read_bytes(), "text/html; charset=utf-8")
+            elif parsed.path == "/api/figure":
+                self._json(figure_drafts())
             elif parsed.path == "/api/search":
                 self._search(query)
             elif parsed.path == "/api/browse":
@@ -592,6 +651,15 @@ class Handler(BaseHTTPRequestHandler):
                 if record["rating"] not in RATINGS:
                     self._json({"error": "rating must be one of %s" % ", ".join(RATINGS)}, 400)
                     return
+                extra = payload.get("extras")
+                if extra is not None:
+                    # 圖頁的結構化欄位（figure_review／refs／tag），只放窄白名單：鍵短、值短、
+                    # 最多 8 個——裁決的主體仍是 rating + reason，這些是可 join 的指針。
+                    if not isinstance(extra, dict):
+                        self._json({"error": "extras must be an object"}, 400)
+                        return
+                    record["extras"] = {str(k)[:32]: str(v)[:300]
+                                        for k, v in list(extra.items())[:8]}
                 self._json({"appended": append_judgement(record), "store": str(STORE)})
             elif parsed.path == "/api/accept-draft":
                 self._json(append_accept(payload))
