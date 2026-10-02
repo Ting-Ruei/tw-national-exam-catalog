@@ -66,6 +66,8 @@
   #verdict-target { flex: 1 1 240px; min-width: 160px; }
   #verdict-target.warn { color: var(--bad); font-weight: 600; }
   li.draft.target { background: #f6f8ef; border-radius: 6px; padding: 4px 6px; }
+  .preview-banner { background: #fff7df; border: 1px solid #e3c04a; border-radius: 8px;
+                    padding: 6px 10px; margin-bottom: 10px; font-size: 13px; }
   .draft .old { color: var(--muted); text-decoration: line-through 1px solid var(--muted); }
   .draft .new { font-weight: 600; }
 
@@ -275,11 +277,14 @@
     <div id="chat-log"></div>
     <div id="verdict-bar">
       <span id="verdict-target" class="meta">未選草案——在題目面板挑一則草案「設為驗收對象」。</span>
-      <button id="accept-draft" class="primary"
-        title="通過選定草案：寫進人審帳本，事件參照草案的 checksum。機器不會代按。">✅ 通過（寫人審帳本）</button>
-      <button id="return-draft" title="退回選定草案：理由必填，理由成為規則候選。">↩ 退回（進規則候選）</button>
-      <input id="return-reason" size="34" placeholder="退回理由（必填；成為規則候選）">
-      <button id="verdict-clear" title="收掉本次的驗收選擇">收掉</button>
+      <span id="verdict-actions" hidden>
+        <button id="preview-draft" title="把這則草案套到題目上給你看——只是預覽，題目還沒真的改。">👁 看套用後的樣子</button>
+        <button id="accept-draft" class="primary"
+          title="核准「這則草案」的改法，寫進人審帳本；題目本體等你說落地才會真的改。機器不會代按。">✅ 通過這則草案</button>
+        <button id="return-draft" title="否決「這則草案」：理由必填，agent 會讀你的理由去學。">↩ 退回這則草案</button>
+        <input id="return-reason" size="34" placeholder="退回理由：寫給 agent 看的（例：這張圖是別題的）">
+        <button id="verdict-clear" title="只是取消目前選定的草案，不寫任何檔案。">取消選取</button>
+      </span>
     </div>
     <div id="chat-row">
       <textarea id="chat-text" rows="2"
@@ -540,6 +545,40 @@ function draftCurrentValue(question, draft) {
 
 let verdictDraftSha = null;
 
+// 所見即所得（designer, 2026-10-02:「我在中間還是看不到她真正改過的樣子」）。The preview renders
+// the question **as if the selected draft were applied**, through the same renderers the real
+// question uses — not a text diff. It never writes: the copy is local, `current` stays the real
+// question, and every POST keeps reading `current`.
+let previewDraftSha = null;
+
+function appliedQuestion(question) {
+  if (!previewDraftSha || !question) return question;
+  const d = (question.drafts || []).find((x) => x._sha256 === previewDraftSha);
+  if (!d) return question;
+  const insert = d.insert || "";
+  // `fix` leads with the target ("A: …") because the drafts panel shows it that way; strip the
+  // prefix when applying. Stem previews drop `stem_html` so the plain-text fallback is used —
+  // the cached html is the OLD stem and would silently win the preview.
+  const fix = (d.fix || "").replace(/^[A-D]\s*[:：]\s*/, "");
+  const om = insert.match(/(?:選項|options?)\s*([A-D])/i);
+  if (om) {
+    const key = om[1];
+    if (Array.isArray(question.options)) {
+      // Platform shape: list of {key, text, ...} rows. The cached `options_html` entry for this
+      // key is the OLD value and would win inside platformHtml — drop it so the fallback path
+      // renders the previewed text.
+      const opts = question.options.map((o) => (o.key === key ? { ...o, text: fix } : o));
+      const html = (question.options_html || []).filter((o) => o.key !== key);
+      return { ...question, options: opts, options_html: html };
+    }
+    const opts = { ...(question.options || {}) };
+    if (opts[key] !== undefined) opts[key] = fix;
+    return { ...question, options: opts };
+  }
+  if (insert.includes("題幹") || insert.includes("stem")) return { ...question, stem: fix, stem_html: null };
+  return question;
+}
+
 function renderSaid(rows) {
   if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
   return rows.map((row) => {
@@ -770,11 +809,17 @@ async function loadList() {
 
 function renderQuestion(question) {
   current = question;
+  // Preview swaps the displayed copy; `current` above stays the untouched question for POSTs.
+  question = appliedQuestion(question);
+  refreshVerdictTarget();  // visibility is per-question: a draftless question must hide the actions
+  const previewing = previewDraftSha && (current.drafts || []).some((x) => x._sha256 === previewDraftSha);
   setStatus(`已載入 q${question.question_number}（${question.subject || question.category || ""}）`);
-  $("key").value = question.candidate_key;
+  $("key").value = current.candidate_key;
   highlightCurrent();
-  $("qmeta").innerHTML = renderTags(question);
+  $("qmeta").innerHTML = renderTags(current);
   $("qbody").innerHTML = `
+    ${previewing ? `<div class="preview-banner">👁 預覽：這是套用「${esc((current.drafts.find((x) => x._sha256 === previewDraftSha) || {}).insert || "草案")}」後的樣子——<b>還沒真的改</b>。
+      <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
     <div class="stem study">${platformHtml(question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
@@ -1044,7 +1089,18 @@ function verdictWarn(text) {
 
 function refreshVerdictTarget() {
   $("verdict-target").classList.remove("warn");
+  // Dead buttons taught nothing (2026-10-02: he pressed 退回 on a draftless question and read
+  // silence as 「沒有跟著題目」). With no draft to act on, the actions are simply not shown and
+  // the target line says where opinions DO go.
+  const hasDrafts = !!current && (current.drafts || []).length > 0;
+  $("verdict-actions").hidden = !(hasDrafts && verdictDraftSha);
+  if (!hasDrafts) {
+    $("verdict-target").textContent =
+      "這題沒有修復草案——要表達「這題有問題」，用下面「我的判讀」的按鈕；等 agent 提出草案，這裡才會出現通過／退回。";
+    return;
+  }
   $("verdict-target").textContent = verdictTargetText();
+  $("preview-draft").textContent = previewDraftSha ? "👁 關閉預覽" : "👁 看套用後的樣子";
 }
 
 async function acceptDraft() {
@@ -1059,11 +1115,15 @@ async function acceptDraft() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, notes }),
     });
+    verdictDraftSha = null;
+    previewDraftSha = null;
+    await refreshQuestion("manual");
+    refreshVerdictTarget();
+    // Set AFTER refreshQuestion: the re-render must not overwrite the confirmation the designer
+    // needs to see — a wiped message is exactly how a verdict looked like 「沒有發生」.
     $("verdict-target").textContent =
       "已寫入人審帳本 question_review_events.jsonl（草案 " + esc(result.event.repair_draft_sha256.slice(0, 12))
-      + "…）——你驗收的是這則草案；題目內容還沒被改。";
-    verdictDraftSha = null;
-    await refreshQuestion("manual");
+      + "…）——你驗收的是這則草案；題目內容要等落地才會真的改。";
   } catch (error) {
     $("verdict-target").textContent = "通過失敗：" + esc(error.message);
   } finally {
@@ -1153,6 +1213,7 @@ function renderPipelineFindings(rows) {
 async function loadQuestion() {
   const key = $("key").value.trim();
   if (!key) return;
+  previewDraftSha = null;  // a preview belongs to the question it was made on
   setStatus("載入中…");
   try {
     renderQuestion(await api("/api/question?key=" + encodeURIComponent(key)));
@@ -1259,14 +1320,31 @@ $("chat-send").addEventListener("click", sendChat);
 $("chat-stop").addEventListener("click", stopChat);
 $("accept-draft").addEventListener("click", acceptDraft);
 $("return-draft").addEventListener("click", returnDraft);
-$("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; refreshVerdictTarget(); });
+$("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; previewDraftSha = null; refreshVerdictTarget(); });
+$("preview-draft").addEventListener("click", () => {
+  if (!verdictDraftSha) return;
+  previewDraftSha = previewDraftSha ? null : verdictDraftSha;
+  refreshVerdictTarget();
+  renderQuestion(current);
+});
 // Picking the verdict target is a delegated click: the drafts panel is re-rendered by every
 // refresh, so the handler cannot be attached once to the list.
 document.addEventListener("click", (event) => {
+  const off = event.target.closest("#preview-off");
+  if (off) {
+    event.preventDefault();
+    previewDraftSha = null;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
   const picky = event.target.closest(".picky");
   if (!picky) return;
   event.preventDefault();
   verdictDraftSha = picky.dataset.draftSha;
+  // A selection change while previewing follows the new draft — the preview is of "the selected
+  // draft", not of whichever one happened to be selected when the toggle went on.
+  if (previewDraftSha && previewDraftSha !== verdictDraftSha) previewDraftSha = verdictDraftSha;
   refreshVerdictTarget();
   // Re-rendering refreshes every 「設為驗收對象」 label: the panel must show which one is on.
   renderQuestion(current);
