@@ -366,6 +366,11 @@ def question_payload(key: str) -> dict:
                     continue
     view["drafts"] = drafts
     view["sandbox_accepts"] = sandbox_accepts_for(key)
+    # 圖片草案（agent 對「圖怎麼插」的提議）只掛在**有草案的題**上；主頁中段的「圖片草案」
+    # 區塊讀這裡。沒有就不帶鍵——前端不出現空區塊。
+    draft = figure_draft_for(key)
+    if draft:
+        view["figure_draft"] = draft
     # 綁定 v2（owner 2026-10-02：「整套圈要可以運作」）。The hash follows v2's own
     # `scopeToHash()` shape `#類科/年/次/科目/qNNN`, spelled with the **normalized** names —
     # v2's tree is keyed on those (its `toItem()` reads `normalized_*`). The `/qNNN` tail is the
@@ -395,8 +400,21 @@ FIGURE_DIR = STORE_DIR / "scans" / "20261001-figure-producer"
 FIGURE_WO = STORE_DIR / "workorders" / "wo-4.1-figure-missing.jsonl"
 
 
-def figure_drafts() -> dict:
+_FIGURE: dict = {"stamp": None, "by_key": {}}
+
+
+def _figure_state() -> dict:
+    """`candidate_key → 草案`，以輸入檔 mtime 為快取鍵。
+
+    兩個 run 流 + 工單 + 學習檔都是 append-only；任一變動（含你在題目頁按下裁決）就整表
+    重建。量測：634 題冷建 ~2 s（不含題幹——那是 `/api/question` 的事），熱讀是 dict 查表。
+    """
     import figure_missing_second_pass as figure_producer  # qbr/scripts 已在 sys.path
+
+    sources = sorted(FIGURE_DIR.glob("figure_drafts_run*.jsonl")) + [FIGURE_WO, STORE]
+    stamp = tuple((p, p.stat().st_mtime_ns) for p in sources if p.exists())
+    if _FIGURE["stamp"] == stamp:
+        return _FIGURE["by_key"]
 
     wo_rows: dict[str, dict] = {}
     for row in _read_jsonl(FIGURE_WO):
@@ -424,7 +442,7 @@ def figure_drafts() -> dict:
                 "degraded": bool(rec.get("degraded")),
                 "at": row.get("at"), "tag": row.get("tag")}
 
-    drafts = []
+    by_key = {}
     for key, by in rounds.items():
         hit = wo_rows.get(key) or {}
         crops = ["review-ui/crops/%s/%s" % (hit.get("run", ""), fn)
@@ -433,13 +451,14 @@ def figure_drafts() -> dict:
         agreed = None
         if by.get("A") and by.get("B"):
             agreed = (a["decision"], sorted(a["refs"])) == (b["decision"], sorted(b["refs"]))
-        # 整題**不在**這份 payload 裡（owner 2026-10-02:「沒有看到整題，無法判斷對錯」——但要
-        # 的是卡上看得到整題，不是把 634 題塞進一次回應：634 × 題幹＋選項＝數 MB、冷建 15 s）。
-        # 卡片各自向既有 `/api/question` 懶載入（每題 ~0.1 s，隨渲染補上），前端 questionPane。
-        drafts.append({"key": key, "a": a, "b": b, "agreed": agreed,
-                       "crops": crops, "ruling": said.get(key, "")})
-    drafts.sort(key=lambda d: d["key"])
-    return {"count": len(drafts), "drafts": drafts}
+        by_key[key] = {"a": a, "b": b, "agreed": agreed, "crops": crops,
+                       "ruling": said.get(key, "")}
+    _FIGURE["stamp"], _FIGURE["by_key"] = stamp, by_key
+    return by_key
+
+
+def figure_draft_for(key: str) -> dict | None:
+    return _figure_state().get(key)
 
 
 # The A2 run artifacts. `HERE` is `agent/ui`, so the sandbox is two levels up.
@@ -599,6 +618,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -606,9 +631,12 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path in ("/", "/index.html"):
                 self._send(200, _page("index.html"), "text/html; charset=utf-8")
             elif parsed.path == "/figure":
-                self._send(200, _page("figure.html"), "text/html; charset=utf-8")
+                # 收掉獨立頁（owner 2026-10-02：「我要簡化而不是一直擴張」——主頁本來就有
+                # PDF 面板，圖草案併進題目頁中段）。302 只是讓舊書籤不要 404。
+                self._redirect("/")
             elif parsed.path == "/api/figure":
-                self._json(figure_drafts())
+                self._json({"count": len(_figure_state()),
+                            "keys": sorted(_figure_state())})
             elif parsed.path == "/api/search":
                 self._search(query)
             elif parsed.path == "/api/browse":
