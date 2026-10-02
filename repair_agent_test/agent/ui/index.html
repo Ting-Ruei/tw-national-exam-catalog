@@ -64,6 +64,7 @@
   #verdict-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
                  padding: 6px 0; border-top: 1px dashed var(--line); margin-top: 6px; }
   #verdict-target { flex: 1 1 240px; min-width: 160px; }
+  #verdict-target.warn { color: var(--bad); font-weight: 600; }
   li.draft.target { background: #f6f8ef; border-radius: 6px; padding: 4px 6px; }
   .draft .old { color: var(--muted); text-decoration: line-through 1px solid var(--muted); }
   .draft .new { font-weight: 600; }
@@ -882,8 +883,14 @@ async function openChatFor(key) {
       : "還沒說話。這是這一題專屬的對話——直接問它。";
     $("chat-log").innerHTML = (data.turns || []).map((t) => chatTurn(t, false)).join("")
       || `<p class="empty-note">${empty}</p>`;
-    $("chat-status").textContent = (data.turns || []).length
-      ? `已有 ${data.turns.length} 則對話（存在 chat.jsonl）` : "";
+    const turns = (data.turns || []);
+    // The binding is the thing people get wrong (2026-10-02: switching questions 「對話沒變」 was
+    // 全庫 mode doing its job). State it on every load, in the line the designer already reads.
+    const binding = chatMode === "corpus"
+      ? "【全庫】這則對話不跟著題目走"
+      : "【綁這一題】" + (chatKey || "（還沒載入題目）");
+    $("chat-status").textContent = binding + "　·　"
+      + (turns.length ? `已有 ${turns.length} 則對話` : "還沒有對話，直接打字送出");
   } catch (error) {
     $("chat-status").textContent = "讀對話紀錄失敗：" + error.message;
   }
@@ -1027,13 +1034,22 @@ function verdictTargetText() {
   return `驗收對象：${row.insert || "（未說明位置）"} → ${row.fix || ""}`;
 }
 
+function verdictWarn(text) {
+  // Blocked verdict attempts were one gray line the designer read as 「按了沒反應」. The state is
+  // the message: red, and it must say what to do next, not just that the precondition failed.
+  const el = $("verdict-target");
+  el.textContent = text;
+  el.classList.add("warn");
+}
+
 function refreshVerdictTarget() {
+  $("verdict-target").classList.remove("warn");
   $("verdict-target").textContent = verdictTargetText();
 }
 
 async function acceptDraft() {
-  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
-  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
+  if (!current) { verdictWarn("先載入一題（左邊候選列表點一題）。"); return; }
+  if (!verdictDraftSha) { verdictWarn("通過是通過「一則草案」：先在上面修復草案清單點一列草案，再按通過。"); return; }
   document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
   try {
     const notes = $("reason").value.trim();
@@ -1044,7 +1060,8 @@ async function acceptDraft() {
       body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, notes }),
     });
     $("verdict-target").textContent =
-      "已寫入人審帳本（" + esc(result.event.repair_draft_sha256.slice(0, 12)) + "…）——草案在此題面板標為已通過。";
+      "已寫入人審帳本 question_review_events.jsonl（草案 " + esc(result.event.repair_draft_sha256.slice(0, 12))
+      + "…）——你驗收的是這則草案；題目內容還沒被改。";
     verdictDraftSha = null;
     await refreshQuestion("manual");
   } catch (error) {
@@ -1055,12 +1072,25 @@ async function acceptDraft() {
 }
 
 async function returnDraft() {
-  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
-  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
+  if (!current) { verdictWarn("先載入一題（左邊候選列表點一題）。"); return; }
+  if (!verdictDraftSha) {
+    const typed = $("return-reason").value.trim();
+    const hasDrafts = ((current || {}).drafts || []).length > 0;
+    if (hasDrafts) {
+      verdictWarn("退回是退「一則草案」：先在上面修復草案清單點一列草案，再按退回；你寫的理由還在框裡。");
+    } else {
+      // No drafts → a return is impossible, and telling the designer to pick one sends him in
+      // circles (2026-10-02: he typed a reason, hit 退回, and read it as 「沒有跟著題目」). The
+      // working path for 「這題有問題」 is the one-key rating below; carry his words there.
+      if (typed && !$("reason").value.trim()) { $("reason").value = typed; }
+      verdictWarn("這題還沒有任何修復草案，沒有東西可退。你寫的理由已幫你搬到「我的判讀」框裡——按「有問題」就會記錄下來。");
+    }
+    return;
+  }
   const reason = $("return-reason").value.trim();
   if (!reason) {
     // The reason IS the rule candidate; an unpinned reason would be a return nobody can learn.
-    $("verdict-target").textContent = "退回要寫理由——理由就是規則候選的原料。";
+    verdictWarn("退回要寫理由——理由就是規則候選的原料。");
     return;
   }
   document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
@@ -1071,13 +1101,15 @@ async function returnDraft() {
     });
     $("return-reason").value = "";
     verdictDraftSha = null;
-    $("verdict-target").textContent = "已退回（理由已進學習流，3.1 起由規則家收走）。";
     await refreshQuestion("manual");
+    refreshVerdictTarget();
+    // Set AFTER refreshQuestion: the re-render must not overwrite the confirmation the designer
+    // needs to see — this message being wiped is exactly how a return looked like 「沒有發生」.
+    $("verdict-target").textContent = "已退回：理由寫進 agent_feedback.jsonl（學習流），草案本身保留在面板。";
   } catch (error) {
-    $("verdict-target").textContent = "退回失敗：" + esc(error.message);
+    verdictWarn("退回失敗：" + error.message + "——草案沒有被動到。");
   } finally {
     document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
-    refreshVerdictTarget();
   }
 }
 
@@ -1200,7 +1232,8 @@ async function save(rating) {
         reason,
       }),
     });
-    $("save-status").textContent = "已寫入 " + result.store;
+    $("save-status").textContent = "已記錄（" + result.store.split("/").pop()
+      + "）：這是你的判讀、給 agent 當學習語料——不是正式審題，也沒有改題目。";
     $("reason").value = "";
     // Re-read so the new judgement is shown from the file, not from what we hoped we wrote.
     renderQuestion(await api("/api/question?key=" + encodeURIComponent(current.candidate_key)));
