@@ -1342,10 +1342,11 @@ function renderPipelineFindings(rows) {
         ${row.error ? `<span class="tag bad">錯誤：${esc(row.error)}</span>` : ''}</div>
       <div class="fq"><b>模型回答（解析後）：</b>
         where＝${esc(f.where || '')}<br>fix＝${esc(f.fix || '')}</div>
+      <!-- 2026-10-03：prompt 考古（system/user）不再進 view payload——那是舊 run 的提示詞副本，
+           不是證據，卻佔指揮者每次工具呼叫 ~4k input tokens。要看完整 prompt：開 store/
+           question_ai_findings.jsonl 的原列（owner 看原始資料的那扇窗仍在）。 -->
       <details><summary>模型收到的提示詞（system）</summary>
-        <pre class="raw">${esc(row.prompt_system || '（未記錄）')}</pre></details>
-      <details><summary>模型收到的提示詞（user，含題目原文）</summary>
-        <pre class="raw">${esc(row.prompt_user || '（未記錄）')}</pre></details>
+        <pre class="raw">已從 view 移除（prompt 考古，非證據）——完整原文在 store/question_ai_findings.jsonl 原列</pre></details>
       <details><summary>模型原始輸出（raw）＋用量</summary>
         <pre class="raw">${esc(row.raw || '（未記錄；這一筆是解析後的 finding）')}\n\n${esc(JSON.stringify(usage, null, 2))}</pre></details>
     </div>`;

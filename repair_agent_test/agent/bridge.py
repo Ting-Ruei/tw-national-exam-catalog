@@ -528,7 +528,19 @@ def question_view(question: dict) -> dict:
         # What the pipeline's own repair loop asked a model and what it answered. Carried here so the
         # UI can show 「AI 實際讀到／產生什麼」; without it the only readable record of a model's
         # reading was its parsed verdict (`where`/`fix`), which is the conclusion, not the evidence.
-        "ai_findings": ai_findings(question.get("candidate_key") or ""),
+        #
+        # **But the prompt archaeology is not evidence.** `prompt_system`/`prompt_user` are copies
+        # of the *prompts* past runs used (measured 2026-10-03 on q051: 11.7k of 21.1k finding
+        # chars). The agent already has the current ROLE; shipping four generations of old prompts
+        # again is ~4k input tokens **per tool call**, and the conductor's latency scales with it
+        # (measured: a turn with one get_question went 15.6k → 19.6k input). What the agent compares
+        # is readings and verdicts: `finding`, `evidence`, `raw`, `model`, `created_at`. The full
+        # rows stay in the UI's own pipeline-findings panel and in the jsonl on disk.
+        "ai_findings": [
+            {k: v for k, v in row.items()
+             if k not in ("prompt_system", "prompt_user", "orchestration", "principles")}
+            for row in ai_findings(question.get("candidate_key") or "")
+        ],
     }
 
 

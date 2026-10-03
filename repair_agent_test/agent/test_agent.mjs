@@ -1443,7 +1443,6 @@ test("the raw view really renders, and the model's own prompt reaches the page",
     judgements: [],
     ai_findings: [{
       model: "ornith-1.5-mtplx-35b", created_at: "2026-09-21T22:32:41", seconds: 1.0,
-      prompt_system: "SYSTEM-MARKER", prompt_user: "USER-MARKER",
       finding: { verdict: "OK", where: "WHERE-MARKER", fix: "FIX-MARKER" },
       raw: "RAW-MARKER", usage: { prompt_tokens: 849 },
     }],
@@ -1459,10 +1458,15 @@ test("the raw view really renders, and the model's own prompt reaches the page",
   // "it renders" a check instead of a claim.
   const result = new Function("question", source)(question);
 
-  for (const marker of ["SYSTEM-MARKER", "USER-MARKER", "WHERE-MARKER", "RAW-MARKER"]) {
+  // 2026-10-03: prompt archaeology (`prompt_system`/`prompt_user`) no longer rides the view, so the
+  // markers for it are gone too — what must reach the page is the verdict, the fix, and the raw
+  // output (the evidence), plus the pointer to the jsonl for the full prompt.
+  for (const marker of ["WHERE-MARKER", "RAW-MARKER", "question_ai_findings.jsonl"]) {
     assert.ok(result.pipeline.includes(marker),
-      `${marker} must reach the page — the prompt and the raw output are the evidence, not the conclusion`);
+      `${marker} must reach the page — the parsed verdict and raw output are the evidence`);
   }
+  assert.ok(!result.pipeline.includes("SYSTEM-MARKER") && !result.pipeline.includes("USER-MARKER"),
+    "prompt archaeology must not render from the view (it is not in the payload)");
   assert.ok(result.read.includes("content_parts"),
     "the agent's tool trace must render, including the image part");
   assert.ok(result.read.includes("q042_option_A.png"), "and the arguments it was called with");
@@ -1494,17 +1498,21 @@ test("the pipeline's AI findings are read from its stream and reach the view", a
   const rows = view.ai_findings || [];
   assert.ok(rows.length, `the stream must yield this question's records (${key})`);
   const row = rows[0];
-  assert.ok(row.prompt_system && row.prompt_system.length > 50,
-    "the prompt the model was given must be carried — it is what 'what the AI was shown' means");
-  assert.ok(row.prompt_user && row.prompt_user.includes("題號"),
-    "and the user prompt, which holds the question's own text");
-  assert.ok(row.finding && row.finding.where, "and the parsed answer");
+  // 2026-10-03: the **prompt archaeology** (`prompt_system`/`prompt_user`/`orchestration`/
+  // `principles`) is stripped from the view — past runs' prompts are not evidence, and they cost
+  // the conductor ~4k input tokens per tool call (measured: q051 get_question 22.6k → 8.7k chars).
+  // What "what the AI was shown" means to a person is still carried: the parsed verdict, the raw
+  // completion, which model said it, and when. The full rows stay on disk in the jsonl.
+  for (const field of ["prompt_system", "prompt_user", "orchestration", "principles"]) {
+    assert.equal(field in row, false, `${field} must be stripped from the view (prompt archaeology, not evidence)`);
+  }
+  assert.ok(row.finding && row.finding.where, "the parsed answer is carried");
   assert.ok(row.model, "and which model said it");
 
   // The bridge must also be the one that reads it, not the UI guessing from another file.
   const source = readFileSync(new URL("./bridge.py", import.meta.url), "utf8");
   assert.match(source, /question_ai_findings\.jsonl/, "the bridge names the stream it reads");
-  assert.match(source, /"ai_findings": ai_findings\(/, "and puts it in the view");
+  assert.match(source, /"ai_findings": \[/, "and puts the trimmed rows in the view");
 });
 
 /**

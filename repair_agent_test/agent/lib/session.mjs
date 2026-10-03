@@ -160,6 +160,14 @@ export async function buildSession({ sessionManager, thinking, cwd, omit = [] } 
     agentDir: process.env.PI_AGENT_DIR || getAgentDir(),
     noExtensions: true,
     noSkills: true,
+    // 2026-10-03 latency work: Pi's context-file loader walks the AGENTS.md chain from `cwd` and
+    // appends **both** the umbrella (`ai_learning_platform/AGENTS.md`, 6.3k chars) and the catalog
+    // repo's (`tw-national-exam-catalog/AGENTS.md`, 11.9k chars) — 18.3k chars ≈ 7k input tokens on
+    // **every** conductor call, on top of the ROLE. The sandbox session's contract is its own ROLE
+    // (`identity.mjs`): governance rules it needs live there; the repo AGENTS.md chain is this
+    // developer session's context, not the reviewer-model's. Baron-cwd control measured: 7.4k
+    // total without it vs 25.6k with it.
+    noContextFiles: true,
   });
   await resourceLoader.reload();
 
