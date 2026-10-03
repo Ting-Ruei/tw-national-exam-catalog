@@ -238,6 +238,8 @@ async function ask(message) {
     return;
   }
   const started = Date.now();
+  // Token metering for this ask (reset every turn; see the `done` event below).
+  const turnUsage = { calls: 0 };
   const entry = await sessionFor(key);
   const { session } = entry;
 
@@ -291,12 +293,22 @@ async function ask(message) {
 
     // Capture the assistant's own text from the event stream, not from a return value: `prompt()`
     // resolves with nothing, and the answer exists only as the deltas it already sent.
+    // Token metering (owner 2026-10-03): every assistant message_end carries `usage`
+    // {input, output, cacheRead, cacheWrite, totalTokens, reasoning} — accumulated across the
+    // turn (one turn may be many model calls: tool rounds) and reported with `done`.
     const collect = session.subscribe((event) => {
       if (event.type === "message_end" && event.message.role === "assistant") {
         const content = event.message.content;
         reply = typeof content === "string"
           ? content
           : (Array.isArray(content) ? content.filter((p) => p?.type === "text").map((p) => p.text).join("") : "");
+        const u = event.message.usage;
+        if (u && typeof u === "object") {
+          turnUsage.calls += 1;
+          for (const k of ["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"]) {
+            if (typeof u[k] === "number") turnUsage[k] = (turnUsage[k] || 0) + u[k];
+          }
+        }
       }
     });
     try {
@@ -304,9 +316,10 @@ async function ask(message) {
     } finally {
       collect();
     }
-    remember({ candidate_key: key || null, role: "agent", text: reply });
+    remember({ candidate_key: key || null, role: "agent", text: reply,
+               ...(turnUsage.calls ? { usage: turnUsage } : {}) });
     write({ id, event: "turn", role: "agent", text: reply });
-    write({ id, event: "done", seconds: (Date.now() - started) / 1000 });
+    write({ id, event: "done", seconds: (Date.now() - started) / 1000, usage: turnUsage.calls ? turnUsage : null });
   } catch (error) {
     write({ id, event: "error", error: `${error?.name || "Error"}: ${error?.message || error}` });
   } finally {

@@ -47,8 +47,11 @@ out = {}
 for name, record in engines.endpoints().items():
     out[name] = {"url": record["url"], "model": record["name"], "key": record.get("key", ""),
                  "reasoning": bool(record.get("reasoning") or record.get("thinking")),
-                 # The deployment's own limits, when engines.py knows them: asking for more than a
-                 # server accepts is a 400 with no body (measured on occamy, see engines.py).
+                 # The engine's own thinking switch (chat_template_kwargs on DGX): Pi's
+                 # chat-template thinking format sends exactly this dict. Without it the DGX GLM
+                 # answers with content null and everything in reasoning_content — measured
+                 # 2026-10-03 — so it must travel with the record, not be re-derived per call.
+                 "thinking": record.get("thinking") or {},
                  "context_window": record.get("context_window"),
                  "max_output_tokens": record.get("max_output_tokens")}
 print(json.dumps(out))
@@ -75,10 +78,19 @@ function providerConfig(name, record) {
     // The role is a per-server fact, not a preference, so it is pinned here rather than left to
     // Pi's default: `instructionRole = reasoning && supportsDeveloperRole ? "developer" : "system"`.
     supportsDeveloperRole: false,
-    // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
-    // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
-    ...(record.reasoning ? {} : { thinkingFormat: "qwen-chat-template" }),
   };
+  // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
+  // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
+  // An engine that ships its own switch dict (DGX: `chat_template_kwargs.enable_thinking=False`)
+  // maps to Pi's `chat-template` format + `chatTemplateKwargs` — Pi sends the dict verbatim.
+  // Without this the DGX GLM runs thinking-on and answers `content: null` (measured 2026-10-03).
+  if (record.thinking && typeof record.thinking === "object"
+      && Object.keys(record.thinking).length) {
+    compat.thinkingFormat = "chat-template";
+    compat.chatTemplateKwargs = record.thinking.chat_template_kwargs || {};
+  } else if (!record.reasoning) {
+    compat.thinkingFormat = "qwen-chat-template";
+  }
   return {
     name,
     baseUrl: record.url.replace(/\/$/, "") + "/v1",

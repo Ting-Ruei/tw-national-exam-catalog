@@ -99,6 +99,13 @@ SANDBOX_ACCEPT_SOURCE = "sandbox_accept"
 #: station's own service; a checkout running v2 locally overrides with `REPAIR_AGENT_V2_BASE`.
 V2_BASE = os.environ.get("REPAIR_AGENT_V2_BASE") or "http://192.168.10.70:8765"
 
+# 指揮者的腦（owner 2026-10-03：「指揮者可以換成 192.168.10.90:8888 的模型」＋「指揮者是要去
+# 訓提示詞跟指揮 MoE 模型做事的」）。只交給**對話子進程**（ui/chat.mjs）；做事 agent（worker）
+# 維持原腦 occamy——智能分層是整個指揮鏈的前提。值是 `REPAIR_AGENT_MODEL` 同格式：
+# `<引擎名>/<served id>`；引擎表在 qbr/src/qbr/engines.py（`dgx-flash`＝timsdgx:8888，
+# LAN 192.168.10.90:8888 同源）。設 `REPAIR_AGENT_CONDUCTOR_MODEL=""` 回復 occamy 對話。
+CONDUCTOR_MODEL = os.environ.get("REPAIR_AGENT_CONDUCTOR_MODEL", "dgx-flash/GLM-5.3-Flash-EXL3")
+
 
 def _page(name: str) -> bytes:
     """One UI page with the deployment's own links baked in.
@@ -507,7 +514,9 @@ class Chat:
                 ["node", str(HERE / "chat.mjs")],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=str(CATALOG), text=True, bufsize=1,
-                env={**os.environ, "REPAIR_AGENT_STORE": str(STORE_DIR)},
+                env={**os.environ, "REPAIR_AGENT_STORE": str(STORE_DIR),
+                     # 指揮者的腦（owner 2026-10-03）。空字串＝沿用 session.mjs 的預設腦。
+                     **({"REPAIR_AGENT_MODEL": CONDUCTOR_MODEL} if CONDUCTOR_MODEL else {})},
             )
         return self.process
 
@@ -595,7 +604,11 @@ def chat_turns(key: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if (row.get("candidate_key") or None) == wanted:
-            out.append(row)
+            # usage 隨列走（owner 2026-10-03 的 token 計量）；舊列沒有就不帶鍵。
+            if row.get("usage"):
+                out.append({**row, "usage": row["usage"]})
+            else:
+                out.append(row)
     return out
 
 

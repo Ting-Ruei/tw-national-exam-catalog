@@ -262,6 +262,7 @@ export function toolsFor(Type) {
           "--reason", params.reason,
         ];
         if (params.engine) argv.push("--engine", params.engine);
+        else if (BRAIN_ENGINE) argv.push("--engine", BRAIN_ENGINE);
         const result = await callBridge(argv, { timeout: 120_000 });
         return asToolResult(result);
       },

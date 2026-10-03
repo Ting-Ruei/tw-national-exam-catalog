@@ -1067,8 +1067,11 @@ async function openChatFor(key) {
 function chatTurn(turn, live) {
   const who = turn.role === "designer" ? "你" : "agent";
   const body = turn.text ? esc(turn.text) : '<span class="empty-note">…</span>';
+  // Token metering (owner 2026-10-03)：該輪的用量跟著紀錄走；舊紀錄沒有 usage 就不出現。
+  const u = turn.role === "agent" && turn.usage;
+  const toks = u ? ` · ${u.input ?? 0} 進/${u.output ?? 0} 出` : "";
   return `<div class="turn ${esc(turn.role)}${live ? " live" : ""}">
-    <div class="who">${esc(who)}${turn.at ? " · " + esc(turn.at.slice(11, 19)) : ""}</div>
+    <div class="who">${esc(who)}${turn.at ? " · " + esc(turn.at.slice(11, 19)) : ""}${toks}</div>
     <div class="body">${body}</div></div>`;
 }
 
@@ -1147,8 +1150,17 @@ async function sendChat() {
             `<div class="chat-tool bad">錯誤：${esc(event.error)}</div>`);
           $("chat-status").textContent = "出錯了——上面的紅字就是原因。";
         } else if (event.event === "done") {
+          // Token metering (owner 2026-10-03). The numbers come from the provider's own usage
+          // report, summed over every model call the turn made; null usage = the engine did not
+          // report (then we say nothing rather than inventing a number).
+          const u = event.usage;
+          const toks = u
+            ? `｜tokens ${u.input ?? 0} 進 / ${u.output ?? 0} 出` +
+              (u.cacheRead ? `（快取讀 ${u.cacheRead}）` : "") +
+              `，模型呼叫 ${u.calls} 次`
+            : "";
           $("chat-status").textContent =
-            `完成（${(event.seconds || 0).toFixed(1)} 秒）`;
+            `完成（${(event.seconds || 0).toFixed(1)} 秒${toks ? "｜" + toks : ""}）`;
           // run 完成 → 自動重抓 (2026-09-30, workplan 2.3): the turn may have written judgements,
           // crops or notes; what the panel already shows is one fetch behind. Not awaited: the
           // chat box's own tail (status, streaming flag) must not wait on the re-render.
