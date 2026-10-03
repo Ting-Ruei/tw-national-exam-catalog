@@ -17,8 +17,6 @@
   :root {
     --ink: #1b1f24; --muted: #6b7280; --line: #d8dde5; --bg: #f6f8fa;
     --ok: #1a7f37; --warn: #9a6700; --bad: #b42318; --accent: #0969da;
-    /* Height reserved for the fixed write bar, so the panes are never hidden behind it. */
-    --footer-h: 168px;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.65 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
@@ -78,13 +76,16 @@
   #verdict-target { flex: 1 1 240px; min-width: 160px; }
   #verdict-target.warn { color: var(--bad); font-weight: 600; }
   li.draft.target { background: #f6f8ef; border-radius: 6px; padding: 4px 6px; }
+  li.draft .draft-detail { margin: 4px 0 0; font-size: 12px; }
+  li.draft .draft-detail summary { cursor: pointer; color: var(--muted); }
+  li.draft .draft-detail[open] { border-left: 2px solid var(--line); padding-left: 8px; }
   .preview-banner { background: #fff7df; border: 1px solid #e3c04a; border-radius: 8px;
                     padding: 6px 10px; margin-bottom: 10px; font-size: 13px; }
   .draft .old { color: var(--muted); text-decoration: line-through 1px solid var(--muted); }
   .draft .new { font-weight: 600; }
 
   /* the list */
-  #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - var(--footer-h) - 84px);
+  #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - 84px);
                display: flex; flex-direction: column; gap: 8px; }
   #list-filters { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   #list-filters select { flex: 1 1 auto; min-width: 0; }
@@ -136,7 +137,8 @@
              border-radius: 4px; background: #fff; cursor: zoom-in; }
   .options li .t { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   /* The question's own figure crop (not an option's), shown under the stem. */
-  .fig-crop { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
+  .fig-crop { max-width: 100%; max-height: 160px; width: auto; object-fit: contain;
+              border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; cursor: zoom-in; }
   /* 圖片草案區（併入主頁的核圖面板）：裁片一列、兩輪提法表、裁決按鈕列。 */
   .fig-draft .crops { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
   .fig-draft .crops img { max-height: 260px; max-width: 100%; border: 1px solid var(--line);
@@ -158,22 +160,10 @@
   .said .who { font-size: 12px; color: var(--muted); }
   .said.designer { border-left-color: var(--accent); }
   .said.agent { border-left-color: var(--ok); }
-  #pdf-frame { width: 100%; height: calc(100vh - var(--footer-h) - 150px); min-height: 320px;
+  #pdf-frame { width: 100%; height: calc(100vh - 150px); min-height: 320px;
                border: 1px solid var(--line); border-radius: 6px; }
   #crop-img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
-  /* The write panel is a fixed footer. It used to sit below the panes, so the answer box and the
-     three buttons were only reachable by scrolling past the whole question and the PDF — the
-     designer had to scroll to judge (2026-09-28: 「我現在滑鼠滾輪要下滑才能看到框與按鈕」).
-     Fixed rather than sticky: a sticky element still scrolls with the document that contains it. */
-  body { padding-bottom: var(--footer-h); }
-  #write { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-           background: #fff; border-top: 1px solid var(--line);
-           box-shadow: 0 -2px 10px rgba(0,0,0,.06); padding: 10px 14px; }
-  #write textarea { width: 100%; min-height: 56px; max-height: 22vh; font: inherit; padding: 9px;
-                    border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
-  #write .row { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-  #write h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
-              color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  /* 「我的判讀」fixed bar 已隨功能移除（owner 2026-10-03）：--footer-h 變數一併退役。 */
   .empty-note { color: var(--muted); font-style: italic; }
   /* 「這一題用了哪幾條經驗」的原則清單：編號讓人在回話時能指「第 2 條」。 */
   ol.exp-list { margin: 4px 0 8px 20px; padding: 0; }
@@ -223,14 +213,6 @@
   .warn { background: #fff8e6; border: 1px solid #f0d999; padding: 9px 11px;
           border-radius: 6px; font-size: 13px; }
   /* three dispositions, not two: the middle one is an annotation, not a verdict */
-  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-  .buttons button { font-weight: 600; border-width: 1px; }
-  #btn-up { border-color: #b7e0c1; color: var(--ok); }
-  #btn-up:hover { background: #f2fdf5; }
-  #btn-down { border-color: #f3c2bd; color: var(--bad); }
-  #btn-down:hover { background: #fff5f4; }
-  #btn-hold { border-color: #f0d999; color: var(--warn); }
-  #btn-hold:hover { background: #fffaf0; }
 </style>
 </head>
 <body>
@@ -256,8 +238,8 @@
   <summary>這一頁怎麼用（點開：一分鐘版 ＋ 整個圈怎麼轉）</summary>
   <ol>
     <li><b>左邊列表挑一題</b>：中間看題目內容、右邊對官方紙本。</li>
-    <li><b>要 agent 做事</b>：右下對話框直接打字送出——它會邊做邊給你看；一句話總評就用最下面「我的判讀」的按鈕。</li>
-    <li><b>它提出修法</b>後，中間會出現「agent 提的修法」：點其中一條 → 按 👁 先看改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。</li>
+    <li><b>要 agent 做事</b>：右下對話框直接打字送出——它會邊做邊給你看。</li>
+    <li><b>它提出修法</b>後，<b>題幹正下方</b>就會出現「agent 提的修法」：點其中一條 → 上面立刻預覽改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。正式審題（收錄/封鎖整題）在 v2。</li>
     <li><b>正式裁決「題目准不准」</b>在右上 v2 審題站（帳本只有那裡寫）；<b>核對圖片草案</b>在這一頁中段「圖片草案」區（有草案的題目才會出現，右邊 PDF 一直是原本的紙本）。</li>
     <li>你按過的每一件事都寫進檔案，沒有東西只存在畫面上：學習檔 <code>agent_feedback.jsonl</code>、修法清單 <code>repair_drafts.jsonl</code>、正式帳本 <code>question_review_events.jsonl</code>。</li>
   </ol>
@@ -322,7 +304,7 @@
       <span id="verdict-target" class="meta">未選草案——在題目面板挑一則草案「設為驗收對象」。</span>
       <span id="verdict-actions" hidden>
         <button id="verdict-clear" title="只是取消目前選定的草案，不寫任何檔案。">取消選取</button>
-        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent。按鈕在每則草案列上（中段「agent 提的修法」）。</span>
+        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent。按鈕在每則草案列上（題幹正下方「agent 提的修法」）。</span>
       </span>
     </div>
     <div id="chat-row">
@@ -335,19 +317,9 @@
   </div>
 </main>
 
-<div id="write">
-  <h2>我的判讀 <span class="hint">你的意見給 agent 學習——不是正式審題；正式審題在 v2</span></h2>
-  <textarea id="reason" placeholder="可留空——一個鍵就是一個判決。要註解時寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
-  <div class="row">
-    <div class="buttons">
-      <button id="btn-up">沒問題</button>
-      <button id="btn-down">有問題</button>
-      <button id="btn-hold">暫存</button>
-    </div>
-    <span id="save-status" class="meta"></span>
-    <span class="meta" style="margin-left:auto">「暫存」＝留著這句話、我還沒判斷；三顆都會記進 agent 的學習檔</span>
-  </div>
-</div>
+<!-- 「我的判讀」已移除（owner 2026-10-03）：那是 reviewUI（v2）該有的功能；沙盒裡你對修法的
+     裁決就是草案列上的 ✅/↩，對 agent 說話用右下對話框。寫路徑 `/api/judgement` 留著——
+     agent 的 record_judgement 工具寫同一個學習流。 -->
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -553,14 +525,19 @@ function renderDrafts(question) {
     const sha = row._sha256 || "";
     const isAccepted = accepted.has(sha);
     const fixHtml = row._fix_html || esc(row.fix || "（沒寫修法）");
+    // 緊湊列（owner 2026-10-03）：**proposed 是主角**——改完的完整文字直接給全句；
+    // 現值與依據折進 details（點開才展開），列高從 ~370px 降到一兩行。
     return `<li class="draft ${verdictDraftSha === sha && !isAccepted ? "target" : ""}" data-draft-sha="${esc(sha)}">
     <div><span class="tag ${isAccepted ? "ok" : ""}">${isAccepted ? "已通過（帳本）" : esc(row.status || "草案")}</span>
-      <b>${esc(row.insert || "（未說明位置）")}</b>：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span>
-      → <span class="new">${fixHtml}</span></div>
-    <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
-    ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
-      ${row.crop.path && row.crop.path.includes("/store/crops/")
-        ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
+      <b>${esc(row.insert || "（未說明位置）")}</b>（改完後）：<span class="new">${fixHtml}</span>
+      <details class="draft-detail"><summary>原值／依據／憑證</summary>
+        <div class="meta">現值：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span></div>
+        <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
+        ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
+          ${row.crop.path && row.crop.path.includes("/store/crops/")
+            ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
+      </details>
+    </div>
     ${!isAccepted && sha ? `<div class="act">
       <button class="pick" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</button>
       <button class="ok" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>✅ 按這個修</button>
@@ -840,15 +817,6 @@ function go(step) {
   loadQuestion();
 }
 
-function judgeKey(rating) {
-  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
-  // One key is one verdict (designer, 2026-09-30: 判定免註解). The note is optional — whatever is
-  // typed travels with the rating; the agent's rating is the one that must carry its basis (its
-  // own contract, refused in the bridge). Nothing is silently swallowed: the row is written with
-  // an empty `reason` and the stream says which column was empty.
-  save(rating).then(() => go(1));
-}
-
 async function loadList() {
   const category = $("category").value;
   if (!category) { $("list").innerHTML = ""; $("cat-count").textContent = "—"; return; }
@@ -952,22 +920,24 @@ function renderQuestion(question) {
     <div class="stem study">${platformHtml(question._fix_html || question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
+    <!-- 草案在題幹正下方（owner 2026-10-03：「優先要給我看的…不想要滑滾輪」）——她提了什麼、
+         憑什麼、按不按，一屏之內看完；其餘 log 折疊，有必要才開。 -->
+    <details open><summary>agent 提的修法 <span style="color:var(--muted);font-weight:400">——點一列即預覽；✅/↩ 就在列上</span></summary>
+      ${renderDrafts(question)}</details>
     ${renderOptions(question)}
     ${renderAnswer(question)}
-    <details open><summary>機器對圖的說法（哪一頁、裁到了嗎）</summary>
+    <details><summary>機器對圖的說法（哪一頁、裁到了嗎）</summary>
       ${(question.figures || []).length
         ? `<ul>${question.figures.map((f) => `<li>${esc(f.label || "?")} · 第 ${esc(f.page ?? "?")} 頁
              · ${f.clipped ? '<span class="tag bad">有裁切</span>' : '<span class="tag ok">未裁切</span>'}
              ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
-    <details open><summary>你在 v2 的審題紀錄（唯讀——機器寫的不會掛你的名）</summary>
+    <details><summary>你在 v2 的審題紀錄（唯讀——機器寫的不會掛你的名）</summary>
       ${renderHumanEvents(question.human_events)}</details>
-    <details open><summary>判讀紀錄（你＋agent 寫的，學習檔 agent_feedback.jsonl）</summary>
+    <details><summary>判讀紀錄（你＋agent 寫的，學習檔 agent_feedback.jsonl）</summary>
       ${renderSaid(question.judgements)}</details>
-    <details open><summary>agent 提的修法 <span style="color:var(--muted);font-weight:400">——先點一條，下面才會出現通過／退回</span></summary>
-      ${renderDrafts(question)}</details>
-    ${question.figure_draft ? `<details open><summary>圖片草案（agent 提的「圖怎麼插」，核完寫學習檔）</summary>
+    ${question.figure_draft ? `<details><summary>圖片草案（agent 提的「圖怎麼插」，核完寫學習檔）</summary>
       ${renderFigureDraft(question.figure_draft)}</details>` : ""}
     <details><summary>原始資料（進階：機器實際存的、模型實際讀到的）</summary>
       <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
@@ -1432,44 +1402,11 @@ async function search() {
   }
 }
 
-async function save(rating) {
-  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
-  // Optional note (2026-09-30 判定免註解): an empty `reason` still names the rating's emptiness —
-  // the stream's column is honest, and the rating itself is the designer's verdict.
-  const reason = $("reason").value.trim();
-  document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = true; });
-  try {
-    const result = await api("/api/judgement", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        key: current.candidate_key,
-        question_number: current.question_number,
-        rating,
-        reason,
-      }),
-    });
-    $("save-status").textContent = "已記錄（" + result.store.split("/").pop()
-      + "）：這是你的判讀、給 agent 當學習語料——不是正式審題，也沒有改題目。";
-    $("reason").value = "";
-    // Re-read so the new judgement is shown from the file, not from what we hoped we wrote.
-    renderQuestion(await api("/api/question?key=" + encodeURIComponent(current.candidate_key)));
-    // The list carries the same judgement, and a list that does not update makes the designer
-    // judge the same question twice tomorrow — so refresh it from the source, not from here.
-    if ($("category").value) await loadList();
-  } catch (error) {
-    $("save-status").textContent = "寫入失敗：" + error.message;
-  } finally {
-    document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = false; });
-  }
-}
+
 
 $("load").addEventListener("click", loadQuestion);
 $("refresh-question").addEventListener("click", () => refreshQuestion("manual"));
 $("find").addEventListener("click", search);
-$("btn-up").addEventListener("click", () => save("up"));
-$("btn-down").addEventListener("click", () => save("down"));
-$("btn-hold").addEventListener("click", () => save("hold"));
 $("chat-mode-question").addEventListener("click", () => setChatMode("question"));
 $("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
 $("chat-send").addEventListener("click", sendChat);
@@ -1505,6 +1442,12 @@ document.addEventListener("click", async (event) => {
     previewDraftSha = verdictDraftSha;
     refreshVerdictTarget();
     renderQuestion(current);
+    // 重繪後把**驗收對象那一列**帶進視野（owner 2026-10-03：「不想要滑滾輪」）——預覽橫幅在
+    // 題幹上方，✅/↩ 在列上；兩者都要一眼看到，不能靠他自己找。
+    requestAnimationFrame(() => {
+      document.querySelector(`li.draft[data-draft-sha="${CSS.escape(verdictDraftSha)}"]`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
     return;
   }
   const okBtn = event.target.closest(".draft .act button.ok");
@@ -1539,16 +1482,16 @@ $("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loa
 $("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
 
 /**
- * Left-hand keys, mirroring v2: `W`/`S` walk, `J`/`K` judge.
+ * Left-hand keys, mirroring v2: `W`/`S` walk. （`J`/`K` 判讀鍵隨「我的判讀」移除——owner
+ * 2026-10-03：裁決在草案列上按 ✅/↩，不在獨立判讀框。）
  *
- * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the 判讀框,
- * and the sandbox has that box focused most of the time. `J`/`K` leave the letters free — the same
- * reasoning v2 records for why its own shortcuts are suppressed inside a textarea.
+ * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the chat box,
+ * and the sandbox has that box focused most of the time.
  */
 document.addEventListener("keydown", (event) => {
   if (event.target.tagName === "TEXTAREA" || event.target.tagName === "INPUT") return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
-  const map = { w: () => go(-1), s: () => go(1), j: () => judgeKey("up"), k: () => judgeKey("down") };
+  const map = { w: () => go(-1), s: () => go(1) };
   const hit = map[event.key.toLowerCase()];
   if (!hit) return;
   event.preventDefault();
