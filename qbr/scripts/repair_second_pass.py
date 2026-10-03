@@ -150,9 +150,13 @@ def main(argv=None) -> int:
             if question is None:
                 tally["skipped"] += 1
                 record, note = {"degraded": True}, "佇列中找不到 candidate_key，跳過不猜"
+                bridge.record_degraded(key, note)
             elif not crops:
                 tally["degraded"] += 1
                 record, note = {"degraded": True}, "裁片不存在於磁碟（虛構路徑已剔除），跳過不猜"
+                bridge.record_degraded(key, note,
+                                       subject=(question.get("metadata") or {}).get("normalized_subject_name"),
+                                       question_number=question.get("question_number"))
             else:
                 decision, note = orchestrator.propose_text_fix(
                     question,
@@ -164,6 +168,9 @@ def main(argv=None) -> int:
                 if decision is None:
                     tally["degraded"] += 1
                     record = {"degraded": True, "decision_note": note}
+                    bridge.record_degraded(key, note,
+                                           subject=(question.get("metadata") or {}).get("normalized_subject_name"),
+                                           question_number=question.get("question_number"))
                 if decision is not None:
                     fix = bridge.strip_option_prefix(decision["fix"])
                     try:
@@ -171,17 +178,26 @@ def main(argv=None) -> int:
                     except ValueError as exc:
                         tally["degraded"] += 1
                         record = {"degraded": True, "decision_note": str(exc)}
+                        bridge.record_degraded(key, str(exc),
+                                               subject=(question.get("metadata") or {}).get("normalized_subject_name"),
+                                               question_number=question.get("question_number"))
                         decision = None
                 if decision is not None:
                     # refs ⊆ 磁碟 的對應物：fix 不得等於現值、不得像片段——生產者自己先擋，
                     # 不要把註定被 ✅ 拒絕的草案推給設計者。
+                    _subj = (question.get("metadata") or {}).get("normalized_subject_name")
+                    _num = question.get("question_number")
                     if field == "stem" and not bridge.is_full_replacement(current, fix):
                         tally["degraded"] += 1
                         record = {"degraded": True, "decision_note":
                                   "fix 與原題幹差太多（像是建議或片段），不是整欄替換"}
+                        bridge.record_degraded(key, record["decision_note"],
+                                               subject=_subj, question_number=_num)
                     elif fix == current:
                         tally["degraded"] += 1
                         record = {"degraded": True, "decision_note": "fix 與現值相同"}
+                        bridge.record_degraded(key, record["decision_note"],
+                                               subject=_subj, question_number=_num)
                     else:
                         # `_die` 以 SystemExit 拒絕（欄位缺漏／crop 不存在）；一列的失敗是
                         # degraded 記錄，不是整輪 run 的死因。
@@ -194,6 +210,8 @@ def main(argv=None) -> int:
                             tally["degraded"] += 1
                             record = {"degraded": True, "decision_note":
                                       "bridge propose 拒絕（%s）" % (exc.code or "")}
+                            bridge.record_degraded(key, record["decision_note"],
+                                                   subject=_subj, question_number=_num)
                         else:
                             # 草案行的 sha 由消費端（UI `_sha256`／pending）以其**檔案行**為準
                             # 計算——這裡不重算，json 序列化差一個空白就對不上。

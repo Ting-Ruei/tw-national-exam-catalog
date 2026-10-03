@@ -763,7 +763,7 @@ let listRows = [];
 // 草案——中欄一開就是改後整題，不是再按一次預覽。
 let pendingItems = [];
 let pendingByKind = {};
-const PENDING_LABEL = { text: "文字草案", figure_pass: "圖 pass 待寫入", figure_new: "圖草案待核" };
+const PENDING_LABEL = { text: "文字草案", text_degraded: "AI 答不出", figure_pass: "圖 pass 待寫入", figure_new: "圖草案待核" };
 
 async function refreshPending() {
   const d = await api("/api/pending");
@@ -796,7 +796,7 @@ function renderList(rows, total) {
     // smallest thing that makes it visible again.
     const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
     const pend = q.pending_kind
-      ? `<span class="tag ${q.pending_kind === "text" ? "" : "ok"}" title="待你看">${esc(PENDING_LABEL[q.pending_kind] || q.pending_kind)}</span>` : "";
+      ? `<span class="tag ${q.pending_kind === "text" ? "" : q.pending_kind === "text_degraded" ? "bad" : "ok"}" title="待你看">${esc(PENDING_LABEL[q.pending_kind] || q.pending_kind)}</span>` : "";
     const retry = (q.returns || 0) >= 3
       ? `<span class="tag bad" title="同一題被退回 ${q.returns} 次——升級處理：自己裁決或換策略，不是無限迴圈">反覆退回×${q.returns}</span>` : "";
     const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
@@ -1480,8 +1480,12 @@ async function loadQuestion() {
     if (pend && pend.kind === "text" && (q.drafts || []).some((d) => d._sha256 === pend.draft_sha256)) {
       verdictDraftSha = pend.draft_sha256;
       previewDraftSha = verdictDraftSha;
-    } else if ($("only-pending").checked) {
-      verdictDraftSha = null;
+    } else {
+      if ($("only-pending").checked) verdictDraftSha = null;
+      if (pend && pend.kind === "text_degraded") {
+        // 問過但 AI 答不出：原因就在清單列上；這裡再講一次，因為設計者是從列點進來的。
+        setTimeout(() => verdictWarn(pend.label || "AI 答不出（原因未記錄）"), 0);
+      }
     }
     renderQuestion(q);
   } catch (error) {

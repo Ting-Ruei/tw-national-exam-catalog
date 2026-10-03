@@ -44,6 +44,7 @@ const KEY_FRESH = "moex:t:311:0704:1:question:q004";
 const KEY_STALE = "moex:t:311:0704:1:question:q005";
 const KEY_MACHINE = "moex:t:311:0704:1:question:q006";
 const KEY_VIEW = "moex:t:311:0704:1:question:q008";
+const KEY_DEGRADED = "moex:t:311:0704:1:question:q009";
 const KEY_NOACCEPT = "moex:t:311:0704:1:question:q007";
 
 const STEM = "下列有關一般人過度換氣（hyperventilation）之敘述，何者正確？";
@@ -61,6 +62,7 @@ const ROWS = [
   { candidate_key: KEY_MACHINE, question_number: 6, stem: "第六題", options: [], answer: "A", metadata: {} },
   { candidate_key: KEY_NOACCEPT, question_number: 7, stem: "第七題", options: [], answer: "A", metadata: {} },
   { candidate_key: KEY_VIEW, question_number: 8, stem: "第八題", options: [], answer: "A", metadata: {} },
+  { candidate_key: KEY_DEGRADED, question_number: 9, stem: "第九題", options: [], answer: "A", metadata: {} },
 ];
 writeFileSync(join(REVIEW, "candidates.jsonl"),
   ROWS.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
@@ -151,6 +153,23 @@ test("✅ 即寫入：一個動作寫齊帳本 accept＋candidates 整欄＋rese
 });
 
 // ---------------------------------------------------------------- §7 view 一致性
+
+test("degraded（AI 答不出）也在待看清單：帶原因、無 draft_sha256（不可 ✅）", async () => {
+  writeFileSync(join(REVIEW, "question_review_events.jsonl"),
+    JSON.stringify({ at: "2026-10-03T14:00:00.000Z", action: "block", candidate_key: KEY_DEGRADED,
+      reviewer: "local", notes: "" }) + "\n", "utf8");
+  writeFileSync(join(STORE, "repair_drafts.jsonl"), JSON.stringify({
+    action: "repair_draft", schema: "repair_agent_test/repair_drafts v1",
+    at: "2026-10-03T14:01:00.000Z", candidate_key: KEY_DEGRADED, question_number: 9,
+    status: "degraded", note: "裁片不存在於磁碟（虛構路徑已剔除），跳過不猜",
+  }) + "\n", "utf8");
+  const out = await drive("mod.pending_state()");
+  const item = (out.items || []).find((it) => it.key === KEY_DEGRADED);
+  assert.ok(item, "問了的題在清單上，即使 AI 答不出");
+  assert.equal(item.kind, "text_degraded");
+  assert.match(item.label, /AI 答不出：裁片不存在/);
+  assert.equal(item.draft_sha256, undefined, "沒有草案就沒有驗收對象——不可 ✅");
+});
 
 test("§7：✅ 之後 /api/question 同 key 立即反映新值（含熱快取的第二讀）——不存在舊 view 的窗口", async () => {
   ledgerEvent({ action: "block", candidate_key: KEY_VIEW, reviewer: "local",

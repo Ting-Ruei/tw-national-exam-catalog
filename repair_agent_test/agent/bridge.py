@@ -914,6 +914,31 @@ def is_full_replacement(old: str, fix: str) -> bool:
     return difflib.SequenceMatcher(None, old_ws, fix_ws).ratio() >= 0.5
 
 
+def record_degraded(key: str, note: str, *, subject=None, question_number=None) -> dict:
+    """Append a `status: degraded` row to the drafts stream — an asked question was *answered*
+    with 「答不出（原因）」. The pending list shows it (AI 答不出：note) so an asked question
+    never vanishes silently; it is never ✅-able (no fix, no draft to verify).
+    Row shape matches `do_propose` exactly（同一條流的同一種列，連 `action` 欄都是）——
+    消費端的 probe 只認這個形。"""
+    record = {
+        **judgement_envelope(),
+        "action": "repair_draft",
+        "schema": "repair_agent_test/repair_drafts v1",
+        "at": _utc_now(),
+        "candidate_key": key,
+        "question_number": question_number
+        if question_number is not None
+        else (int(key.rsplit("q", 1)[-1]) if key.rsplit("q", 1)[-1].isdigit() else None),
+        "subject": subject,
+        "status": "degraded",
+        "note": str(note or "")[:400],
+    }
+    os.makedirs(os.path.dirname(DRAFTS), exist_ok=True)
+    with open(DRAFTS, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
 def do_propose(args) -> dict:
     """Append the agent's own repair draft — a proposal, which is never a change.
 

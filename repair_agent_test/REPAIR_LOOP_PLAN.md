@@ -99,6 +99,11 @@ flowchart LR
 2. **L3 前端** 待你看模式（改後整題＋✅/↩＋對照）。
 3. **L2** 生產者＋單題試跑（你 block 的真題 2–3 題）。
 4. **L1** dispatch `--once` 接上 2/3，跑完整圈；最後才做 `--watch`。
+   > **2026-10-03 owner 修正（實測後）**：cursor 制會把 cursor 之前的 block 靜默掉題
+   > （「我明明問了卻沒有修法」）。改為**狀態驅動**：目標集＝最新人審是 block/return
+   > 且其後無任何草案列（proposed 或 degraded）的題，不分歷史；cursor 整個移除，
+   > 冪等靠狀態檢查本身。degrade 一律寫 `status: degraded` 草案列（帶原因），
+   > pending 顯示「AI 答不出」——問過的題永遠有落點。
 5. **634 圖草案併入 pending**（存量清單），你逐批 ✅（每批 50，`figureApply` 已可整批呼叫）。
 6. **站上同步**：等你點頭的批次，`deploy_station.sh --restart`；同步前站上服務暫停（`review_record_safety.md` 規則）。
 

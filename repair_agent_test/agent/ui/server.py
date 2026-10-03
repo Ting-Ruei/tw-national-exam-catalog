@@ -1091,7 +1091,8 @@ def pending_state() -> dict:
         m = re.search(r"q(\d+)$", key)
         return int(m.group(1)) if m else None
 
-    # (a) 文字草案：每題最新一筆 proposed（檔案序＝時間序，後面蓋前面）。
+    # (a) 文字草案：每題**最新一列**（proposed 或 degraded，檔案序＝時間序，後面蓋前面）。
+    # 問過的題永遠有落點：最新是 proposed → 待你看；最新是 degraded → AI 答不出（原因）。
     latest: dict[str, dict] = {}
     if drafts_path.is_file():
         with drafts_path.open("rb") as handle:
@@ -1103,7 +1104,7 @@ def pending_state() -> dict:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if row.get("status") != "proposed":
+                if row.get("status") not in ("proposed", "degraded"):
                     continue
                 key = row.get("candidate_key") or ""
                 if key:
@@ -1116,6 +1117,13 @@ def pending_state() -> dict:
         rets = returns.get(key) or []
         last = max(last_accept_at.get(key, ""), rets[-1]["at"] if rets else "")
         if draft.get("at", "") > last:
+            if draft.get("status") == "degraded":
+                items.append({"key": key, "kind": "text_degraded", "at": draft.get("at") or "",
+                              "number": draft.get("question_number") or key_number(key),
+                              "subject": draft.get("subject"),
+                              "label": "AI 答不出：%s" % (draft.get("note") or "未說明原因")[:70],
+                              "returns": len(rets)})
+                continue
             items.append({"key": key, "kind": "text", "at": draft.get("at") or "",
                           "number": draft.get("question_number") or key_number(key),
                           "subject": draft.get("subject"),

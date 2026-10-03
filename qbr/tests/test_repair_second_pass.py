@@ -178,7 +178,11 @@ def test_missing_crop_degrades_and_writes_no_draft():
     assert rc == 0
     assert rows[0]["record"] == {"degraded": True}
     assert "裁片不存在" in rows[0]["note"]
-    assert _drafts(store) == [], "沒有證據就沒有草案"
+    # 沒有可 ✅ 的草案，但「AI 答不出」要留痕——問了的題不能無聲消失
+    drafts = _drafts(store)
+    assert len(drafts) == 1 and drafts[0]["status"] == "degraded"
+    assert "裁片不存在" in drafts[0]["note"]
+    assert drafts[0]["action"] == "repair_draft", "同一條流同一種列形（消費端 probe 認它）"
 
 
 def test_unusable_answer_degrades_without_defaulting():
@@ -203,7 +207,8 @@ def test_unusable_answer_degrades_without_defaulting():
             server.shutdown()
         assert rc == 0, why
         assert rows[0]["record"].get("degraded") is True, (why, rows)
-        assert _drafts(store) == [], (why, "不可用的答案沒有草案")
+        drafts = _drafts(store)
+        assert len(drafts) == 1 and drafts[0]["status"] == "degraded", (why, "答不出也要留痕")
         os.remove(out)
 
 
