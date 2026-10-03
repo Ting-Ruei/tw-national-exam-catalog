@@ -58,6 +58,8 @@ _spec = importlib.util.spec_from_file_location("repair_agent_bridge", AGENT_DIR 
 bridge = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bridge)
 
+import platform_view  # noqa: E402  (bridge already put `lib/` on sys.path)
+
 from qbr.review_ui.paths import content_type_of, safe_file_path  # noqa: E402
 
 # The queue root must be an allowed asset root, or `/file` refuses every figure and PDF crop.
@@ -372,6 +374,14 @@ def question_payload(key: str) -> dict:
                 except (ValueError, UnicodeDecodeError):
                     continue
     view["drafts"] = drafts
+    # 草案的 fix 是「改完後的完整文字」，而欄位在畫面上是**平台渲染**（⁻¹／sup／sub）。
+    # 給它補一份渲染版 `_fix_html`（同題幹走的 `as_platform_html`），預覽與草案列顯示都用它；
+    # 原 `fix` 保留——驗收事件比對的是原字串。上標因此不再以 `<sup>` 字面出現在畫面上。
+    for row in drafts:
+        try:
+            row["_fix_html"] = platform_view.as_platform_html(row.get("fix") or "")
+        except Exception:
+            row["_fix_html"] = None
     view["sandbox_accepts"] = sandbox_accepts_for(key)
     # 圖片草案（agent 對「圖怎麼插」的提議）只掛在**有草案的題**上；主頁中段的「圖片草案」
     # 區塊讀這裡。沒有就不帶鍵——前端不出現空區塊。

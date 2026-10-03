@@ -1245,9 +1245,12 @@ print(json.dumps(out))
     "dropping a disallowed tag must not drop the question's real text");
 
   // The UI must actually use the rendered field, with a fallback to escaped raw text — never a
-  // hand-rolled converter, which would be a second opinion about how a question looks.
+  // hand-rolled converter, which would be a second opinion about how a question looks. The stem
+  // render takes the **previewed** fix's rendered html first (`_fix_html`, same server-side
+  // renderer) and falls back to the question's own `stem_html` when not previewing.
   const ui = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
-  assert.match(ui, /platformHtml\(question\.stem_html/, "the stem must render via the platform view");
+  assert.match(ui, /platformHtml\(question\._fix_html \|\| question\.stem_html/,
+    "the stem must render the previewed fix via the platform view first, falling back to the question's own stem_html");
   assert.match(ui, /platformHtml\(rendered\.get\(key\)/, "and each option likewise");
   assert.equal(/stem_markup/.test(ui), false,
     "the UI must not assemble markup itself; it renders what the platform renderer produced");

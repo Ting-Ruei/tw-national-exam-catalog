@@ -308,13 +308,8 @@
     <div id="verdict-bar">
       <span id="verdict-target" class="meta">未選草案——在題目面板挑一則草案「設為驗收對象」。</span>
       <span id="verdict-actions" hidden>
-        <button id="preview-draft" title="把這則草案套到題目上給你看——只是預覽，題目還沒真的改。">👁 看套用後的樣子</button>
-        <button id="accept-draft" class="primary"
-          title="核准「這則草案」的改法，寫進人審帳本；題目本體等你說落地才會真的改。機器不會代按。">✅ 通過這則草案</button>
-        <button id="return-draft" title="否決「這則草案」：理由必填，agent 會讀你的理由去學。">↩ 退回這則草案</button>
-        <input id="return-reason" size="34" placeholder="退回理由：寫給 agent 看的（例：這張圖是別題的）">
         <button id="verdict-clear" title="只是取消目前選定的草案，不寫任何檔案。">取消選取</button>
-        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent｜👁 只是在畫面上預覽，不會真的改</span>
+        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent。按鈕在每則草案列上（中段「agent 提的修法」）。</span>
       </span>
     </div>
     <div id="chat-row">
@@ -544,15 +539,22 @@ function renderDrafts(question) {
   return `<ul>${rows.map((row) => {
     const sha = row._sha256 || "";
     const isAccepted = accepted.has(sha);
+    const fixHtml = row._fix_html || esc(row.fix || "（沒寫修法）");
     return `<li class="draft ${verdictDraftSha === sha && !isAccepted ? "target" : ""}" data-draft-sha="${esc(sha)}">
     <div><span class="tag ${isAccepted ? "ok" : ""}">${isAccepted ? "已通過（帳本）" : esc(row.status || "草案")}</span>
       <b>${esc(row.insert || "（未說明位置）")}</b>：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span>
-      → <span class="new">${esc(row.fix || "（沒寫修法）")}</span></div>
+      → <span class="new">${fixHtml}</span></div>
     <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
     ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
       ${row.crop.path && row.crop.path.includes("/store/crops/")
         ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
-    ${!isAccepted && sha ? `<div class="meta"><a href="#" class="picky" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</a></div>` : ""}
+    ${!isAccepted && sha ? `<div class="act">
+      <button class="pick" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</button>
+      <button class="ok" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>✅ 按這個修</button>
+      <button class="bad" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>↩ 退回</button>
+      <input class="why" placeholder="退回理由（可留空）" ${verdictDraftSha === sha ? "" : "disabled"}>
+      <a href="#" class="picky" data-draft-sha="${esc(sha)}">👁 先看改完的樣子</a>
+    </div>` : ""}
   </li>`;}).join("")}</ul>`;
 }
 
@@ -613,9 +615,11 @@ function appliedQuestion(question) {
     // 明說原因。失敗要看得見，不能靜默毀掉原題。
     const head = (question.stem || "").replace(/\s+/g, "").slice(0, 8);
     const bare = fix.replace(/\s+/g, "");
-    if (!head || bare.includes(head)) return { ...question, stem: fix, stem_html: null };
-    return { ...question,
+    if (!head || !bare.includes(head)) return { ...question,
              _previewBlocked: `這條草案的 fix 不是「改完後的完整文字」（像是建議或片段），預覽不套用——題目保持原樣；請叫 agent 重提（fix 要寫整句）` };
+    // 預覽也走**平台渲染**（伺服器已對這份 fix 算好 `_fix_html`，與題幹同一支 normalizer）：
+    // h<sup>-1</sup> 這類上標在預覽裡就是上標，不是字面 `<sup>`。
+    return { ...question, stem: fix, _fix_html: d._fix_html || null, stem_html: null };
   }
   return question;
 }
@@ -932,7 +936,7 @@ function renderQuestion(question) {
       <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
     ${previewing ? `<div class="preview-banner">👁 預覽：這是套用「${esc((current.drafts.find((x) => x._sha256 === previewDraftSha) || {}).insert || "草案")}」後的樣子——<b>還沒真的改</b>。
       <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
-    <div class="stem study">${platformHtml(question.stem_html, question.stem || "（題幹是空的）")}</div>
+    <div class="stem study">${platformHtml(question._fix_html || question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
     ${renderOptions(question)}
@@ -1108,6 +1112,7 @@ async function sendChat() {
   const body = live.querySelector(".body");
 
   let answer = "";
+  let liveTools = 0;
   try {
     const response = await fetch("/api/chat/ask", {
       method: "POST",
@@ -1138,13 +1143,17 @@ async function sendChat() {
           body.textContent = answer;
           $("chat-log").scrollTop = $("chat-log").scrollHeight;
         } else if (event.event === "tool") {
-          body.insertAdjacentHTML("beforeend",
-            `<div class="chat-tool">→ ${esc(event.tool)} ${esc(JSON.stringify(event.args || {}))}</div>`);
+          // 工具軌跡折成一行計數＋最後一個動作（2026-10-03：訊息被工具列越堆越長）。
+          // 全軌跡仍在「原始資料」裡；對話框只給「她在動」的訊號。
+          liveTools += 1;
+          live.querySelector(".who").textContent =
+            `agent · 正在回答 · 工具 ${liveTools}：${event.tool}`;
         } else if (event.event === "tool_result") {
-          const bad = event.ok === false;
-          body.insertAdjacentHTML("beforeend",
-            `<div class="chat-tool${bad ? " bad" : ""}">← ${esc(event.tool)} ` +
-            `${bad ? "<b>失敗</b> " : ""}${esc(JSON.stringify(event.summary || {}))}</div>`);
+          if (event.ok === false) {
+            // 只有失敗值得佔版面：成功的不出一行。
+            body.insertAdjacentHTML("beforeend",
+              `<div class="chat-tool bad">← ${esc(event.tool)} 失敗</div>`);
+          }
         } else if (event.event === "error") {
           body.insertAdjacentHTML("beforeend",
             `<div class="chat-tool bad">錯誤：${esc(event.error)}</div>`);
@@ -1230,13 +1239,14 @@ function refreshVerdictTarget() {
     return;
   }
   $("verdict-target").textContent = verdictTargetText();
-  $("preview-draft").textContent = previewDraftSha ? "👁 關閉預覽" : "👁 看套用後的樣子";
 }
 
 async function acceptDraft() {
   if (!current) { verdictWarn("先載入一題（左邊候選列表點一題）。"); return; }
   if (!verdictDraftSha) { verdictWarn("通過是通過「一則草案」：先在上面修復草案清單點一列草案，再按通過。"); return; }
-  document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
+  const barButtons = document.querySelectorAll("#verdict-bar button");
+  barButtons.forEach((b) => { b.disabled = true; });
+  document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = true; });
   try {
     const notes = $("reason").value.trim();
     // The event carries the draft's line checksum — the whole reason a checksum is the reference:
@@ -1257,7 +1267,8 @@ async function acceptDraft() {
   } catch (error) {
     $("verdict-target").textContent = "通過失敗：" + esc(error.message);
   } finally {
-    document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
+    barButtons.forEach((b) => { b.disabled = false; });
+    document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -1300,6 +1311,7 @@ async function returnDraft() {
     verdictWarn("退回失敗：" + error.message + "——草案沒有被動到。");
   } finally {
     document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
+    document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -1448,18 +1460,10 @@ $("chat-mode-question").addEventListener("click", () => setChatMode("question"))
 $("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-stop").addEventListener("click", stopChat);
-$("accept-draft").addEventListener("click", acceptDraft);
-$("return-draft").addEventListener("click", returnDraft);
 $("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; previewDraftSha = null; refreshVerdictTarget(); });
-$("preview-draft").addEventListener("click", () => {
-  if (!verdictDraftSha) return;
-  previewDraftSha = previewDraftSha ? null : verdictDraftSha;
-  refreshVerdictTarget();
-  renderQuestion(current);
-});
 // Picking the verdict target is a delegated click: the drafts panel is re-rendered by every
 // refresh, so the handler cannot be attached once to the list.
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const off = event.target.closest("#preview-off");
   if (off) {
     event.preventDefault();
@@ -1469,15 +1473,42 @@ document.addEventListener("click", (event) => {
     return;
   }
   const picky = event.target.closest(".picky");
-  if (!picky) return;
-  event.preventDefault();
-  verdictDraftSha = picky.dataset.draftSha;
-  // A selection change while previewing follows the new draft — the preview is of "the selected
-  // draft", not of whichever one happened to be selected when the toggle went on.
-  if (previewDraftSha && previewDraftSha !== verdictDraftSha) previewDraftSha = verdictDraftSha;
-  refreshVerdictTarget();
-  // Re-rendering refreshes every 「設為驗收對象」 label: the panel must show which one is on.
-  renderQuestion(current);
+  if (picky) {
+    event.preventDefault();
+    verdictDraftSha = picky.dataset.draftSha;
+    // A selection change while previewing follows the new draft — the preview is of "the selected
+    // draft", not of whichever one happened to be selected when the toggle went on.
+    if (previewDraftSha && previewDraftSha !== verdictDraftSha) previewDraftSha = verdictDraftSha;
+    else previewDraftSha = verdictDraftSha;   // 👁 一下就預覽——驗收前先看，不再兩段式
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
+  // 草案列上的行內裁決（2026-10-03：不要滑到頁尾才按驗收）。挑選＋預覽＋通過／退回都在那一列。
+  const pickBtn = event.target.closest(".draft .act button.pick");
+  if (pickBtn) {
+    verdictDraftSha = pickBtn.dataset.draftSha;
+    previewDraftSha = verdictDraftSha;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
+  const okBtn = event.target.closest(".draft .act button.ok");
+  if (okBtn) {
+    verdictDraftSha = okBtn.dataset.draftSha;
+    await acceptDraft();
+    return;
+  }
+  const badBtn = event.target.closest(".draft .act button.bad");
+  if (badBtn) {
+    verdictDraftSha = badBtn.dataset.draftSha;
+    const li = badBtn.closest("li.draft");
+    const why = (li?.querySelector("input.why")?.value || "").trim();
+    if (!why) { verdictWarn("退回要寫理由——理由就是規則候選的原料。"); return; }
+    $("return-reason").value = why;
+    await returnDraft();
+    return;
+  }
 });
 // Enter sends; Shift+Enter writes a newline. A designer's sentence about a question is often more
 // than one line, so the multi-line case must not be the one that accidentally sends.
