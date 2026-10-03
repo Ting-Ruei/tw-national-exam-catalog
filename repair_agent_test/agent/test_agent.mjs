@@ -2139,3 +2139,67 @@ test("the record_rule_hit tool is registered and writes only its own store-side 
     "without REPAIR_AGENT_HITS the tool writes the redirected store's rule_hits.jsonl");
   assert.equal(readHits(hitsPath()).hits.length, 1, "exactly one fact per (rule, key)");
 });
+
+/**
+ * 調度監控（owner 2026-10-03：「要有測試去監控指揮與做事模型之間的調度」）。
+ *
+ * 指揮者（對話 GLM）沒有派工工具；做事 run 是 runner.mjs 吃 workorder 手動開的。她能給的訊號
+ * 是對話裡那句「要開一次做事 run」；做事的事實是 `workorders/report.jsonl` 的 metrics 與
+ * `repair_drafts.jsonl` 依 run_id 的計數。`dispatch_status()` 只讀這三個 append-only 檔，
+ * 算出畫面要的形狀——不寫檔、不假裝能開始/停止 run（那是 G3，未經 owner 逐次核准不存在）。
+ */
+test("dispatch monitoring reads the three ledgers and never writes one", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const uiScript = [
+    "import importlib.util, json, sys, os",
+    "store = sys.argv[2]",
+    "os.makedirs(os.path.join(store, 'workorders'), exist_ok=True)",
+    "with open(os.path.join(store, 'workorders', 'report.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'kind': 'batch', 'at': '2026-10-03T07:00:00Z', 'workorder': 'wo-t.jsonl', 'variant': 'A', 'run_id': 'run-t1', 'metrics': {'items': 2, 'drafted': 2, 'rejected': 0, 'failed': 0}}) + chr(10))",
+    "with open(os.path.join(store, 'repair_drafts.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'run_id': 'run-t1', 'candidate_key': 'k1'}) + chr(10))",
+    "    f.write(json.dumps({'run_id': 'run-t1', 'candidate_key': 'k2'}) + chr(10))",
+    "with open(os.path.join(store, 'chat.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'at': '2026-10-03T07:01:00Z', 'role': 'agent', 'candidate_key': 'k1', 'text': '這要開一次做事 run 才能轉錄。'}, ensure_ascii=False) + chr(10))",
+    "    f.write(json.dumps({'at': '2026-10-03T07:02:00Z', 'role': 'agent', 'candidate_key': 'k1', 'text': '沒問題，我看過了。'}, ensure_ascii=False) + chr(10))",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "d = mod.dispatch_status()",
+    "print(json.dumps(d, ensure_ascii=False))",
+  ].join("\n");
+  const scratch = mkdtempSync(join(tmpdir(), "dispatch-test-"));
+  const { stdout } = await run(PATHS.PYTHON, ["-c", uiScript,
+    join(AGENT_DIR, "ui", "server.py"), scratch],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: scratch } });
+  const d = JSON.parse(stdout);
+
+  // The batch ledger reaches the view with its metrics intact.
+  assert.equal(d.last_batch.run_id, "run-t1", "the latest worker run is named");
+  assert.equal(d.last_batch.metrics.drafted, 2, "its metrics travel, not a summary of a summary");
+  // Drafts count per run: the panel's 「草案 N」 must be the ledger's own count.
+  assert.equal(d.drafts_by_run["run-t1"], 2, "drafts counted by run_id from the drafts stream");
+  // The conductor's request is caught by phrase, with the speaker kept honest.
+  assert.equal(d.conductor_asks.length, 1, "exactly the dispatch-phrase turn is a signal");
+  assert.equal(d.conductor_asks[0].role, "agent", "the speaker is recorded, not assumed");
+  assert.ok(d.conductor_asks[0].text.includes("做事 run"), "and the sentence itself is carried");
+
+  // Negative control: an empty store answers with nulls/empties, never a crash or an invention.
+  const emptyScript = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "print(json.dumps(mod.dispatch_status(), ensure_ascii=False))",
+  ].join("\n");
+  const scratch2 = mkdtempSync(join(tmpdir(), "dispatch-empty-"));
+  const { stdout: emptyOut } = await run(PATHS.PYTHON, ["-c", emptyScript,
+    join(AGENT_DIR, "ui", "server.py"), scratch2],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: scratch2 } });
+  const empty = JSON.parse(emptyOut);
+  assert.equal(empty.last_batch, null, "no run recorded means no run invented");
+  assert.deepEqual(empty.drafts_by_run, {}, "and no drafts invented either");
+  assert.deepEqual(empty.conductor_asks, [], "and no asks invented either");
+});

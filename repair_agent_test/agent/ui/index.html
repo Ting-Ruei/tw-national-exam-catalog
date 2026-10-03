@@ -66,6 +66,12 @@
   #refresh-question.watching { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   #refresh-question.refreshed { border-color: var(--ok, #3a7d44); color: var(--ok, #3a7d44); }
 
+  /* 調度燈（owner 2026-10-03）：綠＝最近一輪做事 run 有草案落成；灰＝沒有。 */
+  #dispatch-lamp { font-size: 12px; padding: 3px 8px; text-transform: none; letter-spacing: 0; }
+  #dispatch-lamp.busy { border-color: var(--ok, #3a7d44); color: var(--ok, #3a7d44); font-weight: 600; }
+  #dispatch-panel { margin: 2px 12px 0; }
+  #dispatch-body { white-space: pre-wrap; }
+
   /* 裁決列（教學 pane）：通過／退回在設計者剛對話的地方，草案的目標在那列看得到。 */
   #verdict-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
                  padding: 6px 0; border-top: 1px dashed var(--line); margin-top: 6px; }
@@ -236,8 +242,15 @@
   <button id="load">讀這一題</button>
   <a id="v2-link" href="__V2_BASE__/v2" target="_blank" title="正式審題站——寫人審帳本的只有那裡">v2 審題站 ↗</a>
   <a id="a2-link" href="/a2" target="_blank" title="模型比對頁與執行記錄（a2/runs）">A2 執行產物</a>
+  <!-- 調度燈（owner 2026-10-03）：指揮↔做事的狀態一眼可見。點開＝詳情面板。 -->
+  <button id="dispatch-lamp" title="指揮者（對話）與做事模型（runner）之間的調度狀態">調度 · 未開工</button>
   <span id="status">尚未載入</span>
 </header>
+
+<details id="dispatch-panel">
+  <summary>調度：指揮者 ↔ 做事模型</summary>
+  <div id="dispatch-body" class="meta">讀取中…</div>
+</details>
 
 <details id="how">
   <summary>這一頁怎麼用（點開：一分鐘版 ＋ 整個圈怎麼轉）</summary>
@@ -1554,6 +1567,51 @@ document.addEventListener("click", (event) => {
 const initial = new URLSearchParams(location.search).get("key");
 loadCategories();
 if (initial) { $("key").value = initial; loadQuestion(); }
+
+// -- 調度監控（owner 2026-10-03：要有測試去監控指揮與做事模型之間的調度） --------------------
+// 指揮者（對話 GLM）只「說」要開做事 run；做事 run 是 runner.mjs 吃 workorder（手動開）。
+// 這裡把三個 append-only 檔的**事實**變成畫面：最近一輪做事 run 的進度、她請求做事的話。
+// 只讀不寫；「她直接派工」是 G3，未經 owner 逐次核准不存在。
+async function refreshDispatch() {
+  try {
+    const d = await api("/api/runs");
+    const lamp = $("dispatch-lamp");
+    const body = $("dispatch-body");
+    const lb = d.last_batch;
+    const m = (lb || {}).metrics || {};
+    const drafts = Object.entries(d.drafts_by_run || {});
+    const recent = drafts.filter(([rid]) => lb && rid === lb.run_id);
+    if (lb && (m.drafted > 0 || recent.length)) {
+      lamp.classList.add("busy");
+      lamp.textContent = `調度 · 做事 run 有產出（草案 ${recent.reduce((a, [, n]) => a + n, 0) || m.drafted}）`;
+    } else if (lb) {
+      lamp.classList.remove("busy");
+      lamp.textContent = "調度 · 做事 run 無草案";
+    } else {
+      lamp.classList.remove("busy");
+      lamp.textContent = "調度 · 未開工";
+    }
+    const asks = (d.conductor_asks || []).slice(-3).map((a) =>
+      `  · ${(a.at || "").slice(0, 19).replace("T", " ")}　${a.role === "designer" ? "設計者轉述" : "指揮者"}（${a.key || "全庫"}）：${a.text.slice(0, 60)}`);
+    body.textContent = [
+      lb ? `最近一輪做事 run：${(lb.at || "").slice(0, 19).replace("T", " ")}｜工單 ${lb.workorder}｜variant ${lb.variant || "-"}`
+         + `\n  metrics：${JSON.stringify(m)}` : "還沒有任何做事 run（runner.mjs 未開過）。",
+      drafts.length ? `各 run 草案數：${drafts.slice(-3).map(([rid, n]) => `${rid.slice(0, 28)}…＝${n}`).join("、")}` : "",
+      asks.length ? `指揮者請求做事（最近 ${asks.length} 則）：\n${asks.join("\n")}` : "指揮者還沒請求過做事 run。",
+      "——派工本體是 runner.mjs（手動）；這裡只讀帳，不開不停（G3 需 owner 逐次核准）。",
+    ].filter(Boolean).join("\n");
+  } catch (error) {
+    $("dispatch-lamp").textContent = "調度 · 讀不到";
+  }
+}
+$("dispatch-lamp").addEventListener("click", () => {
+  const panel = $("dispatch-panel");
+  panel.open = !panel.open;
+  if (panel.open) refreshDispatch();
+});
+refreshDispatch();
+setInterval(() => { if ($("dispatch-panel").open) refreshDispatch(); }, 15000);
+
 </script>
 </body>
 </html>

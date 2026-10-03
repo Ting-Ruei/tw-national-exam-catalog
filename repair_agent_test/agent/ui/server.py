@@ -134,6 +134,76 @@ def _read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+# --- 調度監控（owner 2026-10-03）---------------------------------------------------------
+# 指揮者（對話 GLM）沒有派工工具；做事 run 是 runner.mjs 吃 workorder 手動開的。她的「訊號」
+# 是對話裡那句「這要開一次做事 run」，做事的「事實」是三個 append-only 檔：
+#   store/workorders/report.jsonl   — runner 每輪的 metrics（drafted/rejected/failed）
+#   store/repair_drafts.jsonl       — 草案落成（run_id 依輪計數）
+#   store/chat.jsonl                — 指揮者請求做事的那句話
+# 這裡只**讀**三個檔、算出畫面要的形狀；不寫任何檔（G0），也不假裝能開始/停止 run——
+# 那是 G3 派工，未經 owner 逐次核准不存在。
+
+#: 指揮者請求做事的話，跟她 seed 裡被教的那句完全同形（ui/chat.mjs 兩處）。
+DISPATCH_PHRASES = ("要開一次做事 run", "開一次做事 run", "開做事 run")
+
+
+def dispatch_status() -> dict:
+    """The conductor↔worker dispatch picture, read-only, for the header lamp and the runs panel."""
+    reports = _read_jsonl(STORE_DIR / "workorders" / "report.jsonl")
+    batches = [r for r in reports if r.get("kind") == "batch"]
+    last_batch = batches[-1] if batches else None
+    metrics = (last_batch or {}).get("metrics") or {}
+
+    # drafts per run: count lines by run_id (whole-file scan; the file is 5.8 MB and read once here)
+    per_run: dict[str, int] = {}
+    if (STORE_DIR / "repair_drafts.jsonl").is_file():
+        with (STORE_DIR / "repair_drafts.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                if "run_id" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                rid = row.get("run_id")
+                if rid:
+                    per_run[rid] = per_run.get(rid, 0) + 1
+
+    # the conductor's own requests, newest last, from the append-only transcript
+    asks = []
+    chat_path = STORE_DIR / "chat.jsonl"
+    if chat_path.is_file():
+        with chat_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                text = row.get("text") or ""
+                # The phrase appears in both directions: the conductor asks for a worker run, and
+                # the designer may relay it. What matters is the *request*, not the speaker — the
+                # role is recorded and the panel shows it, so a designer's relay is not passed off
+                # as the conductor's own words.
+                if any(p in text for p in DISPATCH_PHRASES):
+                    asks.append({
+                        "at": row.get("at"),
+                        "role": row.get("role"),
+                        "key": row.get("candidate_key"),
+                        "text": text[:120],
+                    })
+    return {
+        "last_batch": {
+            "at": last_batch.get("at"),
+            "workorder": last_batch.get("workorder"),
+            "variant": last_batch.get("variant"),
+            "run_id": last_batch.get("run_id"),
+            "metrics": metrics,
+        } if last_batch else None,
+        "drafts_by_run": per_run,
+        "conductor_asks": asks[-5:],
+    }
+
+
 def judgements_for(key: str) -> list[dict]:
     """What has already been said about this question, by the agent and by the designer.
 
@@ -685,6 +755,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"turns": chat_turns(key)})
             elif parsed.path == "/api/queue":
                 self._queue(query)
+            elif parsed.path == "/api/runs":
+                # 業主 2026-10-03：「要有測試去監控指揮與做事模型之間的調度」。指揮者只能「說」
+                # 要開做事 run；真正派工（runner.mjs）的進度在這裡變成畫面上可見的狀態。
+                self._json(dispatch_status())
             elif parsed.path == "/file":
                 self._file(query)
             elif parsed.path == "/crop":
