@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from . import ai_findings, engines
 
@@ -465,3 +466,116 @@ def propose_figure_refs(question, crop_names, crop_paths, *, endpoint, timeout=1
     decision["seconds"] = round(seconds, 3)
     decision["model"] = endpoint.get("name")
     return decision, ""
+
+
+#: 修題生產者（L2）的提示詞。鐵律：你的封鎖理由是**第一優先**、歷次退回理由依序、經驗隨行；
+#: fix 是「改完後的完整文字」不是建議；依據必須指到真的看得到的證據；證據不足就明說 degraded，
+#: 不硬湊——一份硬湊的草案比沒有草案貴（設計者要多按一次 ↩）。
+REPAIR_INSTRUCTION = (
+    "你是修題生產者。這一題被設計者封鎖（block）；`designer_block_reason` 是設計者說的錯在哪裡，"
+    "**第一優先**；`previous_return_reasons` 是之前被退回的理由（依時序，不要重犯）；"
+    "`subject_lessons` 是這個科目累積的經驗。\n"
+    "只回一個 JSON 物件，不要有其他文字：\n"
+    "{\"fix\": \"改完後的完整文字\", \"insert\": \"題幹\"|\"選項 A\"..\"選項 D\"|\"答案\", "
+    "\"basis\": \"依據（紙本哪個字、哪一行或哪張圖）\"}\n"
+    "規則：\n"
+    "- fix 是**整欄替換後的完整內容**：insert=題幹 ⇒ fix＝改完的整句題幹（不是「把X改成Y」"
+    "這種建議）；insert=選項 X ⇒ fix＝該選項改完的完整文字；insert=答案 ⇒ fix＝正確選項字母。\n"
+    "- 依據必須指到**這次真的看得到的**證據（附的裁片影像或題面文字），不得編造頁碼或字。\n"
+    "- 證據不足以提出整欄替換 ⇒ 回 {\"degraded\": true, \"note\": \"一句話原因\"}，不要硬湊。")
+
+
+def _repair_payload(question, *, block_reason, return_reasons, lessons, crop_names):
+    """The evidence pack for a text repair, all of it deterministic except the reading."""
+    return {
+        "task": "repair_proposal",
+        "candidate_key": question.get("candidate_key") or "",
+        "question_number": question.get("question_number") or "",
+        "stem": question.get("stem") or "",
+        "options": ["%s：%s" % (opt.get("key"), str(opt.get("text") or "")[:200])
+                    for opt in (question.get("options") or []) if isinstance(opt, dict)],
+        "answer": question.get("answer"),
+        "current_image_refs": (question.get("image_refs") or [])[:400],
+        "available_crops": crop_names,
+        "designer_block_reason": block_reason or "",
+        "previous_return_reasons": list(return_reasons or []),
+        "subject_lessons": list(lessons or []),
+    }
+
+
+def _parse_json_object(raw) -> dict | None:
+    """The first JSON object in the completion, or `None` (same tolerance as `parse_judgement`)."""
+    text = (engines.content_of(raw) or "").strip()
+    if text.startswith("```"):
+        text = text.split("```")[1] if "```" in text[3:] else text[3:]
+        text = text.lstrip("json").strip() if text.startswith("json") else text
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        parsed = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def parse_text_fix(raw) -> tuple[dict | None, str]:
+    """`(fix/insert/basis record, "")` 或 `(None, 原因)`——沒有預設 fix，缺一欄就不可用。
+
+    strict 的點：`insert` 必須是落點欄位（題幹／選項 A–D／答案），`fix`/`basis` 必須非空；
+    模型自己說 degraded 也記為不可用——原因原樣帶回，不硬湊。
+    """
+    parsed = _parse_json_object(raw)
+    if parsed is None:
+        return None, "回答不是可用的 JSON"
+    if parsed.get("degraded"):
+        return None, "生產者自報 degraded：%s" % (str(parsed.get("note") or "")[:200] or "未說明")
+    fix = str(parsed.get("fix") or "").strip()
+    insert = str(parsed.get("insert") or "").strip()
+    basis = str(parsed.get("basis") or "").strip()
+    if not fix:
+        return None, "fix 是空的"
+    if not basis:
+        return None, "basis（依據）是空的"
+    if "題幹" not in insert and "stem" not in insert.lower() \
+            and "答案" not in insert and not insert.lower().startswith("answer") \
+            and not re.search(r"(?:選項|options?)\s*[A-D]", insert, re.IGNORECASE):
+        return None, "insert 認不得（要 題幹／選項 A–D／答案）：%r" % insert[:60]
+    return {"fix": fix, "insert": insert, "basis": basis[:400]}, ""
+
+
+def propose_text_fix(question, *, block_reason, return_reasons, lessons, crop_paths,
+                     endpoint, timeout=180, max_tokens=800):
+    """Propose one whole-field repair for a blocked question — the L2 one-call producer.
+
+    Same shape as `propose_figure_refs`: one evidence pack (question fields + the paper crop
+    itself + the designer's words), one completion, `(record_or_None, note)`; `None` degrades.
+    `refs ⊆ 磁碟` 的對應物是 **crop 檔必須真的存在**——由呼叫者先行過濾，這裡只收存在的路徑。
+    """
+    refusal = engines.egress_refusal(endpoint)
+    if refusal:
+        return None, refusal
+    crop_names = [os.path.basename(p) for p in (crop_paths or [])]
+    payload = _repair_payload(question, block_reason=block_reason, return_reasons=return_reasons,
+                              lessons=lessons, crop_names=crop_names)
+    text = json.dumps(payload, ensure_ascii=False) + "\n\n" + REPAIR_INSTRUCTION
+    images = [part for part in (crop_image_part(path) for path in crop_paths) if part]
+    content = [{"type": "text", "text": text}] + images if images else text
+    if not images:
+        content += "\n\n（這一題沒有可附上的裁片影像；依據請基於題面文字與清單。）"
+    messages = [
+        {"role": "system", "content": ORCHESTRATOR_SYSTEM},
+        {"role": "user", "content": content},
+    ]
+    try:
+        raw, seconds = engines.ask(messages, endpoint=endpoint, max_tokens=max_tokens, timeout=timeout)
+    except Exception as exc:
+        return None, "做事模型呼叫失敗：%s" % exc
+    if raw is None:
+        return None, "做事模型沒有回答（%s）" % endpoint.get("name")
+    record, note = parse_text_fix(raw)
+    if record is None:
+        return None, note
+    record["seconds"] = round(seconds, 3)
+    record["model"] = endpoint.get("name")
+    return record, ""
