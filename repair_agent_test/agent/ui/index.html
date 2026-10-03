@@ -55,6 +55,13 @@
   @media (max-width: 1000px) { main { grid-template-columns: 1fr; }
                                #chat-pane { grid-column: auto; } }
   .pane { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  /* 核圖模式（勾「圖草案待核」）：這份工作只需要 題幹＋選項＋那張圖＋通過/退回。
+     其他篩選與右欄 PDF 全收掉——PDF 面板換題重載是量到的慢因（2026-10-03），而核圖
+     要看的證據本來就是裁片本身，不是整卷。 */
+  body.figdraft-mode #paper-pane { display: none; }
+  body.figdraft-mode #chat-pane { display: none; }
+  body.figdraft-mode main { grid-template-columns: 310px minmax(0, 1fr) 340px; }
+  @media (max-width: 1700px) { body.figdraft-mode main { grid-template-columns: 290px minmax(0, 1fr) 340px; } }
   .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; font-weight: 600; }
   /* 「刷新此題」 lives in the pane title: it is a question-area action, not a filter. While the
@@ -239,7 +246,8 @@
   <ol>
     <li><b>左邊列表挑一題</b>：中間看題目內容、右邊對官方紙本。</li>
     <li><b>要 agent 做事</b>：右下對話框直接打字送出——它會邊做邊給你看。</li>
-    <li><b>它提出修法</b>後，<b>題幹正下方</b>就會出現「agent 提的修法」：點其中一條 → 上面立刻預覽改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。正式審題（收錄/封鎖整題）在 v2。</li>
+    <li><b>它提出修法</b>後，<b>題幹正下方</b>就會出現「agent 提的修法」：點其中一條 → 上面立刻預覽改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。✅ 的當下就是已寫入（帳本＋題庫＋經驗一次完成）。</li>
+    <li><b>「待你看」清單</b>（左欄勾選或 <code>?mode=review</code>）：草案已提出、等你裁決的題全部在這裡，最舊優先；中欄直接是改後整題，鍵盤 A＝✅、X＝退回。同一題退回 3 次會標「反覆退回」——該升級處理，不是無限迴圈。</li>
     <li><b>正式裁決「題目准不准」</b>在右上 v2 審題站（帳本只有那裡寫）；<b>核對圖片草案</b>在這一頁中段「圖片草案」區（有草案的題目才會出現，右邊 PDF 一直是原本的紙本）。</li>
     <li>你按過的每一件事都寫進檔案，沒有東西只存在畫面上：學習檔 <code>agent_feedback.jsonl</code>、修法清單 <code>repair_drafts.jsonl</code>、正式帳本 <code>question_review_events.jsonl</code>。</li>
   </ol>
@@ -262,6 +270,7 @@
       <label><input type="checkbox" id="only-unjudged">未判讀</label>
       <label><input type="checkbox" id="only-figures">有圖</label>
       <label><input type="checkbox" id="only-figdrafts" title="agent 已提出「圖怎麼插」草案、等你核讀的題目">圖草案待核</label>
+      <label><input type="checkbox" id="only-pending" title="草案已提出、等你 ✅/↩ 的題（文字＋圖），最舊優先">待你看 (…)</label>
       <label><input type="checkbox" id="only-disputed" title="設計者曾標記為有問題（block／comment）">有問題的（你說過的）</label>
     </div>
     <div id="legend">
@@ -282,7 +291,7 @@
     <div id="qbody"><p class="empty-note">從左邊的列表點一題，或在上方搜尋。</p></div>
   </div>
 
-  <div class="pane">
+  <div class="pane" id="paper-pane">
     <h2>紙本 <span class="hint">官方卷對照——它不跟著左邊換頁</span></h2>
     <div id="pdfmeta" class="meta"></div>
     <iframe id="pdf-frame" title="官方題目卷"></iframe>
@@ -361,7 +370,15 @@ function platformInline(text) {
 }
 
 async function api(path, options) {
-  const response = await fetch(path, options);
+  // 純物件＝JSON body（method 預設 POST）。之前 `api("/api/judgement", {…})` 這種呼叫點
+  // 把純物件直接當 fetch init——沒有 method/body，瀏覽器發出 **GET**，後端回 404，
+  // 畫面上就是「按了沒反應」（量測 2026-10-03：GET /api/figure/apply → 404）。
+  const init = options !== null && typeof options === "object"
+    && !("method" in options) && !("body" in options) && !Array.isArray(options)
+    ? { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options) }
+    : options;
+  const response = await fetch(path, init);
   const payload = await response.json().catch(() => ({ error: "回應不是 JSON" }));
   if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
   return payload;
@@ -600,13 +617,13 @@ function appliedQuestion(question) {
   }
   if (insert.includes("題幹") || insert.includes("stem")) {
     // 結構守門（owner 2026-10-03）：agent 曾把「在「得到」後面補「(如下圖)」」這種**建議**寫進
-    // fix，預覽直接把整句題幹換掉——原題消失。判準是機械的：fix 須含原題幹的開頭（去空白後
-    // 前 8 字）才算「同一句的改後版」；不像就**一個字都不套用**，由 renderQuestion 畫警告橫幅
-    // 明說原因。失敗要看得見，不能靜默毀掉原題。
-    const head = (question.stem || "").replace(/\s+/g, "").slice(0, 8);
-    const bare = fix.replace(/\s+/g, "");
-    if (!head || !bare.includes(head)) return { ...question,
-             _previewBlocked: `這條草案的 fix 不是「改完後的完整文字」（像是建議或片段），預覽不套用——題目保持原樣；請叫 agent 重提（fix 要寫整句）` };
+    // fix，預覽直接把整句題幹換掉——原題消失。判準（difflib 相似度）**只在後端算一次**
+    // （`question_payload` 的 `_stem_guard`），前端只讀——一份契約，不許兩份實作。
+    // 不像就**一個字都不套用**，由 renderQuestion 畫警告橫幅明說原因。失敗要看得見。
+    if (d._stem_guard !== true) return { ...question,
+             _previewBlocked: d._stem_guard === false
+               ? `這條草案的 fix 不是「改完後的完整文字」（像是建議或片段），預覽不套用——題目保持原樣；請叫 agent 重提（fix 要寫整句）`
+               : `這條草案的 insert 指向不存在的欄位或選項，預覽不套用——✅ 也會被後端拒絕；請叫 agent 重提。` };
     // 預覽也走**平台渲染**（伺服器已對這份 fix 算好 `_fix_html`，與題幹同一支 normalizer）：
     // h<sup>-1</sup> 這類上標在預覽裡就是上標，不是字面 `<sup>`。
     return { ...question, stem: fix, _fix_html: d._fix_html || null, stem_html: null };
@@ -740,6 +757,22 @@ const HUMAN_LABEL = {
 };
 let listRows = [];
 
+// -- 待你看（L3 單一清單）：一個數字回答「現在積幾題等我」。 --------------------------------
+// 文字草案（最舊優先）＋圖 pass 未落地＋圖未判，全部在 /api/pending；左欄清單就是這一份，
+// W/S 走它（導覽跟隨被畫出的清單）。`pendingByKind` 讓 loadQuestion 知道這一題在等**哪一筆**
+// 草案——中欄一開就是改後整題，不是再按一次預覽。
+let pendingItems = [];
+let pendingByKind = {};
+const PENDING_LABEL = { text: "文字草案", figure_pass: "圖 pass 待寫入", figure_new: "圖草案待核" };
+
+async function refreshPending() {
+  const d = await api("/api/pending");
+  pendingItems = d.items || [];
+  pendingByKind = Object.fromEntries(pendingItems.map((it) => [it.key, it]));
+  $("only-pending").parentElement.lastChild.textContent = `待你看（${d.count}）`;
+  return d;
+}
+
 function renderList(rows, total) {
   listRows = rows;
   $("cat-count").textContent = rows.length === total
@@ -762,9 +795,13 @@ function renderList(rows, total) {
     // invisible (「我原本在 v2 審核過的大量題目也沒有紀錄」); a list that shows what he wrote is the
     // smallest thing that makes it visible again.
     const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
+    const pend = q.pending_kind
+      ? `<span class="tag ${q.pending_kind === "text" ? "" : "ok"}" title="待你看">${esc(PENDING_LABEL[q.pending_kind] || q.pending_kind)}</span>` : "";
+    const retry = (q.returns || 0) >= 3
+      ? `<span class="tag bad" title="同一題被退回 ${q.returns} 次——升級處理：自己裁決或換策略，不是無限迴圈">反覆退回×${q.returns}</span>` : "";
     const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
     return `<div class="row" data-key="${esc(q.candidate_key)}">
-      <div class="top"><span class="no">q${esc(q.question_number)}</span>${human}${mine}${agent}${disputed}${figures}${figd}</div>
+      <div class="top"><span class="no">q${esc(q.question_number)}</span>${pend}${retry}${human}${mine}${agent}${disputed}${figures}${figd}</div>
       <div class="sub">${esc(q.subject || "")} ${esc(q.year || "")}</div>
       <div class="snip">${esc(q.stem || "")}</div>
       ${note}
@@ -818,6 +855,21 @@ function go(step) {
 }
 
 async function loadList() {
+  // 待你看模式：清單就是 /api/pending 那一份（跨科目，最舊優先），不吃類科篩選。
+  if ($("only-pending").checked) {
+    $("list").innerHTML = '<p class="empty-note" style="padding:10px">載入中…</p>';
+    try {
+      const d = await refreshPending();
+      $("cat-count").textContent = `最舊優先 · 共 ${d.count} 題`;
+      renderList(pendingItems.map((it) => ({
+        candidate_key: it.key, question_number: it.number, subject: it.subject || "",
+        stem: it.label || "", pending_kind: it.kind, returns: it.returns || 0,
+      })), pendingItems.length);
+    } catch (error) {
+      $("list").innerHTML = `<p class="warn" style="margin:10px">${esc(error.message)}</p>`;
+    }
+    return;
+  }
   const category = $("category").value;
   if (!category) { $("list").innerHTML = ""; $("cat-count").textContent = "—"; return; }
   $("list").innerHTML = '<p class="empty-note" style="padding:10px">載入中…</p>';
@@ -848,6 +900,35 @@ api("/api/figure").then((d) => {
   if ($("category").value) loadList();   // 若清單已開著，補上徽章／重套篩選
 }).catch(() => {});                       // 抓不到就當沒有——題目頁的草案區仍照 /api/question 走
 
+// 核圖模式：勾上「圖草案待核」就把跟這份工作無關的篩選收掉（不是刪，換回取消勾選即還原）。
+function syncFigdraftMode() {
+  const on = $("only-figdrafts").checked;
+  document.body.classList.toggle("figdraft-mode", on);
+  ["only-unjudged", "only-figures", "only-disputed"].forEach((id) => {
+    const box = $(id);
+    if (box) box.parentElement.style.display = on ? "none" : "";
+  });
+  const hs = $("human-status");
+  if (hs) hs.parentElement.style.display = on ? "none" : "";
+}
+$("only-figdrafts").addEventListener("change", syncFigdraftMode);
+
+// 待你看模式：跟核圖模式同一招——收掉跟「驗收草案」無關的篩選，換回取消勾選即還原。
+function syncPendingMode() {
+  const on = $("only-pending").checked;
+  document.body.classList.toggle("pending-mode", on);
+  ["only-unjudged", "only-figures", "only-figdrafts", "only-disputed"].forEach((id) => {
+    const box = $(id);
+    if (box) box.parentElement.style.display = on ? "none" : "";
+  });
+  const hs = $("human-status");
+  if (hs) hs.parentElement.style.display = on ? "none" : "";
+  $("category").parentElement.style.display = on ? "none" : "";
+  loadList();
+}
+$("only-pending").addEventListener("change", syncPendingMode);
+refreshPending().catch(() => {});   // 晶片上的數字先亮起來，清單等使用者點
+
 // -- 圖片草案（併入題目頁，2026-10-02 owner 裁決：不要獨立頁）-----------------------------
 // 裁片＋兩輪提法掛在題目中段；整題就在上面、官方卷在右邊——核讀只看這一頁。
 function renderFigureDraft(d) {
@@ -864,11 +945,16 @@ function renderFigureDraft(d) {
     : d.agreed === false ? '<span class="tag bad">兩輪不一致</span> ' : "";
   const ruled = d.ruling === "pass" ? '<span class="tag ok">你判：通過</span>'
     : d.ruling === "return" ? '<span class="tag bad">你判：退回</span>' : "";
+  const landed = d.landed
+    ? '<div class="meta">✅ 已寫入題庫（v2 重新整理即見）</div>'
+    : d.ruling === "pass"
+      ? `<div class="act"><button id="fig-apply">⬇ 之前已判通過、還沒寫入題庫——按這裡寫入</button></div>` : "";
   return `
     <div class="fig-draft">
-      <div class="meta">${agreed}${ruled}${ruled ? "——再按會追加一筆新裁決（append-only）" : "核讀寫進學習檔 agent_feedback.jsonl，不動人審帳本"}</div>
+      <div class="meta">${agreed}${ruled}${ruled ? "——再按會追加一筆新裁決（append-only）" : "核讀寫進學習檔 agent_feedback.jsonl；通過的當下就寫入題庫"}</div>
       <div class="crops">${cropTag}</div>
       <table class="rounds">${round(d.a)}${round(d.b)}</table>
+      ${landed}
       <div class="act">
         <input id="fig-reason" placeholder="退回理由（例：這是別題的圖）">
         <button id="fig-approve">✅ 這個 refs 提法是對的</button>
@@ -877,10 +963,23 @@ function renderFigureDraft(d) {
     </div>`;
 }
 
+async function figureApply(keys) {
+  const out = await api("/api/figure/apply", { keys });
+  if (!out || out.error) { setStatus("寫入題庫失敗：" + ((out && out.error) || "無回應")); return false; }
+  const sk = out.skipped || [];
+  setStatus(`✅ 已寫入題庫：${(out.applied || []).length} 題${sk.length ? "；跳過 " + sk.length +
+    " 題（" + sk.slice(0, 3).map((s) => s.key.split(":").pop() + "：" + s.reason).join("；") + "）" : ""}`);
+  return true;
+}
+
 async function figureVerdict(rating, review) {
   const d = current && current.figure_draft;
   if (!d) return;
   const reason = ($("fig-reason")?.value || "").slice(0, 400);
+  if (review === "return" && !reason) {
+    const box = $("fig-reason"); if (box) box.focus();
+    setStatus("退回要說理由（AI 從理由學下一次怎麼改）——先填再按 ↩"); return;
+  }
   const body = {
     key: current.candidate_key, rating,
     reason: reason || (review === "pass" ? "figure refs 提法正確" : ""),
@@ -891,7 +990,14 @@ async function figureVerdict(rating, review) {
   };
   const out = await api("/api/judgement", body);
   if (out && out.error) { setStatus("圖草案裁決失敗：" + out.error); return; }
-  setStatus(review === "pass" ? "圖草案：已記通過" : "圖草案：已記退回");
+  if (review === "pass") {
+    // 按下去的當下就是改好的題目：記錄通過後立刻寫入 candidates（同一個動作，不是兩個流程）。
+    const ok = await figureApply([current.candidate_key]);
+    if (ok) { $("fig-reason").value = ""; await loadQuestion(); return; }
+  } else {
+    $("fig-reason").value = "";
+    setStatus("圖草案：已記退回——理由已進學習檔，AI 下一輪會讀到");
+  }
   loadQuestion();  // 重抓——草案流 mtime 變了，伺服器重組表後新裁決會畫出來
 }
 
@@ -915,8 +1021,23 @@ function renderQuestion(question) {
   $("qbody").innerHTML = `
     ${question._previewBlocked && picked ? `<div class="preview-banner" style="border-color:#f3c2bd;background:#fff5f4">⚠ ${esc(question._previewBlocked)}。
       <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
-    ${previewing ? `<div class="preview-banner">👁 預覽：這是套用「${esc((current.drafts.find((x) => x._sha256 === previewDraftSha) || {}).insert || "草案")}」後的樣子——<b>還沒真的改</b>。
-      <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
+    ${(() => {
+      // 待你看橫幅：她改了什麼（insert＋依據）一行說完；✅/↩ 就在草案列上。
+      // previewing＝改後整題在畫面上；否則（待你看模式收掉預覽時）給一條「看改後的樣子」。
+      // 資訊跟著 verdictDraftSha（對照原版之後 previewDraftSha 是 null）。
+      const d = (current.drafts || []).find((x) => x._sha256 === (previewDraftSha || verdictDraftSha));
+      if (!d || (question._previewBlocked && picked)) return "";
+      if (previewing) {
+        return `<div class="preview-banner">👁 她改了什麼：<b>${esc(d.insert || "草案")}</b> → ${esc((d.fix || "").slice(0, 80))}${(d.fix || "").length > 80 ? "…" : ""}
+          ｜依據：${esc(d.basis || "—")}｜<b>還沒真的改，✅ 即寫入</b>
+          <a href="#" id="preview-off">對照原版</a></div>`;
+      }
+      if ($("only-pending").checked) {
+        return `<div class="preview-banner" style="border-style:dashed">（現在是原版）——
+          <a href="#" id="preview-on">看改後的樣子</a></div>`;
+      }
+      return "";
+    })()}
     <div class="stem study">${platformHtml(question._fix_html || question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
@@ -961,13 +1082,19 @@ function renderQuestion(question) {
 
   // The PDF panel is deliberately independent of the question panel: changing one must not
   // move the other (the charter's rule, and a real v2 defect where a filter moved the walk).
+  // 慢的根因（2026-10-03 量測）：每一題都重設 src ⇒ 換題就把整份 PDF 重新解析。同一份卷＋
+  // 同一頁就不重設——面板的「不跟著左邊換頁」契約本來就該這樣讀。
   const pdf = question.pdf_relative || question.pdf_absolute || "";
   $("pdfmeta").innerHTML = pdf
-    ? `第 <b>${esc(question.page ?? "?")}</b> 頁 ｜ ${esc(pdf.split("/").pop())}`
+    ? `第 <b>${esc(question.page ?? "?")}</b> ｜ ${esc(pdf.split("/").pop())}`
     : '<span class="empty-note">這一題沒有對應的題目卷。</span>';
-  $("pdf-frame").src = pdf
+  const pdfUrl = pdf
     ? `/file?path=${encodeURIComponent(question.pdf_absolute || pdf)}#page=${question.page || 1}`
     : "about:blank";
+  if ((renderQuestion._pdfShown || "") !== pdfUrl) {
+    $("pdf-frame").src = pdfUrl;
+    renderQuestion._pdfShown = pdfUrl;
+  }
   $("crop-wrap").innerHTML = question.crop_png
     ? `<div class="meta">這是 agent 送給地端模型看的裁片（含它自己的圖框）：</div>
        <img id="crop-img" src="/crop?path=${encodeURIComponent(question.crop_png)}" alt="這一題的裁片">`
@@ -980,6 +1107,8 @@ function renderQuestion(question) {
   if (question.figure_draft) {
     $("fig-approve").onclick = () => figureVerdict("up", "pass");
     $("fig-return").onclick = () => figureVerdict("down", "return");
+    const applyBtn = $("fig-apply");
+    if (applyBtn) applyBtn.onclick = () => figureApply([current.candidate_key]).then((ok) => ok && loadQuestion());
   }
   if (chatMode === "question") openChatFor(question.candidate_key);
 }
@@ -1232,23 +1361,24 @@ async function acceptDraft() {
   document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = true; });
   try {
     const notes = $("reason").value.trim();
-    // The event carries the draft's line checksum — the whole reason a checksum is the reference:
-    // it names an immutable proposal, not 「第三則草案」.
-    const result = await api("/api/accept-draft", {
+    // 鐵律「✅ 的當下＝已寫入」：一個動作寫齊三件事——帳本 accept（指著草案 sha）＋
+    // candidates 整欄替換＋經驗入庫。後端先驗證到「真的有東西可寫」才動第一個 byte；
+    // 驗證不過整個拒絕（400），不會出現「判通了但沒寫進去」的狀態。
+    const result = await api("/api/accept-and-apply", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, notes }),
     });
     verdictDraftSha = null;
     previewDraftSha = null;
+    await refreshPending();
     await refreshQuestion("manual");
     refreshVerdictTarget();
-    // Set AFTER refreshQuestion: the re-render must not overwrite the confirmation the designer
-    // needs to see — a wiped message is exactly how a verdict looked like 「沒有發生」.
-    $("verdict-target").textContent =
-      "已寫入人審帳本 question_review_events.jsonl（草案 " + esc(result.event.repair_draft_sha256.slice(0, 12))
-      + "…）——你驗收的是這則草案；題目內容要等落地才會真的改。";
+    const skipped = (result.skipped || []).map((s) => s.reason).join("；");
+    $("verdict-target").textContent = skipped
+      ? "帳本已記 ✅，但落地跳過：" + esc(skipped)
+      : "✅ 已寫入：帳本 accept（草案 " + esc(result.event.repair_draft_sha256.slice(0, 12)) + "…）＋ candidates 整欄替換＋經驗入庫——v2 重新整理即見。";
   } catch (error) {
-    $("verdict-target").textContent = "通過失敗：" + esc(error.message);
+    $("verdict-target").textContent = "通過失敗：" + esc(error.message) + "——什麼都沒寫。";
   } finally {
     barButtons.forEach((b) => { b.disabled = false; });
     document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = false; });
@@ -1285,11 +1415,12 @@ async function returnDraft() {
     });
     $("return-reason").value = "";
     verdictDraftSha = null;
+    await refreshPending();
     await refreshQuestion("manual");
     refreshVerdictTarget();
     // Set AFTER refreshQuestion: the re-render must not overwrite the confirmation the designer
     // needs to see — this message being wiped is exactly how a return looked like 「沒有發生」.
-    $("verdict-target").textContent = "已退回：理由寫進 agent_feedback.jsonl（學習流），草案本身保留在面板。";
+    $("verdict-target").textContent = "已退回：理由寫進 agent_feedback.jsonl（學習流），下一輪 prompt 第一行就是它。";
   } catch (error) {
     verdictWarn("退回失敗：" + error.message + "——草案沒有被動到。");
   } finally {
@@ -1342,7 +1473,17 @@ async function loadQuestion() {
   previewDraftSha = null;  // a preview belongs to the question it was made on
   setStatus("載入中…");
   try {
-    renderQuestion(await api("/api/question?key=" + encodeURIComponent(key)));
+    const q = await api("/api/question?key=" + encodeURIComponent(key));
+    // 待你看模式：草案就是主角——驗收對象直接設成「在等的那一筆」，中欄一開就是改後整題
+    // （不是再按一次預覽）；「她改了什麼」在橫幅上。離開清單的題目維持原行為。
+    const pend = pendingByKind[q.candidate_key];
+    if (pend && pend.kind === "text" && (q.drafts || []).some((d) => d._sha256 === pend.draft_sha256)) {
+      verdictDraftSha = pend.draft_sha256;
+      previewDraftSha = verdictDraftSha;
+    } else if ($("only-pending").checked) {
+      verdictDraftSha = null;
+    }
+    renderQuestion(q);
   } catch (error) {
     // A rendering exception used to escape this function entirely: the fetch succeeded,
     // `renderQuestion` threw on `answer.map`, and the panel kept its previous contents — which on
@@ -1423,6 +1564,14 @@ document.addEventListener("click", async (event) => {
     renderQuestion(current);
     return;
   }
+  const on = event.target.closest("#preview-on");
+  if (on) {
+    event.preventDefault();
+    previewDraftSha = verdictDraftSha;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
   const picky = event.target.closest(".picky");
   if (picky) {
     event.preventDefault();
@@ -1491,6 +1640,30 @@ $("search").addEventListener("keydown", (event) => { if (event.key === "Enter") 
 document.addEventListener("keydown", (event) => {
   if (event.target.tagName === "TEXTAREA" || event.target.tagName === "INPUT") return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // 核圖模式鍵盤（有草案的題目上）：A＝通過＋寫入＋下一題；X＝退回（要理由）。
+  // 退回沒理由時先聚焦輸入框——append_return 拒絕空理由，理由是 AI 學習的原材料。
+  if (current && current.figure_draft && !current.figure_draft.landed) {
+    if (event.key.toLowerCase() === "a") { event.preventDefault(); $("fig-approve").click(); return; }
+    if (event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      const reason = $("fig-reason");
+      if (reason && !reason.value.trim()) { reason.focus(); setStatus("先填退回理由，再按 ↩ 或 X"); return; }
+      $("fig-return").click(); return;
+    }
+  }
+  // 待你看模式鍵盤（文字草案）：A＝✅ 即寫入；X＝退回（要理由——沒理由先聚焦輸入框）。
+  // 驗收對象在（loadQuestion 已自動設或你點過列），A/X 才接手；打字中的按鍵上面已擋掉。
+  if (verdictDraftSha && (current?.drafts || []).some((d) => d._sha256 === verdictDraftSha)) {
+    if (event.key.toLowerCase() === "a") { event.preventDefault(); acceptDraft(); return; }
+    if (event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      const li = document.querySelector(`li.draft[data-draft-sha="${CSS.escape(verdictDraftSha)}"]`);
+      const why = li?.querySelector("input.why");
+      if (why && !why.value.trim()) { why.focus(); setStatus("先寫退回理由——理由是 AI 下一輪的第一行輸入"); return; }
+      returnDraft();
+      return;
+    }
+  }
   const map = { w: () => go(-1), s: () => go(1) };
   const hit = map[event.key.toLowerCase()];
   if (!hit) return;
@@ -1508,6 +1681,11 @@ document.addEventListener("click", (event) => {
 });
 // A key in the URL loads on open, so a question can be sent to someone as a link.
 const initial = new URLSearchParams(location.search).get("key");
+// ?mode=review：待你看清單開場（§8 一圈驗收的入口——block 之後回來就看這裡）。
+if (new URLSearchParams(location.search).get("mode") === "review") {
+  $("only-pending").checked = true;
+  syncPendingMode();
+}
 loadCategories();
 if (initial) { $("key").value = initial; loadQuestion(); }
 

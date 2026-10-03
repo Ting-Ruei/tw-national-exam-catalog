@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -863,6 +865,53 @@ def drafts_for(key: str) -> list:
             if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
                 rows.append(row)
     return rows
+
+
+#: 與前端預覽同一組判準（一份契約，不許兩份）：`fix` 先剝掉「A: 」這種選項前綴；
+#: `insert` 認 題幹/stem、答案/answer、選項 X（candidates 的 options 是 `{key, text}` 列）、
+#: 或 candidates 列上真實存在的字串欄位名。生產者（驗證自己的草案）與落地寫入器（✅ 的前置
+#: 驗證）都用這一份——兩份實作就是兩個可以不一致的地方。
+_INSERT_OPTION = re.compile(r"(?:選項|options?)\s*([A-D])", re.IGNORECASE)
+_FIX_OPTION_PREFIX = re.compile(r"^[A-D]\s*[:：]\s*")
+
+
+def resolve_text_target(row: dict, insert: str) -> tuple[str, str]:
+    """`insert` →（目標欄位描述, 現值）。欄位／選項不存在 → ValueError（負對照：靜默猜錯格）。"""
+    text = (insert or "").strip()
+    low = text.lower()
+    if "題幹" in text or "stem" in low:
+        return "stem", str(row.get("stem") or "")
+    if "答案" in text or low.startswith("answer"):
+        return "answer", str(row.get("answer") or "")
+    om = _INSERT_OPTION.search(text)
+    if om:
+        letter = om.group(1).upper()
+        for opt in row.get("options") or []:
+            if isinstance(opt, dict) and str(opt.get("key") or "").upper() == letter:
+                return "option:%s" % letter, str(opt.get("text") or "")
+        raise ValueError("insert 指向不存在的選項：%s（這一題沒有 %s）" % (text, letter))
+    if text and isinstance(row.get(text), str):
+        return "field:%s" % text, row[text]
+    raise ValueError("insert 指向不存在的欄位：%r" % text)
+
+
+def strip_option_prefix(fix: str) -> str:
+    """草案 fix 帶「A: 」前綴（草案面板的顯示形態）；套用到選項欄時要剝掉。"""
+    return _FIX_OPTION_PREFIX.sub("", (fix or "").strip())
+
+
+def is_full_replacement(old: str, fix: str) -> bool:
+    """fix 是不是「改完後的完整文字」——機械判準：與原句的相似度。
+
+    舊判準「須含原句開頭 8 字」擋得住建議（「把X改成Y」），也擋得住**開頭本身的錯字修正**
+    （「一般人→健康成人」改在前 8 字內）：合法修正在前、建議在後，兩者都會撞上。
+    相似度擋得住片段與建議（與原句相似度低），放行任何位置的修正；整句重寫（相似度低）
+    會被拒——那不是這個生產者該提的形態，設計者會叫 agent 重提。前端預覽讀後端算好的值。
+    """
+    old_ws, fix_ws = re.sub(r"\s+", "", old), re.sub(r"\s+", "", fix)
+    if not old_ws:
+        return True
+    return difflib.SequenceMatcher(None, old_ws, fix_ws).ratio() >= 0.5
 
 
 def do_propose(args) -> dict:
