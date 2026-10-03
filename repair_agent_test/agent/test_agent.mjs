@@ -1245,9 +1245,12 @@ print(json.dumps(out))
     "dropping a disallowed tag must not drop the question's real text");
 
   // The UI must actually use the rendered field, with a fallback to escaped raw text — never a
-  // hand-rolled converter, which would be a second opinion about how a question looks.
+  // hand-rolled converter, which would be a second opinion about how a question looks. The stem
+  // render takes the **previewed** fix's rendered html first (`_fix_html`, same server-side
+  // renderer) and falls back to the question's own `stem_html` when not previewing.
   const ui = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
-  assert.match(ui, /platformHtml\(question\.stem_html/, "the stem must render via the platform view");
+  assert.match(ui, /platformHtml\(question\._fix_html \|\| question\.stem_html/,
+    "the stem must render the previewed fix via the platform view first, falling back to the question's own stem_html");
   assert.match(ui, /platformHtml\(rendered\.get\(key\)/, "and each option likewise");
   assert.equal(/stem_markup/.test(ui), false,
     "the UI must not assemble markup itself; it renders what the platform renderer produced");
@@ -1360,6 +1363,28 @@ test("the chat seed hands over the resolved figure paths", () => {
 });
 
 /**
+ * The conductor/worker boundary and the full-text draft contract (owner 2026-10-03).
+ *
+ * Two measured failures: the chat 指揮者 called `read_page` — the transcription engine, i.e.
+ * 做事模型 — with her own hands (chat transcript 2026-09-30 03:37); and she proposed a draft whose
+ * `fix` was a suggestion sentence, which the stem preview applied verbatim and erased the question.
+ * The chat must not carry the worker's pen, and a preview that would replace a whole field with
+ * something that is not the resulting text must refuse visibly.
+ */
+test("the chat conductor carries no worker pen, and a bad fix cannot erase the stem", () => {
+  const chat = readFileSync(new URL("./ui/chat.mjs", import.meta.url), "utf8");
+  assert.match(chat, /omit:\s*\["read_page"\]/,
+    "the conductor must not carry read_page — transcription is one-shot-run work");
+  const session = readFileSync(new URL("./lib/session.mjs", import.meta.url), "utf8");
+  assert.match(session, /BUILTIN_TOOLS\.filter\(\(name\) => !omit\.includes\(name\)\)/,
+    "an omit that hid only custom tools would still ship the pen");
+  // The fix contract lives where the erasure happened: appliedQuestion replaces the whole field.
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /_previewBlocked/,
+    "a stem preview whose fix is not the full resulting text must refuse visibly, not erase the stem");
+});
+
+/**
  * A restart continues the conversation instead of losing it.
  *
  * `SessionManager.create(cwd, sessionDir)` takes two arguments, and the first is the cwd. Measured
@@ -1418,7 +1443,6 @@ test("the raw view really renders, and the model's own prompt reaches the page",
     judgements: [],
     ai_findings: [{
       model: "ornith-1.5-mtplx-35b", created_at: "2026-09-21T22:32:41", seconds: 1.0,
-      prompt_system: "SYSTEM-MARKER", prompt_user: "USER-MARKER",
       finding: { verdict: "OK", where: "WHERE-MARKER", fix: "FIX-MARKER" },
       raw: "RAW-MARKER", usage: { prompt_tokens: 849 },
     }],
@@ -1434,10 +1458,15 @@ test("the raw view really renders, and the model's own prompt reaches the page",
   // "it renders" a check instead of a claim.
   const result = new Function("question", source)(question);
 
-  for (const marker of ["SYSTEM-MARKER", "USER-MARKER", "WHERE-MARKER", "RAW-MARKER"]) {
+  // 2026-10-03: prompt archaeology (`prompt_system`/`prompt_user`) no longer rides the view, so the
+  // markers for it are gone too — what must reach the page is the verdict, the fix, and the raw
+  // output (the evidence), plus the pointer to the jsonl for the full prompt.
+  for (const marker of ["WHERE-MARKER", "RAW-MARKER", "question_ai_findings.jsonl"]) {
     assert.ok(result.pipeline.includes(marker),
-      `${marker} must reach the page — the prompt and the raw output are the evidence, not the conclusion`);
+      `${marker} must reach the page — the parsed verdict and raw output are the evidence`);
   }
+  assert.ok(!result.pipeline.includes("SYSTEM-MARKER") && !result.pipeline.includes("USER-MARKER"),
+    "prompt archaeology must not render from the view (it is not in the payload)");
   assert.ok(result.read.includes("content_parts"),
     "the agent's tool trace must render, including the image part");
   assert.ok(result.read.includes("q042_option_A.png"), "and the arguments it was called with");
@@ -1469,17 +1498,21 @@ test("the pipeline's AI findings are read from its stream and reach the view", a
   const rows = view.ai_findings || [];
   assert.ok(rows.length, `the stream must yield this question's records (${key})`);
   const row = rows[0];
-  assert.ok(row.prompt_system && row.prompt_system.length > 50,
-    "the prompt the model was given must be carried — it is what 'what the AI was shown' means");
-  assert.ok(row.prompt_user && row.prompt_user.includes("題號"),
-    "and the user prompt, which holds the question's own text");
-  assert.ok(row.finding && row.finding.where, "and the parsed answer");
+  // 2026-10-03: the **prompt archaeology** (`prompt_system`/`prompt_user`/`orchestration`/
+  // `principles`) is stripped from the view — past runs' prompts are not evidence, and they cost
+  // the conductor ~4k input tokens per tool call (measured: q051 get_question 22.6k → 8.7k chars).
+  // What "what the AI was shown" means to a person is still carried: the parsed verdict, the raw
+  // completion, which model said it, and when. The full rows stay on disk in the jsonl.
+  for (const field of ["prompt_system", "prompt_user", "orchestration", "principles"]) {
+    assert.equal(field in row, false, `${field} must be stripped from the view (prompt archaeology, not evidence)`);
+  }
+  assert.ok(row.finding && row.finding.where, "the parsed answer is carried");
   assert.ok(row.model, "and which model said it");
 
   // The bridge must also be the one that reads it, not the UI guessing from another file.
   const source = readFileSync(new URL("./bridge.py", import.meta.url), "utf8");
   assert.match(source, /question_ai_findings\.jsonl/, "the bridge names the stream it reads");
-  assert.match(source, /"ai_findings": ai_findings\(/, "and puts it in the view");
+  assert.match(source, /"ai_findings": \[/, "and puts the trimmed rows in the view");
 });
 
 /**
@@ -2105,4 +2138,68 @@ test("the record_rule_hit tool is registered and writes only its own store-side 
   assert.equal(hitsPath(), join(SCRATCH, "rule_hits.jsonl"),
     "without REPAIR_AGENT_HITS the tool writes the redirected store's rule_hits.jsonl");
   assert.equal(readHits(hitsPath()).hits.length, 1, "exactly one fact per (rule, key)");
+});
+
+/**
+ * 調度監控（owner 2026-10-03：「要有測試去監控指揮與做事模型之間的調度」）。
+ *
+ * 指揮者（對話 GLM）沒有派工工具；做事 run 是 runner.mjs 吃 workorder 手動開的。她能給的訊號
+ * 是對話裡那句「要開一次做事 run」；做事的事實是 `workorders/report.jsonl` 的 metrics 與
+ * `repair_drafts.jsonl` 依 run_id 的計數。`dispatch_status()` 只讀這三個 append-only 檔，
+ * 算出畫面要的形狀——不寫檔、不假裝能開始/停止 run（那是 G3，未經 owner 逐次核准不存在）。
+ */
+test("dispatch monitoring reads the three ledgers and never writes one", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const uiScript = [
+    "import importlib.util, json, sys, os",
+    "store = sys.argv[2]",
+    "os.makedirs(os.path.join(store, 'workorders'), exist_ok=True)",
+    "with open(os.path.join(store, 'workorders', 'report.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'kind': 'batch', 'at': '2026-10-03T07:00:00Z', 'workorder': 'wo-t.jsonl', 'variant': 'A', 'run_id': 'run-t1', 'metrics': {'items': 2, 'drafted': 2, 'rejected': 0, 'failed': 0}}) + chr(10))",
+    "with open(os.path.join(store, 'repair_drafts.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'run_id': 'run-t1', 'candidate_key': 'k1'}) + chr(10))",
+    "    f.write(json.dumps({'run_id': 'run-t1', 'candidate_key': 'k2'}) + chr(10))",
+    "with open(os.path.join(store, 'chat.jsonl'), 'w') as f:",
+    "    f.write(json.dumps({'at': '2026-10-03T07:01:00Z', 'role': 'agent', 'candidate_key': 'k1', 'text': '這要開一次做事 run 才能轉錄。'}, ensure_ascii=False) + chr(10))",
+    "    f.write(json.dumps({'at': '2026-10-03T07:02:00Z', 'role': 'agent', 'candidate_key': 'k1', 'text': '沒問題，我看過了。'}, ensure_ascii=False) + chr(10))",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "d = mod.dispatch_status()",
+    "print(json.dumps(d, ensure_ascii=False))",
+  ].join("\n");
+  const scratch = mkdtempSync(join(tmpdir(), "dispatch-test-"));
+  const { stdout } = await run(PATHS.PYTHON, ["-c", uiScript,
+    join(AGENT_DIR, "ui", "server.py"), scratch],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: scratch } });
+  const d = JSON.parse(stdout);
+
+  // The batch ledger reaches the view with its metrics intact.
+  assert.equal(d.last_batch.run_id, "run-t1", "the latest worker run is named");
+  assert.equal(d.last_batch.metrics.drafted, 2, "its metrics travel, not a summary of a summary");
+  // Drafts count per run: the panel's 「草案 N」 must be the ledger's own count.
+  assert.equal(d.drafts_by_run["run-t1"], 2, "drafts counted by run_id from the drafts stream");
+  // The conductor's request is caught by phrase, with the speaker kept honest.
+  assert.equal(d.conductor_asks.length, 1, "exactly the dispatch-phrase turn is a signal");
+  assert.equal(d.conductor_asks[0].role, "agent", "the speaker is recorded, not assumed");
+  assert.ok(d.conductor_asks[0].text.includes("做事 run"), "and the sentence itself is carried");
+
+  // Negative control: an empty store answers with nulls/empties, never a crash or an invention.
+  const emptyScript = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('ui_server', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+    "print(json.dumps(mod.dispatch_status(), ensure_ascii=False))",
+  ].join("\n");
+  const scratch2 = mkdtempSync(join(tmpdir(), "dispatch-empty-"));
+  const { stdout: emptyOut } = await run(PATHS.PYTHON, ["-c", emptyScript,
+    join(AGENT_DIR, "ui", "server.py"), scratch2],
+    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, REPAIR_AGENT_STORE: scratch2 } });
+  const empty = JSON.parse(emptyOut);
+  assert.equal(empty.last_batch, null, "no run recorded means no run invented");
+  assert.deepEqual(empty.drafts_by_run, {}, "and no drafts invented either");
+  assert.deepEqual(empty.conductor_asks, [], "and no asks invented either");
 });

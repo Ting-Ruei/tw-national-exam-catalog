@@ -18,6 +18,43 @@ description: 這一輪維修改了什麼（每一項附量到的數字與量法�
 
 數字一律附「怎麼量的」。**沒量到的不要寫成事實**。
 
+## 0-ter. 2026-10-01/03 DGX GLM 指揮者導入＋沙盒指揮鏈（owner 逐項裁決）
+
+完整紀錄：[`qbr/reports/dgx_glm_conductor.md`](../../../qbr/reports/dgx_glm_conductor.md)
+（端點量測、99 題 triage vs evidence 對照、figure-missing 生產者 A/B、分流裁決、程式與測試）。
+這裡只放交接要用的最小集（skill 只 link 不複製全文——兩份全文就是兩個可以不一致的地方）；
+**沒量到的不要寫成事實**。
+
+**owner 裁決鏈**：09-30「直接讓地端模型去做」→ 10-01「我要選全做」（登記 lane＋指揮者
+換腦＋99 題小考）→ 10-01 分流裁決（5A/5B/5c agent-session 形態停跑；改
+`figure_missing_second_pass.py` 證據包生產者）→ 10-03「指揮者可以換成 192.168.10.90:8888
+的模型」（沙盒對話指揮者＝GLM，做事模型 occamy 不動）。
+
+**量到的核心數字**（量法在報告）：
+
+| 事實 | 數字 |
+|---|---|
+| triage-only（不看證據）99 題 | 99/99 TRUST、0 次升級看圖——**不可用** |
+| evidence 模式同一批 | TRUST 97／DOUBT 2，兩列 DOUBT 都抓到 worker 編造紙本內容 |
+| figure-missing agent-session（occamy） | 9.4 分/題 ⇒ 兩輪 634 題 ≈100 小時 → 停跑 |
+| figure-missing 證據包生產者（GLM） | A/B 兩輪共識率 **1.0**（634 insert／8 none），A 71 分＋B 35 分 |
+| 沙盒對話指揮者首輪 input（10-03 瘦身後） | 15,664→9,138 tokens；UI 實測無工具一輪 0.7 s、帶一次 get_question 4.0 s |
+
+**沙盒指揮鏈契約**（`repair_agent_test/agent/`，PR #21）：`CONDUCTOR_MODEL` 只注入對話
+子進程（`dgx-flash/GLM-5.3-Flash-EXL3`，pin＝served id）；thinking off 走
+`chat_template_kwargs`（沒帶會回 `content:null`，實測）；對話指揮者沒有 `read_page`——
+她看證據用 `crop_question`＋`read`，逐字轉錄就說「要開一次做事 run」（調度燈把這句
+上畫面；派工本體仍是 runner.mjs 手動，G3）。fix 契約＝「改完後的完整文字」，UI 守門
+（fix 須含原題幹開頭 8 字，否則一個字不套用）。
+
+**還沒解決／待裁決**：
+
+1. 634 題 figure 草案落地（G3）——owner 逐批核准；134 題已在 v2 審過，先列清單決定
+   reset／跳過。
+2. 指揮者「直接派工單」（寫 workorder 檔）——未核准前只做調度監控（唯讀）。
+3. 舊對話 session 的輸入體積（歷史＋圖）只隨新輪攤薄，不回溯改寫；若仍嫌慢，下一步是
+   session compaction——未做。
+
 ## 0-bis. 2026-09-29/30 佇列重建＋crops 事故修復（owner 已准「就做吧」）
 
 owner 2026-09-29：「你幫我確定PR #4，然後依照你列的 你一句話就能動的 就做吧」——授權執行：

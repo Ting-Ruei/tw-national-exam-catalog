@@ -47,8 +47,11 @@ out = {}
 for name, record in engines.endpoints().items():
     out[name] = {"url": record["url"], "model": record["name"], "key": record.get("key", ""),
                  "reasoning": bool(record.get("reasoning") or record.get("thinking")),
-                 # The deployment's own limits, when engines.py knows them: asking for more than a
-                 # server accepts is a 400 with no body (measured on occamy, see engines.py).
+                 # The engine's own thinking switch (chat_template_kwargs on DGX): Pi's
+                 # chat-template thinking format sends exactly this dict. Without it the DGX GLM
+                 # answers with content null and everything in reasoning_content — measured
+                 # 2026-10-03 — so it must travel with the record, not be re-derived per call.
+                 "thinking": record.get("thinking") or {},
                  "context_window": record.get("context_window"),
                  "max_output_tokens": record.get("max_output_tokens")}
 print(json.dumps(out))
@@ -75,10 +78,19 @@ function providerConfig(name, record) {
     // The role is a per-server fact, not a preference, so it is pinned here rather than left to
     // Pi's default: `instructionRole = reasoning && supportsDeveloperRole ? "developer" : "system"`.
     supportsDeveloperRole: false,
-    // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
-    // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
-    ...(record.reasoning ? {} : { thinkingFormat: "qwen-chat-template" }),
   };
+  // The thinking spelling is engine-specific and a wrong one is silently ignored, so it is
+  // declared here rather than left to Pi's default. Same decision as `engines.body_for`.
+  // An engine that ships its own switch dict (DGX: `chat_template_kwargs.enable_thinking=False`)
+  // maps to Pi's `chat-template` format + `chatTemplateKwargs` — Pi sends the dict verbatim.
+  // Without this the DGX GLM runs thinking-on and answers `content: null` (measured 2026-10-03).
+  if (record.thinking && typeof record.thinking === "object"
+      && Object.keys(record.thinking).length) {
+    compat.thinkingFormat = "chat-template";
+    compat.chatTemplateKwargs = record.thinking.chat_template_kwargs || {};
+  } else if (!record.reasoning) {
+    compat.thinkingFormat = "qwen-chat-template";
+  }
   return {
     name,
     baseUrl: record.url.replace(/\/$/, "") + "/v1",
@@ -118,7 +130,7 @@ export const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
  * Throws rather than falling back to another model. Using a different brain silently would make
  * every number from a run unattributable to a model, and auditable numbers are the project's point.
  */
-export async function buildSession({ sessionManager, thinking, cwd } = {}) {
+export async function buildSession({ sessionManager, thinking, cwd, omit = [] } = {}) {
   const modelRuntime = await ModelRuntime.create();
   for (const [name, record] of Object.entries(await localProviders())) {
     modelRuntime.registerProvider(name, providerConfig(name, record));
@@ -148,10 +160,22 @@ export async function buildSession({ sessionManager, thinking, cwd } = {}) {
     agentDir: process.env.PI_AGENT_DIR || getAgentDir(),
     noExtensions: true,
     noSkills: true,
+    // 2026-10-03 latency work: Pi's context-file loader walks the AGENTS.md chain from `cwd` and
+    // appends **both** the umbrella (`ai_learning_platform/AGENTS.md`, 6.3k chars) and the catalog
+    // repo's (`tw-national-exam-catalog/AGENTS.md`, 11.9k chars) — 18.3k chars ≈ 7k input tokens on
+    // **every** conductor call, on top of the ROLE. The sandbox session's contract is its own ROLE
+    // (`identity.mjs`): governance rules it needs live there; the repo AGENTS.md chain is this
+    // developer session's context, not the reviewer-model's. Baron-cwd control measured: 7.4k
+    // total without it vs 25.6k with it.
+    noContextFiles: true,
   });
   await resourceLoader.reload();
 
-  const customTools = toolsFor(Type);
+  // `omit` is the conductor/worker boundary (owner 2026-10-03): the chat conductor must not carry
+  // the worker's pen. `read_page` drives a transcription engine — that is 做事模型 work, done in a
+  // one-shot run, not inside a conversation. The one-shot agent passes no `omit` and keeps it.
+  const customTools = toolsFor(Type).filter((tool) => !omit.includes(tool.name));
+  const builtinTools = BUILTIN_TOOLS.filter((name) => !omit.includes(name));
   const { session } = await createAgentSession({
     cwd: cwd || PATHS.CATALOG,
     modelRuntime,
@@ -159,7 +183,7 @@ export async function buildSession({ sessionManager, thinking, cwd } = {}) {
     thinkingLevel: thinking || process.env.REPAIR_AGENT_THINKING || "medium",
     resourceLoader,
     // No edit/write: this agent produces findings, not edits.
-    tools: [...BUILTIN_TOOLS, ...customTools.map((tool) => tool.name)],
+    tools: [...builtinTools, ...customTools.map((tool) => tool.name)],
     customTools,
     sessionManager: sessionManager || SessionManager.create(PATHS.AGENT_DIR),
     sessionStartEvent: { reason: "startup" },

@@ -598,7 +598,13 @@ function renderTextSide() {
   const candidate = item.candidate || {};
   const options = candidate.options || [];
 
-  $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)}`;
+  // 2026-10-02 owner: 沙盒要能從審題頁一鍵打開（「整個圈要可以運作」）。The key travels in the
+  // query string, which is the sandbox's own open-on-load contract (`?key=`). The base lives in
+  // localStorage（key `sandboxBase`）so a deployment moves it without a rebuild; the default is
+  // the sandbox service the owner has been using.
+  const sandboxBase = String(localStorage.getItem('sandboxBase') || 'http://192.168.20.249:8790');
+  const sandboxHref = `${sandboxBase}/?key=${encodeURIComponent(item.candidate_key)}`;
+  $('where').innerHTML = `<b>第 ${esc(item.question_number)} 題</b> · ${esc(item.category)} · ${esc(item.year)}年第${esc(item.ordinal)}次 · ${esc(item.subject)} · <a href="${esc(sandboxHref)}" target="_blank" rel="noopener" title="沙盒：跟 agent 對話、驗收它提的修法">沙盒：教 AI 修這題 ↗</a>`;
   const standing = verdictOf(item.candidate_key);
   const note = noteOf(item.candidate_key);
   // 被退回來的題目要說出**是誰退回、為什麼**，不然「AI／管線退回」只是一個標籤。
