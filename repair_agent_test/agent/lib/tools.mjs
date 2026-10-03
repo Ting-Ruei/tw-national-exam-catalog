@@ -272,12 +272,14 @@ export function toolsFor(Type) {
       label: "提出修法（草案，不動正式檔）",
       description:
         "把你建議的**修法**寫成草案（append-only；可多版，寫入不等於核准）。" +
-        "fix＝改成什麼字；insert＝落到哪一格／哪一選項；basis＝**你依據什麼**（紙本哪個字、哪張圖）；" +
+        "fix＝**改完後的完整文字**（整句題幹／整個選項，從頭到尾）——不是建議、不是步驟、不是只寫差異；" +
+        "UI 會拿 fix **整句替換**該欄位，寫「建議在X後補Y」會把原題蓋掉。「補一個詞」也要寫補完後的整句。" +
+        "insert＝落到哪一格／哪一選項；basis＝**你依據什麼**（紙本哪個字、哪張圖）；" +
         "crop＝你實際看過的那張裁片路徑（會記其 SHA-256 當憑證）。" +
         "它不修題目、不動人工審核紀錄——真正核准在沙盒 UI，由設計者按。",
       parameters: Type.Object({
         key: Type.String({ description: keyRequiredMessage }),
-        fix: Type.String({ description: "修法：改成什麼（目標文字／值）" }),
+        fix: Type.String({ description: "改完後的**完整**文字（整句題幹／整個選項，從頭到尾）——不是建議、不是片段" }),
         insert: Type.String({ description: "插入點：哪一格／哪一欄／哪一選項" }),
         basis: Type.String({ description: "依據：紙本哪個字、哪張圖（你親眼看過的）" }),
         crop: Type.Optional(Type.String({ description: "裁片憑證：你看過的裁片路徑" })),

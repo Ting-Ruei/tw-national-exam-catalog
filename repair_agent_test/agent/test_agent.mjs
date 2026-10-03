@@ -1360,6 +1360,28 @@ test("the chat seed hands over the resolved figure paths", () => {
 });
 
 /**
+ * The conductor/worker boundary and the full-text draft contract (owner 2026-10-03).
+ *
+ * Two measured failures: the chat 指揮者 called `read_page` — the transcription engine, i.e.
+ * 做事模型 — with her own hands (chat transcript 2026-09-30 03:37); and she proposed a draft whose
+ * `fix` was a suggestion sentence, which the stem preview applied verbatim and erased the question.
+ * The chat must not carry the worker's pen, and a preview that would replace a whole field with
+ * something that is not the resulting text must refuse visibly.
+ */
+test("the chat conductor carries no worker pen, and a bad fix cannot erase the stem", () => {
+  const chat = readFileSync(new URL("./ui/chat.mjs", import.meta.url), "utf8");
+  assert.match(chat, /omit:\s*\["read_page"\]/,
+    "the conductor must not carry read_page — transcription is one-shot-run work");
+  const session = readFileSync(new URL("./lib/session.mjs", import.meta.url), "utf8");
+  assert.match(session, /BUILTIN_TOOLS\.filter\(\(name\) => !omit\.includes\(name\)\)/,
+    "an omit that hid only custom tools would still ship the pen");
+  // The fix contract lives where the erasure happened: appliedQuestion replaces the whole field.
+  const html = readFileSync(new URL("./ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /_previewBlocked/,
+    "a stem preview whose fix is not the full resulting text must refuse visibly, not erase the stem");
+});
+
+/**
  * A restart continues the conversation instead of losing it.
  *
  * `SessionManager.create(cwd, sessionDir)` takes two arguments, and the first is the cwd. Measured

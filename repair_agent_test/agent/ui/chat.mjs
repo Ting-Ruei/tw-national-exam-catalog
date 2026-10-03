@@ -81,9 +81,14 @@ async function seed(key) {
       "",
       "他說的是問題或方向時，先看全局、再挑一題深入，或直接回答他的問題。"
       + "如果他點出一條**可以重複使用的規則**，用 `remember_lesson` 記下來。",
+      "**你是指揮者，不是做事模型**：`read_page`（引擎逐字轉錄）不在這則對話裡——那是做事模型的"
+      + "筆，由一次性工單 run 去做。看紙本證據＝`crop_question` 裁下來自己 `read`（你的眼睛）；"
+      + "真的需要逐字轉錄/引擎 diff，就明說「這要開一次做事 run」，不要自己硬做。",
       "**這裡是對話，不是判讀**：不要自己下 rating。**但他叫你修（例：「要補(如下圖)」、"
       + "「某字改成 X」），就用 `propose_repair` 把修法寫成草案**——草案是提議，不是 rating，"
-      + "也不動正式檔。只說「應該補」而不 propose ＝ 只交了一半。",
+      + "也不動正式檔。只說「應該補」而不 propose ＝ 只交了一半。"
+      + "**fix 必須是改完後的完整文字**（整句題幹／整個選項，從頭到尾），不是建議、不是片段——"
+      + "UI 會拿 fix 整句替換該欄位；寫「建議在X後補Y」會把原題蓋掉。",
     ].join("\n");
   }
   const { execFile } = await import("node:child_process");
@@ -130,8 +135,12 @@ async function seed(key) {
     "",
     "設計者接下來會跟你說話。**先不要自己跑一輪判讀、也不要自己下 rating**——這裡是對話，"
     + "不是判讀。等他說完，再決定要看什麼、要不要 call 工具。"
+    + "**你是指揮者，不是做事模型**：`read_page`（引擎逐字轉錄）不在這則對話裡；看紙本證據＝"
+    + "`crop_question`＋`read`（你自己的眼睛），需要逐字轉錄就明說「要開一次做事 run」。"
     + "但**他叫你修（例：補字、改字、換圖），就用 `propose_repair` 寫成草案**——"
     + "草案是提議、不是 rating，也不動正式檔。"
+    + "**fix 必須是改完後的完整文字**（整句題幹／整個選項，從頭到尾），不是建議、不是片段——"
+    + "UI 會拿 fix 整句替換該欄位；寫「建議在X後補Y」會把原題蓋掉。"
     + "如果你在他的話裡聽出一個**可以重複使用的規則**（不是關於這一題而已），"
     + "用 `remember_lesson` 記下來，並在回答裡說你記了什麼。",
   ].filter(Boolean).join("\n");
@@ -179,7 +188,9 @@ async function sessionFor(key) {
   // question the UI had just handed it. `SessionManager.continueRecent` on an empty directory
   // returns 0 entries and creates no file, so this check is the one that can tell the two apart.
   const restored = manager.getEntries().length > 0;
-  const built = await buildSession({ sessionManager: manager });
+  // 設計者 2026-10-03：對話裡的是**指揮者**；做事模型由她指揮（一次性工單 run），不是她親手
+  // 調用——`read_page`（引擎逐字轉錄）因此不進對話。她看證據用自己的眼睛（crop_question＋read）。
+  const built = await buildSession({ sessionManager: manager, omit: ["read_page"] });
   // Entries already present means this session was restored, so its opening context is already in
   // it. Re-sending the seed would put the question in the conversation twice. `manager` is kept
   // so a judgement written inside this conversation can name the session it belongs to.

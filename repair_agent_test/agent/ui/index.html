@@ -606,7 +606,17 @@ function appliedQuestion(question) {
     if (opts[key] !== undefined) opts[key] = fix;
     return { ...question, options: opts };
   }
-  if (insert.includes("題幹") || insert.includes("stem")) return { ...question, stem: fix, stem_html: null };
+  if (insert.includes("題幹") || insert.includes("stem")) {
+    // 結構守門（owner 2026-10-03）：agent 曾把「在「得到」後面補「(如下圖)」」這種**建議**寫進
+    // fix，預覽直接把整句題幹換掉——原題消失。判準是機械的：fix 須含原題幹的開頭（去空白後
+    // 前 8 字）才算「同一句的改後版」；不像就**一個字都不套用**，由 renderQuestion 畫警告橫幅
+    // 明說原因。失敗要看得見，不能靜默毀掉原題。
+    const head = (question.stem || "").replace(/\s+/g, "").slice(0, 8);
+    const bare = fix.replace(/\s+/g, "");
+    if (!head || bare.includes(head)) return { ...question, stem: fix, stem_html: null };
+    return { ...question,
+             _previewBlocked: `這條草案的 fix 不是「改完後的完整文字」（像是建議或片段），預覽不套用——題目保持原樣；請叫 agent 重提（fix 要寫整句）` };
+  }
   return question;
 }
 
@@ -905,7 +915,10 @@ function renderQuestion(question) {
   // Preview swaps the displayed copy; `current` above stays the untouched question for POSTs.
   question = appliedQuestion(question);
   refreshVerdictTarget();  // visibility is per-question: a draftless question must hide the actions
-  const previewing = previewDraftSha && (current.drafts || []).some((x) => x._sha256 === previewDraftSha);
+  const picked = previewDraftSha && (current.drafts || []).find((x) => x._sha256 === previewDraftSha);
+  // `question._previewBlocked` is set by appliedQuestion when the fix is not a full replacement:
+  // the banner below explains instead of silently showing a stem the fix erased.
+  const previewing = picked && !question._previewBlocked;
   setStatus(`已載入 q${question.question_number}（${question.subject || question.category || ""}）`);
   $("key").value = current.candidate_key;
   highlightCurrent();
@@ -915,6 +928,8 @@ function renderQuestion(question) {
   const v2q = $("v2-question");
   if (v2q) { v2q.href = current.v2_url || "__V2_BASE__/v2"; v2q.hidden = !current.v2_url; }
   $("qbody").innerHTML = `
+    ${question._previewBlocked && picked ? `<div class="preview-banner" style="border-color:#f3c2bd;background:#fff5f4">⚠ ${esc(question._previewBlocked)}。
+      <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
     ${previewing ? `<div class="preview-banner">👁 預覽：這是套用「${esc((current.drafts.find((x) => x._sha256 === previewDraftSha) || {}).insert || "草案")}」後的樣子——<b>還沒真的改</b>。
       <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
     <div class="stem study">${platformHtml(question.stem_html, question.stem || "（題幹是空的）")}</div>

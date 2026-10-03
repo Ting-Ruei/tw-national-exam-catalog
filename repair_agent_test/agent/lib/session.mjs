@@ -118,7 +118,7 @@ export const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
  * Throws rather than falling back to another model. Using a different brain silently would make
  * every number from a run unattributable to a model, and auditable numbers are the project's point.
  */
-export async function buildSession({ sessionManager, thinking, cwd } = {}) {
+export async function buildSession({ sessionManager, thinking, cwd, omit = [] } = {}) {
   const modelRuntime = await ModelRuntime.create();
   for (const [name, record] of Object.entries(await localProviders())) {
     modelRuntime.registerProvider(name, providerConfig(name, record));
@@ -151,7 +151,11 @@ export async function buildSession({ sessionManager, thinking, cwd } = {}) {
   });
   await resourceLoader.reload();
 
-  const customTools = toolsFor(Type);
+  // `omit` is the conductor/worker boundary (owner 2026-10-03): the chat conductor must not carry
+  // the worker's pen. `read_page` drives a transcription engine — that is 做事模型 work, done in a
+  // one-shot run, not inside a conversation. The one-shot agent passes no `omit` and keeps it.
+  const customTools = toolsFor(Type).filter((tool) => !omit.includes(tool.name));
+  const builtinTools = BUILTIN_TOOLS.filter((name) => !omit.includes(name));
   const { session } = await createAgentSession({
     cwd: cwd || PATHS.CATALOG,
     modelRuntime,
@@ -159,7 +163,7 @@ export async function buildSession({ sessionManager, thinking, cwd } = {}) {
     thinkingLevel: thinking || process.env.REPAIR_AGENT_THINKING || "medium",
     resourceLoader,
     // No edit/write: this agent produces findings, not edits.
-    tools: [...BUILTIN_TOOLS, ...customTools.map((tool) => tool.name)],
+    tools: [...builtinTools, ...customTools.map((tool) => tool.name)],
     customTools,
     sessionManager: sessionManager || SessionManager.create(PATHS.AGENT_DIR),
     sessionStartEvent: { reason: "startup" },
