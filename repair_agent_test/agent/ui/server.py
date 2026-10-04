@@ -771,6 +771,159 @@ def _apply_text_drafts(keys=None) -> dict:
             "backup": str(backup), "resets": len(events)}
 
 
+def _apply_spot_verdicts(payload: dict) -> dict:
+    """逐處裁決的落地（owner 2026-10-03：一個地方改過就要有一個打勾打叉）。
+
+    `verdicts`＝每處 {index, pass, reason}；pass 的處**組合**進原欄位（不是整欄蓋掉——
+    設計者只放行他認可的那幾處），✗ 的處以理由退回生產者（下一輪的第一行輸入）。
+    鐵律不變：備份先於寫入、reset_review 帶原值（每處 from/to）、manifest 記裁決。
+    """
+    import hashlib
+
+    key = str(payload.get("key") or "").strip()
+    draft_sha = str(payload.get("draft_sha256") or "").strip()
+    verdicts = list(payload.get("verdicts") or [])
+    if not key or not draft_sha:
+        raise ValueError("apply-spots requires the question key and the draft's line checksum")
+    draft = _draft_line_by_sha(key, draft_sha)      # 不存在 → ValueError → 400
+    row = bridge.load_question(key)                  # 不存在 → QuestionNotFound → 404
+    field, old = _resolve_text_target(row, draft.get("insert") or "")
+    fix = _FIX_OPTION_PREFIX.sub("", (draft.get("fix") or "").strip())
+    spots = bridge.text_spots(old, fix)
+    if not spots:
+        raise ValueError("這則草案與現值沒有可切出的變更處（可能已寫入過）")
+    if len(verdicts) != len(spots):
+        raise ValueError("裁決數 %d 與變更處 %d 不符——重新載入題目再裁決" % (len(verdicts), len(spots)))
+    for v in verdicts:
+        if not isinstance(v, dict) or "index" not in v or "pass" not in v:
+            raise ValueError("裁決列要有 index 與 pass")
+        if not v.get("pass") and not str(v.get("reason") or "").strip():
+            raise ValueError("打叉要寫理由——理由就是規則候選的原料")
+
+    approved = [spots[v["index"]] for v in verdicts if v.get("pass")]
+    rejected = [(spots[v["index"]], str(v.get("reason") or "").strip())
+                for v in verdicts if not v.get("pass")]
+    composed = old
+    for sp in sorted(approved, key=lambda s: -s["old_start"]):
+        composed = composed[:sp["old_start"]] + sp["after"] + composed[sp["old_end"]:]
+    if composed == old:
+        # 全 ✗：candidates 一個 byte 不動，只記退回——設計者的裁決本身就是要留的紀錄。
+        for sp, reason in rejected:
+            append_return({"key": key, "draft_sha256": draft_sha,
+                           "reason": "【第 %d 處】%s → %s：%s" % (
+                               spots.index(sp) + 1,
+                               (sp["before"] or "（刪除）")[:60], (sp["after"] or "（刪除）")[:60], reason)})
+        return {"applied": [], "returned": len(rejected), "wrote": False}
+
+    candidates_path = Path(bridge.CANDIDATES)
+    if not candidates_path.is_file():
+        raise ValueError("candidates.jsonl not found at %s" % candidates_path)
+    data = candidates_path.read_bytes()
+    sha_before = hashlib.sha256(data).hexdigest()
+    lines = data.decode("utf-8").splitlines(keepends=True)
+    hit = None
+    for i, raw in enumerate(lines):
+        if not raw.strip():
+            continue
+        probe = raw[:4096]
+        if key not in probe:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            continue
+        if parsed.get("candidate_key") == key:
+            hit = (i, parsed, raw)
+            break
+    if hit is None:
+        raise ValueError("candidates 沒有這一題")
+    idx, parsed, raw = hit
+
+    changes = []
+    if field.startswith("option:"):
+        letter = field.split(":", 1)[1]
+        for opt in parsed.get("options") or []:
+            if isinstance(opt, dict) and str(opt.get("key") or "").upper() == letter:
+                changes.append({"field": "options[%s].text" % letter, "from": str(opt.get("text") or ""),
+                                "to": composed, "spot_changes": [
+                                    {"from": sp["before"], "to": sp["after"]} for sp in approved]})
+                opt["text"] = composed
+                break
+    else:
+        fname = field.split(":", 1)[1] if field.startswith("field:") else field
+        changes.append({"field": fname, "from": old, "to": composed, "spot_changes": [
+            {"from": sp["before"], "to": sp["after"]} for sp in approved]})
+        parsed[fname] = composed
+        if fname == "answer" and isinstance(parsed.get("answer_payload"), dict):
+            ap = parsed["answer_payload"]
+            for sub in ("answer", "raw_answer"):
+                if isinstance(ap.get(sub), str) and ap[sub] != composed:
+                    changes.append({"field": "answer_payload.%s" % sub, "from": ap[sub], "to": composed})
+                    ap[sub] = composed
+            if isinstance(ap.get("accepted_values"), list) and composed not in ap["accepted_values"]:
+                changes.append({"field": "answer_payload.accepted_values",
+                                "from": ap["accepted_values"], "to": [composed]})
+                ap["accepted_values"] = [composed]
+
+    now = bridge._utc_now()
+    backup_dir = Path(bridge.QUEUE_ROOT) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / ("candidates.jsonl.before-spot-landing-%s" % now.replace(":", ""))
+    backup.write_bytes(data)
+    lines[idx] = json.dumps(parsed, ensure_ascii=False) + ("\n" if raw.endswith("\n") else "\n")
+    out = ("".join(lines)).encode("utf-8")
+
+    # 帳本先記設計者的裁決（append-only；部分套用也如實記），再落地。
+    # append_accept／append_return 自己拿 _write_lock（不可重入）——絕不能在我的鎖內呼叫它們，
+    # 否則同一執行緒自我死鎖（test_landing 的 120s 逾時就是這一課）。
+    # self_check＝agent 代按（owner 2026-10-03 授權全權自檢 sandbox）——notes 與 manifest
+    # 必須如實聲明，不得冒充設計者裁決。
+    self_check = bool(payload.get("self_check"))
+    accepted = append_accept({"key": key, "draft_sha256": draft_sha,
+                              "notes": ("沙盒自檢：agent 代按（owner 2026-10-03 授權全權自檢 sandbox）；非人工裁決。"
+                                        if self_check else "")
+                              + "逐處裁決：放行 %d／%d 處%s" % (
+                                  len(approved), len(spots),
+                                  "；退回 %d 處" % len(rejected) if rejected else "")})
+    with _write_lock:
+        tmp = candidates_path.with_suffix(".jsonl.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, candidates_path)
+        with open(bridge.HUMAN_EVENTS, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "action": "reset_review", "candidate_key": key, "created_at": now,
+                "reviewer": TEXT_LANDING_REVIEWER if not self_check else "repair_agent_selfcheck",
+                "notes": ("沙盒自檢（agent 代按，非人工裁決）：設計者授權的逐處落地；"
+                          if self_check else "逐處落地：")
+                        + "放行的 %d 處已寫入；原值與逐處 from/to 在 changes。" % len(approved),
+                "changes": changes,
+            }, ensure_ascii=False) + "\n")
+        with TEXT_LANDING_MANIFEST.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": now, "actor": "agent:selfcheck" if self_check else "human:designer",
+                "mode": "spot_verdicts",
+                "applied": [key], "skipped": [], "sha_before": sha_before,
+                "sha_after": hashlib.sha256(out).hexdigest(), "backup": str(backup),
+                "resets": 1, "drafts": {key: draft_sha},
+                "spot_verdicts": [{"index": v.get("index"), "pass": bool(v.get("pass")),
+                                   "reason": str(v.get("reason") or "")} for v in verdicts],
+            }, ensure_ascii=False) + "\n")
+    for sp, reason in rejected:
+        append_return({"key": key, "draft_sha256": draft_sha,
+                       "reason": "【未放行 第 %d 處】%s → %s：%s" % (
+                           spots.index(sp) + 1,
+                           (sp["before"] or "（刪除）")[:60], (sp["after"] or "（刪除）")[:60], reason)})
+
+    block_reason = _latest_human_block_notes(key)
+    _remember_lesson(
+        subject=draft.get("subject") or (row.get("metadata") or {}).get("normalized_subject_name") or "",
+        text="錯誤：%s → 修法：%s" % (block_reason or "（沒有記錄的 block 理由）", composed[:120]),
+        key=key, evidence="草案 %s…（%s，%d/%d 處）" % (draft_sha[:12], field, len(approved), len(spots)))
+    return {"applied": [key], "wrote": True, "spots_total": len(spots),
+            "spots_applied": len(approved), "spots_returned": len(rejected),
+            "composed": composed, "backup": str(backup), "event": accepted["event"]}
+
+
 def _latest_human_block_notes(key: str) -> str:
     """該題最新一筆**人類** block 的理由（經驗「錯誤：」半句的原料）；沒有就空字串。
 
@@ -909,6 +1062,16 @@ def question_payload(key: str) -> dict:
             row["_fix_html"] = platform_view.as_platform_html(row.get("fix") or "")
         except Exception:
             row["_fix_html"] = None
+    # 「一個地方改過就要有一個打勾打叉」：proposed 草案附上機械切點（與落地寫入器同一份
+    # `bridge.text_spots`——兩份實作就是兩個可以不一致的地方）。✗ 的理由以此為座標。
+    for row in drafts:
+        if row.get("status") != "proposed":
+            continue
+        try:
+            _field, _old = _resolve_text_target(question, row.get("insert") or "")
+            row["_spots"] = bridge.text_spots(_old, _FIX_OPTION_PREFIX.sub("", (row.get("fix") or "").strip()))
+        except Exception:
+            row["_spots"] = []
         # 結構守門的唯一實作：difflib 相似度在這裡算一次，前端預覽只讀 `_stem_guard`。
         # None＝insert 認不得（✅ 會被後端拒）；False＝片段／建議；True＝整句替換。
         try:
@@ -1436,6 +1599,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(_apply_text_drafts(payload.get("keys")))
             elif parsed.path == "/api/return-draft":
                 self._json(append_return(payload))
+            elif parsed.path == "/api/apply-spots":
+                self._json(_apply_spot_verdicts(payload))
             elif parsed.path == "/api/chat/ask":
                 self._chat_ask(payload)
             elif parsed.path == "/api/chat/stop":

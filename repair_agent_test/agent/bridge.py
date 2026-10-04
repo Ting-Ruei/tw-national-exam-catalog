@@ -900,6 +900,38 @@ def strip_option_prefix(fix: str) -> str:
     return _FIX_OPTION_PREFIX.sub("", (fix or "").strip())
 
 
+def text_spots(old: str, fix: str, *, context: int = 18, min_gap: int = 6) -> list[dict]:
+    """「改過的地方」：`fix` 相對 `old` 的每一處變更，機械切點（difflib opcodes）。
+
+    同一函式餵前端與落地寫入器——一處一組 ✅/✗ 是同一份清單（兩份實作就是兩個可以不一致的
+    地方）。opcodes 之間 ≤`min_gap` 個相同字元就併成一處（模型常動標點空格，切太碎沒辦法看）；
+    純空白差異不計。每處帶前後 `context` 字的原文，讓設計者不用回去翻題幹就知道改在哪裡。
+    """
+    old = str(old or "")
+    fix = str(fix or "")
+    matcher = difflib.SequenceMatcher(None, old, fix, autojunk=False)
+    raw = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+    # 併攏相鄰的變更：中間只有 ≤min_gap 個未動字元就算同一處。
+    merged: list[list[int]] = []
+    for op in raw:
+        if merged and op[1] - merged[-1][2] <= min_gap:
+            merged[-1][2], merged[-1][3] = op[2], op[3]
+        else:
+            merged.append([op[1], op[2], op[3], op[4]])  # old_start, old_end, fix_start, fix_end
+    spots = []
+    for old_s, old_e, fix_s, fix_e in merged:
+        before, after = old[old_s:old_e], fix[fix_s:fix_e]
+        if before.strip() == after.strip():
+            continue  # 純空白差異
+        spots.append({
+            "old_start": old_s, "old_end": old_e,
+            "before": before, "after": after,
+            "before_context": old[max(0, old_s - context):old_s],
+            "after_context": old[old_e:old_e + context],
+        })
+    return spots
+
+
 def is_full_replacement(old: str, fix: str) -> bool:
     """fix 是不是「改完後的完整文字」——機械判準：與原句的相似度。
 

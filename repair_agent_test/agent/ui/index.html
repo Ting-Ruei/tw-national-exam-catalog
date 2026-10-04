@@ -161,6 +161,21 @@
          border: 1px solid var(--line); background: var(--bg); color: var(--muted); margin-right: 5px; }
   .tag.bad { color: var(--bad); border-color: #f3c2bd; background: #fff5f4; }
   .tag.ok { color: var(--ok); border-color: #b7e0c1; background: #f2fdf5; }
+  /* 逐處裁決（owner 2026-10-03：一個地方改過就要有一個打勾打叉） */
+  .spot { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0;
+          background: #fff; }
+  .spot.undecided { border-left: 4px solid #f0d999; }
+  .spot.pass { border-left: 4px solid var(--ok); }
+  .spot.reject { border-left: 4px solid var(--bad); }
+  .spot .ctx { color: var(--muted); }
+  .spot .del { color: var(--bad); text-decoration: line-through; background: #fff5f4; }
+  .spot .ins { color: var(--ok); background: #f2fdf5; font-weight: 600; }
+  .spot .why { margin-left: 8px; width: 300px; font-size: 12px; }
+  .spot .vbtns { margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .spot button { padding: 2px 10px; font-size: 13px; border-radius: 6px; border: 1px solid var(--line);
+                 background: #fff; cursor: pointer; }
+  .spot button.on-ok { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .spot button.on-bad { background: var(--bad); color: #fff; border-color: var(--bad); }
   section { margin-top: 14px; }
   section > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
   .said { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
@@ -555,13 +570,15 @@ function renderDrafts(question) {
             ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
       </details>
     </div>
-    ${!isAccepted && sha ? `<div class="act">
+    ${!isAccepted && sha && !(row._spots || []).length ? `<div class="act">
       <button class="pick" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</button>
       <button class="ok" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>✅ 按這個修</button>
       <button class="bad" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>↩ 退回</button>
       <input class="why" placeholder="退回理由（可留空）" ${verdictDraftSha === sha ? "" : "disabled"}>
       <a href="#" class="picky" data-draft-sha="${esc(sha)}">👁 先看改完的樣子</a>
     </div>` : ""}
+    ${!isAccepted && sha && (row._spots || []).length
+      ? `<div class="meta">逐處 ✅/✗ 在上面的「改過的地方」——這裡不再給整句按鈕，兩個地方裁同一題就會有兩種紀錄。</div>` : ""}
   </li>`;}).join("")}</ul>`;
 }
 
@@ -584,6 +601,103 @@ function draftCurrentValue(question, draft) {
 }
 
 let verdictDraftSha = null;
+
+// -- 逐處裁決（owner 2026-10-03）：原題在上、改過的地方一處一組 ✅/✗。 ----------------------
+// verdicts 以草案 sha 為鍵，陣列序＝後端 `_spots` 的序（同一份 bridge.text_spots 切出來的）。
+// null＝還沒裁決；套用前每一處都要有裁決——看過但不表態的修改不會被偷偷寫入。
+let spotVerdicts = {};
+
+function pendingDraftOf(question) {
+  const pend = pendingByKind[question?.candidate_key || ""];
+  if (!pend || !["text"].includes(pend.kind) || !pend.draft_sha256) return null;
+  return (question?.drafts || []).find((d) => d._sha256 === pend.draft_sha256) || null;
+}
+
+function renderSpots(question) {
+  const draft = pendingDraftOf(question);
+  const spots = draft?._spots || [];
+  const box = $("spots-box");
+  if (!box) return;
+  if (!draft || !spots.length) { box.hidden = true; box.innerHTML = ""; return; }
+  if ((spotVerdicts[draft._sha256] || []).length !== spots.length) {
+    spotVerdicts[draft._sha256] = spots.map(() => ({ pass: null, reason: "" }));
+  }
+  const verdicts = spotVerdicts[draft._sha256];
+  const decided = verdicts.filter((v) => v.pass !== null).length;
+  const esc2 = esc;
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="preview-banner" style="border-color:#b7e0c1">
+      ✂ <b>改過的地方（${spots.length} 處）</b>——上面是原題（做題畫面）。每一處都要裁決：
+      ✅ 放行、✗ 打叉要寫理由。已裁 ${decided}/${spots.length}
+      ${draft.basis ? `｜依據：${esc2(draft.basis).slice(0, 70)}` : ""}
+    </div>
+    ${spots.map((sp, i) => {
+      const v = verdicts[i];
+      const cls = v.pass === true ? "pass" : v.pass === false ? "reject" : "undecided";
+      return `<div class="spot ${cls}" data-spot="${i}">
+        <div>…<span class="ctx">${esc2(sp.before_context)}</span><span class="del">${esc2(sp.before) || "（此處原文被刪）"}</span><span class="ins">${esc2(sp.after) || "（刪除）"}</span><span class="ctx">${esc2(sp.after_context)}…</span></div>
+        <div class="vbtns">
+          <button class="spot-ok ${v.pass === true ? "on-ok" : ""}" data-spot="${i}">✅ 放行</button>
+          <button class="spot-bad ${v.pass === false ? "on-bad" : ""}" data-spot="${i}">✗ 打叉</button>
+          ${v.pass === false ? `<input class="why" data-spot="${i}" placeholder="✗ 理由（必填——理由是 AI 下一輪的第一行）" value="${esc2(v.reason)}">` : ""}
+        </div>
+      </div>`;
+    }).join("")}
+    <button id="spots-apply" ${decided === spots.length ? "" : "disabled"}
+      style="margin-top:8px;padding:6px 14px;font-weight:600">套用我的裁決（放行 ${verdicts.filter((v) => v.pass === true).length}／${spots.length} 處${decided < spots.length ? `——還有 ${spots.length - decided} 處沒裁` : ""}）</button>`;
+}
+
+async function applySpots() {
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const verdicts = spotVerdicts[draft._sha256] || [];
+  if (!verdicts.length || verdicts.some((v) => v.pass === null)) {
+    verdictWarn("每一處都要先裁決（✅ 或 ✗）——看過但不表態的修改不會被寫入。");
+    return;
+  }
+  try {
+    const result = await api("/api/apply-spots", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: current.candidate_key, draft_sha256: draft._sha256, verdicts }),
+    });
+    if (!result.wrote) {
+      $("verdict-target").textContent = `全部 ${result.returned} 處都打了叉——candidates 沒動，理由已進生產者的下一輪。`;
+    } else {
+      $("verdict-target").textContent = `已寫入 ${result.spots_applied}/${result.spots_total} 處；v2 重新整理即見。` +
+        (result.spots_returned ? ` ${result.spots_returned} 處連理由退回生產者。` : "");
+    }
+    spotVerdicts[draft._sha256] = [];
+    await refreshPending();
+    await refreshQuestion("manual");
+  } catch (error) {
+    verdictWarn("套用失敗：" + error.message + "——candidates 沒有被動到。");
+  }
+}
+
+// 事件委派：spots-box 內的按鈕／輸入（重新渲染後仍在）。
+document.addEventListener("click", (event) => {
+  const ok = event.target.closest(".spot-ok");
+  const bad = event.target.closest(".spot-bad");
+  if (!ok && !bad) return;
+  if (event.target.closest("button")) event.preventDefault();
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const verdicts = spotVerdicts[draft._sha256];
+  const i = Number((ok || bad).dataset.spot);
+  verdicts[i].pass = ok ? true : false;
+  if (ok) verdicts[i].reason = "";
+  renderSpots(current);
+  if (bad) { const why = document.querySelector(`.spot[data-spot="${i}"] input.why`); why && why.focus(); }
+});
+document.addEventListener("input", (event) => {
+  if (!event.target.matches(".spot input.why")) return;
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const i = Number(event.target.dataset.spot);
+  if (spotVerdicts[draft._sha256]?.[i]) spotVerdicts[draft._sha256][i].reason = event.target.value;
+});
+
 
 // 所見即所得（designer, 2026-10-02:「我在中間還是看不到她真正改過的樣子」）。The preview renders
 // the question **as if the selected draft were applied**, through the same renderers the real
@@ -778,7 +892,14 @@ function renderList(rows, total) {
   $("cat-count").textContent = rows.length === total
     ? `${total} 題`
     : `顯示 ${rows.length}／${total} 題`;
-  $("list").innerHTML = rows.length ? rows.map((q) => {
+  // 分頁渲染（owner 2026-10-03「UI 還是很慢」）：4,268 列一次畫完是慢的主因（端點都 <150ms，
+  // 慢在前端 DOM）。一次畫 300 列，「顯示更多」往下長；W/S 導覽仍走完整 listRows（清單畫到哪
+  // 不改變什麼被走過——「filter 只縮小畫的範圍，不改變走的範圍」的教訓反過來也成立）。
+  const PAGE = 300;
+  if (renderList._rows !== rows) { renderList._rows = rows; renderList._page = 1; }
+  const shown = rows.slice(0, renderList._page * PAGE);
+  const more = rows.length - shown.length;
+  const rowHtml = (q) => {
     // Three chips, three sources, drawn apart. He said the sandbox did not strictly separate
     // 「已經審過」 from 「有問題」 (2026-09-29); it was drawing one `judged` flag for what is really
     // (a) his decision on the station, (b) his decision pressed here, (c) the agent's own rating.
@@ -806,7 +927,10 @@ function renderList(rows, total) {
       <div class="snip">${esc(q.stem || "")}</div>
       ${note}
     </div>`;
-  }).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>';
+  };
+  $("list").innerHTML = (shown.length ? shown.map(rowHtml).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>')
+    + (more > 0 ? `<div style="padding:10px;text-align:center"><button id="list-more" style="padding:6px 18px">顯示更多（還有 ${more} 題）</button></div>` : "");
+  $("list-more")?.addEventListener("click", () => { renderList._page += 1; renderList(renderList._rows, renderList._rows.length); });
   highlightCurrent();
 }
 
@@ -1041,6 +1165,9 @@ function renderQuestion(question) {
     <div class="stem study">${platformHtml(question._fix_html || question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
+    <!-- 逐處裁決（owner 2026-10-03）：原題在上（上面那格就是），這裡列「改過的地方」，
+         一處一組 ✅/✗；✗ 要理由。有在等的草案才出現。 -->
+    <div id="spots-box" hidden></div>
     <!-- 草案在題幹正下方（owner 2026-10-03：「優先要給我看的…不想要滑滾輪」）——她提了什麼、
          憑什麼、按不按，一屏之內看完；其餘 log 折疊，有必要才開。 -->
     <details open><summary>agent 提的修法 <span style="color:var(--muted);font-weight:400">——點一列即預覽；✅/↩ 就在列上</span></summary>
@@ -1079,6 +1206,9 @@ function renderQuestion(question) {
       <ul>${question.lessons.map((l) => `<li>${esc(l.text)}（已見 ${l.count || 1} 次）</li>`).join("")}</ul>
     </details>` : ""}
   `;
+
+  // 逐處裁決盒：有在等的草案才展開（owner 2026-10-03 重審法）。
+  renderSpots(current);
 
   // The PDF panel is deliberately independent of the question panel: changing one must not
   // move the other (the charter's rule, and a real v2 defect where a filter moved the walk).
@@ -1474,12 +1604,13 @@ async function loadQuestion() {
   setStatus("載入中…");
   try {
     const q = await api("/api/question?key=" + encodeURIComponent(key));
-    // 待你看模式：草案就是主角——驗收對象直接設成「在等的那一筆」，中欄一開就是改後整題
-    // （不是再按一次預覽）；「她改了什麼」在橫幅上。離開清單的題目維持原行為。
+    // 待你看模式（owner 2026-10-03 重審法）：**原題（做題畫面）在上**，改過的地方一處一組
+    // ✅/✗ 在下——不再自動把整題換成改後版（預覽由逐處 before→after 承擔）。驗收對象仍指向
+    // 在等的那一筆（spots 盒與鍵盤用）；離開清單的題目維持原行為。
     const pend = pendingByKind[q.candidate_key];
     if (pend && pend.kind === "text" && (q.drafts || []).some((d) => d._sha256 === pend.draft_sha256)) {
       verdictDraftSha = pend.draft_sha256;
-      previewDraftSha = verdictDraftSha;
+      previewDraftSha = null;
     } else {
       if ($("only-pending").checked) verdictDraftSha = null;
       if (pend && pend.kind === "text_degraded") {
@@ -1657,6 +1788,24 @@ document.addEventListener("keydown", (event) => {
   }
   // 待你看模式鍵盤（文字草案）：A＝✅ 即寫入；X＝退回（要理由——沒理由先聚焦輸入框）。
   // 驗收對象在（loadQuestion 已自動設或你點過列），A/X 才接手；打字中的按鍵上面已擋掉。
+  // 待你看模式鍵盤。**逐處裁決優先**（owner 2026-10-03 重審法）：A＝全部裁完就套用；
+  // X＝聚焦第一個還沒裁決的處。沒有 spots 盒時才落到整句草案的 A/X。
+  {
+    const draft = current && pendingDraftOf(current);
+    if (draft && (draft._spots || []).length) {
+      if (event.key.toLowerCase() === "a") { event.preventDefault(); applySpots(); return; }
+      if (event.key.toLowerCase() === "x") {
+        event.preventDefault();
+        const verdicts = spotVerdicts[draft._sha256] || [];
+        const i = verdicts.findIndex((v) => v.pass === null);
+        if (i < 0) { applySpots(); return; }
+        const why = document.querySelector(`.spot[data-spot="${i}"] input.why`);
+        (why || document.querySelector(`.spot[data-spot="${i}"] button`))?.focus();
+        setStatus(`第 ${i + 1} 處還沒裁決——✅ 放行或 ✗ 打叉（要理由）`);
+        return;
+      }
+    }
+  }
   if (verdictDraftSha && (current?.drafts || []).some((d) => d._sha256 === verdictDraftSha)) {
     if (event.key.toLowerCase() === "a") { event.preventDefault(); acceptDraft(); return; }
     if (event.key.toLowerCase() === "x") {

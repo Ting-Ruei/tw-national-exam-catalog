@@ -45,6 +45,7 @@ const KEY_STALE = "moex:t:311:0704:1:question:q005";
 const KEY_MACHINE = "moex:t:311:0704:1:question:q006";
 const KEY_VIEW = "moex:t:311:0704:1:question:q008";
 const KEY_DEGRADED = "moex:t:311:0704:1:question:q009";
+const KEY_SPOT = "moex:t:311:0704:1:question:q010";
 const KEY_NOACCEPT = "moex:t:311:0704:1:question:q007";
 
 const STEM = "下列有關一般人過度換氣（hyperventilation）之敘述，何者正確？";
@@ -63,6 +64,10 @@ const ROWS = [
   { candidate_key: KEY_NOACCEPT, question_number: 7, stem: "第七題", options: [], answer: "A", metadata: {} },
   { candidate_key: KEY_VIEW, question_number: 8, stem: "第八題", options: [], answer: "A", metadata: {} },
   { candidate_key: KEY_DEGRADED, question_number: 9, stem: "第九題", options: [], answer: "A", metadata: {} },
+  { candidate_key: KEY_SPOT, question_number: 10, options: [{ key: "A", text: "舊選項" }, { key: "B", text: "乙" }],
+    answer: "A",
+    stem: "第十題：以 4 mg/kg 投與，其係式為 C = 80e-0.35t，半衰期為何？（原句無圖、無缺字）",
+    metadata: {} },
 ];
 writeFileSync(join(REVIEW, "candidates.jsonl"),
   ROWS.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
@@ -322,4 +327,67 @@ test("反覆退回：第 3 次起清單帶 returns≥3（負對照：次數被�
   const fresh = out.items.find((it) => it.key === KEY_FRESH);
   assert.ok(fresh, "退回後的新草案進清單");
   assert.equal(fresh.returns, 3);
+});
+
+// ---------------------------------------------------------------- 逐處裁決（owner 2026-10-03）
+
+const SPOT_STEM_OLD = "第十題：以 4 mg/kg 投與，其係式為 C = 80e-0.35t，半衰期為何？（原句無圖、無缺字）";
+const SPOT_STEM_FIX = "第十題：以 4 mg/kg 投與，其關係式為 C = 80e^-0.35t，半衰期為何？（原句無圖、無缺字）";
+
+const spotsFor = (key, fix) => drive(`mod.bridge.text_spots(mod.bridge.load_question("${key}")["stem"], ${JSON.stringify(fix)})`);
+
+test("逐處裁決：一處 ✅ 一處 ✗（含理由）→ candidates 只含放行處、✗ 理由進退回流、manifest 記裁決（負對照：整句蓋掉或理由被吞）", async () => {
+  ledgerEvent({ action: "block", candidate_key: KEY_SPOT, reviewer: "local",
+    notes: "係式漏字、指數壓平", created_at: "2026-10-03T11:00:00.000Z" });
+  const sha = seedDraft(KEY_SPOT, { fix: SPOT_STEM_FIX, insert: "題幹", at: "2026-10-03T11:05:00.000Z" });
+  const spots = await spotsFor(KEY_SPOT, SPOT_STEM_FIX);
+  assert.equal(spots.length, 2, "兩處變更被切出（'' →'關'、''→'^'）");
+  const verdicts = `[{"index": 0, "pass": True, "reason": ""}, {"index": 1, "pass": False, "reason": "^ 不是紙本的寫法，紙本是上標"}]`;
+  const result = await drive(`mod._apply_spot_verdicts({"key": "${KEY_SPOT}", "draft_sha256": "${sha}", "verdicts": ${verdicts}})`);
+  assert.equal(result.wrote, true);
+  assert.equal(result.spots_applied, 1);
+  const row = rowOf(KEY_SPOT);
+  assert.ok(row.stem.includes("其關係式"), "放行的處已寫入");
+  assert.ok(!row.stem.includes("e^"), "打叉的處沒有被寫入（不是整句蓋掉）");
+  assert.ok(row.stem.includes("e-0.35t"), "原值在未放行處保持不動");
+  const resets = readFileSync(LEDGER, "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l)).filter((r) => r.action === "reset_review" && r.candidate_key === KEY_SPOT);
+  assert.equal(resets.length, 1, "一次 reset_review");
+  const spotChanges = resets[0].changes.flatMap((c) => c.spot_changes || []);
+  assert.deepEqual(spotChanges, [{ from: "", to: "關" }], "reset_review 的 changes 只含放行處的 from/to");
+  const store = readFileSync(join(STORE, "agent_feedback.jsonl"), "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l));
+  const rets = store.filter((r) => r.action === "repair_return" && r.candidate_key === KEY_SPOT);
+  assert.equal(rets.length, 1, "一列退回");
+  assert.ok(rets[0].reason.includes("紙本是上標"), "✗ 的理由原原本本進學習流");
+  const manifest = readFileSync(join(STORE, "text_landing.jsonl"), "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l));
+  const last = manifest[manifest.length - 1];
+  assert.equal(last.mode, "spot_verdicts", "manifest 記了裁決模式");
+  assert.deepEqual(last.spot_verdicts.map((v) => v.pass), [true, false], "每處裁決如實入帳");
+});
+
+test("逐處裁決：裁決數與變更處不符 → 拒絕且一個 byte 不寫（負對照：靜默對不齊就套）", async () => {
+  const fix = SPOT_STEM_FIX.replace("半衰期為何", "半衰期（T1/2）為何");
+  const sha = seedDraft(KEY_SPOT, { fix, insert: "題幹", at: "2026-10-03T11:10:00.000Z" });
+  const spots = await spotsFor(KEY_SPOT, fix);
+  const before = rowOf(KEY_SPOT).stem;
+  const wrong = Array.from({ length: spots.length + 1 }, (_, i) => `{"index": ${i}, "pass": True, "reason": ""}`).join(", ");
+  await assert.rejects(
+    () => drive(`mod._apply_spot_verdicts({"key": "${KEY_SPOT}", "draft_sha256": "${sha}", "verdicts": [${wrong}]})`),
+    /不符/);
+  assert.equal(rowOf(KEY_SPOT).stem, before, "candidates 沒動");
+});
+
+test("逐處裁決：全部 ✗ → candidates 一個 byte 不動、理由逐處退回（負對照：全 ✗ 也硬寫）", async () => {
+  const sha = seedDraft(KEY_SPOT, { fix: SPOT_STEM_FIX.replace("e-0.35t", "e^-0.35t").replace("半衰期為何", "半衰期（T1/2）為何"), insert: "題幹", at: "2026-10-03T11:15:00.000Z" });
+  const before = rowOf(KEY_SPOT).stem;
+  const result = await drive(`mod._apply_spot_verdicts({"key": "${KEY_SPOT}", "draft_sha256": "${sha}", "verdicts": [{"index": 0, "pass": False, "reason": "理由一"}, {"index": 1, "pass": False, "reason": "理由二"}]})`);
+  assert.equal(result.wrote, false);
+  assert.equal(rowOf(KEY_SPOT).stem, before, "candidates 沒動");
+  const store = readFileSync(join(STORE, "agent_feedback.jsonl"), "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l));
+  const rets = store.filter((r) => r.action === "repair_return" && r.candidate_key === KEY_SPOT);
+  assert.ok(rets.some((r) => (r.reason || "").includes("理由一")) && rets.some((r) => (r.reason || "").includes("理由二")),
+    "逐處退回，理由各自成立");
 });
