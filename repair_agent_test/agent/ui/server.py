@@ -34,6 +34,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,8 @@ for path in (QBR / "src", QBR / "scripts"):
 _spec = importlib.util.spec_from_file_location("repair_agent_bridge", AGENT_DIR / "bridge.py")
 bridge = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bridge)
+
+import platform_view  # noqa: E402  (bridge already put `lib/` on sys.path)
 
 from qbr.review_ui.paths import content_type_of, safe_file_path  # noqa: E402
 
@@ -94,6 +97,28 @@ HUMAN_LEDGER = os.environ.get("REPAIR_AGENT_LEDGER") or bridge.HUMAN_EVENTS
 #: the ledger must be able to answer 「這一筆 accept 是在哪個入口按的」.
 SANDBOX_ACCEPT_SOURCE = "sandbox_accept"
 
+#: Where the v2 審題站 lives. The sandbox links to it and v2 links back here (owner 2026-10-02:
+#: 「整套圈要可以運作」), so neither side hard-codes the other's host in HTML. Default is the
+#: station's own service; a checkout running v2 locally overrides with `REPAIR_AGENT_V2_BASE`.
+V2_BASE = os.environ.get("REPAIR_AGENT_V2_BASE") or "http://192.168.10.70:8765"
+
+# 指揮者的腦（owner 2026-10-03：「指揮者可以換成 192.168.10.90:8888 的模型」＋「指揮者是要去
+# 訓提示詞跟指揮 MoE 模型做事的」）。只交給**對話子進程**（ui/chat.mjs）；做事 agent（worker）
+# 維持原腦 occamy——智能分層是整個指揮鏈的前提。值是 `REPAIR_AGENT_MODEL` 同格式：
+# `<引擎名>/<served id>`；引擎表在 qbr/src/qbr/engines.py（`dgx-flash`＝timsdgx:8888，
+# LAN 192.168.10.90:8888 同源）。設 `REPAIR_AGENT_CONDUCTOR_MODEL=""` 回復 occamy 對話。
+CONDUCTOR_MODEL = os.environ.get("REPAIR_AGENT_CONDUCTOR_MODEL", "dgx-flash/GLM-5.3-Flash-EXL3")
+
+
+def _page(name: str) -> bytes:
+    """One UI page with the deployment's own links baked in.
+
+    The pages are static files carrying a single token, `__V2_BASE__`; replacing it here is what
+    lets the same checkout point at a local v2 or at the station without editing HTML. `no-store`
+    already governs these responses, so a changed base is a refresh away.
+    """
+    return (HERE / name).read_bytes().replace(b"__V2_BASE__", V2_BASE.encode())
+
 
 def _read_jsonl(path: Path) -> list[dict]:
     """Tolerant read: a half-written last line must not blank the whole page."""
@@ -108,6 +133,76 @@ def _read_jsonl(path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+# --- 調度監控（owner 2026-10-03）---------------------------------------------------------
+# 指揮者（對話 GLM）沒有派工工具；做事 run 是 runner.mjs 吃 workorder 手動開的。她的「訊號」
+# 是對話裡那句「這要開一次做事 run」，做事的「事實」是三個 append-only 檔：
+#   store/workorders/report.jsonl   — runner 每輪的 metrics（drafted/rejected/failed）
+#   store/repair_drafts.jsonl       — 草案落成（run_id 依輪計數）
+#   store/chat.jsonl                — 指揮者請求做事的那句話
+# 這裡只**讀**三個檔、算出畫面要的形狀；不寫任何檔（G0），也不假裝能開始/停止 run——
+# 那是 G3 派工，未經 owner 逐次核准不存在。
+
+#: 指揮者請求做事的話，跟她 seed 裡被教的那句完全同形（ui/chat.mjs 兩處）。
+DISPATCH_PHRASES = ("要開一次做事 run", "開一次做事 run", "開做事 run")
+
+
+def dispatch_status() -> dict:
+    """The conductor↔worker dispatch picture, read-only, for the header lamp and the runs panel."""
+    reports = _read_jsonl(STORE_DIR / "workorders" / "report.jsonl")
+    batches = [r for r in reports if r.get("kind") == "batch"]
+    last_batch = batches[-1] if batches else None
+    metrics = (last_batch or {}).get("metrics") or {}
+
+    # drafts per run: count lines by run_id (whole-file scan; the file is 5.8 MB and read once here)
+    per_run: dict[str, int] = {}
+    if (STORE_DIR / "repair_drafts.jsonl").is_file():
+        with (STORE_DIR / "repair_drafts.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                if "run_id" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                rid = row.get("run_id")
+                if rid:
+                    per_run[rid] = per_run.get(rid, 0) + 1
+
+    # the conductor's own requests, newest last, from the append-only transcript
+    asks = []
+    chat_path = STORE_DIR / "chat.jsonl"
+    if chat_path.is_file():
+        with chat_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                text = row.get("text") or ""
+                # The phrase appears in both directions: the conductor asks for a worker run, and
+                # the designer may relay it. What matters is the *request*, not the speaker — the
+                # role is recorded and the panel shows it, so a designer's relay is not passed off
+                # as the conductor's own words.
+                if any(p in text for p in DISPATCH_PHRASES):
+                    asks.append({
+                        "at": row.get("at"),
+                        "role": row.get("role"),
+                        "key": row.get("candidate_key"),
+                        "text": text[:120],
+                    })
+    return {
+        "last_batch": {
+            "at": last_batch.get("at"),
+            "workorder": last_batch.get("workorder"),
+            "variant": last_batch.get("variant"),
+            "run_id": last_batch.get("run_id"),
+            "metrics": metrics,
+        } if last_batch else None,
+        "drafts_by_run": per_run,
+        "conductor_asks": asks[-5:],
+    }
 
 
 def judgements_for(key: str) -> list[dict]:
@@ -307,6 +402,615 @@ def sandbox_accepts_for(key: str) -> list[dict]:
     return out
 
 
+FIGURE_LANDING_REVIEWER = "repair_figure_landing"
+FIGURE_LANDING_MANIFEST = STORE_DIR / "figure_landing.jsonl"
+
+
+def _human_landing_states(keys: set) -> dict:
+    """`key → {human, human_at, reset_after, source, draft_sha}` — 一次掃完帳本，只看**人**寫的列。
+
+    `human` 是該題最後一筆人審 action；`reset_after` 是那句話**之後**有沒有 reset_review
+    （內容變過 → 已經在重審池裡）。機器列不覆寫人的話，只讓 reset 在人話之後成立。
+    `source`/`draft_sha` 記最後一筆人審的來源與它指到的草案行——文字落地要靠它分辨
+    「這一筆 accept 就是授權本身」（sandbox accept、同一草案）與「更早的最終決定」（不動）。
+    """
+    states: dict[str, dict] = {}
+    if not os.path.exists(bridge.HUMAN_EVENTS):
+        return states
+    with open(bridge.HUMAN_EVENTS, encoding="utf-8") as handle:
+        for line in handle:
+            if "candidate_key" not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            key = row.get("candidate_key") or ""
+            if key not in keys:
+                continue
+            st = states.setdefault(key, {"human": None, "human_at": "", "reset_after": False,
+                                         "source": "", "draft_sha": ""})
+            reviewer = str(row.get("reviewer") or "")
+            if any(reviewer.startswith(p) for p in bridge.REPAIR_REVIEWER_PREFIXES):
+                if row.get("action") == "reset_review" and st["human"] is not None \
+                        and str(row.get("created_at") or "") > st["human_at"]:
+                    st["reset_after"] = True
+                continue
+            action = str(row.get("action") or "")
+            if action:
+                st["human"], st["human_at"], st["reset_after"] = action, str(row.get("created_at") or ""), False
+                st["source"], st["draft_sha"] = str(row.get("source") or ""), str(row.get("repair_draft_sha256") or "")
+    return states
+
+
+def _apply_figure_drafts(keys=None) -> dict:
+    """把**已判 pass** 的圖草案寫進 candidates.jsonl——設計者按「寫入」的當下生效。
+
+    這就是 G3 的執行點，不是又一個閘門：核准是學習檔裡那一筆人類 pass（`figure_review`），
+    這裡只執行它；沒有記錄在案的 pass 就沒有可執行的核准，逐鍵拒絕。
+
+    契約：
+    - 只增不刪：`image_refs` 只追加；裁片必須實際存在於 QUEUE_ROOT 才可引用。
+    - 人的最新一句話是 accept 且之後沒有 reset → **不動**（accept 是最終決定，
+      草案要碰到核准過的題目才需要理由——owner 2026-10-03 裁決）。
+    - 被審過的其他題（block／comment）寫入後補一筆 append-only `reset_review`
+      （repo 規則：內容改變的已審候選要逐題 reset 並保留原註記），v2 會重新端上來；
+      從沒被審過的題默默寫入——沒有人的話可 reset。
+    - 第一次寫入前整份備份到 `<queue>/backups/`；manifest（append-only）記 before/after sha256。
+    """
+    import hashlib
+
+    state = _figure_state()
+    if keys is None:
+        keys = [k for k, d in state.items() if d.get("agreed") and d.get("ruling") == "pass"]
+    keys = [str(k) for k in (keys or []) if k]
+    if not keys:
+        raise ValueError("no keys to apply")
+
+    skipped: list[dict] = []
+    want = set(keys)
+    plans: dict[str, dict] = {}
+    for key in keys:
+        d = state.get(key) or {}
+        if not d:
+            skipped.append({"key": key, "reason": "沒有圖草案"})
+            want.discard(key)
+            continue
+        if not d.get("agreed") or d.get("ruling") != "pass":
+            skipped.append({"key": key, "reason": "沒有記錄在案的人類 pass（或兩輪不一致）"})
+            want.discard(key)
+            continue
+        by_base = {os.path.basename(p): p for p in (d.get("crops") or [])}
+        entries = []
+        for fn in (d.get("a") or {}).get("refs") or []:
+            path = by_base.get(fn)
+            if not path or not os.path.exists(os.path.join(bridge.QUEUE_ROOT, path)):
+                skipped.append({"key": key, "reason": "裁片不存在：%s" % fn})
+                want.discard(key)
+                entries = []
+                break
+            entries.append({"asset_role": "figure-crop", "description": "figure 草案落地（設計者核可）",
+                            "exists": True, "label": "figure-crop", "page": None, "path": path,
+                            "placement": "question", "raw_ref": fn,
+                            "source": "figure_missing_second_pass"})
+        if entries:
+            plans[key] = {"entries": entries, "draft": d}
+
+    human = _human_landing_states(want)
+    events: list[dict] = []
+    now = bridge._utc_now()
+    for key in list(plans):
+        st = human.get(key) or {}
+        if st.get("human") == "accept" and not st.get("reset_after"):
+            skipped.append({"key": key, "reason": "你已 accept（最終決定），不動"})
+            del plans[key]
+        elif st.get("human") is not None:
+            events.append({"action": "reset_review", "candidate_key": key, "created_at": now,
+                           "reviewer": FIGURE_LANDING_REVIEWER,
+                           "notes": "figure 草案落地：設計者核可的圖 refs 已寫入 image_refs，"
+                                    "題目內容改變，請重新確認。原裁決與理由保留在學習檔。",
+                           "changes": [{"field": "image_refs", "from": "（未含草案圖）", "to":
+                                        [e["path"] for e in plans[key]["entries"]]}]})
+
+    candidates_path = Path(bridge.CANDIDATES)
+    if not candidates_path.is_file():
+        raise ValueError("candidates.jsonl not found at %s" % candidates_path)
+    data = candidates_path.read_bytes()
+    sha_before = hashlib.sha256(data).hexdigest()
+    lines = data.decode("utf-8").splitlines(keepends=True)
+    replaced: set[str] = set()
+    for i, raw in enumerate(lines):
+        if not raw.strip() or len(replaced) == len(plans):
+            continue
+        probe = raw[:4096]
+        if not any(k.encode() in probe.encode() for k in plans):
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        key = row.get("candidate_key") or ""
+        if key not in plans or key in replaced:
+            continue
+        existing = row.get("image_refs") or []
+        have = {r.get("path") for r in existing if isinstance(r, dict)}
+        fresh = [e for e in plans[key]["entries"] if e["path"] not in have]
+        if not fresh:
+            skipped.append({"key": key, "reason": "已寫入過"})
+            del plans[key]
+            continue
+        if isinstance(row.get("question_page"), int):
+            for e in fresh:
+                e["page"] = row["question_page"]
+        row["image_refs"] = list(existing) + fresh
+        newline = json.dumps(row, ensure_ascii=False)
+        lines[i] = newline + ("\n" if raw.endswith("\n") else "\n")
+        replaced.add(key)
+    for key in set(plans) - replaced:
+        skipped.append({"key": key, "reason": "candidates 沒有這一題"})
+        del plans[key]
+    if not plans:
+        return {"applied": [], "skipped": skipped, "wrote": False}
+
+    backup_dir = Path(bridge.QUEUE_ROOT) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / ("candidates.jsonl.before-figure-landing-%s" % now.replace(":", ""))
+    backup.write_bytes(data)
+    out = ("".join(lines)).encode("utf-8")
+    with _write_lock:
+        tmp = candidates_path.with_suffix(".jsonl.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, candidates_path)
+        if events:
+            with open(bridge.HUMAN_EVENTS, "a", encoding="utf-8") as handle:
+                for ev in events:
+                    handle.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        with FIGURE_LANDING_MANIFEST.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": now, "actor": "human:designer", "applied": sorted(plans),
+                "skipped": skipped, "sha_before": sha_before,
+                "sha_after": hashlib.sha256(out).hexdigest(),
+                "backup": str(backup), "resets": len(events),
+            }, ensure_ascii=False) + "\n")
+    return {"applied": sorted(plans), "skipped": skipped, "wrote": True,
+            "backup": str(backup), "resets": len(events)}
+
+
+# --- 文字草案落地（L3 後端：✅ 的落點）------------------------------------------------------
+#
+# 與 `_apply_figure_drafts` 同一個骨架，但授權來源不同：圖草案的核准在學習檔（figure_review），
+# 文字草案的 ✅ 是**帳本裡的一筆 sandbox accept**（`append_accept` 寫的，帶草案行 sha256）。
+# 落地只執行帳本記錄在案的 ✅——沒有授權的鍵逐鍵拒絕，機器永遠不能自己按下這一步。
+TEXT_LANDING_REVIEWER = "repair_text_landing"
+TEXT_LANDING_MANIFEST = STORE_DIR / "text_landing.jsonl"
+
+# 落點解析與結構守門的**唯一**實作在 `bridge.py`（`resolve_text_target`／`is_full_replacement`）
+# ——生產者（L2）與落地寫入器共用一份，兩份實作就是兩個可以不一致的地方。
+_resolve_text_target = bridge.resolve_text_target
+_is_full_replacement = bridge.is_full_replacement
+_FIX_OPTION_PREFIX = bridge._FIX_OPTION_PREFIX
+
+
+def _text_plans_for(keys: list[str]) -> tuple[dict, list[dict]]:
+    """`keys` →（可落地的計畫 `key → {field, old, fix, draft_sha}`，被拒清單）。
+
+    授權＝帳本該題**最新**一筆 sandbox accept（檔案序＝時間序）；它指到的草案就是要落地的草案。
+    fix 空／等於現值／insert 認不得 → 拒絕該鍵。題幹帶結構守門（與前端預覽同一條規則，
+    `bridge.is_full_replacement`）：片段或建議不是整欄替換，拒絕。
+    """
+    skipped: list[dict] = []
+    plans: dict[str, dict] = {}
+    for key in keys:
+        accepts = sandbox_accepts_for(key)
+        if not accepts:
+            skipped.append({"key": key, "reason": "帳本沒有這一題的 ✅（未 accept 的 key 拒絕）"})
+            continue
+        accept = accepts[-1]
+        try:
+            draft = _draft_line_by_sha(key, accept.get("repair_draft_sha256") or "")
+        except ValueError as exc:
+            skipped.append({"key": key, "reason": "✅ 指到的草案找不到：%s" % exc})
+            continue
+        try:
+            row = bridge.load_question(key)
+        except bridge.QuestionNotFound:
+            skipped.append({"key": key, "reason": "candidates 沒有這一題"})
+            continue
+        try:
+            field, old = _resolve_text_target(row, draft.get("insert") or "")
+        except ValueError as exc:
+            skipped.append({"key": key, "reason": str(exc)})
+            continue
+        fix = _FIX_OPTION_PREFIX.sub("", (draft.get("fix") or "").strip())
+        if not fix:
+            skipped.append({"key": key, "reason": "fix 是空的，沒有東西可寫"})
+            continue
+        if fix == old:
+            skipped.append({"key": key, "reason": "fix 與現值相同（已寫入過或草案無改變）"})
+            continue
+        if field == "stem" and not _is_full_replacement(old, fix):
+            skipped.append({"key": key,
+                            "reason": "fix 不是「改完後的完整題幹」（與原句差太多，像是建議或片段）——請叫 agent 重提整句"})
+            continue
+        plans[key] = {"field": field, "old": old, "fix": fix, "draft_sha": draft["_line_sha256"]}
+    return plans, skipped
+
+
+def _apply_text_drafts(keys=None) -> dict:
+    """把**帳本記錄在案的 ✅** 落地成 candidates.jsonl 的整欄替換——✅ 的當下生效，沒有第二段。
+
+    契約（鐵律 3/4）：
+    - `fix` 整欄替換 `insert` 指的欄位（選項換的是該選項的 `text`）；`answer` 同步
+      `answer_payload`（同一件事的另一種形狀，留著舊值就是自相矛盾的列）。
+    - 原值保存在 `reset_review` 事件的 `changes[].from`；欄位只增不刪。
+    - 被人審過的題補一筆 append-only `reset_review`（機器前綴 `repair_text_landing`）；
+      沒被審過的默默寫。最新人審是 accept 且無 reset → **不動**——除非那筆 accept 就是
+      這次落地正在執行的授權本身（同一草案的 sandbox accept）。
+    - 寫入前整份備份到 `<queue>/backups/`；manifest（append-only）記 before/after sha256 與草案 sha。
+    """
+    import hashlib
+
+    keys = [str(k) for k in (keys or []) if k]
+    if not keys:
+        raise ValueError("no keys to apply")
+    plans, skipped = _text_plans_for(keys)
+    if not plans:
+        return {"applied": [], "skipped": skipped, "wrote": False}
+
+    # 鐵律 4：accept 過且未 reset 的題不動。但**這次正在執行的授權**（最新的 sandbox accept、
+    # 同一草案）不算阻擋——它是 ✅ 本身，不是更早的最終決定。
+    human = _human_landing_states(set(plans))
+    now = bridge._utc_now()
+    for key in list(plans):
+        st = human.get(key) or {}
+        if st.get("human") == "accept" and not st.get("reset_after"):
+            authorized = st.get("source") == SANDBOX_ACCEPT_SOURCE \
+                and st.get("draft_sha") == plans[key]["draft_sha"]
+            if not authorized:
+                skipped.append({"key": key, "reason": "你已 accept（最終決定），不動——除非你指名"})
+                del plans[key]
+
+    candidates_path = Path(bridge.CANDIDATES)
+    if not candidates_path.is_file():
+        raise ValueError("candidates.jsonl not found at %s" % candidates_path)
+    data = candidates_path.read_bytes()
+    sha_before = hashlib.sha256(data).hexdigest()
+    lines = data.decode("utf-8").splitlines(keepends=True)
+    replaced: set[str] = set()
+    for i, raw in enumerate(lines):
+        if not raw.strip() or len(replaced) == len(plans):
+            continue
+        probe = raw[:4096]
+        if not any(k in probe for k in plans):
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        key = row.get("candidate_key") or ""
+        if key not in plans or key in replaced:
+            continue
+        plan = plans[key]
+        changes: list[dict] = []
+        if plan["field"].startswith("option:"):
+            letter = plan["field"].split(":", 1)[1]
+            hit = False
+            for opt in row.get("options") or []:
+                if isinstance(opt, dict) and str(opt.get("key") or "").upper() == letter:
+                    if str(opt.get("text") or "") != plan["fix"]:
+                        changes.append({"field": "options[%s].text" % letter,
+                                        "from": str(opt.get("text") or ""), "to": plan["fix"]})
+                        opt["text"] = plan["fix"]
+                        hit = True
+                    break
+            if not hit:
+                skipped.append({"key": key, "reason": "candidates 列上沒有 %s 選項" % letter})
+                del plans[key]
+                continue
+        else:
+            field = plan["field"].split(":", 1)[1] if plan["field"].startswith("field:") else plan["field"]
+            if str(row.get(field) or "") == plan["fix"]:
+                skipped.append({"key": key, "reason": "已是這個內容（已寫入過）"})
+                del plans[key]
+                continue
+            changes.append({"field": field, "from": str(row.get(field) or ""), "to": plan["fix"]})
+            row[field] = plan["fix"]
+            if field == "answer" and isinstance(row.get("answer_payload"), dict):
+                ap = row["answer_payload"]
+                for sub in ("answer", "raw_answer"):
+                    if isinstance(ap.get(sub), str) and ap[sub] != plan["fix"]:
+                        changes.append({"field": "answer_payload.%s" % sub, "from": ap[sub],
+                                        "to": plan["fix"]})
+                        ap[sub] = plan["fix"]
+                if isinstance(ap.get("accepted_values"), list) and plan["fix"] not in ap["accepted_values"]:
+                    changes.append({"field": "answer_payload.accepted_values",
+                                    "from": ap["accepted_values"], "to": [plan["fix"]]})
+                    ap["accepted_values"] = [plan["fix"]]
+        plan["changes"] = changes
+        newline = json.dumps(row, ensure_ascii=False)
+        lines[i] = newline + ("\n" if raw.endswith("\n") else "\n")
+        replaced.add(key)
+    for key in set(plans) - replaced:
+        skipped.append({"key": key, "reason": "candidates 沒有這一題"})
+        del plans[key]
+    if not plans:
+        return {"applied": [], "skipped": skipped, "wrote": False}
+
+    events = []
+    for key in sorted(plans):
+        st = human.get(key) or {}
+        if st.get("human") is not None:
+            events.append({"action": "reset_review", "candidate_key": key, "created_at": now,
+                           "reviewer": TEXT_LANDING_REVIEWER,
+                           "notes": "文字草案落地：設計者核可的 fix 已整欄寫入，題目內容改變，"
+                                    "請重新確認。原裁決與理由保留在學習檔。",
+                           "changes": plans[key]["changes"]})
+
+    backup_dir = Path(bridge.QUEUE_ROOT) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / ("candidates.jsonl.before-text-landing-%s" % now.replace(":", ""))
+    backup.write_bytes(data)
+    out = ("".join(lines)).encode("utf-8")
+    with _write_lock:
+        tmp = candidates_path.with_suffix(".jsonl.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, candidates_path)
+        if events:
+            with open(bridge.HUMAN_EVENTS, "a", encoding="utf-8") as handle:
+                for ev in events:
+                    handle.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        with TEXT_LANDING_MANIFEST.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": now, "actor": "human:designer", "applied": sorted(plans),
+                "skipped": skipped, "sha_before": sha_before,
+                "sha_after": hashlib.sha256(out).hexdigest(),
+                "backup": str(backup), "resets": len(events),
+                "drafts": {k: plans[k]["draft_sha"] for k in sorted(plans)},
+            }, ensure_ascii=False) + "\n")
+    return {"applied": sorted(plans), "skipped": skipped, "wrote": True,
+            "backup": str(backup), "resets": len(events)}
+
+
+def _apply_spot_verdicts(payload: dict) -> dict:
+    """逐處裁決的落地（owner 2026-10-03：一個地方改過就要有一個打勾打叉）。
+
+    `verdicts`＝每處 {index, pass, reason}；pass 的處**組合**進原欄位（不是整欄蓋掉——
+    設計者只放行他認可的那幾處），✗ 的處以理由退回生產者（下一輪的第一行輸入）。
+    鐵律不變：備份先於寫入、reset_review 帶原值（每處 from/to）、manifest 記裁決。
+    """
+    import hashlib
+
+    key = str(payload.get("key") or "").strip()
+    draft_sha = str(payload.get("draft_sha256") or "").strip()
+    verdicts = list(payload.get("verdicts") or [])
+    if not key or not draft_sha:
+        raise ValueError("apply-spots requires the question key and the draft's line checksum")
+    draft = _draft_line_by_sha(key, draft_sha)      # 不存在 → ValueError → 400
+    row = bridge.load_question(key)                  # 不存在 → QuestionNotFound → 404
+    field, old = _resolve_text_target(row, draft.get("insert") or "")
+    fix = _FIX_OPTION_PREFIX.sub("", (draft.get("fix") or "").strip())
+    spots = bridge.text_spots(old, fix)
+    if not spots:
+        raise ValueError("這則草案與現值沒有可切出的變更處（可能已寫入過）")
+    if len(verdicts) != len(spots):
+        raise ValueError("裁決數 %d 與變更處 %d 不符——重新載入題目再裁決" % (len(verdicts), len(spots)))
+    for v in verdicts:
+        if not isinstance(v, dict) or "index" not in v or "pass" not in v:
+            raise ValueError("裁決列要有 index 與 pass")
+        if not v.get("pass") and not str(v.get("reason") or "").strip():
+            raise ValueError("打叉要寫理由——理由就是規則候選的原料")
+
+    approved = [spots[v["index"]] for v in verdicts if v.get("pass")]
+    rejected = [(spots[v["index"]], str(v.get("reason") or "").strip())
+                for v in verdicts if not v.get("pass")]
+    composed = old
+    for sp in sorted(approved, key=lambda s: -s["old_start"]):
+        composed = composed[:sp["old_start"]] + sp["after"] + composed[sp["old_end"]:]
+    if composed == old:
+        # 全 ✗：candidates 一個 byte 不動，只記退回——設計者的裁決本身就是要留的紀錄。
+        for sp, reason in rejected:
+            append_return({"key": key, "draft_sha256": draft_sha,
+                           "reason": "【第 %d 處】%s → %s：%s" % (
+                               spots.index(sp) + 1,
+                               (sp["before"] or "（刪除）")[:60], (sp["after"] or "（刪除）")[:60], reason)})
+        return {"applied": [], "returned": len(rejected), "wrote": False}
+
+    candidates_path = Path(bridge.CANDIDATES)
+    if not candidates_path.is_file():
+        raise ValueError("candidates.jsonl not found at %s" % candidates_path)
+    data = candidates_path.read_bytes()
+    sha_before = hashlib.sha256(data).hexdigest()
+    lines = data.decode("utf-8").splitlines(keepends=True)
+    hit = None
+    for i, raw in enumerate(lines):
+        if not raw.strip():
+            continue
+        probe = raw[:4096]
+        if key not in probe:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            continue
+        if parsed.get("candidate_key") == key:
+            hit = (i, parsed, raw)
+            break
+    if hit is None:
+        raise ValueError("candidates 沒有這一題")
+    idx, parsed, raw = hit
+
+    changes = []
+    if field.startswith("option:"):
+        letter = field.split(":", 1)[1]
+        for opt in parsed.get("options") or []:
+            if isinstance(opt, dict) and str(opt.get("key") or "").upper() == letter:
+                changes.append({"field": "options[%s].text" % letter, "from": str(opt.get("text") or ""),
+                                "to": composed, "spot_changes": [
+                                    {"from": sp["before"], "to": sp["after"]} for sp in approved]})
+                opt["text"] = composed
+                break
+    else:
+        fname = field.split(":", 1)[1] if field.startswith("field:") else field
+        changes.append({"field": fname, "from": old, "to": composed, "spot_changes": [
+            {"from": sp["before"], "to": sp["after"]} for sp in approved]})
+        parsed[fname] = composed
+        if fname == "answer" and isinstance(parsed.get("answer_payload"), dict):
+            ap = parsed["answer_payload"]
+            for sub in ("answer", "raw_answer"):
+                if isinstance(ap.get(sub), str) and ap[sub] != composed:
+                    changes.append({"field": "answer_payload.%s" % sub, "from": ap[sub], "to": composed})
+                    ap[sub] = composed
+            if isinstance(ap.get("accepted_values"), list) and composed not in ap["accepted_values"]:
+                changes.append({"field": "answer_payload.accepted_values",
+                                "from": ap["accepted_values"], "to": [composed]})
+                ap["accepted_values"] = [composed]
+
+    now = bridge._utc_now()
+    backup_dir = Path(bridge.QUEUE_ROOT) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / ("candidates.jsonl.before-spot-landing-%s" % now.replace(":", ""))
+    backup.write_bytes(data)
+    lines[idx] = json.dumps(parsed, ensure_ascii=False) + ("\n" if raw.endswith("\n") else "\n")
+    out = ("".join(lines)).encode("utf-8")
+
+    # 帳本先記設計者的裁決（append-only；部分套用也如實記），再落地。
+    # append_accept／append_return 自己拿 _write_lock（不可重入）——絕不能在我的鎖內呼叫它們，
+    # 否則同一執行緒自我死鎖（test_landing 的 120s 逾時就是這一課）。
+    # self_check＝agent 代按（owner 2026-10-03 授權全權自檢 sandbox）——notes 與 manifest
+    # 必須如實聲明，不得冒充設計者裁決。
+    self_check = bool(payload.get("self_check"))
+    accepted = append_accept({"key": key, "draft_sha256": draft_sha,
+                              "notes": ("沙盒自檢：agent 代按（owner 2026-10-03 授權全權自檢 sandbox）；非人工裁決。"
+                                        if self_check else "")
+                              + "逐處裁決：放行 %d／%d 處%s" % (
+                                  len(approved), len(spots),
+                                  "；退回 %d 處" % len(rejected) if rejected else "")})
+    with _write_lock:
+        tmp = candidates_path.with_suffix(".jsonl.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, candidates_path)
+        with open(bridge.HUMAN_EVENTS, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "action": "reset_review", "candidate_key": key, "created_at": now,
+                "reviewer": TEXT_LANDING_REVIEWER if not self_check else "repair_agent_selfcheck",
+                "notes": ("沙盒自檢（agent 代按，非人工裁決）：設計者授權的逐處落地；"
+                          if self_check else "逐處落地：")
+                        + "放行的 %d 處已寫入；原值與逐處 from/to 在 changes。" % len(approved),
+                "changes": changes,
+            }, ensure_ascii=False) + "\n")
+        with TEXT_LANDING_MANIFEST.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": now, "actor": "agent:selfcheck" if self_check else "human:designer",
+                "mode": "spot_verdicts",
+                "applied": [key], "skipped": [], "sha_before": sha_before,
+                "sha_after": hashlib.sha256(out).hexdigest(), "backup": str(backup),
+                "resets": 1, "drafts": {key: draft_sha},
+                "spot_verdicts": [{"index": v.get("index"), "pass": bool(v.get("pass")),
+                                   "reason": str(v.get("reason") or "")} for v in verdicts],
+            }, ensure_ascii=False) + "\n")
+    for sp, reason in rejected:
+        append_return({"key": key, "draft_sha256": draft_sha,
+                       "reason": "【未放行 第 %d 處】%s → %s：%s" % (
+                           spots.index(sp) + 1,
+                           (sp["before"] or "（刪除）")[:60], (sp["after"] or "（刪除）")[:60], reason)})
+
+    block_reason = _latest_human_block_notes(key)
+    _remember_lesson(
+        subject=draft.get("subject") or (row.get("metadata") or {}).get("normalized_subject_name") or "",
+        text="錯誤：%s → 修法：%s" % (block_reason or "（沒有記錄的 block 理由）", composed[:120]),
+        key=key, evidence="草案 %s…（%s，%d/%d 處）" % (draft_sha[:12], field, len(approved), len(spots)))
+    return {"applied": [key], "wrote": True, "spots_total": len(spots),
+            "spots_applied": len(approved), "spots_returned": len(rejected),
+            "composed": composed, "backup": str(backup), "event": accepted["event"]}
+
+
+def _latest_human_block_notes(key: str) -> str:
+    """該題最新一筆**人類** block 的理由（經驗「錯誤：」半句的原料）；沒有就空字串。
+
+    機器列（`repair_*` 前綴）不冒充人的話——經驗要記的是**你**說哪裡錯，不是機器自己的狀態。
+    """
+    if not os.path.exists(bridge.HUMAN_EVENTS):
+        return ""
+    notes = ""
+    with open(bridge.HUMAN_EVENTS, encoding="utf-8") as handle:
+        for line in handle:
+            if '"block"' not in line or key not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("candidate_key") != key or row.get("action") != "block":
+                continue
+            reviewer = str(row.get("reviewer") or "")
+            if any(reviewer.startswith(p) for p in bridge.REPAIR_REVIEWER_PREFIXES):
+                continue
+            if str(row.get("notes") or "").strip():
+                notes = str(row["notes"]).strip()
+    return notes
+
+
+def _remember_lesson(subject: str, text: str, key: str, evidence: str = "") -> dict:
+    """✅ hook 的經驗入庫。與 `lib/identity.mjs` `remember()` 同一條契約：同 (subject, kind, text)
+    只累計次數不重複列——同一修法在整份卷子上重複出現時，清單該變短而不是變長。"""
+    kind = "approved-repair"
+    rows = _read_jsonl(LESSONS)
+    for row in rows:
+        if row.get("kind") == kind and row.get("text") == text and row.get("subject") == subject:
+            row["count"] = (row.get("count") or 1) + 1
+            row["last_key"] = key
+            with _write_lock:
+                tmp = LESSONS.with_suffix(".jsonl.tmp")
+                tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                               encoding="utf-8")
+                os.replace(tmp, LESSONS)
+            return row
+    record = {"at": bridge._utc_now(), "subject": subject, "kind": kind, "text": text,
+              "evidence": evidence, "key": key, "count": 1, "actor": "human:designer"}
+    with _write_lock:
+        LESSONS.parent.mkdir(parents=True, exist_ok=True)
+        with LESSONS.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def accept_and_apply(payload: dict) -> dict:
+    """設計者按下 ✅ 的**那一個動作**：帳本 accept → 落地 candidates → 經驗入庫，一次完成。
+
+    鐵律 2：不準出現「判通了還要再按寫入」。所以這不是三個端點，是一個——先驗證到
+    「這個 ✅ 確實有東西可寫」（草案存在、fix 非空且異於現值、insert 認得）才寫第一個
+    byte；驗證不過就整個拒絕（400），帳本、candidates、經驗檔一個都不動。
+    """
+    key = str(payload.get("key") or "").strip()
+    draft_sha = str(payload.get("draft_sha256") or "").strip()
+    if not key or not draft_sha:
+        raise ValueError("accept requires the question key and the draft's line checksum")
+    draft = _draft_line_by_sha(key, draft_sha)  # 不存在 → ValueError → 400，什麼都沒寫
+    row = bridge.load_question(key)             # 不存在 → QuestionNotFound → 404
+    field, old = _resolve_text_target(row, draft.get("insert") or "")
+    fix = _FIX_OPTION_PREFIX.sub("", (draft.get("fix") or "").strip())
+    if not fix:
+        raise ValueError("fix 是空的，沒有東西可寫")
+    if fix == old:
+        raise ValueError("fix 與現值相同（已寫入過或草案無改變）——沒有東西可 ✅")
+    if field == "stem" and not _is_full_replacement(old, fix):
+        raise ValueError("fix 不是「改完後的完整題幹」（與原句差太多，像是建議或片段）——請叫 agent 重提整句")
+
+    accepted = append_accept({"key": key, "draft_sha256": draft_sha,
+                              "notes": str(payload.get("notes") or "")})
+    result = _apply_text_drafts([key])
+    lesson = None
+    if result["wrote"]:
+        block_reason = _latest_human_block_notes(key)
+        summary = fix[:120] + ("…" if len(fix) > 120 else "")
+        lesson = _remember_lesson(
+            subject=draft.get("subject") or (row.get("metadata") or {}).get("normalized_subject_name") or "",
+            text="錯誤：%s → 修法：%s" % (block_reason or "（沒有記錄的 block 理由）", summary),
+            key=key,
+            evidence="草案 %s…（%s）" % (draft_sha[:12], field))
+    return {"event": accepted["event"], "ledger": accepted["ledger"], **result, "lesson": lesson}
+
+
 def question_payload(key: str) -> dict:
     question = bridge.load_question(key)
     view = bridge.question_view(question)
@@ -350,8 +1054,266 @@ def question_payload(key: str) -> dict:
                 except (ValueError, UnicodeDecodeError):
                     continue
     view["drafts"] = drafts
+    # 草案的 fix 是「改完後的完整文字」，而欄位在畫面上是**平台渲染**（⁻¹／sup／sub）。
+    # 給它補一份渲染版 `_fix_html`（同題幹走的 `as_platform_html`），預覽與草案列顯示都用它；
+    # 原 `fix` 保留——驗收事件比對的是原字串。上標因此不再以 `<sup>` 字面出現在畫面上。
+    for row in drafts:
+        try:
+            row["_fix_html"] = platform_view.as_platform_html(row.get("fix") or "")
+        except Exception:
+            row["_fix_html"] = None
+    # 「一個地方改過就要有一個打勾打叉」：proposed 草案附上機械切點（與落地寫入器同一份
+    # `bridge.text_spots`——兩份實作就是兩個可以不一致的地方）。✗ 的理由以此為座標。
+    for row in drafts:
+        if row.get("status") != "proposed":
+            continue
+        try:
+            _field, _old = _resolve_text_target(question, row.get("insert") or "")
+            row["_spots"] = bridge.text_spots(_old, _FIX_OPTION_PREFIX.sub("", (row.get("fix") or "").strip()))
+        except Exception:
+            row["_spots"] = []
+        # 結構守門的唯一實作：difflib 相似度在這裡算一次，前端預覽只讀 `_stem_guard`。
+        # None＝insert 認不得（✅ 會被後端拒）；False＝片段／建議；True＝整句替換。
+        try:
+            _field, _old = _resolve_text_target(question, row.get("insert") or "")
+            row["_stem_guard"] = _is_full_replacement(_old, row.get("fix") or "") if _field == "stem" else True
+        except ValueError as _exc:
+            row["_stem_guard"] = None
+            row["_stem_guard_reason"] = str(_exc)
     view["sandbox_accepts"] = sandbox_accepts_for(key)
+    # 圖片草案（agent 對「圖怎麼插」的提議）只掛在**有草案的題**上；主頁中段的「圖片草案」
+    # 區塊讀這裡。沒有就不帶鍵——前端不出現空區塊。
+    draft = figure_draft_for(key)
+    if draft:
+        draft = dict(draft)
+        draft["landed"] = any(
+            isinstance(r, dict) and r.get("source") == "figure_missing_second_pass"
+            for r in (question.get("image_refs") or []))
+        view["figure_draft"] = draft
+    # 綁定 v2（owner 2026-10-02：「整套圈要可以運作」）。The hash follows v2's own
+    # `scopeToHash()` shape `#類科/年/次/科目/qNNN`, spelled with the **normalized** names —
+    # v2's tree is keyed on those (its `toItem()` reads `normalized_*`). The `/qNNN` tail is the
+    # named-question contract `scopeFromHash()` already reads. A missing piece leaves the URL
+    # unset and the link hidden, rather than a link that opens the wrong paper.
+    meta = question.get("metadata") or {}
+    cat = meta.get("normalized_category_name") or meta.get("official_category_name")
+    subj = meta.get("normalized_subject_name") or meta.get("official_subject_name")
+    year, ordinal = meta.get("year"), meta.get("exam_ordinal")
+    if cat and subj and year is not None and ordinal is not None and view.get("question_number"):
+        import urllib.parse
+
+        tail = "/".join(urllib.parse.quote(str(p), safe="")
+                        for p in (cat, year, ordinal, subj, "q%d" % view["question_number"]))
+        view["v2_url"] = "%s/v2#%s" % (V2_BASE, tail)
     return view
+
+
+# --- figure-missing 證據包草案 --------------------------------------------------------------
+#
+# `figure_missing_second_pass.py`（qbr/scripts，PR #20）把 deterministic 掃描工單的每一列
+# 決策寫進 `store/scans/20261001-figure-producer/figure_drafts_run{A,B}.jsonl`（append-only、
+# queue 零寫入）。這一節只**讀**那兩個流 + 工單的裁片路徑，合成一張卡的素材；設計者的
+# 裁決走 `/api/judgement` 既有寫路徑（`store/agent_feedback.jsonl`，學習流）——這一頁
+# **不**寫人審帳本：落地（G3）另行 owner 核准。
+FIGURE_DIR = STORE_DIR / "scans" / "20261001-figure-producer"
+FIGURE_WO = STORE_DIR / "workorders" / "wo-4.1-figure-missing.jsonl"
+
+
+_FIGURE: dict = {"stamp": None, "by_key": {}}
+
+
+def _figure_state() -> dict:
+    """`candidate_key → 草案`，以輸入檔 mtime 為快取鍵。
+
+    兩個 run 流 + 工單 + 學習檔都是 append-only；任一變動（含你在題目頁按下裁決）就整表
+    重建。量測：634 題冷建 ~2 s（不含題幹——那是 `/api/question` 的事），熱讀是 dict 查表。
+    """
+    import figure_missing_second_pass as figure_producer  # qbr/scripts 已在 sys.path
+
+    sources = sorted(FIGURE_DIR.glob("figure_drafts_run*.jsonl")) + [FIGURE_WO, STORE]
+    stamp = tuple((p, p.stat().st_mtime_ns) for p in sources if p.exists())
+    if _FIGURE["stamp"] == stamp:
+        return _FIGURE["by_key"]
+
+    wo_rows: dict[str, dict] = {}
+    for row in _read_jsonl(FIGURE_WO):
+        hits = figure_producer.crop_hits_of(row.get("note"))
+        wo_rows[row.get("key") or ""] = hits[0] if hits else {}
+
+    rounds: dict[str, dict[str, dict]] = {}
+    for path in sorted(FIGURE_DIR.glob("figure_drafts_run*.jsonl")):
+        for row in _read_jsonl(path):
+            key = row.get("candidate_key") or ""
+            tag = str(row.get("tag") or "")[:1]
+            if key and tag:
+                rounds.setdefault(key, {})[tag] = row
+
+    said: dict[str, str] = {}
+    for row in _read_jsonl(STORE):  # 最後一次裁決說話（append-only 的「現在值」）
+        extras = (row.get("extras") or {}) if isinstance(row.get("extras"), dict) else {}
+        if (row.get("candidate_key") or "") in rounds and extras.get("figure_review"):
+            said[row["candidate_key"]] = str(extras["figure_review"])
+
+    def view(row: dict) -> dict:
+        rec = row.get("record") or {}
+        return {"decision": rec.get("decision"), "refs": rec.get("refs") or [],
+                "where": rec.get("where"), "basis": rec.get("basis"),
+                "degraded": bool(rec.get("degraded")),
+                "at": row.get("at"), "tag": row.get("tag")}
+
+    by_key = {}
+    for key, by in rounds.items():
+        hit = wo_rows.get(key) or {}
+        crops = ["review-ui/crops/%s/%s" % (hit.get("run", ""), fn)
+                 for fn in (by.get("A", {}).get("crop_files") or [])]
+        a, b = view(by.get("A", {})), view(by.get("B", {}))
+        agreed = None
+        if by.get("A") and by.get("B"):
+            agreed = (a["decision"], sorted(a["refs"])) == (b["decision"], sorted(b["refs"]))
+        by_key[key] = {"a": a, "b": b, "agreed": agreed, "crops": crops,
+                       "ruling": said.get(key, "")}
+    _FIGURE["stamp"], _FIGURE["by_key"] = stamp, by_key
+    return by_key
+
+
+def figure_draft_for(key: str) -> dict | None:
+    return _figure_state().get(key)
+
+
+# --- 待你看（L3 單一清單）-------------------------------------------------------------------
+#
+# 一個數字回答「現在積幾題等我」：文字草案待驗收＋圖草案已判 pass 未落地＋圖草案未判。
+# 來源全是 append-only 流，以 mtime 戳快取——任何一支筆動過就整表重建。
+
+_PENDING: dict = {"stamp": None, "payload": None}
+
+
+def pending_state() -> dict:
+    """待你看清單，最舊優先。每列帶 kind／草案摘要／該題被退回次數（≥3 → 反覆退回，要升級）。
+
+    文字草案（kind=text）pending 的判準：該題**最新**的 proposed 草案，且
+    （a）沒有帳本 accept 指到它、（b）不在 text_landing manifest（沒落地過）、
+    （c）晚於該題最新一筆人類 accept／退回——人已經說過話之後才提的草案才值得看。
+    圖草案：ruling=pass 未落地（figure_pass）與未判（figure_new）。
+    """
+    import hashlib
+
+    drafts_path = Path(bridge.DRAFTS)
+    ledger_path = Path(bridge.HUMAN_EVENTS)
+    sources = [drafts_path, ledger_path, Path(STORE), TEXT_LANDING_MANIFEST, FIGURE_LANDING_MANIFEST,
+               FIGURE_WO] + sorted(FIGURE_DIR.glob("figure_drafts_run*.jsonl"))
+    stamp = tuple((p, p.stat().st_mtime_ns) for p in sources if p.exists())
+    if _PENDING["stamp"] == stamp:
+        return _PENDING["payload"]
+
+    # 帳本一遍：每題最新**人類** accept 的時間、所有 sandbox accept 指到的草案 sha。
+    last_accept_at: dict[str, str] = {}
+    accepted_shas: set[str] = set()
+    if ledger_path.is_file():
+        with ledger_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if '"accept"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("action") != "accept":
+                    continue
+                reviewer = str(row.get("reviewer") or "")
+                if any(reviewer.startswith(p) for p in bridge.REPAIR_REVIEWER_PREFIXES):
+                    continue
+                key = row.get("candidate_key") or ""
+                at = str(row.get("created_at") or "")
+                if at > last_accept_at.get(key, ""):
+                    last_accept_at[key] = at
+                if row.get("source") == SANDBOX_ACCEPT_SOURCE:
+                    accepted_shas.add(str(row.get("repair_draft_sha256") or ""))
+
+    # 退回（學習流）：理由是下一輪的第一行輸入；次數是「反覆退回」升級提示的原料。
+    returns: dict[str, list[dict]] = {}
+    for row in _read_jsonl(Path(STORE)):
+        if row.get("action") != "repair_return":
+            continue
+        returns.setdefault(row.get("candidate_key") or "", []).append(
+            {"at": str(row.get("at") or ""), "reason": str(row.get("reason") or "")})
+
+    landed_text_shas: set[str] = set()
+    for row in _read_jsonl(TEXT_LANDING_MANIFEST):
+        drafts = row.get("drafts")
+        if isinstance(drafts, dict):
+            landed_text_shas.update(str(v) for v in drafts.values())
+    landed_figure_keys: set[str] = set()
+    for row in _read_jsonl(FIGURE_LANDING_MANIFEST):
+        for k in row.get("applied") or []:
+            landed_figure_keys.add(str(k))
+
+    items: list[dict] = []
+
+    def key_number(key: str):
+        m = re.search(r"q(\d+)$", key)
+        return int(m.group(1)) if m else None
+
+    # (a) 文字草案：每題**最新一列**（proposed 或 degraded，檔案序＝時間序，後面蓋前面）。
+    # 問過的題永遠有落點：最新是 proposed → 待你看；最新是 degraded → AI 答不出（原因）。
+    latest: dict[str, dict] = {}
+    if drafts_path.is_file():
+        with drafts_path.open("rb") as handle:
+            for raw in handle:
+                line = raw.rstrip(b"\n")
+                if not line or b'"repair_draft"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("status") not in ("proposed", "degraded"):
+                    continue
+                key = row.get("candidate_key") or ""
+                if key:
+                    row["_sha256"] = hashlib.sha256(line).hexdigest()
+                    latest[key] = row
+    for key, draft in latest.items():
+        sha = draft.get("_sha256") or ""
+        if sha in accepted_shas or sha in landed_text_shas:
+            continue
+        rets = returns.get(key) or []
+        last = max(last_accept_at.get(key, ""), rets[-1]["at"] if rets else "")
+        if draft.get("at", "") > last:
+            if draft.get("status") == "degraded":
+                items.append({"key": key, "kind": "text_degraded", "at": draft.get("at") or "",
+                              "number": draft.get("question_number") or key_number(key),
+                              "subject": draft.get("subject"),
+                              "label": "AI 答不出：%s" % (draft.get("note") or "未說明原因")[:70],
+                              "returns": len(rets)})
+                continue
+            items.append({"key": key, "kind": "text", "at": draft.get("at") or "",
+                          "number": draft.get("question_number") or key_number(key),
+                          "subject": draft.get("subject"),
+                          "label": "%s：%s" % (draft.get("insert") or "（未說明位置）",
+                                               (draft.get("fix") or "")[:60]),
+                          "draft_sha256": sha, "returns": len(rets)})
+
+    # (b)+(c) 圖草案：已判 pass 未落地、未判。
+    for key, d in _figure_state().items():
+        ruling = d.get("ruling") or ""
+        if ruling == "return":
+            continue
+        if ruling == "pass":
+            if key in landed_figure_keys:
+                continue
+            kind, label = "figure_pass", "圖草案已判通過、還沒寫入題庫"
+        else:
+            kind, label = "figure_new", "圖草案待核：%s" % ((d.get("a") or {}).get("decision") or "?")
+        items.append({"key": key, "kind": kind,
+                      "at": (d.get("a") or {}).get("at") or (d.get("b") or {}).get("at") or "",
+                      "number": key_number(key), "subject": None, "label": label,
+                      "returns": len(returns.get(key) or [])})
+
+    items.sort(key=lambda it: it["at"] or "9999")
+    payload = {"count": len(items), "items": items}
+    _PENDING["stamp"], _PENDING["payload"] = stamp, payload
+    return payload
 
 
 # The A2 run artifacts. `HERE` is `agent/ui`, so the sandbox is two levels up.
@@ -400,7 +1362,9 @@ class Chat:
                 ["node", str(HERE / "chat.mjs")],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=str(CATALOG), text=True, bufsize=1,
-                env={**os.environ, "REPAIR_AGENT_STORE": str(STORE_DIR)},
+                env={**os.environ, "REPAIR_AGENT_STORE": str(STORE_DIR),
+                     # 指揮者的腦（owner 2026-10-03）。空字串＝沿用 session.mjs 的預設腦。
+                     **({"REPAIR_AGENT_MODEL": CONDUCTOR_MODEL} if CONDUCTOR_MODEL else {})},
             )
         return self.process
 
@@ -488,7 +1452,11 @@ def chat_turns(key: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if (row.get("candidate_key") or None) == wanted:
-            out.append(row)
+            # usage 隨列走（owner 2026-10-03 的 token 計量）；舊列沒有就不帶鍵。
+            if row.get("usage"):
+                out.append({**row, "usage": row["usage"]})
+            else:
+                out.append(row)
     return out
 
 
@@ -511,12 +1479,27 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         try:
             if parsed.path in ("/", "/index.html"):
-                self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+                self._send(200, _page("index.html"), "text/html; charset=utf-8")
+            elif parsed.path == "/figure":
+                # 收掉獨立頁（owner 2026-10-02：「我要簡化而不是一直擴張」——主頁本來就有
+                # PDF 面板，圖草案併進題目頁中段）。302 只是讓舊書籤不要 404。
+                self._redirect("/")
+            elif parsed.path == "/api/figure":
+                self._json({"count": len(_figure_state()),
+                            "keys": sorted(_figure_state())})
+            elif parsed.path == "/api/pending":
+                self._json(pending_state())
             elif parsed.path == "/api/search":
                 self._search(query)
             elif parsed.path == "/api/browse":
@@ -542,6 +1525,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"turns": chat_turns(key)})
             elif parsed.path == "/api/queue":
                 self._queue(query)
+            elif parsed.path == "/api/runs":
+                # 業主 2026-10-03：「要有測試去監控指揮與做事模型之間的調度」。指揮者只能「說」
+                # 要開做事 run；真正派工（runner.mjs）的進度在這裡變成畫面上可見的狀態。
+                self._json(dispatch_status())
             elif parsed.path == "/file":
                 self._file(query)
             elif parsed.path == "/crop":
@@ -592,11 +1579,28 @@ class Handler(BaseHTTPRequestHandler):
                 if record["rating"] not in RATINGS:
                     self._json({"error": "rating must be one of %s" % ", ".join(RATINGS)}, 400)
                     return
+                extra = payload.get("extras")
+                if extra is not None:
+                    # 圖頁的結構化欄位（figure_review／refs／tag），只放窄白名單：鍵短、值短、
+                    # 最多 8 個——裁決的主體仍是 rating + reason，這些是可 join 的指針。
+                    if not isinstance(extra, dict):
+                        self._json({"error": "extras must be an object"}, 400)
+                        return
+                    record["extras"] = {str(k)[:32]: str(v)[:300]
+                                        for k, v in list(extra.items())[:8]}
                 self._json({"appended": append_judgement(record), "store": str(STORE)})
             elif parsed.path == "/api/accept-draft":
                 self._json(append_accept(payload))
+            elif parsed.path == "/api/accept-and-apply":
+                self._json(accept_and_apply(payload))
+            elif parsed.path == "/api/figure/apply":
+                self._json(_apply_figure_drafts(payload.get("keys")))
+            elif parsed.path == "/api/text/apply":
+                self._json(_apply_text_drafts(payload.get("keys")))
             elif parsed.path == "/api/return-draft":
                 self._json(append_return(payload))
+            elif parsed.path == "/api/apply-spots":
+                self._json(_apply_spot_verdicts(payload))
             elif parsed.path == "/api/chat/ask":
                 self._chat_ask(payload)
             elif parsed.path == "/api/chat/stop":

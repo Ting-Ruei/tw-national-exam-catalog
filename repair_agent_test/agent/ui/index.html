@@ -17,8 +17,6 @@
   :root {
     --ink: #1b1f24; --muted: #6b7280; --line: #d8dde5; --bg: #f6f8fa;
     --ok: #1a7f37; --warn: #9a6700; --bad: #b42318; --accent: #0969da;
-    /* Height reserved for the fixed write bar, so the panes are never hidden behind it. */
-    --footer-h: 168px;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.65 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
@@ -26,6 +24,12 @@
   header { padding: 10px 16px; background: #fff; border-bottom: 1px solid var(--line);
            display: flex; gap: 12px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #how { padding: 6px 16px; background: #fffdf3; border-bottom: 1px solid var(--line); }
+  #how summary { cursor: pointer; font-size: 13.5px; color: var(--ink); }
+  #how ol { margin: 8px 0 4px; padding-left: 22px; font-size: 13.5px; }
+  #how li { margin: 3px 0; }
+  .pane h2 .hint, #write h2 .hint { font-weight: 400; text-transform: none; letter-spacing: 0;
+                                   color: var(--muted); font-size: 12px; margin-left: 6px; }
   input, button, select { font: inherit; padding: 6px 9px; border: 1px solid var(--line);
                           border-radius: 6px; background: #fff; color: inherit; }
   button { cursor: pointer; }
@@ -51,6 +55,13 @@
   @media (max-width: 1000px) { main { grid-template-columns: 1fr; }
                                #chat-pane { grid-column: auto; } }
   .pane { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  /* 核圖模式（勾「圖草案待核」）：這份工作只需要 題幹＋選項＋那張圖＋通過/退回。
+     其他篩選與右欄 PDF 全收掉——PDF 面板換題重載是量到的慢因（2026-10-03），而核圖
+     要看的證據本來就是裁片本身，不是整卷。 */
+  body.figdraft-mode #paper-pane { display: none; }
+  body.figdraft-mode #chat-pane { display: none; }
+  body.figdraft-mode main { grid-template-columns: 310px minmax(0, 1fr) 340px; }
+  @media (max-width: 1700px) { body.figdraft-mode main { grid-template-columns: 290px minmax(0, 1fr) 340px; } }
   .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; font-weight: 600; }
   /* 「刷新此題」 lives in the pane title: it is a question-area action, not a filter. While the
@@ -60,16 +71,28 @@
   #refresh-question.watching { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   #refresh-question.refreshed { border-color: var(--ok, #3a7d44); color: var(--ok, #3a7d44); }
 
+  /* 調度燈（owner 2026-10-03）：綠＝最近一輪做事 run 有草案落成；灰＝沒有。 */
+  #dispatch-lamp { font-size: 12px; padding: 3px 8px; text-transform: none; letter-spacing: 0; }
+  #dispatch-lamp.busy { border-color: var(--ok, #3a7d44); color: var(--ok, #3a7d44); font-weight: 600; }
+  #dispatch-panel { margin: 2px 12px 0; }
+  #dispatch-body { white-space: pre-wrap; }
+
   /* 裁決列（教學 pane）：通過／退回在設計者剛對話的地方，草案的目標在那列看得到。 */
   #verdict-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
                  padding: 6px 0; border-top: 1px dashed var(--line); margin-top: 6px; }
   #verdict-target { flex: 1 1 240px; min-width: 160px; }
+  #verdict-target.warn { color: var(--bad); font-weight: 600; }
   li.draft.target { background: #f6f8ef; border-radius: 6px; padding: 4px 6px; }
+  li.draft .draft-detail { margin: 4px 0 0; font-size: 12px; }
+  li.draft .draft-detail summary { cursor: pointer; color: var(--muted); }
+  li.draft .draft-detail[open] { border-left: 2px solid var(--line); padding-left: 8px; }
+  .preview-banner { background: #fff7df; border: 1px solid #e3c04a; border-radius: 8px;
+                    padding: 6px 10px; margin-bottom: 10px; font-size: 13px; }
   .draft .old { color: var(--muted); text-decoration: line-through 1px solid var(--muted); }
   .draft .new { font-weight: 600; }
 
   /* the list */
-  #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - var(--footer-h) - 84px);
+  #list-wrap { position: sticky; top: 62px; max-height: calc(100vh - 84px);
                display: flex; flex-direction: column; gap: 8px; }
   #list-filters { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   #list-filters select { flex: 1 1 auto; min-width: 0; }
@@ -121,34 +144,48 @@
              border-radius: 4px; background: #fff; cursor: zoom-in; }
   .options li .t { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   /* The question's own figure crop (not an option's), shown under the stem. */
-  .fig-crop { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
+  .fig-crop { max-width: 100%; max-height: 160px; width: auto; object-fit: contain;
+              border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; cursor: zoom-in; }
+  /* 圖片草案區（併入主頁的核圖面板）：裁片一列、兩輪提法表、裁決按鈕列。 */
+  .fig-draft .crops { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .fig-draft .crops img { max-height: 260px; max-width: 100%; border: 1px solid var(--line);
+                          border-radius: 6px; background: #fff; }
+  .fig-draft .rounds { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .fig-draft .rounds th { text-align: left; vertical-align: top; padding: 4px 8px 4px 0;
+                          color: var(--muted); white-space: nowrap; }
+  .fig-draft .rounds td { padding: 4px 0; line-height: 1.55; }
+  .fig-draft .act { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .fig-draft .act input { flex: 1 1 220px; min-width: 0; }
   .fig-note { font-size: 12px; color: var(--muted); }
   .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 99px;
          border: 1px solid var(--line); background: var(--bg); color: var(--muted); margin-right: 5px; }
   .tag.bad { color: var(--bad); border-color: #f3c2bd; background: #fff5f4; }
   .tag.ok { color: var(--ok); border-color: #b7e0c1; background: #f2fdf5; }
+  /* 逐處裁決（owner 2026-10-03：一個地方改過就要有一個打勾打叉） */
+  .spot { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0;
+          background: #fff; }
+  .spot.undecided { border-left: 4px solid #f0d999; }
+  .spot.pass { border-left: 4px solid var(--ok); }
+  .spot.reject { border-left: 4px solid var(--bad); }
+  .spot .ctx { color: var(--muted); }
+  .spot .del { color: var(--bad); text-decoration: line-through; background: #fff5f4; }
+  .spot .ins { color: var(--ok); background: #f2fdf5; font-weight: 600; }
+  .spot .why { margin-left: 8px; width: 300px; font-size: 12px; }
+  .spot .vbtns { margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .spot button { padding: 2px 10px; font-size: 13px; border-radius: 6px; border: 1px solid var(--line);
+                 background: #fff; cursor: pointer; }
+  .spot button.on-ok { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .spot button.on-bad { background: var(--bad); color: #fff; border-color: var(--bad); }
   section { margin-top: 14px; }
   section > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
   .said { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin: 8px 0; }
   .said .who { font-size: 12px; color: var(--muted); }
   .said.designer { border-left-color: var(--accent); }
   .said.agent { border-left-color: var(--ok); }
-  #pdf-frame { width: 100%; height: calc(100vh - var(--footer-h) - 150px); min-height: 320px;
+  #pdf-frame { width: 100%; height: calc(100vh - 150px); min-height: 320px;
                border: 1px solid var(--line); border-radius: 6px; }
   #crop-img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
-  /* The write panel is a fixed footer. It used to sit below the panes, so the answer box and the
-     three buttons were only reachable by scrolling past the whole question and the PDF — the
-     designer had to scroll to judge (2026-09-28: 「我現在滑鼠滾輪要下滑才能看到框與按鈕」).
-     Fixed rather than sticky: a sticky element still scrolls with the document that contains it. */
-  body { padding-bottom: var(--footer-h); }
-  #write { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-           background: #fff; border-top: 1px solid var(--line);
-           box-shadow: 0 -2px 10px rgba(0,0,0,.06); padding: 10px 14px; }
-  #write textarea { width: 100%; min-height: 56px; max-height: 22vh; font: inherit; padding: 9px;
-                    border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
-  #write .row { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-  #write h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
-              color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  /* 「我的判讀」fixed bar 已隨功能移除（owner 2026-10-03）：--footer-h 變數一併退役。 */
   .empty-note { color: var(--muted); font-style: italic; }
   /* 「這一題用了哪幾條經驗」的原則清單：編號讓人在回話時能指「第 2 條」。 */
   ol.exp-list { margin: 4px 0 8px 20px; padding: 0; }
@@ -198,14 +235,6 @@
   .warn { background: #fff8e6; border: 1px solid #f0d999; padding: 9px 11px;
           border-radius: 6px; font-size: 13px; }
   /* three dispositions, not two: the middle one is an annotation, not a verdict */
-  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-  .buttons button { font-weight: 600; border-width: 1px; }
-  #btn-up { border-color: #b7e0c1; color: var(--ok); }
-  #btn-up:hover { background: #f2fdf5; }
-  #btn-down { border-color: #f3c2bd; color: var(--bad); }
-  #btn-down:hover { background: #fff5f4; }
-  #btn-hold { border-color: #f0d999; color: var(--warn); }
-  #btn-hold:hover { background: #fffaf0; }
 </style>
 </head>
 <body>
@@ -215,13 +244,33 @@
   <button id="find">搜尋</button>
   <input id="key" size="40" placeholder="candidate_key（直接貼上時用）">
   <button id="load">讀這一題</button>
+  <a id="v2-link" href="__V2_BASE__/v2" target="_blank" title="正式審題站——寫人審帳本的只有那裡">v2 審題站 ↗</a>
   <a id="a2-link" href="/a2" target="_blank" title="模型比對頁與執行記錄（a2/runs）">A2 執行產物</a>
+  <!-- 調度燈（owner 2026-10-03）：指揮↔做事的狀態一眼可見。點開＝詳情面板。 -->
+  <button id="dispatch-lamp" title="指揮者（對話）與做事模型（runner）之間的調度狀態">調度 · 未開工</button>
   <span id="status">尚未載入</span>
 </header>
 
+<details id="dispatch-panel">
+  <summary>調度：指揮者 ↔ 做事模型</summary>
+  <div id="dispatch-body" class="meta">讀取中…</div>
+</details>
+
+<details id="how">
+  <summary>這一頁怎麼用（點開：一分鐘版 ＋ 整個圈怎麼轉）</summary>
+  <ol>
+    <li><b>左邊列表挑一題</b>：中間看題目內容、右邊對官方紙本。</li>
+    <li><b>要 agent 做事</b>：右下對話框直接打字送出——它會邊做邊給你看。</li>
+    <li><b>它提出修法</b>後，<b>題幹正下方</b>就會出現「agent 提的修法」：點其中一條 → 上面立刻預覽改完的樣子 → 滿意按 ✅、不滿意按 ↩（寫一句理由給它學）。✅ 的當下就是已寫入（帳本＋題庫＋經驗一次完成）。</li>
+    <li><b>「待你看」清單</b>（左欄勾選或 <code>?mode=review</code>）：草案已提出、等你裁決的題全部在這裡，最舊優先；中欄直接是改後整題，鍵盤 A＝✅、X＝退回。同一題退回 3 次會標「反覆退回」——該升級處理，不是無限迴圈。</li>
+    <li><b>正式裁決「題目准不准」</b>在右上 v2 審題站（帳本只有那裡寫）；<b>核對圖片草案</b>在這一頁中段「圖片草案」區（有草案的題目才會出現，右邊 PDF 一直是原本的紙本）。</li>
+    <li>你按過的每一件事都寫進檔案，沒有東西只存在畫面上：學習檔 <code>agent_feedback.jsonl</code>、修法清單 <code>repair_drafts.jsonl</code>、正式帳本 <code>question_review_events.jsonl</code>。</li>
+  </ol>
+</details>
+
 <main>
   <div class="pane" id="list-wrap">
-    <h2>候選列表</h2>
+    <h2>候選列表 <span class="hint">點一題就會載入；上面的篩選只是縮小清單</span></h2>
     <div id="list-filters">
       <select id="category"><option value="">載入中…</option></select>
       <select id="human-status" title="人在站上（v2）對這一題做過的裁決">
@@ -235,6 +284,8 @@
       </select>
       <label><input type="checkbox" id="only-unjudged">未判讀</label>
       <label><input type="checkbox" id="only-figures">有圖</label>
+      <label><input type="checkbox" id="only-figdrafts" title="agent 已提出「圖怎麼插」草案、等你核讀的題目">圖草案待核</label>
+      <label><input type="checkbox" id="only-pending" title="草案已提出、等你 ✅/↩ 的題（文字＋圖），最舊優先">待你看 (…)</label>
       <label><input type="checkbox" id="only-disputed" title="設計者曾標記為有問題（block／comment）">有問題的（你說過的）</label>
     </div>
     <div id="legend">
@@ -246,7 +297,8 @@
   </div>
 
   <div class="pane">
-    <h2>題目（整題完整）
+    <h2>題目（整題完整） <span class="hint">看內容與機器對圖的說法</span>
+      <a id="v2-question" hidden target="_blank" title="到正式審題站打開這一題（帶著卷次與題號）">在 v2 開這一題 ↗</a>
       <button id="refresh-question"
         title="重抓重畫：把檔案裡的最新內容重新拉一次。不清單、不整頁，左邊選的位置不動。">刷新此題</button>
     </h2>
@@ -254,15 +306,15 @@
     <div id="qbody"><p class="empty-note">從左邊的列表點一題，或在上方搜尋。</p></div>
   </div>
 
-  <div class="pane">
-    <h2>紙本（右側，與左側解耦）</h2>
+  <div class="pane" id="paper-pane">
+    <h2>紙本 <span class="hint">官方卷對照——它不跟著左邊換頁</span></h2>
     <div id="pdfmeta" class="meta"></div>
     <iframe id="pdf-frame" title="官方題目卷"></iframe>
     <div id="crop-wrap"></div>
   </div>
 
   <div class="pane" id="chat-pane">
-    <h2>跟 agent 對話
+    <h2>跟 agent 對話 <span class="hint">直接打字說要改什麼；它會邊做邊給你看</span>
       <span class="chat-modes">
         <button id="chat-mode-question" class="on" title="對話綁在左邊選到的題目上">綁這一題</button>
         <button id="chat-mode-corpus" title="不綁題：從整個題庫的角度討論，它可以自己找題">全庫</button>
@@ -274,11 +326,10 @@
     <div id="chat-log"></div>
     <div id="verdict-bar">
       <span id="verdict-target" class="meta">未選草案——在題目面板挑一則草案「設為驗收對象」。</span>
-      <button id="accept-draft" class="primary"
-        title="通過選定草案：寫進人審帳本，事件參照草案的 checksum。機器不會代按。">✅ 通過（寫人審帳本）</button>
-      <button id="return-draft" title="退回選定草案：理由必填，理由成為規則候選。">↩ 退回（進規則候選）</button>
-      <input id="return-reason" size="34" placeholder="退回理由（必填；成為規則候選）">
-      <button id="verdict-clear" title="收掉本次的驗收選擇">收掉</button>
+      <span id="verdict-actions" hidden>
+        <button id="verdict-clear" title="只是取消目前選定的草案，不寫任何檔案。">取消選取</button>
+        <span class="meta" style="flex-basis:100%">通過＝記錄「這個修法可以」（寫進帳本）｜退回＝把原因教給 agent。按鈕在每則草案列上（題幹正下方「agent 提的修法」）。</span>
+      </span>
     </div>
     <div id="chat-row">
       <textarea id="chat-text" rows="2"
@@ -290,19 +341,9 @@
   </div>
 </main>
 
-<div id="write">
-  <h2>我的判讀（寫進檔案，成為 agent 的學習語料）</h2>
-  <textarea id="reason" placeholder="可留空——一個鍵就是一個判決。要註解時寫具體：哪個字／哪個欄位／哪張圖不同。例：「選項 B 在紙本上是第 3 個化學結構式，抽取值空了」"></textarea>
-  <div class="row">
-    <div class="buttons">
-      <button id="btn-up">沒問題</button>
-      <button id="btn-down">有問題</button>
-      <button id="btn-hold">暫存</button>
-    </div>
-    <span id="save-status" class="meta"></span>
-    <span class="meta" style="margin-left:auto">「暫存」＝留著這句話、我還沒判斷</span>
-  </div>
-</div>
+<!-- 「我的判讀」已移除（owner 2026-10-03）：那是 reviewUI（v2）該有的功能；沙盒裡你對修法的
+     裁決就是草案列上的 ✅/↩，對 agent 說話用右下對話框。寫路徑 `/api/judgement` 留著——
+     agent 的 record_judgement 工具寫同一個學習流。 -->
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -344,7 +385,15 @@ function platformInline(text) {
 }
 
 async function api(path, options) {
-  const response = await fetch(path, options);
+  // 純物件＝JSON body（method 預設 POST）。之前 `api("/api/judgement", {…})` 這種呼叫點
+  // 把純物件直接當 fetch init——沒有 method/body，瀏覽器發出 **GET**，後端回 404，
+  // 畫面上就是「按了沒反應」（量測 2026-10-03：GET /api/figure/apply → 404）。
+  const init = options !== null && typeof options === "object"
+    && !("method" in options) && !("body" in options) && !Array.isArray(options)
+    ? { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options) }
+    : options;
+  const response = await fetch(path, init);
   const payload = await response.json().catch(() => ({ error: "回應不是 JSON" }));
   if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
   return payload;
@@ -507,15 +556,29 @@ function renderDrafts(question) {
   return `<ul>${rows.map((row) => {
     const sha = row._sha256 || "";
     const isAccepted = accepted.has(sha);
+    const fixHtml = row._fix_html || esc(row.fix || "（沒寫修法）");
+    // 緊湊列（owner 2026-10-03）：**proposed 是主角**——改完的完整文字直接給全句；
+    // 現值與依據折進 details（點開才展開），列高從 ~370px 降到一兩行。
     return `<li class="draft ${verdictDraftSha === sha && !isAccepted ? "target" : ""}" data-draft-sha="${esc(sha)}">
     <div><span class="tag ${isAccepted ? "ok" : ""}">${isAccepted ? "已通過（帳本）" : esc(row.status || "草案")}</span>
-      <b>${esc(row.insert || "（未說明位置）")}</b>：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span>
-      → <span class="new">${esc(row.fix || "（沒寫修法）")}</span></div>
-    <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
-    ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
-      ${row.crop.path && row.crop.path.includes("/store/crops/")
-        ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
-    ${!isAccepted && sha ? `<div class="meta"><a href="#" class="picky" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</a></div>` : ""}
+      <b>${esc(row.insert || "（未說明位置）")}</b>（改完後）：<span class="new">${fixHtml}</span>
+      <details class="draft-detail"><summary>原值／依據／憑證</summary>
+        <div class="meta">現值：<span class="old">${esc(draftCurrentValue(question, row) || "（現值）")}</span></div>
+        <div class="meta">依據：${esc(row.basis || "（沒寫依據）")} · ${row.at ? esc(row.at) : ""}</div>
+        ${row.crop ? `<div class="meta">裁片憑證：<span class="k">${esc((row.crop.sha256 || "").slice(0, 12))}…</span>
+          ${row.crop.path && row.crop.path.includes("/store/crops/")
+            ? `<a href="/crop?path=${encodeURIComponent(row.crop.path)}" target="_blank">看圖</a>` : esc(row.crop.path || "")}</div>` : ""}
+      </details>
+    </div>
+    ${!isAccepted && sha && !(row._spots || []).length ? `<div class="act">
+      <button class="pick" data-draft-sha="${esc(sha)}">${verdictDraftSha === sha ? "◎ 驗收對象" : "設為驗收對象"}</button>
+      <button class="ok" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>✅ 按這個修</button>
+      <button class="bad" data-draft-sha="${esc(sha)}" ${verdictDraftSha === sha ? "" : "disabled"}>↩ 退回</button>
+      <input class="why" placeholder="退回理由（可留空）" ${verdictDraftSha === sha ? "" : "disabled"}>
+      <a href="#" class="picky" data-draft-sha="${esc(sha)}">👁 先看改完的樣子</a>
+    </div>` : ""}
+    ${!isAccepted && sha && (row._spots || []).length
+      ? `<div class="meta">逐處 ✅/✗ 在上面的「改過的地方」——這裡不再給整句按鈕，兩個地方裁同一題就會有兩種紀錄。</div>` : ""}
   </li>`;}).join("")}</ul>`;
 }
 
@@ -538,6 +601,149 @@ function draftCurrentValue(question, draft) {
 }
 
 let verdictDraftSha = null;
+
+// -- 逐處裁決（owner 2026-10-03）：原題在上、改過的地方一處一組 ✅/✗。 ----------------------
+// verdicts 以草案 sha 為鍵，陣列序＝後端 `_spots` 的序（同一份 bridge.text_spots 切出來的）。
+// null＝還沒裁決；套用前每一處都要有裁決——看過但不表態的修改不會被偷偷寫入。
+let spotVerdicts = {};
+
+function pendingDraftOf(question) {
+  const pend = pendingByKind[question?.candidate_key || ""];
+  if (!pend || !["text"].includes(pend.kind) || !pend.draft_sha256) return null;
+  return (question?.drafts || []).find((d) => d._sha256 === pend.draft_sha256) || null;
+}
+
+function renderSpots(question) {
+  const draft = pendingDraftOf(question);
+  const spots = draft?._spots || [];
+  const box = $("spots-box");
+  if (!box) return;
+  if (!draft || !spots.length) { box.hidden = true; box.innerHTML = ""; return; }
+  if ((spotVerdicts[draft._sha256] || []).length !== spots.length) {
+    spotVerdicts[draft._sha256] = spots.map(() => ({ pass: null, reason: "" }));
+  }
+  const verdicts = spotVerdicts[draft._sha256];
+  const decided = verdicts.filter((v) => v.pass !== null).length;
+  const esc2 = esc;
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="preview-banner" style="border-color:#b7e0c1">
+      ✂ <b>改過的地方（${spots.length} 處）</b>——上面是原題（做題畫面）。每一處都要裁決：
+      ✅ 放行、✗ 打叉要寫理由。已裁 ${decided}/${spots.length}
+      ${draft.basis ? `｜依據：${esc2(draft.basis).slice(0, 70)}` : ""}
+    </div>
+    ${spots.map((sp, i) => {
+      const v = verdicts[i];
+      const cls = v.pass === true ? "pass" : v.pass === false ? "reject" : "undecided";
+      return `<div class="spot ${cls}" data-spot="${i}">
+        <div>…<span class="ctx">${esc2(sp.before_context)}</span><span class="del">${esc2(sp.before) || "（此處原文被刪）"}</span><span class="ins">${esc2(sp.after) || "（刪除）"}</span><span class="ctx">${esc2(sp.after_context)}…</span></div>
+        <div class="vbtns">
+          <button class="spot-ok ${v.pass === true ? "on-ok" : ""}" data-spot="${i}">✅ 放行</button>
+          <button class="spot-bad ${v.pass === false ? "on-bad" : ""}" data-spot="${i}">✗ 打叉</button>
+          ${v.pass === false ? `<input class="why" data-spot="${i}" placeholder="✗ 理由（必填——理由是 AI 下一輪的第一行）" value="${esc2(v.reason)}">` : ""}
+        </div>
+      </div>`;
+    }).join("")}
+    <button id="spots-apply" ${decided === spots.length ? "" : "disabled"}
+      style="margin-top:8px;padding:6px 14px;font-weight:600">套用我的裁決（放行 ${verdicts.filter((v) => v.pass === true).length}／${spots.length} 處${decided < spots.length ? `——還有 ${spots.length - decided} 處沒裁` : ""}）</button>`;
+}
+
+async function applySpots() {
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const verdicts = spotVerdicts[draft._sha256] || [];
+  if (!verdicts.length || verdicts.some((v) => v.pass === null)) {
+    verdictWarn("每一處都要先裁決（✅ 或 ✗）——看過但不表態的修改不會被寫入。");
+    return;
+  }
+  try {
+    const result = await api("/api/apply-spots", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: current.candidate_key, draft_sha256: draft._sha256, verdicts }),
+    });
+    if (!result.wrote) {
+      $("verdict-target").textContent = `全部 ${result.returned} 處都打了叉——candidates 沒動，理由已進生產者的下一輪。`;
+    } else {
+      $("verdict-target").textContent = `已寫入 ${result.spots_applied}/${result.spots_total} 處；v2 重新整理即見。` +
+        (result.spots_returned ? ` ${result.spots_returned} 處連理由退回生產者。` : "");
+    }
+    spotVerdicts[draft._sha256] = [];
+    await refreshPending();
+    await refreshQuestion("manual");
+  } catch (error) {
+    verdictWarn("套用失敗：" + error.message + "——candidates 沒有被動到。");
+  }
+}
+
+// 事件委派：spots-box 內的按鈕／輸入（重新渲染後仍在）。
+document.addEventListener("click", (event) => {
+  const ok = event.target.closest(".spot-ok");
+  const bad = event.target.closest(".spot-bad");
+  if (!ok && !bad) return;
+  if (event.target.closest("button")) event.preventDefault();
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const verdicts = spotVerdicts[draft._sha256];
+  const i = Number((ok || bad).dataset.spot);
+  verdicts[i].pass = ok ? true : false;
+  if (ok) verdicts[i].reason = "";
+  renderSpots(current);
+  if (bad) { const why = document.querySelector(`.spot[data-spot="${i}"] input.why`); why && why.focus(); }
+});
+document.addEventListener("input", (event) => {
+  if (!event.target.matches(".spot input.why")) return;
+  const draft = pendingDraftOf(current);
+  if (!draft) return;
+  const i = Number(event.target.dataset.spot);
+  if (spotVerdicts[draft._sha256]?.[i]) spotVerdicts[draft._sha256][i].reason = event.target.value;
+});
+
+
+// 所見即所得（designer, 2026-10-02:「我在中間還是看不到她真正改過的樣子」）。The preview renders
+// the question **as if the selected draft were applied**, through the same renderers the real
+// question uses — not a text diff. It never writes: the copy is local, `current` stays the real
+// question, and every POST keeps reading `current`.
+let previewDraftSha = null;
+
+function appliedQuestion(question) {
+  if (!previewDraftSha || !question) return question;
+  const d = (question.drafts || []).find((x) => x._sha256 === previewDraftSha);
+  if (!d) return question;
+  const insert = d.insert || "";
+  // `fix` leads with the target ("A: …") because the drafts panel shows it that way; strip the
+  // prefix when applying. Stem previews drop `stem_html` so the plain-text fallback is used —
+  // the cached html is the OLD stem and would silently win the preview.
+  const fix = (d.fix || "").replace(/^[A-D]\s*[:：]\s*/, "");
+  const om = insert.match(/(?:選項|options?)\s*([A-D])/i);
+  if (om) {
+    const key = om[1];
+    if (Array.isArray(question.options)) {
+      // Platform shape: list of {key, text, ...} rows. The cached `options_html` entry for this
+      // key is the OLD value and would win inside platformHtml — drop it so the fallback path
+      // renders the previewed text.
+      const opts = question.options.map((o) => (o.key === key ? { ...o, text: fix } : o));
+      const html = (question.options_html || []).filter((o) => o.key !== key);
+      return { ...question, options: opts, options_html: html };
+    }
+    const opts = { ...(question.options || {}) };
+    if (opts[key] !== undefined) opts[key] = fix;
+    return { ...question, options: opts };
+  }
+  if (insert.includes("題幹") || insert.includes("stem")) {
+    // 結構守門（owner 2026-10-03）：agent 曾把「在「得到」後面補「(如下圖)」」這種**建議**寫進
+    // fix，預覽直接把整句題幹換掉——原題消失。判準（difflib 相似度）**只在後端算一次**
+    // （`question_payload` 的 `_stem_guard`），前端只讀——一份契約，不許兩份實作。
+    // 不像就**一個字都不套用**，由 renderQuestion 畫警告橫幅明說原因。失敗要看得見。
+    if (d._stem_guard !== true) return { ...question,
+             _previewBlocked: d._stem_guard === false
+               ? `這條草案的 fix 不是「改完後的完整文字」（像是建議或片段），預覽不套用——題目保持原樣；請叫 agent 重提（fix 要寫整句）`
+               : `這條草案的 insert 指向不存在的欄位或選項，預覽不套用——✅ 也會被後端拒絕；請叫 agent 重提。` };
+    // 預覽也走**平台渲染**（伺服器已對這份 fix 算好 `_fix_html`，與題幹同一支 normalizer）：
+    // h<sup>-1</sup> 這類上標在預覽裡就是上標，不是字面 `<sup>`。
+    return { ...question, stem: fix, _fix_html: d._fix_html || null, stem_html: null };
+  }
+  return question;
+}
 
 function renderSaid(rows) {
   if (!rows?.length) return '<p class="empty-note">還沒有判讀。</p>';
@@ -665,12 +871,35 @@ const HUMAN_LABEL = {
 };
 let listRows = [];
 
+// -- 待你看（L3 單一清單）：一個數字回答「現在積幾題等我」。 --------------------------------
+// 文字草案（最舊優先）＋圖 pass 未落地＋圖未判，全部在 /api/pending；左欄清單就是這一份，
+// W/S 走它（導覽跟隨被畫出的清單）。`pendingByKind` 讓 loadQuestion 知道這一題在等**哪一筆**
+// 草案——中欄一開就是改後整題，不是再按一次預覽。
+let pendingItems = [];
+let pendingByKind = {};
+const PENDING_LABEL = { text: "文字草案", text_degraded: "AI 答不出", figure_pass: "圖 pass 待寫入", figure_new: "圖草案待核" };
+
+async function refreshPending() {
+  const d = await api("/api/pending");
+  pendingItems = d.items || [];
+  pendingByKind = Object.fromEntries(pendingItems.map((it) => [it.key, it]));
+  $("only-pending").parentElement.lastChild.textContent = `待你看（${d.count}）`;
+  return d;
+}
+
 function renderList(rows, total) {
   listRows = rows;
   $("cat-count").textContent = rows.length === total
     ? `${total} 題`
     : `顯示 ${rows.length}／${total} 題`;
-  $("list").innerHTML = rows.length ? rows.map((q) => {
+  // 分頁渲染（owner 2026-10-03「UI 還是很慢」）：4,268 列一次畫完是慢的主因（端點都 <150ms，
+  // 慢在前端 DOM）。一次畫 300 列，「顯示更多」往下長；W/S 導覽仍走完整 listRows（清單畫到哪
+  // 不改變什麼被走過——「filter 只縮小畫的範圍，不改變走的範圍」的教訓反過來也成立）。
+  const PAGE = 300;
+  if (renderList._rows !== rows) { renderList._rows = rows; renderList._page = 1; }
+  const shown = rows.slice(0, renderList._page * PAGE);
+  const more = rows.length - shown.length;
+  const rowHtml = (q) => {
     // Three chips, three sources, drawn apart. He said the sandbox did not strictly separate
     // 「已經審過」 from 「有問題」 (2026-09-29); it was drawing one `judged` flag for what is really
     // (a) his decision on the station, (b) his decision pressed here, (c) the agent's own rating.
@@ -682,18 +911,26 @@ function renderList(rows, total) {
     const agent = q.judged_by_agent
       ? `<span class="judged ${esc(q.judged_by_agent)}">代理：${esc(JUDGED_LABEL[q.judged_by_agent] || q.judged_by_agent)}</span>` : "";
     const figures = q.figures ? `<span class="tag">圖 ${q.figures}</span>` : "";
+    const figd = figDraftKeys.has(q.candidate_key) ? '<span class="tag ok" title="agent 已提出圖片草案，題目頁中段可核讀">圖草案</span>' : "";
     // The designer's own flag, and his own words. He said the sandbox made his earlier review
     // invisible (「我原本在 v2 審核過的大量題目也沒有紀錄」); a list that shows what he wrote is the
     // smallest thing that makes it visible again.
     const disputed = q.disputed ? '<span class="tag bad">你說過</span>' : "";
+    const pend = q.pending_kind
+      ? `<span class="tag ${q.pending_kind === "text" ? "" : q.pending_kind === "text_degraded" ? "bad" : "ok"}" title="待你看">${esc(PENDING_LABEL[q.pending_kind] || q.pending_kind)}</span>` : "";
+    const retry = (q.returns || 0) >= 3
+      ? `<span class="tag bad" title="同一題被退回 ${q.returns} 次——升級處理：自己裁決或換策略，不是無限迴圈">反覆退回×${q.returns}</span>` : "";
     const note = q.notes ? `<div class="note">${esc(q.notes)}</div>` : "";
     return `<div class="row" data-key="${esc(q.candidate_key)}">
-      <div class="top"><span class="no">q${esc(q.question_number)}</span>${human}${mine}${agent}${disputed}${figures}</div>
+      <div class="top"><span class="no">q${esc(q.question_number)}</span>${pend}${retry}${human}${mine}${agent}${disputed}${figures}${figd}</div>
       <div class="sub">${esc(q.subject || "")} ${esc(q.year || "")}</div>
       <div class="snip">${esc(q.stem || "")}</div>
       ${note}
     </div>`;
-  }).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>';
+  };
+  $("list").innerHTML = (shown.length ? shown.map(rowHtml).join("") : '<p class="empty-note" style="padding:10px">這個條件下沒有題目。</p>')
+    + (more > 0 ? `<div style="padding:10px;text-align:center"><button id="list-more" style="padding:6px 18px">顯示更多（還有 ${more} 題）</button></div>` : "");
+  $("list-more")?.addEventListener("click", () => { renderList._page += 1; renderList(renderList._rows, renderList._rows.length); });
   highlightCurrent();
 }
 
@@ -741,16 +978,22 @@ function go(step) {
   loadQuestion();
 }
 
-function judgeKey(rating) {
-  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
-  // One key is one verdict (designer, 2026-09-30: 判定免註解). The note is optional — whatever is
-  // typed travels with the rating; the agent's rating is the one that must carry its basis (its
-  // own contract, refused in the bridge). Nothing is silently swallowed: the row is written with
-  // an empty `reason` and the stream says which column was empty.
-  save(rating).then(() => go(1));
-}
-
 async function loadList() {
+  // 待你看模式：清單就是 /api/pending 那一份（跨科目，最舊優先），不吃類科篩選。
+  if ($("only-pending").checked) {
+    $("list").innerHTML = '<p class="empty-note" style="padding:10px">載入中…</p>';
+    try {
+      const d = await refreshPending();
+      $("cat-count").textContent = `最舊優先 · 共 ${d.count} 題`;
+      renderList(pendingItems.map((it) => ({
+        candidate_key: it.key, question_number: it.number, subject: it.subject || "",
+        stem: it.label || "", pending_kind: it.kind, returns: it.returns || 0,
+      })), pendingItems.length);
+    } catch (error) {
+      $("list").innerHTML = `<p class="warn" style="margin:10px">${esc(error.message)}</p>`;
+    }
+    return;
+  }
   const category = $("category").value;
   if (!category) { $("list").innerHTML = ""; $("cat-count").textContent = "—"; return; }
   $("list").innerHTML = '<p class="empty-note" style="padding:10px">載入中…</p>';
@@ -761,38 +1004,190 @@ async function loadList() {
   if ($("human-status").value) query.set("status", $("human-status").value);
   try {
     const data = await api("/api/browse?" + query);
-    renderList(data.questions || [], data.total || 0);
+    let rows = data.questions || [];
+    // 圖草案篩選在**清單上**，不走 walker（v2 的規則：導覽跟隨被畫出的清單）。keys 是一次抓的
+    // Set，所以這裡是查表不是再打一次 API。
+    if ($("only-figdrafts").checked) rows = rows.filter((q) => figDraftKeys.has(q.candidate_key));
+    renderList(rows, data.total || 0);
   } catch (error) {
     $("list").innerHTML = `<p class="warn" style="margin:10px">${esc(error.message)}</p>`;
   }
 }
 
+// -- 圖片草案：哪幾題有草案（一次抓 key set；每題的草案本體走 /api/question）---------------
+let figDraftKeys = new Set();
+api("/api/figure").then((d) => {
+  figDraftKeys = new Set(d.keys || []);
+  // label 的文字節點是最後一個 child（input 在前面）；直接換 text 免去重建 label。
+  const lab = $("only-figdrafts").parentElement;
+  lab.lastChild.textContent = `圖草案待核（${figDraftKeys.size}）`;
+  if ($("category").value) loadList();   // 若清單已開著，補上徽章／重套篩選
+}).catch(() => {});                       // 抓不到就當沒有——題目頁的草案區仍照 /api/question 走
+
+// 核圖模式：勾上「圖草案待核」就把跟這份工作無關的篩選收掉（不是刪，換回取消勾選即還原）。
+function syncFigdraftMode() {
+  const on = $("only-figdrafts").checked;
+  document.body.classList.toggle("figdraft-mode", on);
+  ["only-unjudged", "only-figures", "only-disputed"].forEach((id) => {
+    const box = $(id);
+    if (box) box.parentElement.style.display = on ? "none" : "";
+  });
+  const hs = $("human-status");
+  if (hs) hs.parentElement.style.display = on ? "none" : "";
+}
+$("only-figdrafts").addEventListener("change", syncFigdraftMode);
+
+// 待你看模式：跟核圖模式同一招——收掉跟「驗收草案」無關的篩選，換回取消勾選即還原。
+function syncPendingMode() {
+  const on = $("only-pending").checked;
+  document.body.classList.toggle("pending-mode", on);
+  ["only-unjudged", "only-figures", "only-figdrafts", "only-disputed"].forEach((id) => {
+    const box = $(id);
+    if (box) box.parentElement.style.display = on ? "none" : "";
+  });
+  const hs = $("human-status");
+  if (hs) hs.parentElement.style.display = on ? "none" : "";
+  $("category").parentElement.style.display = on ? "none" : "";
+  loadList();
+}
+$("only-pending").addEventListener("change", syncPendingMode);
+refreshPending().catch(() => {});   // 晶片上的數字先亮起來，清單等使用者點
+
+// -- 圖片草案（併入題目頁，2026-10-02 owner 裁決：不要獨立頁）-----------------------------
+// 裁片＋兩輪提法掛在題目中段；整題就在上面、官方卷在右邊——核讀只看這一頁。
+function renderFigureDraft(d) {
+  if (!d) return "";
+  const cropTag = (d.crops || []).length
+    ? d.crops.map((p) => `<img loading="lazy" src="/file?path=${encodeURIComponent(p)}" alt="草案裁片">`).join("")
+    : '<span class="tag bad">找不到裁片路徑（工單 join 缺）</span>';
+  const round = (r) => r ? `<tr><th>輪 ${esc(r.tag || "?")}</th><td>
+      <b>${r.decision === "insert" ? "插入" : r.decision === "none" ? "不用圖" : r.degraded ? "⚠ degraded" : esc(r.decision || "?")}</b>
+      refs：<span class="refs">${esc((r.refs || []).join(", ") || "—")}</span><br>
+      插哪：${esc(r.where || "—")}<br>
+      依據：${esc(r.basis || "—")}</td></tr>` : "";
+  const agreed = d.agreed === true ? '<span class="tag ok">兩輪一致</span> '
+    : d.agreed === false ? '<span class="tag bad">兩輪不一致</span> ' : "";
+  const ruled = d.ruling === "pass" ? '<span class="tag ok">你判：通過</span>'
+    : d.ruling === "return" ? '<span class="tag bad">你判：退回</span>' : "";
+  const landed = d.landed
+    ? '<div class="meta">✅ 已寫入題庫（v2 重新整理即見）</div>'
+    : d.ruling === "pass"
+      ? `<div class="act"><button id="fig-apply">⬇ 之前已判通過、還沒寫入題庫——按這裡寫入</button></div>` : "";
+  return `
+    <div class="fig-draft">
+      <div class="meta">${agreed}${ruled}${ruled ? "——再按會追加一筆新裁決（append-only）" : "核讀寫進學習檔 agent_feedback.jsonl；通過的當下就寫入題庫"}</div>
+      <div class="crops">${cropTag}</div>
+      <table class="rounds">${round(d.a)}${round(d.b)}</table>
+      ${landed}
+      <div class="act">
+        <input id="fig-reason" placeholder="退回理由（例：這是別題的圖）">
+        <button id="fig-approve">✅ 這個 refs 提法是對的</button>
+        <button id="fig-return">↩ 不對（退回）</button>
+      </div>
+    </div>`;
+}
+
+async function figureApply(keys) {
+  const out = await api("/api/figure/apply", { keys });
+  if (!out || out.error) { setStatus("寫入題庫失敗：" + ((out && out.error) || "無回應")); return false; }
+  const sk = out.skipped || [];
+  setStatus(`✅ 已寫入題庫：${(out.applied || []).length} 題${sk.length ? "；跳過 " + sk.length +
+    " 題（" + sk.slice(0, 3).map((s) => s.key.split(":").pop() + "：" + s.reason).join("；") + "）" : ""}`);
+  return true;
+}
+
+async function figureVerdict(rating, review) {
+  const d = current && current.figure_draft;
+  if (!d) return;
+  const reason = ($("fig-reason")?.value || "").slice(0, 400);
+  if (review === "return" && !reason) {
+    const box = $("fig-reason"); if (box) box.focus();
+    setStatus("退回要說理由（AI 從理由學下一次怎麼改）——先填再按 ↩"); return;
+  }
+  const body = {
+    key: current.candidate_key, rating,
+    reason: reason || (review === "pass" ? "figure refs 提法正確" : ""),
+    engine: "human:designer", source: "designer", audit_scope: "figure_ref",
+    question_number: current.candidate_key.split(":").pop(),
+    extras: { figure_review: review, refs: (d.a.refs || []).join(";"),
+              decision_a: d.a.decision || "", decision_b: d.b.decision || "" },
+  };
+  const out = await api("/api/judgement", body);
+  if (out && out.error) { setStatus("圖草案裁決失敗：" + out.error); return; }
+  if (review === "pass") {
+    // 按下去的當下就是改好的題目：記錄通過後立刻寫入 candidates（同一個動作，不是兩個流程）。
+    const ok = await figureApply([current.candidate_key]);
+    if (ok) { $("fig-reason").value = ""; await loadQuestion(); return; }
+  } else {
+    $("fig-reason").value = "";
+    setStatus("圖草案：已記退回——理由已進學習檔，AI 下一輪會讀到");
+  }
+  loadQuestion();  // 重抓——草案流 mtime 變了，伺服器重組表後新裁決會畫出來
+}
+
 function renderQuestion(question) {
   current = question;
+  // Preview swaps the displayed copy; `current` above stays the untouched question for POSTs.
+  question = appliedQuestion(question);
+  refreshVerdictTarget();  // visibility is per-question: a draftless question must hide the actions
+  const picked = previewDraftSha && (current.drafts || []).find((x) => x._sha256 === previewDraftSha);
+  // `question._previewBlocked` is set by appliedQuestion when the fix is not a full replacement:
+  // the banner below explains instead of silently showing a stem the fix erased.
+  const previewing = picked && !question._previewBlocked;
   setStatus(`已載入 q${question.question_number}（${question.subject || question.category || ""}）`);
-  $("key").value = question.candidate_key;
+  $("key").value = current.candidate_key;
   highlightCurrent();
-  $("qmeta").innerHTML = renderTags(question);
+  $("qmeta").innerHTML = renderTags(current);
+  // The deep link is per-question and built server-side (v2's own hash shape); hidden when the
+  // question lacks the paper coordinates rather than shown as a link that opens nothing.
+  const v2q = $("v2-question");
+  if (v2q) { v2q.href = current.v2_url || "__V2_BASE__/v2"; v2q.hidden = !current.v2_url; }
   $("qbody").innerHTML = `
-    <div class="stem study">${platformHtml(question.stem_html, question.stem || "（題幹是空的）")}</div>
+    ${question._previewBlocked && picked ? `<div class="preview-banner" style="border-color:#f3c2bd;background:#fff5f4">⚠ ${esc(question._previewBlocked)}。
+      <a href="#" id="preview-off">關閉預覽</a></div>` : ""}
+    ${(() => {
+      // 待你看橫幅：她改了什麼（insert＋依據）一行說完；✅/↩ 就在草案列上。
+      // previewing＝改後整題在畫面上；否則（待你看模式收掉預覽時）給一條「看改後的樣子」。
+      // 資訊跟著 verdictDraftSha（對照原版之後 previewDraftSha 是 null）。
+      const d = (current.drafts || []).find((x) => x._sha256 === (previewDraftSha || verdictDraftSha));
+      if (!d || (question._previewBlocked && picked)) return "";
+      if (previewing) {
+        return `<div class="preview-banner">👁 她改了什麼：<b>${esc(d.insert || "草案")}</b> → ${esc((d.fix || "").slice(0, 80))}${(d.fix || "").length > 80 ? "…" : ""}
+          ｜依據：${esc(d.basis || "—")}｜<b>還沒真的改，✅ 即寫入</b>
+          <a href="#" id="preview-off">對照原版</a></div>`;
+      }
+      if ($("only-pending").checked) {
+        return `<div class="preview-banner" style="border-style:dashed">（現在是原版）——
+          <a href="#" id="preview-on">看改後的樣子</a></div>`;
+      }
+      return "";
+    })()}
+    <div class="stem study">${platformHtml(question._fix_html || question.stem_html, question.stem || "（題幹是空的）")}</div>
     ${stemCrops(question)}
     ${question.shared_stem ? `<details><summary>共同題幹</summary><div class="stem study">${platformHtml(question.shared_stem_html, question.shared_stem)}</div></details>` : ""}
+    <!-- 逐處裁決（owner 2026-10-03）：原題在上（上面那格就是），這裡列「改過的地方」，
+         一處一組 ✅/✗；✗ 要理由。有在等的草案才出現。 -->
+    <div id="spots-box" hidden></div>
+    <!-- 草案在題幹正下方（owner 2026-10-03：「優先要給我看的…不想要滑滾輪」）——她提了什麼、
+         憑什麼、按不按，一屏之內看完；其餘 log 折疊，有必要才開。 -->
+    <details open><summary>agent 提的修法 <span style="color:var(--muted);font-weight:400">——點一列即預覽；✅/↩ 就在列上</span></summary>
+      ${renderDrafts(question)}</details>
     ${renderOptions(question)}
     ${renderAnswer(question)}
-    <details open><summary>機器說法（圖的歸屬與範圍）</summary>
+    <details><summary>機器對圖的說法（哪一頁、裁到了嗎）</summary>
       ${(question.figures || []).length
         ? `<ul>${question.figures.map((f) => `<li>${esc(f.label || "?")} · 第 ${esc(f.page ?? "?")} 頁
              · ${f.clipped ? '<span class="tag bad">有裁切</span>' : '<span class="tag ok">未裁切</span>'}
              ${esc(f.ownership_note || "")}</li>`).join("")}</ul>`
         : '<p class="empty-note">沒有圖。</p>'}
     </details>
-    <details open><summary>這一題在 v2 的審核紀錄（設計者的動作 ＋ 機器事件，唯讀——機器寫的不會掛設計者的名）</summary>
+    <details><summary>你在 v2 的審題紀錄（唯讀——機器寫的不會掛你的名）</summary>
       ${renderHumanEvents(question.human_events)}</details>
-    <details open><summary>這個沙盒的判讀（你／agent 寫進 agent_feedback.jsonl）</summary>
+    <details><summary>判讀紀錄（你＋agent 寫的，學習檔 agent_feedback.jsonl）</summary>
       ${renderSaid(question.judgements)}</details>
-    <details open><summary>修復草案（agent 的提議，propose_repair 寫的；多版並存、寫入不是核准——真正通過/退回在下面的教學討論區）</summary>
-      ${renderDrafts(question)}</details>
-    <details><summary>原始記錄（JSONL 實際存的是什麼、AI 實際讀到什麼）</summary>
+    ${question.figure_draft ? `<details><summary>圖片草案（agent 提的「圖怎麼插」，核完寫學習檔）</summary>
+      ${renderFigureDraft(question.figure_draft)}</details>` : ""}
+    <details><summary>原始資料（進階：機器實際存的、模型實際讀到的）</summary>
       <p class="empty-note">上面是<b>平台視圖</b>——考題在平台會長成的樣子。
         這裡是<b>機器實際存的</b>與<b>模型實際看到的</b>：題目欄位的原樣、模型逐字判讀與 diff、
         以及 agent 的工具軌跡。兩者不同時，不同在哪裡就是判讀的對象。</p>
@@ -812,15 +1207,24 @@ function renderQuestion(question) {
     </details>` : ""}
   `;
 
+  // 逐處裁決盒：有在等的草案才展開（owner 2026-10-03 重審法）。
+  renderSpots(current);
+
   // The PDF panel is deliberately independent of the question panel: changing one must not
   // move the other (the charter's rule, and a real v2 defect where a filter moved the walk).
+  // 慢的根因（2026-10-03 量測）：每一題都重設 src ⇒ 換題就把整份 PDF 重新解析。同一份卷＋
+  // 同一頁就不重設——面板的「不跟著左邊換頁」契約本來就該這樣讀。
   const pdf = question.pdf_relative || question.pdf_absolute || "";
   $("pdfmeta").innerHTML = pdf
-    ? `第 <b>${esc(question.page ?? "?")}</b> 頁 ｜ ${esc(pdf.split("/").pop())}`
+    ? `第 <b>${esc(question.page ?? "?")}</b> ｜ ${esc(pdf.split("/").pop())}`
     : '<span class="empty-note">這一題沒有對應的題目卷。</span>';
-  $("pdf-frame").src = pdf
+  const pdfUrl = pdf
     ? `/file?path=${encodeURIComponent(question.pdf_absolute || pdf)}#page=${question.page || 1}`
     : "about:blank";
+  if ((renderQuestion._pdfShown || "") !== pdfUrl) {
+    $("pdf-frame").src = pdfUrl;
+    renderQuestion._pdfShown = pdfUrl;
+  }
   $("crop-wrap").innerHTML = question.crop_png
     ? `<div class="meta">這是 agent 送給地端模型看的裁片（含它自己的圖框）：</div>
        <img id="crop-img" src="/crop?path=${encodeURIComponent(question.crop_png)}" alt="這一題的裁片">`
@@ -830,6 +1234,12 @@ function renderQuestion(question) {
   // page reload or a server restart does not lose it.
   // In corpus mode a loaded question must **not** steal the conversation: the whole point of that
   // mode is to keep talking about the corpus while browsing questions.
+  if (question.figure_draft) {
+    $("fig-approve").onclick = () => figureVerdict("up", "pass");
+    $("fig-return").onclick = () => figureVerdict("down", "return");
+    const applyBtn = $("fig-apply");
+    if (applyBtn) applyBtn.onclick = () => figureApply([current.candidate_key]).then((ok) => ok && loadQuestion());
+  }
   if (chatMode === "question") openChatFor(question.candidate_key);
 }
 
@@ -882,8 +1292,14 @@ async function openChatFor(key) {
       : "還沒說話。這是這一題專屬的對話——直接問它。";
     $("chat-log").innerHTML = (data.turns || []).map((t) => chatTurn(t, false)).join("")
       || `<p class="empty-note">${empty}</p>`;
-    $("chat-status").textContent = (data.turns || []).length
-      ? `已有 ${data.turns.length} 則對話（存在 chat.jsonl）` : "";
+    const turns = (data.turns || []);
+    // The binding is the thing people get wrong (2026-10-02: switching questions 「對話沒變」 was
+    // 全庫 mode doing its job). State it on every load, in the line the designer already reads.
+    const binding = chatMode === "corpus"
+      ? "【全庫】這則對話不跟著題目走"
+      : "【綁這一題】" + (chatKey || "（還沒載入題目）");
+    $("chat-status").textContent = binding + "　·　"
+      + (turns.length ? `已有 ${turns.length} 則對話` : "還沒有對話，直接打字送出");
   } catch (error) {
     $("chat-status").textContent = "讀對話紀錄失敗：" + error.message;
   }
@@ -897,8 +1313,11 @@ async function openChatFor(key) {
 function chatTurn(turn, live) {
   const who = turn.role === "designer" ? "你" : "agent";
   const body = turn.text ? esc(turn.text) : '<span class="empty-note">…</span>';
+  // Token metering (owner 2026-10-03)：該輪的用量跟著紀錄走；舊紀錄沒有 usage 就不出現。
+  const u = turn.role === "agent" && turn.usage;
+  const toks = u ? ` · ${u.input ?? 0} 進/${u.output ?? 0} 出` : "";
   return `<div class="turn ${esc(turn.role)}${live ? " live" : ""}">
-    <div class="who">${esc(who)}${turn.at ? " · " + esc(turn.at.slice(11, 19)) : ""}</div>
+    <div class="who">${esc(who)}${turn.at ? " · " + esc(turn.at.slice(11, 19)) : ""}${toks}</div>
     <div class="body">${body}</div></div>`;
 }
 
@@ -935,6 +1354,7 @@ async function sendChat() {
   const body = live.querySelector(".body");
 
   let answer = "";
+  let liveTools = 0;
   try {
     const response = await fetch("/api/chat/ask", {
       method: "POST",
@@ -965,20 +1385,33 @@ async function sendChat() {
           body.textContent = answer;
           $("chat-log").scrollTop = $("chat-log").scrollHeight;
         } else if (event.event === "tool") {
-          body.insertAdjacentHTML("beforeend",
-            `<div class="chat-tool">→ ${esc(event.tool)} ${esc(JSON.stringify(event.args || {}))}</div>`);
+          // 工具軌跡折成一行計數＋最後一個動作（2026-10-03：訊息被工具列越堆越長）。
+          // 全軌跡仍在「原始資料」裡；對話框只給「她在動」的訊號。
+          liveTools += 1;
+          live.querySelector(".who").textContent =
+            `agent · 正在回答 · 工具 ${liveTools}：${event.tool}`;
         } else if (event.event === "tool_result") {
-          const bad = event.ok === false;
-          body.insertAdjacentHTML("beforeend",
-            `<div class="chat-tool${bad ? " bad" : ""}">← ${esc(event.tool)} ` +
-            `${bad ? "<b>失敗</b> " : ""}${esc(JSON.stringify(event.summary || {}))}</div>`);
+          if (event.ok === false) {
+            // 只有失敗值得佔版面：成功的不出一行。
+            body.insertAdjacentHTML("beforeend",
+              `<div class="chat-tool bad">← ${esc(event.tool)} 失敗</div>`);
+          }
         } else if (event.event === "error") {
           body.insertAdjacentHTML("beforeend",
             `<div class="chat-tool bad">錯誤：${esc(event.error)}</div>`);
           $("chat-status").textContent = "出錯了——上面的紅字就是原因。";
         } else if (event.event === "done") {
+          // Token metering (owner 2026-10-03). The numbers come from the provider's own usage
+          // report, summed over every model call the turn made; null usage = the engine did not
+          // report (then we say nothing rather than inventing a number).
+          const u = event.usage;
+          const toks = u
+            ? `｜tokens ${u.input ?? 0} 進 / ${u.output ?? 0} 出` +
+              (u.cacheRead ? `（快取讀 ${u.cacheRead}）` : "") +
+              `，模型呼叫 ${u.calls} 次`
+            : "";
           $("chat-status").textContent =
-            `完成（${(event.seconds || 0).toFixed(1)} 秒）`;
+            `完成（${(event.seconds || 0).toFixed(1)} 秒${toks ? "｜" + toks : ""}）`;
           // run 完成 → 自動重抓 (2026-09-30, workplan 2.3): the turn may have written judgements,
           // crops or notes; what the panel already shows is one fetch behind. Not awaited: the
           // chat box's own tail (status, streaming flag) must not wait on the re-render.
@@ -1027,40 +1460,81 @@ function verdictTargetText() {
   return `驗收對象：${row.insert || "（未說明位置）"} → ${row.fix || ""}`;
 }
 
+function verdictWarn(text) {
+  // Blocked verdict attempts were one gray line the designer read as 「按了沒反應」. The state is
+  // the message: red, and it must say what to do next, not just that the precondition failed.
+  const el = $("verdict-target");
+  el.textContent = text;
+  el.classList.add("warn");
+}
+
 function refreshVerdictTarget() {
+  $("verdict-target").classList.remove("warn");
+  // Dead buttons taught nothing (2026-10-02: he pressed 退回 on a draftless question and read
+  // silence as 「沒有跟著題目」). With no draft to act on, the actions are simply not shown and
+  // the target line says where opinions DO go.
+  const hasDrafts = !!current && (current.drafts || []).length > 0;
+  $("verdict-actions").hidden = !(hasDrafts && verdictDraftSha);
+  if (!hasDrafts) {
+    $("verdict-target").textContent =
+      "這題沒有修復草案——要表達「這題有問題」，用下面「我的判讀」的按鈕；等 agent 提出草案，這裡才會出現通過／退回。";
+    return;
+  }
   $("verdict-target").textContent = verdictTargetText();
 }
 
 async function acceptDraft() {
-  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
-  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
-  document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
+  if (!current) { verdictWarn("先載入一題（左邊候選列表點一題）。"); return; }
+  if (!verdictDraftSha) { verdictWarn("通過是通過「一則草案」：先在上面修復草案清單點一列草案，再按通過。"); return; }
+  const barButtons = document.querySelectorAll("#verdict-bar button");
+  barButtons.forEach((b) => { b.disabled = true; });
+  document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = true; });
   try {
     const notes = $("reason").value.trim();
-    // The event carries the draft's line checksum — the whole reason a checksum is the reference:
-    // it names an immutable proposal, not 「第三則草案」.
-    const result = await api("/api/accept-draft", {
+    // 鐵律「✅ 的當下＝已寫入」：一個動作寫齊三件事——帳本 accept（指著草案 sha）＋
+    // candidates 整欄替換＋經驗入庫。後端先驗證到「真的有東西可寫」才動第一個 byte；
+    // 驗證不過整個拒絕（400），不會出現「判通了但沒寫進去」的狀態。
+    const result = await api("/api/accept-and-apply", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: current.candidate_key, draft_sha256: verdictDraftSha, notes }),
     });
-    $("verdict-target").textContent =
-      "已寫入人審帳本（" + esc(result.event.repair_draft_sha256.slice(0, 12)) + "…）——草案在此題面板標為已通過。";
     verdictDraftSha = null;
+    previewDraftSha = null;
+    await refreshPending();
     await refreshQuestion("manual");
+    refreshVerdictTarget();
+    const skipped = (result.skipped || []).map((s) => s.reason).join("；");
+    $("verdict-target").textContent = skipped
+      ? "帳本已記 ✅，但落地跳過：" + esc(skipped)
+      : "✅ 已寫入：帳本 accept（草案 " + esc(result.event.repair_draft_sha256.slice(0, 12)) + "…）＋ candidates 整欄替換＋經驗入庫——v2 重新整理即見。";
   } catch (error) {
-    $("verdict-target").textContent = "通過失敗：" + esc(error.message);
+    $("verdict-target").textContent = "通過失敗：" + esc(error.message) + "——什麼都沒寫。";
   } finally {
-    document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
+    barButtons.forEach((b) => { b.disabled = false; });
+    document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = false; });
   }
 }
 
 async function returnDraft() {
-  if (!current) { $("verdict-target").textContent = "先載入一題。"; return; }
-  if (!verdictDraftSha) { $("verdict-target").textContent = "先挑一則草案「設為驗收對象」。"; return; }
+  if (!current) { verdictWarn("先載入一題（左邊候選列表點一題）。"); return; }
+  if (!verdictDraftSha) {
+    const typed = $("return-reason").value.trim();
+    const hasDrafts = ((current || {}).drafts || []).length > 0;
+    if (hasDrafts) {
+      verdictWarn("退回是退「一則草案」：先在上面修復草案清單點一列草案，再按退回；你寫的理由還在框裡。");
+    } else {
+      // No drafts → a return is impossible, and telling the designer to pick one sends him in
+      // circles (2026-10-02: he typed a reason, hit 退回, and read it as 「沒有跟著題目」). The
+      // working path for 「這題有問題」 is the one-key rating below; carry his words there.
+      if (typed && !$("reason").value.trim()) { $("reason").value = typed; }
+      verdictWarn("這題還沒有任何修復草案，沒有東西可退。你寫的理由已幫你搬到「我的判讀」框裡——按「有問題」就會記錄下來。");
+    }
+    return;
+  }
   const reason = $("return-reason").value.trim();
   if (!reason) {
     // The reason IS the rule candidate; an unpinned reason would be a return nobody can learn.
-    $("verdict-target").textContent = "退回要寫理由——理由就是規則候選的原料。";
+    verdictWarn("退回要寫理由——理由就是規則候選的原料。");
     return;
   }
   document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = true; });
@@ -1071,13 +1545,17 @@ async function returnDraft() {
     });
     $("return-reason").value = "";
     verdictDraftSha = null;
-    $("verdict-target").textContent = "已退回（理由已進學習流，3.1 起由規則家收走）。";
+    await refreshPending();
     await refreshQuestion("manual");
+    refreshVerdictTarget();
+    // Set AFTER refreshQuestion: the re-render must not overwrite the confirmation the designer
+    // needs to see — this message being wiped is exactly how a return looked like 「沒有發生」.
+    $("verdict-target").textContent = "已退回：理由寫進 agent_feedback.jsonl（學習流），下一輪 prompt 第一行就是它。";
   } catch (error) {
-    $("verdict-target").textContent = "退回失敗：" + esc(error.message);
+    verdictWarn("退回失敗：" + error.message + "——草案沒有被動到。");
   } finally {
     document.querySelectorAll("#verdict-bar button").forEach((b) => { b.disabled = false; });
-    refreshVerdictTarget();
+    document.querySelectorAll(".draft .act button").forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -1108,10 +1586,11 @@ function renderPipelineFindings(rows) {
         ${row.error ? `<span class="tag bad">錯誤：${esc(row.error)}</span>` : ''}</div>
       <div class="fq"><b>模型回答（解析後）：</b>
         where＝${esc(f.where || '')}<br>fix＝${esc(f.fix || '')}</div>
+      <!-- 2026-10-03：prompt 考古（system/user）不再進 view payload——那是舊 run 的提示詞副本，
+           不是證據，卻佔指揮者每次工具呼叫 ~4k input tokens。要看完整 prompt：開 store/
+           question_ai_findings.jsonl 的原列（owner 看原始資料的那扇窗仍在）。 -->
       <details><summary>模型收到的提示詞（system）</summary>
-        <pre class="raw">${esc(row.prompt_system || '（未記錄）')}</pre></details>
-      <details><summary>模型收到的提示詞（user，含題目原文）</summary>
-        <pre class="raw">${esc(row.prompt_user || '（未記錄）')}</pre></details>
+        <pre class="raw">已從 view 移除（prompt 考古，非證據）——完整原文在 store/question_ai_findings.jsonl 原列</pre></details>
       <details><summary>模型原始輸出（raw）＋用量</summary>
         <pre class="raw">${esc(row.raw || '（未記錄；這一筆是解析後的 finding）')}\n\n${esc(JSON.stringify(usage, null, 2))}</pre></details>
     </div>`;
@@ -1121,9 +1600,25 @@ function renderPipelineFindings(rows) {
 async function loadQuestion() {
   const key = $("key").value.trim();
   if (!key) return;
+  previewDraftSha = null;  // a preview belongs to the question it was made on
   setStatus("載入中…");
   try {
-    renderQuestion(await api("/api/question?key=" + encodeURIComponent(key)));
+    const q = await api("/api/question?key=" + encodeURIComponent(key));
+    // 待你看模式（owner 2026-10-03 重審法）：**原題（做題畫面）在上**，改過的地方一處一組
+    // ✅/✗ 在下——不再自動把整題換成改後版（預覽由逐處 before→after 承擔）。驗收對象仍指向
+    // 在等的那一筆（spots 盒與鍵盤用）；離開清單的題目維持原行為。
+    const pend = pendingByKind[q.candidate_key];
+    if (pend && pend.kind === "text" && (q.drafts || []).some((d) => d._sha256 === pend.draft_sha256)) {
+      verdictDraftSha = pend.draft_sha256;
+      previewDraftSha = null;
+    } else {
+      if ($("only-pending").checked) verdictDraftSha = null;
+      if (pend && pend.kind === "text_degraded") {
+        // 問過但 AI 答不出：原因就在清單列上；這裡再講一次，因為設計者是從列點進來的。
+        setTimeout(() => verdictWarn(pend.label || "AI 答不出（原因未記錄）"), 0);
+      }
+    }
+    renderQuestion(q);
   } catch (error) {
     // A rendering exception used to escape this function entirely: the fetch succeeded,
     // `renderQuestion` threw on `answer.map`, and the panel kept its previous contents — which on
@@ -1183,60 +1678,78 @@ async function search() {
   }
 }
 
-async function save(rating) {
-  if (!current) { $("save-status").textContent = "先載入一題。"; return; }
-  // Optional note (2026-09-30 判定免註解): an empty `reason` still names the rating's emptiness —
-  // the stream's column is honest, and the rating itself is the designer's verdict.
-  const reason = $("reason").value.trim();
-  document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = true; });
-  try {
-    const result = await api("/api/judgement", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        key: current.candidate_key,
-        question_number: current.question_number,
-        rating,
-        reason,
-      }),
-    });
-    $("save-status").textContent = "已寫入 " + result.store;
-    $("reason").value = "";
-    // Re-read so the new judgement is shown from the file, not from what we hoped we wrote.
-    renderQuestion(await api("/api/question?key=" + encodeURIComponent(current.candidate_key)));
-    // The list carries the same judgement, and a list that does not update makes the designer
-    // judge the same question twice tomorrow — so refresh it from the source, not from here.
-    if ($("category").value) await loadList();
-  } catch (error) {
-    $("save-status").textContent = "寫入失敗：" + error.message;
-  } finally {
-    document.querySelectorAll(".buttons button").forEach((b) => { b.disabled = false; });
-  }
-}
+
 
 $("load").addEventListener("click", loadQuestion);
 $("refresh-question").addEventListener("click", () => refreshQuestion("manual"));
 $("find").addEventListener("click", search);
-$("btn-up").addEventListener("click", () => save("up"));
-$("btn-down").addEventListener("click", () => save("down"));
-$("btn-hold").addEventListener("click", () => save("hold"));
 $("chat-mode-question").addEventListener("click", () => setChatMode("question"));
 $("chat-mode-corpus").addEventListener("click", () => setChatMode("corpus"));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-stop").addEventListener("click", stopChat);
-$("accept-draft").addEventListener("click", acceptDraft);
-$("return-draft").addEventListener("click", returnDraft);
-$("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; refreshVerdictTarget(); });
+$("verdict-clear").addEventListener("click", () => { verdictDraftSha = null; previewDraftSha = null; refreshVerdictTarget(); });
 // Picking the verdict target is a delegated click: the drafts panel is re-rendered by every
 // refresh, so the handler cannot be attached once to the list.
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
+  const off = event.target.closest("#preview-off");
+  if (off) {
+    event.preventDefault();
+    previewDraftSha = null;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
+  const on = event.target.closest("#preview-on");
+  if (on) {
+    event.preventDefault();
+    previewDraftSha = verdictDraftSha;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
   const picky = event.target.closest(".picky");
-  if (!picky) return;
-  event.preventDefault();
-  verdictDraftSha = picky.dataset.draftSha;
-  refreshVerdictTarget();
-  // Re-rendering refreshes every 「設為驗收對象」 label: the panel must show which one is on.
-  renderQuestion(current);
+  if (picky) {
+    event.preventDefault();
+    verdictDraftSha = picky.dataset.draftSha;
+    // A selection change while previewing follows the new draft — the preview is of "the selected
+    // draft", not of whichever one happened to be selected when the toggle went on.
+    if (previewDraftSha && previewDraftSha !== verdictDraftSha) previewDraftSha = verdictDraftSha;
+    else previewDraftSha = verdictDraftSha;   // 👁 一下就預覽——驗收前先看，不再兩段式
+    refreshVerdictTarget();
+    renderQuestion(current);
+    return;
+  }
+  // 草案列上的行內裁決（2026-10-03：不要滑到頁尾才按驗收）。挑選＋預覽＋通過／退回都在那一列。
+  const pickBtn = event.target.closest(".draft .act button.pick");
+  if (pickBtn) {
+    verdictDraftSha = pickBtn.dataset.draftSha;
+    previewDraftSha = verdictDraftSha;
+    refreshVerdictTarget();
+    renderQuestion(current);
+    // 重繪後把**驗收對象那一列**帶進視野（owner 2026-10-03：「不想要滑滾輪」）——預覽橫幅在
+    // 題幹上方，✅/↩ 在列上；兩者都要一眼看到，不能靠他自己找。
+    requestAnimationFrame(() => {
+      document.querySelector(`li.draft[data-draft-sha="${CSS.escape(verdictDraftSha)}"]`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    return;
+  }
+  const okBtn = event.target.closest(".draft .act button.ok");
+  if (okBtn) {
+    verdictDraftSha = okBtn.dataset.draftSha;
+    await acceptDraft();
+    return;
+  }
+  const badBtn = event.target.closest(".draft .act button.bad");
+  if (badBtn) {
+    verdictDraftSha = badBtn.dataset.draftSha;
+    const li = badBtn.closest("li.draft");
+    const why = (li?.querySelector("input.why")?.value || "").trim();
+    if (!why) { verdictWarn("退回要寫理由——理由就是規則候選的原料。"); return; }
+    $("return-reason").value = why;
+    await returnDraft();
+    return;
+  }
 });
 // Enter sends; Shift+Enter writes a newline. A designer's sentence about a question is often more
 // than one line, so the multi-line case must not be the one that accidentally sends.
@@ -1246,22 +1759,65 @@ $("chat-text").addEventListener("keydown", (event) => {
 $("category").addEventListener("change", loadList);
 $("only-unjudged").addEventListener("change", loadList);
 $("only-figures").addEventListener("change", loadList);
+$("only-figdrafts").addEventListener("change", loadList);
 $("only-disputed").addEventListener("change", loadList);
 $("human-status").addEventListener("change", loadList);
 $("key").addEventListener("keydown", (event) => { if (event.key === "Enter") loadQuestion(); });
 $("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
 
 /**
- * Left-hand keys, mirroring v2: `W`/`S` walk, `J`/`K` judge.
+ * Left-hand keys, mirroring v2: `W`/`S` walk. （`J`/`K` 判讀鍵隨「我的判讀」移除——owner
+ * 2026-10-03：裁決在草案列上按 ✅/↩，不在獨立判讀框。）
  *
- * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the 判讀框,
- * and the sandbox has that box focused most of the time. `J`/`K` leave the letters free — the same
- * reasoning v2 records for why its own shortcuts are suppressed inside a textarea.
+ * Deliberately **not** v2's `A`/`B`: those are ordinary letters a reviewer types into the chat box,
+ * and the sandbox has that box focused most of the time.
  */
 document.addEventListener("keydown", (event) => {
   if (event.target.tagName === "TEXTAREA" || event.target.tagName === "INPUT") return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
-  const map = { w: () => go(-1), s: () => go(1), j: () => judgeKey("up"), k: () => judgeKey("down") };
+  // 核圖模式鍵盤（有草案的題目上）：A＝通過＋寫入＋下一題；X＝退回（要理由）。
+  // 退回沒理由時先聚焦輸入框——append_return 拒絕空理由，理由是 AI 學習的原材料。
+  if (current && current.figure_draft && !current.figure_draft.landed) {
+    if (event.key.toLowerCase() === "a") { event.preventDefault(); $("fig-approve").click(); return; }
+    if (event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      const reason = $("fig-reason");
+      if (reason && !reason.value.trim()) { reason.focus(); setStatus("先填退回理由，再按 ↩ 或 X"); return; }
+      $("fig-return").click(); return;
+    }
+  }
+  // 待你看模式鍵盤（文字草案）：A＝✅ 即寫入；X＝退回（要理由——沒理由先聚焦輸入框）。
+  // 驗收對象在（loadQuestion 已自動設或你點過列），A/X 才接手；打字中的按鍵上面已擋掉。
+  // 待你看模式鍵盤。**逐處裁決優先**（owner 2026-10-03 重審法）：A＝全部裁完就套用；
+  // X＝聚焦第一個還沒裁決的處。沒有 spots 盒時才落到整句草案的 A/X。
+  {
+    const draft = current && pendingDraftOf(current);
+    if (draft && (draft._spots || []).length) {
+      if (event.key.toLowerCase() === "a") { event.preventDefault(); applySpots(); return; }
+      if (event.key.toLowerCase() === "x") {
+        event.preventDefault();
+        const verdicts = spotVerdicts[draft._sha256] || [];
+        const i = verdicts.findIndex((v) => v.pass === null);
+        if (i < 0) { applySpots(); return; }
+        const why = document.querySelector(`.spot[data-spot="${i}"] input.why`);
+        (why || document.querySelector(`.spot[data-spot="${i}"] button`))?.focus();
+        setStatus(`第 ${i + 1} 處還沒裁決——✅ 放行或 ✗ 打叉（要理由）`);
+        return;
+      }
+    }
+  }
+  if (verdictDraftSha && (current?.drafts || []).some((d) => d._sha256 === verdictDraftSha)) {
+    if (event.key.toLowerCase() === "a") { event.preventDefault(); acceptDraft(); return; }
+    if (event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      const li = document.querySelector(`li.draft[data-draft-sha="${CSS.escape(verdictDraftSha)}"]`);
+      const why = li?.querySelector("input.why");
+      if (why && !why.value.trim()) { why.focus(); setStatus("先寫退回理由——理由是 AI 下一輪的第一行輸入"); return; }
+      returnDraft();
+      return;
+    }
+  }
+  const map = { w: () => go(-1), s: () => go(1) };
   const hit = map[event.key.toLowerCase()];
   if (!hit) return;
   event.preventDefault();
@@ -1278,8 +1834,58 @@ document.addEventListener("click", (event) => {
 });
 // A key in the URL loads on open, so a question can be sent to someone as a link.
 const initial = new URLSearchParams(location.search).get("key");
+// ?mode=review：待你看清單開場（§8 一圈驗收的入口——block 之後回來就看這裡）。
+if (new URLSearchParams(location.search).get("mode") === "review") {
+  $("only-pending").checked = true;
+  syncPendingMode();
+}
 loadCategories();
 if (initial) { $("key").value = initial; loadQuestion(); }
+
+// -- 調度監控（owner 2026-10-03：要有測試去監控指揮與做事模型之間的調度） --------------------
+// 指揮者（對話 GLM）只「說」要開做事 run；做事 run 是 runner.mjs 吃 workorder（手動開）。
+// 這裡把三個 append-only 檔的**事實**變成畫面：最近一輪做事 run 的進度、她請求做事的話。
+// 只讀不寫；「她直接派工」是 G3，未經 owner 逐次核准不存在。
+async function refreshDispatch() {
+  try {
+    const d = await api("/api/runs");
+    const lamp = $("dispatch-lamp");
+    const body = $("dispatch-body");
+    const lb = d.last_batch;
+    const m = (lb || {}).metrics || {};
+    const drafts = Object.entries(d.drafts_by_run || {});
+    const recent = drafts.filter(([rid]) => lb && rid === lb.run_id);
+    if (lb && (m.drafted > 0 || recent.length)) {
+      lamp.classList.add("busy");
+      lamp.textContent = `調度 · 做事 run 有產出（草案 ${recent.reduce((a, [, n]) => a + n, 0) || m.drafted}）`;
+    } else if (lb) {
+      lamp.classList.remove("busy");
+      lamp.textContent = "調度 · 做事 run 無草案";
+    } else {
+      lamp.classList.remove("busy");
+      lamp.textContent = "調度 · 未開工";
+    }
+    const asks = (d.conductor_asks || []).slice(-3).map((a) =>
+      `  · ${(a.at || "").slice(0, 19).replace("T", " ")}　${a.role === "designer" ? "設計者轉述" : "指揮者"}（${a.key || "全庫"}）：${a.text.slice(0, 60)}`);
+    body.textContent = [
+      lb ? `最近一輪做事 run：${(lb.at || "").slice(0, 19).replace("T", " ")}｜工單 ${lb.workorder}｜variant ${lb.variant || "-"}`
+         + `\n  metrics：${JSON.stringify(m)}` : "還沒有任何做事 run（runner.mjs 未開過）。",
+      drafts.length ? `各 run 草案數：${drafts.slice(-3).map(([rid, n]) => `${rid.slice(0, 28)}…＝${n}`).join("、")}` : "",
+      asks.length ? `指揮者請求做事（最近 ${asks.length} 則）：\n${asks.join("\n")}` : "指揮者還沒請求過做事 run。",
+      "——派工本體是 runner.mjs（手動）；這裡只讀帳，不開不停（G3 需 owner 逐次核准）。",
+    ].filter(Boolean).join("\n");
+  } catch (error) {
+    $("dispatch-lamp").textContent = "調度 · 讀不到";
+  }
+}
+$("dispatch-lamp").addEventListener("click", () => {
+  const panel = $("dispatch-panel");
+  panel.open = !panel.open;
+  if (panel.open) refreshDispatch();
+});
+refreshDispatch();
+setInterval(() => { if ($("dispatch-panel").open) refreshDispatch(); }, 15000);
+
 </script>
 </body>
 </html>

@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -528,7 +530,19 @@ def question_view(question: dict) -> dict:
         # What the pipeline's own repair loop asked a model and what it answered. Carried here so the
         # UI can show 「AI 實際讀到／產生什麼」; without it the only readable record of a model's
         # reading was its parsed verdict (`where`/`fix`), which is the conclusion, not the evidence.
-        "ai_findings": ai_findings(question.get("candidate_key") or ""),
+        #
+        # **But the prompt archaeology is not evidence.** `prompt_system`/`prompt_user` are copies
+        # of the *prompts* past runs used (measured 2026-10-03 on q051: 11.7k of 21.1k finding
+        # chars). The agent already has the current ROLE; shipping four generations of old prompts
+        # again is ~4k input tokens **per tool call**, and the conductor's latency scales with it
+        # (measured: a turn with one get_question went 15.6k → 19.6k input). What the agent compares
+        # is readings and verdicts: `finding`, `evidence`, `raw`, `model`, `created_at`. The full
+        # rows stay in the UI's own pipeline-findings panel and in the jsonl on disk.
+        "ai_findings": [
+            {k: v for k, v in row.items()
+             if k not in ("prompt_system", "prompt_user", "orchestration", "principles")}
+            for row in ai_findings(question.get("candidate_key") or "")
+        ],
     }
 
 
@@ -851,6 +865,110 @@ def drafts_for(key: str) -> list:
             if row.get("candidate_key") == key or row.get("canonical_question_key") == key:
                 rows.append(row)
     return rows
+
+
+#: 與前端預覽同一組判準（一份契約，不許兩份）：`fix` 先剝掉「A: 」這種選項前綴；
+#: `insert` 認 題幹/stem、答案/answer、選項 X（candidates 的 options 是 `{key, text}` 列）、
+#: 或 candidates 列上真實存在的字串欄位名。生產者（驗證自己的草案）與落地寫入器（✅ 的前置
+#: 驗證）都用這一份——兩份實作就是兩個可以不一致的地方。
+_INSERT_OPTION = re.compile(r"(?:選項|options?)\s*([A-D])", re.IGNORECASE)
+_FIX_OPTION_PREFIX = re.compile(r"^[A-D]\s*[:：]\s*")
+
+
+def resolve_text_target(row: dict, insert: str) -> tuple[str, str]:
+    """`insert` →（目標欄位描述, 現值）。欄位／選項不存在 → ValueError（負對照：靜默猜錯格）。"""
+    text = (insert or "").strip()
+    low = text.lower()
+    if "題幹" in text or "stem" in low:
+        return "stem", str(row.get("stem") or "")
+    if "答案" in text or low.startswith("answer"):
+        return "answer", str(row.get("answer") or "")
+    om = _INSERT_OPTION.search(text)
+    if om:
+        letter = om.group(1).upper()
+        for opt in row.get("options") or []:
+            if isinstance(opt, dict) and str(opt.get("key") or "").upper() == letter:
+                return "option:%s" % letter, str(opt.get("text") or "")
+        raise ValueError("insert 指向不存在的選項：%s（這一題沒有 %s）" % (text, letter))
+    if text and isinstance(row.get(text), str):
+        return "field:%s" % text, row[text]
+    raise ValueError("insert 指向不存在的欄位：%r" % text)
+
+
+def strip_option_prefix(fix: str) -> str:
+    """草案 fix 帶「A: 」前綴（草案面板的顯示形態）；套用到選項欄時要剝掉。"""
+    return _FIX_OPTION_PREFIX.sub("", (fix or "").strip())
+
+
+def text_spots(old: str, fix: str, *, context: int = 18, min_gap: int = 6) -> list[dict]:
+    """「改過的地方」：`fix` 相對 `old` 的每一處變更，機械切點（difflib opcodes）。
+
+    同一函式餵前端與落地寫入器——一處一組 ✅/✗ 是同一份清單（兩份實作就是兩個可以不一致的
+    地方）。opcodes 之間 ≤`min_gap` 個相同字元就併成一處（模型常動標點空格，切太碎沒辦法看）；
+    純空白差異不計。每處帶前後 `context` 字的原文，讓設計者不用回去翻題幹就知道改在哪裡。
+    """
+    old = str(old or "")
+    fix = str(fix or "")
+    matcher = difflib.SequenceMatcher(None, old, fix, autojunk=False)
+    raw = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+    # 併攏相鄰的變更：中間只有 ≤min_gap 個未動字元就算同一處。
+    merged: list[list[int]] = []
+    for op in raw:
+        if merged and op[1] - merged[-1][2] <= min_gap:
+            merged[-1][2], merged[-1][3] = op[2], op[3]
+        else:
+            merged.append([op[1], op[2], op[3], op[4]])  # old_start, old_end, fix_start, fix_end
+    spots = []
+    for old_s, old_e, fix_s, fix_e in merged:
+        before, after = old[old_s:old_e], fix[fix_s:fix_e]
+        if before.strip() == after.strip():
+            continue  # 純空白差異
+        spots.append({
+            "old_start": old_s, "old_end": old_e,
+            "before": before, "after": after,
+            "before_context": old[max(0, old_s - context):old_s],
+            "after_context": old[old_e:old_e + context],
+        })
+    return spots
+
+
+def is_full_replacement(old: str, fix: str) -> bool:
+    """fix 是不是「改完後的完整文字」——機械判準：與原句的相似度。
+
+    舊判準「須含原句開頭 8 字」擋得住建議（「把X改成Y」），也擋得住**開頭本身的錯字修正**
+    （「一般人→健康成人」改在前 8 字內）：合法修正在前、建議在後，兩者都會撞上。
+    相似度擋得住片段與建議（與原句相似度低），放行任何位置的修正；整句重寫（相似度低）
+    會被拒——那不是這個生產者該提的形態，設計者會叫 agent 重提。前端預覽讀後端算好的值。
+    """
+    old_ws, fix_ws = re.sub(r"\s+", "", old), re.sub(r"\s+", "", fix)
+    if not old_ws:
+        return True
+    return difflib.SequenceMatcher(None, old_ws, fix_ws).ratio() >= 0.5
+
+
+def record_degraded(key: str, note: str, *, subject=None, question_number=None) -> dict:
+    """Append a `status: degraded` row to the drafts stream — an asked question was *answered*
+    with 「答不出（原因）」. The pending list shows it (AI 答不出：note) so an asked question
+    never vanishes silently; it is never ✅-able (no fix, no draft to verify).
+    Row shape matches `do_propose` exactly（同一條流的同一種列，連 `action` 欄都是）——
+    消費端的 probe 只認這個形。"""
+    record = {
+        **judgement_envelope(),
+        "action": "repair_draft",
+        "schema": "repair_agent_test/repair_drafts v1",
+        "at": _utc_now(),
+        "candidate_key": key,
+        "question_number": question_number
+        if question_number is not None
+        else (int(key.rsplit("q", 1)[-1]) if key.rsplit("q", 1)[-1].isdigit() else None),
+        "subject": subject,
+        "status": "degraded",
+        "note": str(note or "")[:400],
+    }
+    os.makedirs(os.path.dirname(DRAFTS), exist_ok=True)
+    with open(DRAFTS, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
 
 
 def do_propose(args) -> dict:
