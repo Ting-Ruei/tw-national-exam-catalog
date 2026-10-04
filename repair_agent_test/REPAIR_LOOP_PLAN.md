@@ -75,6 +75,13 @@ flowchart LR
 
 ### L3｜「待你看」單一清單（`ui/server.py`＋`index.html`）
 
+> **修正（2026-10-04，owner 重審法）**：審面不再是「中欄直接是改後整題」。**原題（做題畫面）
+> 在上**，下面「改過的地方」一處一列（`bridge.text_spots` 機械切點，before→after 帶前後文），
+> **一處一組 ✅/✗；✗ 要理由**。「套用我的裁決」未裁完停用。落地語意：只有放行的處被組合進
+> 欄位（`/api/apply-spots`，不是整句蓋掉）；✗ 逐處退回、理由進生產者下一輪；全 ✗ 一個 byte
+> 不寫；manifest 記每處裁決；agent 自檢代按帶 `self_check` 標記（notes 明示非人工裁決）。
+> 整句草案的 ✅/↩ 保留給沒有可切變更處的草案。UI 慢的根因是 4,268 列 DOM——清單分頁 300 列。
+
 - **後端**：新增 `GET /api/pending`＝（a）`repair_drafts` 中 status=proposed 且晚於該題任何人類 accept/return 的題（帶 `_sha256`、改後整題欄位）；＋（b）圖草案 ruling=pass 未 landed 的題；＋（c）圖草案未判的題。**一個數字回答「現在積幾題等我」。**
 - **前端**：`?mode=review`（或按鈕「待你看 (N)」）→ 左欄只剩 pending 清單（依最舊優先）；中欄**直接是改後整題**（`appliedQuestion` 已做）＋「對照原版」切換＋「她改了什麼」一行（`insert`＋basis 摘要）；✅/↩ 在列上（既有）。
 - **✅ 的語意（新）**：文字草案 ✅＝`append_accept`（既有，帶 draft_sha）＋**`_apply_text_drafts(keys)`**（新，複製 `_apply_figure_drafts` 骨架：備份→逐列以 `fix` 整欄替換 `insert` 指的欄位→append-only `reset_review`（若曾被審過）→manifest）＋**經驗入庫**：`lessons.jsonl` 追加 `{kind, subject, text:"錯誤：<block理由> → 修法：<fix 摘要>", key}`（由該題 block 理由＋草案組成，actor `human:designer`）。
